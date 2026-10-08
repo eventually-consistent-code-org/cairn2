@@ -60,7 +60,7 @@ describe("audit sweep mode (#179)", () => {
   it("the sweep section names the shared label, the manifest scope, the delta classes and --fix", () => {
     expect(section).toContain("cairn:sweep");
     expect(section).toMatch(/audit_record\(scope: "sweep-<YYYY-MM-DD>"/);
-    for (const cls of ["new", "persisting", "fixed", "regressed"]) expect(section).toContain(cls);
+    for (const cls of ["new", "persisting", "fixed", "regressed", "unchecked", "uncoveredLegs"]) expect(section).toContain(cls);
     expect(section).toContain("sweep --fix");
     expect(section).toContain("outlook_emit");
   });
@@ -89,7 +89,9 @@ describe("audit sweep mode (#179)", () => {
     expect(flat).toContain("regressed critical → new critical → persisting critical → " +
       "regressed important → new important → persisting important. Minors as counts only");
     expect(flat).toContain("fixed since the baseline: N");
-    const at = ["Backlog, in exactly this order", "Eval table", "Spend:", "`outlook_emit(tracker:"]
+    // #266: findings whose leg didn't re-run get their own line, never the fixed one.
+    expect(flat).toContain('"unchecked: N — legs not re-run: <uncoveredLegs>"; never fold those into fixed');
+    const at =["Backlog, in exactly this order", "Eval table", "Spend:", "`outlook_emit(tracker:"]
       .map((s) => flat.indexOf(s));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);

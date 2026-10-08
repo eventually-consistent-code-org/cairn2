@@ -1619,14 +1619,18 @@ Then one manifest: an `audit_record` under a `sweep-<date>` scope that
 lists every leg's record and carries the union of the legs' surviving
 findings, panel votes and all. Nothing is re-judged there. The server
 stamps the cairn version and the commit, and diffs the findings against the
-previous sweep — **new**, **persisting**, **fixed**, and **regressed**
-(fixed last time, back now), plus how many code commits landed in between.
-The first sweep has no delta; it's the baseline the next one is measured
-against.
+previous sweep — **new**, **persisting**, **fixed**, **regressed**
+(fixed last time, back now), and **unchecked**, plus how many code commits
+landed in between. A finding only counts as fixed when the leg that raised
+it ran again under the same scope; if that leg was skipped or pointed at a
+newer phase, the finding is unchecked, its leg is named as uncovered, and
+the next sweep still compares against it. The first sweep has no delta;
+it's the baseline the next one is measured against.
 
 The report is one prioritized backlog: regressed critical, new critical,
 persisting critical, then important in the same order, minors as counts,
-and a "fixed since the baseline" line — the payoff. Below it: the latest
+and a "fixed since the baseline" line — the payoff — followed by the
+unchecked count and the legs that didn't re-run. Below it: the latest
 eval results as a per-case table (read from the last run, never started by
 the sweep, regression rows marked as gates and any failing gate first), the
 approximate agent spend on the issues the sweep filed, and a portfolio
@@ -1635,7 +1639,7 @@ snapshot so `/cairn:outlook` sees where the project stands.
 `--fix` runs the staged-patch discipline leg by leg — each leg's patches in
 its own scratch directory, its own verifier round, its own apply question —
 never one patch or one ask across legs. A fix applied during a sweep shows
-up as `fixed` in the next sweep's delta.
+up as `fixed` in the next sweep's delta, once that leg runs again.
 
 ### Peers
 

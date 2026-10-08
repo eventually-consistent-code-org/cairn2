@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -277,7 +277,96 @@ describe("sweep manifest + baseline delta (#215)", () => {
     expect(d3.persisting.map((f) => f.title).sort()).toEqual(
       ["caller crashes on missing key", "retry loop never backs off"]);
     expect(d3.fixed).toEqual([]);
+    expect(d3).toMatchObject({ unchecked: [], uncoveredLegs: [] });
     expect(readFileSync(third.path, "utf8")).toContain("- regressed — minor: settings footer is stale");
+  });
+
+  describe("the delta claims fixed only for legs it re-checked (#266)", () => {
+    const T = minor("tests miss the retry path", "the retry branch in client.ts has no test, so deleting it stays green");
+    const D = minor("runbook names a dead flag", "the runbook tells users to pass --legacy, which the CLI rejects");
+    /** Writes one record per leg, then a manifest indexing them in the given order. */
+    function legged(repo: string, date: string, byLeg: Record<string, AuditFinding[]>) {
+      const legs = Object.entries(byLeg).map(([scope, fs]) =>
+        ({ scope, path: writeAuditRecord(repo, scope, fs.length ? "findings" : "pass", fs).path }));
+      const all = Object.values(byLeg).flat();
+      return writeAuditRecord(repo, `sweep-${date}`, all.length ? "findings" : "pass", all, { legs });
+    }
+
+    it("a retargeted or skipped leg's findings read unchecked; a later re-raise reads persisting; a re-run settles them", () => {
+      const repo = freshRepo();
+      legged(repo, "2026-01-01", { "tests-25": [T], "docs-full": [D] });
+
+      // The tests leg moved to the newest phase (clean) and the docs leg was skipped.
+      const second = legged(repo, "2026-01-02", { "tests-26": [] });
+      const d2 = second.delta!;
+      expect(d2.fixed).toEqual([]);
+      expect(d2.unchecked.map((f) => [f.title, f.leg])).toEqual([[T.title, "tests-25"], [D.title, "docs-full"]]);
+      expect(d2.uncoveredLegs).toEqual(["tests-25", "docs-full"]);
+      const raw2 = readFileSync(second.path, "utf8");
+      expect(raw2).toContain("counts: new 0, persisting 0, fixed 0, regressed 0, unchecked 2");
+      expect(raw2).toContain("uncovered legs: tests-25, docs-full");
+      expect(raw2).toContain(`- unchecked — minor: ${T.title}\n  scenario: ${T.failure_scenario}\n  leg: tests-25`);
+      expect(parseAuditRecord(second.path).deltaUnchecked).toEqual([
+        { title: T.title, severity: "minor", failure_scenario: T.failure_scenario, leg: "tests-25" },
+        { title: D.title, severity: "minor", failure_scenario: D.failure_scenario, leg: "docs-full" },
+      ]);
+
+      // The docs leg comes back and raises D again: persisting, not new and not regressed.
+      // tests-25 is still not re-run, so T is carried forward as unchecked again.
+      const d3 = legged(repo, "2026-01-03", { "docs-full": [D] }).delta!;
+      expect(d3.persisting.map((f) => f.title)).toEqual([D.title]);
+      expect(d3).toMatchObject({ new: [], regressed: [], fixed: [] });
+      expect(d3.unchecked.map((f) => f.title)).toEqual([T.title]);
+      expect(d3.uncoveredLegs).toEqual(["tests-26", "tests-25"]);
+
+      // Both legs re-run clean over their old targets: now, and only now, both are fixed.
+      const d4 = legged(repo, "2026-01-04", { "tests-25": [], "docs-full": [] }).delta!;
+      expect(d4.fixed.map((f) => [f.title, f.leg])).toEqual([[D.title, "docs-full"], [T.title, "tests-25"]]);
+      expect(d4).toMatchObject({ unchecked: [], uncoveredLegs: [] });
+    });
+
+    it("a mislabelled leg covers nothing — an index entry must point at a record written under its scope", () => {
+      const repo = freshRepo();
+      legged(repo, "2026-01-01", { "security-25": [NULL_DEREF] });
+      const next = writeAuditRecord(repo, "security-26", "pass", []);
+      const d = writeAuditRecord(repo, "sweep-2026-01-02", "pass", [],
+        { legs: [{ scope: "security-25", path: next.path }] }).delta!;
+      expect(d.fixed).toEqual([]);
+      expect(d.unchecked.map((f) => f.title)).toEqual([NULL_DEREF.title]);
+      expect(d.uncoveredLegs).toEqual(["security-25"]);
+    });
+
+    it("a manifest written before unchecked existed still serves as a baseline", () => {
+      const repo = freshRepo();
+      const audit = join(repo, ".cairn", "audit");
+      mkdirSync(audit, { recursive: true });
+      // The shape the 2.8.x writer produced: four classes, no uncovered-legs line.
+      const old = join(audit, "sweep-2026-01-01-2026-01-01.md");
+      writeFileSync(old, [
+        "---", "scope: sweep-2026-01-01", "verdict: findings", "created: 2026-01-01",
+        "commit: 0000000000000000000000000000000000000000", "dirty: false", "cairn: 2.8.1", "---",
+        "# Audit: sweep-2026-01-01", "",
+        `leg: tests-25 => ${join(audit, "tests-25-2026-01-01.md")}`,
+        `leg: docs-full => ${join(audit, "docs-full-2026-01-01.md")}`, "",
+        "## delta vs sweep-2025-12-01-2025-12-01",
+        "baseline: /elsewhere/sweep-2025-12-01-2025-12-01.md @ 1111111 (cairn 2.8.0), 2025-12-01",
+        "code commits since: 3",
+        "counts: new 1, persisting 0, fixed 1, regressed 0",
+        `- new — minor: ${T.title}`, `  scenario: ${T.failure_scenario}`, "  leg: tests-25",
+        `- fixed — minor: ${D.title}`, `  scenario: ${D.failure_scenario}`, "  leg: docs-full", "",
+        "## finding — minor", T.title, `scenario: ${T.failure_scenario}`, "source leg: tests-25", "",
+      ].join("\n"));
+      const back = parseAuditRecord(old);
+      expect(back.findings.map((f) => [f.title, f.leg])).toEqual([[T.title, "tests-25"]]);
+      expect(back.deltaFixed.map((f) => [f.title, f.leg])).toEqual([[D.title, "docs-full"]]);
+      expect(back.deltaUnchecked).toEqual([]);
+
+      const d = legged(repo, "2026-01-02", { "tests-25": [T], "docs-full": [D] }).delta!;
+      expect(d.baseline.path).toBe(old);
+      expect(d.persisting.map((f) => f.title)).toEqual([T.title]);
+      expect(d.regressed.map((f) => f.title)).toEqual([D.title]);
+      expect(d).toMatchObject({ new: [], fixed: [], unchecked: [], uncoveredLegs: [] });
+    });
   });
 
   it("refuted findings are neither carried nor compared; a non-sweep scope has no delta and refuses legs", () => {
@@ -305,7 +394,7 @@ describe("sweep manifest + baseline delta (#215)", () => {
       panel: [{ seat: "v", verdict: "REFUTED", evidence: "single writer by construction" }] };
     const second = writeAuditRecord(repo, "sweep-2026-01-02", "findings", [NULL_DEREF, killed]);
     const d = second.delta!;
-    const classed = [...d.new, ...d.persisting, ...d.fixed, ...d.regressed].map((f) => f.title);
+    const classed = [...d.new, ...d.persisting, ...d.fixed, ...d.regressed, ...d.unchecked].map((f) => f.title);
     expect(classed).toEqual(["lookup dereferences null"]);
     expect(d.persisting.map((f) => f.title)).toEqual(["lookup dereferences null"]);
     // Still in the record, marked — just never in the delta section.
@@ -326,7 +415,9 @@ describe("sweep manifest + baseline delta (#215)", () => {
     const d = writeAuditRecord(repo, "sweep-2026-01-02", "findings", [fuzzy, titled, para1, para2]).delta!;
     expect(d.persisting.map((f) => f.title)).toEqual(["cache returns stale node", "caller crashes on missing key"]);
     expect(d.new.map((f) => f.title)).toEqual(["map read is stale after write", "lookup crash on undefined"]);
-    expect(d.fixed.map((f) => f.title)).toEqual(["retry loop never backs off"]);
+    // No leg index on either side: nothing was re-checked, so the unmatched prior is unchecked, not fixed (#266).
+    expect(d.fixed).toEqual([]);
+    expect(d.unchecked.map((f) => f.title)).toEqual(["retry loop never backs off"]);
   });
 
   it("the baseline is the latest manifest dated no later than this one — never a later date, never the file being rewritten", () => {
@@ -343,7 +434,8 @@ describe("sweep manifest + baseline delta (#215)", () => {
     expect(d.baseline.path).toBe(early.path);
     expect(d.persisting).toEqual([]);
     expect(d.new.map((f) => f.title)).toEqual(["lookup dereferences null", "retry loop never backs off"]);
-    expect(d.fixed.map((f) => f.title)).toEqual(["settings footer is stale"]);
+    expect(d.fixed).toEqual([]);
+    expect(d.unchecked.map((f) => f.title)).toEqual(["settings footer is stale"]);
   });
 
   it("a sweep manifest credits no seat yield — its legs already did (#255)", () => {
@@ -472,5 +564,6 @@ describe("sweep manifest + baseline delta (#215)", () => {
     expect(back.notes).toEqual(["skipped critical finding 'checkout 500s' — no scenario (pre-phase-21 body)"]);
     expect(back.legs).toEqual([]);
     expect(back.deltaFixed).toEqual([]);
+    expect(back.deltaUnchecked).toEqual([]);
   });
 });
