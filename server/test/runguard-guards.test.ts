@@ -226,6 +226,101 @@ describe("run guard: force-push refused in every session (#250)", () => {
   });
 });
 
+describe("run guard: a wrapper's flags and their values don't hide git (#270)", () => {
+  // Each row: [wrapped form, plain form]. The wrapper must change nothing --
+  // refused exactly where the plain form is. Before #270 the run guard
+  // skipped a wrapper's flags but not their values, so `root` / `5` read as
+  // the command, and timeout, nice, stdbuf, doas, xargs and a full-path
+  // sudo were not wrappers at all.
+  const resets: Array<[wrapped: string, plain: string]> = [
+    ["sudo -u root git reset --hard", "git reset --hard"],
+    ["timeout 5 git reset --hard HEAD~1", "git reset --hard HEAD~1"],
+    ["nice -n 5 git reset --hard", "git reset --hard"],
+    ["env -u FOO git reset HEAD~1 --hard", "git reset HEAD~1 --hard"],
+    ["stdbuf -o0 git -C . reset --hard", "git -C . reset --hard"],
+    ["doas -u root git reset --hard", "git reset --hard"],
+    ["echo | xargs git reset --hard", "echo | git reset --hard"],
+    ["/usr/bin/sudo git reset --hard", "git reset --hard"],
+    ["timeout -s KILL -k 2 5s git reset --hard", "git reset --hard"],
+    ["nohup sudo -u root env -i nice -n 1 git reset --hard", "git reset --hard"],
+    ["sudo -u root bash -c 'git reset --hard'", "bash -c 'git reset --hard'"],
+  ];
+  const forces: Array<[wrapped: string, plain: string]> = [
+    ["nice git push --force", "git push --force"],
+    ["sudo -u root git push --force origin x", "git push --force origin x"],
+    ["timeout 5 git push -f", "git push -f"],
+    ["env -u FOO git push origin +main", "git push origin +main"],
+    ["/usr/bin/sudo -n git push --force-with-lease", "git push --force-with-lease"],
+    ["xargs -n 1 git push --force", "git push --force"],
+    ["stdbuf -oL git push -fu origin main", "git push -fu origin main"],
+  ];
+
+  it("a wrapped hard reset is refused next to its plain form", () => {
+    const { proj, home } = fixture();
+    for (const [wrapped, plain] of resets) {
+      const w = guard(proj, home, wrapped);
+      expect(w.status, wrapped).toBe(2);
+      expect(w.stderr, wrapped).toContain("git reset --hard");
+      expect(guard(proj, home, plain).status, plain).toBe(2);
+    }
+  });
+
+  it("a wrapped force-push is refused next to its plain form", () => {
+    const { proj, home } = fixture();
+    for (const [wrapped, plain] of forces) {
+      const w = guard(proj, home, wrapped);
+      expect(w.status, wrapped).toBe(2);
+      expect(w.stderr, wrapped).toContain("git push --force");
+      expect(guard(proj, home, plain).status, plain).toBe(2);
+    }
+  });
+
+  it("mid-run, a wrapped checkout or switch of the owner's checkout is refused next to its plain form", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const rows: Array<[wrapped: string, plain: string]> = [
+      ["sudo -u me git checkout main", "git checkout main"],
+      ["timeout 5 git switch main", "git switch main"],
+      ["nice -n 5 git checkout -b x", "git checkout -b x"],
+      ["/usr/bin/sudo git switch -c y", "git switch -c y"],
+      ["env -u FOO git checkout main", "git checkout main"],
+    ];
+    for (const [wrapped, plain] of rows) {
+      const w = guard(proj, home, wrapped);
+      expect(w.status, wrapped).toBe(2);
+      expect(w.stderr, wrapped).toContain("run-x");
+      expect(guard(proj, home, plain).status, plain).toBe(2);
+    }
+    // ...and from the run's own worktree, wrapped or not, it is left alone
+    const wt = join(freshDir("cairn-runguard-wt-"), "tree");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "runbranch", wt], { cwd: proj });
+    expect(guard(proj, home, "timeout 5 git switch main", {}, wt).status).toBe(0);
+    expect(guard(proj, home, "git switch main", {}, wt).status).toBe(0);
+  });
+
+  it("quoted text behind a wrapper still passes", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      'sudo -u root git commit -m "explain git reset --hard"',
+      "timeout 5 git commit -m 'git push --force'",
+      "nice -n 5 echo git reset --hard",
+      "env -u FOO git log --oneline # git reset --hard",
+      "sudo -u root git reset --soft HEAD~1",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("the leading override still unlocks exactly one wrapped command; a flag value is no override", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 timeout 5 git reset --hard").status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true && timeout 5 git reset --hard").status)
+      .toBe(2);
+    expect(guard(proj, home, "sudo -u CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard").status).toBe(2);
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    expect(guard(live.proj, live.home, "CAIRN_RUN_OK=1 nice -n 5 git checkout main").status).toBe(0);
+  });
+});
+
 describe("run guard: mid-run push needs manifest push authority (#252)", () => {
   const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
   const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };

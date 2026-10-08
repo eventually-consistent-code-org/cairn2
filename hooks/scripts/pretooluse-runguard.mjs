@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249, #250, #251, #252, #257) --
+ * Purpose: PreToolUse run guard (#216, #249, #250, #251, #252, #257, #270) --
  *   refuses the git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks
  *   the tool call; ANY internal error exits 0 -- never block work because
@@ -30,7 +30,8 @@
  *   override: push authority is the owner's staging decision (ADR 0007).
  *
  *   Commands are read as shell words by shell-words.mjs, the reader this
- *   guard shares with the harness guard (#270), never by a raw regex.
+ *   guard shares with the harness guard (#270), so every rule sees through
+ *   wrappers and their flag values (sudo -u root, timeout 5, nice -n 5).
  *   Quoted text (`git commit -m "explain git reset --hard"`) is never a
  *   refusal, but command substitution inside double quotes still runs, so
  *   its body is checked as a command of its own (#257).
@@ -45,7 +46,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, shellSegments } from "./shell-words.mjs";
+import { SHELLS, shellSegments, unwrap } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -56,10 +57,6 @@ function pathHash(projectDir) {
 }
 
 // Constants
-
-// Wrappers that just run the next word as the command -- skipped so
-// `sudo git reset --hard` is still seen as git.
-const WRAPPERS = new Set(["sudo", "env", "command", "exec", "nohup", "time"]);
 
 // git global options that eat the following word as their value.
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
@@ -94,29 +91,21 @@ const DEFAULT_BRANCHES = ["main", "master"];
  */
 function gitInvocations(line, depth = 0) {
   const found = [];
-  for (const { words } of shellSegments(line, READ)) {
-    let i = 0;
-    const assigns = [];
-    while (i < words.length) {
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) { assigns.push(words[i]); i++; continue; }
-      if (WRAPPERS.has(words[i])) {
-        i++;
-        while (i < words.length && words[i].startsWith("-")) i++;
-        continue;
-      }
-      break;
-    }
-    const cmd = basename(words[i] ?? "");
+  for (const seg of shellSegments(line, READ)) {
+    // Assignments and wrappers come off the front, flag values and all, so
+    // `/usr/bin/sudo -u root git reset --hard` is still git (#270)
+    const { words, assigns } = unwrap(seg.words, READ);
+    const cmd = basename(words[0] ?? "");
 
     // sh -c / bash -lc: the script is one quoted word -- parse it too
     if (SHELLS.has(cmd) && depth < 2) {
-      const flag = words.findIndex((w, k) => k > i && /^-[a-z]*c[a-z]*$/.test(w));
+      const flag = words.findIndex((w, k) => k > 0 && /^-[a-z]*c[a-z]*$/.test(w));
       if (flag > 0 && words[flag + 1]) found.push(...gitInvocations(words[flag + 1], depth + 1));
       continue;
     }
     if (cmd !== "git") continue;
 
-    i++;
+    let i = 1;
     const dirs = [];
     while (i < words.length && words[i].startsWith("-")) {
       if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
