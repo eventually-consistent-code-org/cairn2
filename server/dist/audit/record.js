@@ -8,9 +8,11 @@
  * the raising seats' yield. The record is stamped with the commit it
  * judged. Since #215 a `sweep-<YYYY-MM-DD>` scope is a sweep MANIFEST:
  * it carries the cairn version, a leg index, and a delta against the
- * previous manifest (new / persisting / fixed / regressed) — computed
- * here, in the writer, never by a reader tool. parseAuditRecord reads any
- * record back.
+ * previous manifest (new / persisting / fixed / regressed / unchecked) —
+ * computed here, in the writer, never by a reader tool. Since #266 a prior
+ * finding reads `fixed` only when its own leg ran again in this sweep;
+ * otherwise it is `unchecked` and carried forward. parseAuditRecord reads
+ * any record back.
  *
  * removeWhen: verifier votes reliably agree with human triage across a
  *   milestone, so the server-computed quorum can become advisory.
@@ -82,7 +84,9 @@ export function patchClaimsHold(c) {
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
  *   failure_scenario, a missing panel, or (sweeps) a finding its leg
- *   refuted or carried with fewer votes than its leg required
+ *   refuted or carried with fewer votes than its leg required, a
+ *   surviving finding no listed leg raised, or a leg path with no
+ *   readable record behind it
  */
 export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(scope)) {
@@ -148,11 +152,21 @@ export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}
     // it. Since #248 the leg's own judgment binds the manifest — a finding
     // its leg refuted can't be resurrected here by a friendlier panel, and
     // a security leg's two-vote bar travels with its findings.
-    const attributed = sweep ? attributeLegs(projectDir, legs, findings) : [];
+    const read = sweep ? readLegs(projectDir, legs) : [];
+    const attributed = sweep ? attributeLegs(read, findings) : [];
     attributed.forEach((a, i) => {
-        if (!a)
-            return;
         const f = findings[i];
+        // #259: with a leg index given, every survivor must trace to a leg —
+        // an unattributed one would skip both checks below. (No index at all
+        // stays legal; the delta then calls nothing fixed.)
+        if (!a) {
+            if (legs.length > 0 && results[i].survived) {
+                throw new CairnError("PRECONDITION_FAILED", `finding '${f.title}' matches nothing in any listed leg — a sweep manifest only carries ` +
+                    "findings its legs raised, so each one must trace back to its leg's record", "carry the finding's title and scenario unedited from the leg record that holds it, or add " +
+                    "that leg's record to legs");
+            }
+            return;
+        }
         if (a.match.outcome === "refuted" && results[i].survived) {
             throw new CairnError("PRECONDITION_FAILED", `finding '${f.title}' was refuted in leg '${a.leg}' — a sweep manifest carries survivors only`, "leave refuted findings in their leg's record and out of the manifest's union");
         }
@@ -179,13 +193,13 @@ export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}
             current.push({ title: f.title, severity: f.severity, failure_scenario: f.failure_scenario.trim(),
                 ...(sourceLeg[i] ? { leg: sourceLeg[i] } : {}) });
         });
-        delta = sweepDelta(projectDir, scope, path, current);
+        delta = sweepDelta(projectDir, scope, path, current, coveredScopes(read));
     }
     const body = [`# Audit: ${scope}`, ""];
     if (sweep) {
-        for (const l of legs)
-            body.push(`leg: ${l.scope.trim()} => ${l.path.trim()}`);
-        if (legs.length > 0)
+        for (const l of read)
+            body.push(`leg: ${l.scope} => ${l.path}`);
+        if (read.length > 0)
             body.push("");
         body.push(...renderDelta(delta), "");
     }
@@ -283,7 +297,7 @@ export function listAuditRecords(projectDir) {
     return out;
 }
 const FINDING_HEAD_RE = /^## finding — (critical|important|minor)\s*$/;
-const DELTA_ITEM_RE = /^- (new|persisting|fixed|regressed) — (critical|important|minor): (.*)$/;
+const DELTA_ITEM_RE = /^- (new|persisting|fixed|regressed|unchecked) — (critical|important|minor): (.*)$/;
 const OUTCOMES = ["confirmed", "plausible", "refuted", "unpanelled"];
 /**
  * Reads a record back into frontmatter + findings. Tolerant of every
@@ -292,12 +306,14 @@ const OUTCOMES = ["confirmed", "plausible", "refuted", "unpanelled"];
  * match on it now), never an error.
  *
  * :param path: the record file
- * :returns: frontmatter, findings, leg index, the record's own fixed list, notes
+ * :returns: frontmatter, findings, leg index, the record's own fixed and
+ *   unchecked lists, notes
  * :raises CairnError: CONFIG_INVALID only on a broken frontmatter block
  */
 export function parseAuditRecord(path) {
     const { data, body } = parseFrontmatter(readFileSync(path, "utf8"));
-    const out = { frontmatter: data, findings: [], legs: [], deltaFixed: [], notes: [] };
+    const out = { frontmatter: data, findings: [], legs: [], deltaFixed: [],
+        deltaUnchecked: [], notes: [] };
     let section = "head";
     let cur = null;
     let deltaItem = null;
@@ -335,14 +351,14 @@ export function parseAuditRecord(path) {
                 out.legs.push({ scope: m[1].trim(), path: m[2].trim() });
             continue;
         }
-        // Delta items — only the fixed list matters to the next sweep.
+        // Delta items — only the fixed and unchecked lists matter to the next sweep.
         if (section === "delta") {
             const m = DELTA_ITEM_RE.exec(line);
             if (m) {
-                deltaItem = m[1] === "fixed"
-                    ? { title: m[3].trim(), severity: m[2], failure_scenario: "" } : null;
-                if (deltaItem)
-                    out.deltaFixed.push(deltaItem);
+                const keep = m[1] === "fixed" ? out.deltaFixed : m[1] === "unchecked" ? out.deltaUnchecked : null;
+                deltaItem = keep ? { title: m[3].trim(), severity: m[2], failure_scenario: "" } : null;
+                if (keep && deltaItem)
+                    keep.push(deltaItem);
                 continue;
             }
             const sc = /^ {2}scenario: (.*)$/.exec(line);
@@ -448,18 +464,23 @@ function previousManifest(projectDir, scope, path) {
 }
 /**
  * Classifies this sweep's survivors against the previous manifest:
- * persisting (matched a prior survivor), regressed (unmatched, but the
- * previous manifest's own delta had called it fixed), new (otherwise),
- * fixed (a prior survivor nothing matches now). Null on the first sweep,
- * or when the baseline can't be read.
+ * persisting (matched a prior), regressed (unmatched, but the previous
+ * manifest's own delta had called it fixed), new (otherwise). A prior
+ * nothing matches now is fixed only when its leg is one this sweep
+ * re-checked; any other prior — a leg retargeted, skipped, or never named
+ * — is unchecked, never a false fixed (#266). "Prior" is the baseline's
+ * survivors plus its own unchecked items, so a finding that went unlooked-at
+ * for a sweep and comes back reads persisting, not new. Null on the first
+ * sweep, or when the baseline can't be read.
  *
  * :param projectDir: repository root
  * :param scope: this sweep's scope
  * :param path: this sweep's record path
  * :param current: this sweep's surviving findings
+ * :param covered: the leg scopes this sweep re-checked (coveredScopes)
  * :returns: the delta, or null when there is no baseline
  */
-function sweepDelta(projectDir, scope, path, current) {
+function sweepDelta(projectDir, scope, path, current, covered) {
     const basePath = previousManifest(projectDir, scope, path);
     if (!basePath)
         return null;
@@ -474,15 +495,18 @@ function sweepDelta(projectDir, scope, path, current) {
     const commit = str(base.frontmatter.commit);
     const cairn = str(base.frontmatter.cairn);
     const created = str(base.frontmatter.created);
-    const prior = base.findings
-        .filter((f) => f.outcome !== "refuted")
-        .map((f) => ({ title: f.title, severity: f.severity, failure_scenario: f.failure_scenario,
-        ...(f.leg ? { leg: f.leg } : {}) }));
+    const prior = [
+        ...base.findings
+            .filter((f) => f.outcome !== "refuted")
+            .map((f) => ({ title: f.title, severity: f.severity, failure_scenario: f.failure_scenario,
+            ...(f.leg ? { leg: f.leg } : {}) })),
+        ...base.deltaUnchecked,
+    ];
     const delta = {
         baseline: { path: basePath, ...(commit ? { commit } : {}), ...(cairn ? { cairn } : {}),
             ...(created ? { created } : {}) },
         codeCommitsSince: commit ? codeCommitsSince(projectDir, commit) : null,
-        new: [], persisting: [], fixed: [], regressed: [],
+        new: [], persisting: [], fixed: [], regressed: [], unchecked: [], uncoveredLegs: [],
     };
     const pair = matchFindings(current, prior);
     const unmatched = [];
@@ -490,14 +514,22 @@ function sweepDelta(projectDir, scope, path, current) {
     const fixedPair = matchFindings(unmatched, base.deltaFixed);
     unmatched.forEach((c, i) => { (fixedPair[i] >= 0 ? delta.regressed : delta.new).push(c); });
     const claimed = new Set(pair.filter((j) => j >= 0));
-    prior.forEach((p, j) => { if (!claimed.has(j))
-        delta.fixed.push(p); });
+    prior.forEach((p, j) => {
+        if (claimed.has(j))
+            return;
+        (p.leg && covered.has(p.leg) ? delta.fixed : delta.unchecked).push(p);
+    });
+    // Every leg the baseline named — its index and its carried findings' legs —
+    // that nothing in this sweep re-checked.
+    const named = new Set([...base.legs.map((l) => l.scope), ...prior.flatMap((p) => (p.leg ? [p.leg] : []))]);
+    delta.uncoveredLegs = [...named].filter((l) => !covered.has(l));
     return delta;
 }
 /**
- * The record's delta section — heading, baseline, counts, then one item
- * per finding with its scenario (and leg) indented below, so the next
- * sweep can read this one's fixed list back.
+ * The record's delta section — heading, baseline, counts, the legs left
+ * uncovered, then one item per finding with its scenario (and leg)
+ * indented below, so the next sweep can read this one's fixed and
+ * unchecked lists back.
  *
  * :param delta: the computed delta, or null on the first sweep
  * :returns: body lines
@@ -512,8 +544,9 @@ function renderDelta(delta) {
             `${b.cairn ? ` (cairn ${b.cairn})` : ""}${b.created ? `, ${b.created}` : ""}`,
         `code commits since: ${delta.codeCommitsSince ?? "unknown"}`,
         `counts: new ${delta.new.length}, persisting ${delta.persisting.length}, ` +
-            `fixed ${delta.fixed.length}, regressed ${delta.regressed.length}`];
-    for (const cls of ["regressed", "new", "persisting", "fixed"]) {
+            `fixed ${delta.fixed.length}, regressed ${delta.regressed.length}, unchecked ${delta.unchecked.length}`,
+        `uncovered legs: ${delta.uncoveredLegs.length > 0 ? delta.uncoveredLegs.join(", ") : "none"}`];
+    for (const cls of ["regressed", "new", "persisting", "fixed", "unchecked"]) {
         for (const f of delta[cls]) {
             out.push(`- ${cls} — ${f.severity}: ${f.title}`, `  scenario: ${f.failure_scenario}`);
             if (f.leg)
@@ -530,13 +563,15 @@ function under(base, p) {
 /**
  * Where a leg's record may be read from: a regular file under the
  * project's audit dir, symlinks resolved — the leg index is caller input,
- * and the manifest must not become a reader of arbitrary files. A path
- * that doesn't exist yet is not refused; it attributes nothing.
+ * and the manifest must not become a reader of arbitrary files. Since
+ * #259 a path that names no file is refused too: a leg the manifest can't
+ * read would silently attribute nothing and skip its leg's checks.
  *
  * :param projectDir: repository root (relative leg paths resolve here)
  * :param leg: one leg index entry
- * :returns: the absolute record path, or null when the file is absent
- * :raises CairnError: UNSUPPORTED when the path escapes the audit dir or isn't a regular file
+ * :returns: the record's real (symlink-free) absolute path
+ * :raises CairnError: UNSUPPORTED when the path escapes the audit dir or
+ *   isn't a regular file; PRECONDITION_FAILED when no file is there
  */
 function legRecordPath(projectDir, leg) {
     const dir = resolve(auditDir(projectDir));
@@ -549,38 +584,76 @@ function legRecordPath(projectDir, leg) {
         st = lstatSync(p);
     }
     catch {
-        return null;
+        throw new CairnError("PRECONDITION_FAILED", `leg '${leg.scope.trim()}' points at a record that isn't there (${leg.path.trim()}) — ` +
+            "a sweep can only index legs that wrote a record", "pass the exact path that leg's own audit_record call returned; a leg that didn't run stays " +
+            "out of the index as a 'leg skipped' line");
     }
     if (!st.isFile())
         throw refuse("is not a regular file");
-    if (!under(realpathSync(dir), realpathSync(p)))
+    const real = realpathSync(p);
+    if (!under(realpathSync(dir), real))
         throw refuse("resolves outside the audit dir");
-    return p;
+    return real;
 }
 /**
- * Which leg raised each finding: read every leg record back and match by
- * the delta's identity rule. A leg whose record can't be read attributes
- * nothing — the manifest still writes.
+ * Reads every leg record the index names, once per file: entries that
+ * resolve to the same record collapse to the first (#259). Every entry
+ * must resolve to a readable audit record — one that won't parse, or
+ * carries no scope of its own, is refused rather than quietly
+ * attributing nothing.
  *
  * :param projectDir: repository root (relative leg paths resolve here)
  * :param legs: the leg index
+ * :returns: one ReadLeg per distinct record, in index order
+ * :raises CairnError: UNSUPPORTED on a leg path outside the audit dir;
+ *   PRECONDITION_FAILED on a leg path with no readable record behind it
+ */
+function readLegs(projectDir, legs) {
+    const seen = new Set();
+    const out = [];
+    for (const l of legs) {
+        const real = legRecordPath(projectDir, l);
+        if (seen.has(real))
+            continue;
+        seen.add(real);
+        const unreadable = (why) => new CairnError("PRECONDITION_FAILED", `leg '${l.scope.trim()}' points at a file that isn't a readable audit record (${l.path.trim()}): ${why}`, "pass the exact path that leg's own audit_record call returned");
+        let record;
+        try {
+            record = parseAuditRecord(real);
+        }
+        catch (e) {
+            throw unreadable(e instanceof Error ? e.message : String(e));
+        }
+        const own = record.frontmatter.scope;
+        if (typeof own !== "string" || own.trim() === "")
+            throw unreadable("it names no scope");
+        out.push({ scope: l.scope.trim(), path: l.path.trim(), recordScope: own.trim(), record });
+    }
+    return out;
+}
+/**
+ * Which leg scopes this sweep actually re-checked (#266): a leg covers
+ * its index scope only when its record was written under that same
+ * scope — a mislabelled index entry (scope security-25 pointing at a
+ * security-26 record) covers nothing, so it can't turn untouched findings
+ * into a false fixed.
+ *
+ * :param read: the legs as readLegs returned them
+ * :returns: the covered scopes
+ */
+function coveredScopes(read) {
+    return new Set(read.filter((l) => l.recordScope === l.scope).map((l) => l.scope));
+}
+/**
+ * Which leg raised each finding: match every finding against the legs'
+ * records by the delta's identity rule.
+ *
+ * :param read: the legs as readLegs returned them
  * :param findings: the manifest's findings
  * :returns: leg attribution per finding index (undefined when unattributed)
- * :raises CairnError: UNSUPPORTED on a leg path outside the audit dir
  */
-function attributeLegs(projectDir, legs, findings) {
-    const records = legs.map((l) => {
-        const p = legRecordPath(projectDir, l);
-        if (!p)
-            return null;
-        try {
-            return parseAuditRecord(p);
-        }
-        catch {
-            return null;
-        }
-    });
-    const legFindings = records.map((r) => r?.findings ?? []);
+function attributeLegs(read, findings) {
+    const legFindings = read.map((l) => l.record.findings);
     // Within a leg, a surviving copy wins over a refuted one of the same identity.
     const pick = (fs, same) => fs.find((x) => same(x) && x.outcome !== "refuted") ?? fs.find(same);
     return findings.map((f) => {
@@ -596,7 +669,6 @@ function attributeLegs(projectDir, legs, findings) {
         const match = k >= 0 ? pick(legFindings[k], same) : undefined;
         if (!match)
             return undefined;
-        const fm = records[k]?.frontmatter.scope;
-        return { leg: legs[k].scope.trim(), recordScope: typeof fm === "string" ? fm : "", match };
+        return { leg: read[k].scope, recordScope: read[k].recordScope, match };
     });
 }

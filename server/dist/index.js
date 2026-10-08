@@ -306,9 +306,9 @@ export function buildServer(deps) {
         inputSchema: z.object({}),
     }, wrap(() => contextMeterReport(dir())));
     server.registerTool("issue_create", {
-        description: "Create an issue in the configured tracker. `phase` accepts the " +
-            "tracker's phase id OR the cairn phase number ('14', '1.5' -- " +
-            "resolved via the 'Phase N: <name>' convention). Estimates " +
+        description: "Create an issue in the configured tracker. `phase`: cairn phase " +
+            "number ('14', '1.5' -- matches the 'Phase N: <name>' title) or " +
+            "tracker phase id ('id:<raw>' if numeric). Estimates " +
             "(story points / original minutes) land in the backend's native " +
             "fields where supported; elsewhere they're skipped and the result " +
             "says so via estimateSkipped",
@@ -325,7 +325,7 @@ export function buildServer(deps) {
         const { estimatePoints, estimateMinutes, ...input } = a;
         const wantsEstimate = estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
-        // phase accepts a tracker phase id OR a cairn phase number (#138)
+        // phase is a cairn phase number (by title) or a raw id (#138, #271)
         const phase = input.phase === undefined
             ? undefined
             : await resolvePhaseParam(tracker, input.phase);
@@ -352,9 +352,9 @@ export function buildServer(deps) {
     }, wrap(async (a) => (await getTracker()).getIssue(a.id)));
     server.registerTool("issue_update", {
         description: "Update an issue (title/body/state/labels/assignee/estimate/phase). " +
-            "`phase` re-parents the issue and accepts the tracker's phase id OR " +
-            "the cairn phase number ('14', '1.5' -- resolved via the " +
-            "'Phase N: <name>' convention); backends that can't re-parent skip " +
+            "`phase` re-parents it: cairn phase number ('14', '1.5' -- matches " +
+            "the 'Phase N: <name>' title) or tracker phase id ('id:<raw>' if " +
+            "numeric); backends that can't re-parent skip " +
             "it and the result says so via phaseSkipped",
         inputSchema: z.object({
             id: z.string(),
@@ -373,7 +373,7 @@ export function buildServer(deps) {
         const wantsEstimate = estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
         const canRephase = tracker.capabilities.hasPhaseReassign;
-        // phase accepts a tracker phase id OR a cairn phase number (#138) —
+        // phase is a cairn phase number (by title) or a raw id (#138, #271) —
         // resolved only where the backend can actually re-parent; elsewhere
         // it's dropped with a note (mirrors the estimate degradation).
         const phase = phaseParam === undefined || !canRephase
@@ -655,8 +655,8 @@ export function buildServer(deps) {
         };
     }));
     server.registerTool("issue_list", {
-        description: "List issues, optionally by phase/state (phase accepts the tracker's " +
-            "phase id OR the cairn phase number; state matches the semantic " +
+        description: "List issues, optionally by phase/state (phase: cairn phase number " +
+            "or tracker phase id, 'id:<raw>' if numeric; state matches the semantic " +
             "category — open/in_progress/closed — or an exact state name)",
         inputSchema: z.object({
             phase: z.string().optional(),
@@ -664,7 +664,7 @@ export function buildServer(deps) {
         }),
     }, wrap(async (a) => {
         const tracker = await getTracker();
-        // phase accepts a tracker phase id OR a cairn phase number (#138/#142)
+        // phase is a cairn phase number (by title) or a raw id (#138/#142/#271)
         const phase = a.phase === undefined
             ? undefined
             : await resolvePhaseParam(tracker, a.phase);
@@ -1745,10 +1745,10 @@ export function buildServer(deps) {
     }, wrap(() => peerList(dir())));
     server.registerTool("peer_run", {
         description: "Run one external peer CLI with capped stdin input — advisory output, non-zero exit is a result. " +
-            "Outbound content leaves the machine; callers MUST leak-scan the input first — this layer does not scan. " +
+            "Outbound content leaves the machine: the capped input is leak-scanned first and a hit refuses the run. " +
             "cwdMode 'scratch' (default) runs the child contained in a throwaway temp dir with the capped input " +
-            "staged as packet.txt — the peer never sees the repo; 'project' runs from the project dir and is " +
-            "granted ONLY to execCapable peers on the functionality dimension (that is what the trust flag means)",
+            "staged as packet.txt — the peer never sees the repo; 'project' runs from the project dir, refused " +
+            "unless cairn.json marks the peer execCapable — grant it only on the functionality dimension",
         inputSchema: z.object({
             provider: z.enum(PROVIDERS),
             input: z.string().min(1),

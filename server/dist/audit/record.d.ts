@@ -8,9 +8,11 @@
  * the raising seats' yield. The record is stamped with the commit it
  * judged. Since #215 a `sweep-<YYYY-MM-DD>` scope is a sweep MANIFEST:
  * it carries the cairn version, a leg index, and a delta against the
- * previous manifest (new / persisting / fixed / regressed) — computed
- * here, in the writer, never by a reader tool. parseAuditRecord reads any
- * record back.
+ * previous manifest (new / persisting / fixed / regressed / unchecked) —
+ * computed here, in the writer, never by a reader tool. Since #266 a prior
+ * finding reads `fixed` only when its own leg ran again in this sweep;
+ * otherwise it is `unchecked` and carried forward. parseAuditRecord reads
+ * any record back.
  *
  * removeWhen: verifier votes reliably agree with human triage across a
  *   milestone, so the server-computed quorum can become advisory.
@@ -111,9 +113,18 @@ export interface SweepDelta {
     codeCommitsSince: number | null;
     new: DeltaFinding[];
     persisting: DeltaFinding[];
+    /** A prior finding nothing matches now, from a leg this sweep re-checked. */
     fixed: DeltaFinding[];
     /** Fixed in the previous manifest's own delta, present again now. */
     regressed: DeltaFinding[];
+    /**
+     * A prior finding nothing matches now whose leg this sweep did NOT
+     * re-check (or that names no leg) — not fixed, just unlooked-at. The next
+     * sweep compares against these too, so a re-raise reads persisting (#266).
+     */
+    unchecked: DeltaFinding[];
+    /** Legs the baseline named that this sweep's index doesn't cover. */
+    uncoveredLegs: string[];
 }
 export interface AuditRecordResult {
     path: string;
@@ -162,7 +173,9 @@ export declare function patchClaimsHold(c: PatchClaims): boolean;
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
  *   failure_scenario, a missing panel, or (sweeps) a finding its leg
- *   refuted or carried with fewer votes than its leg required
+ *   refuted or carried with fewer votes than its leg required, a
+ *   surviving finding no listed leg raised, or a leg path with no
+ *   readable record behind it
  */
 export declare function writeAuditRecord(projectDir: string, scope: string, verdict: "pass" | "findings", findings: AuditFinding[], opts?: {
     yieldBaseDir?: string;
@@ -195,6 +208,10 @@ export interface ParsedAuditRecord {
     /** Sweep manifests: what this record's own delta called fixed — the
      *  next manifest's regression baseline. Empty elsewhere. */
     deltaFixed: DeltaFinding[];
+    /** Sweep manifests: what this record's own delta left unchecked — still
+     *  open as far as anyone knows, so the next manifest compares against
+     *  them alongside the survivors (#266). Empty elsewhere. */
+    deltaUnchecked: DeltaFinding[];
     /** Blocks skipped on the way in (legacy bodies), in plain words. */
     notes: string[];
 }
@@ -205,7 +222,8 @@ export interface ParsedAuditRecord {
  * match on it now), never an error.
  *
  * :param path: the record file
- * :returns: frontmatter, findings, leg index, the record's own fixed list, notes
+ * :returns: frontmatter, findings, leg index, the record's own fixed and
+ *   unchecked lists, notes
  * :raises CairnError: CONFIG_INVALID only on a broken frontmatter block
  */
 export declare function parseAuditRecord(path: string): ParsedAuditRecord;

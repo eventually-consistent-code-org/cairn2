@@ -31,9 +31,10 @@ export interface RevisionStamp {
 export declare function revisionStamp(projectDir: string): RevisionStamp | null;
 /**
  * Counts commits reachable from HEAD but not from `commit` that touch any
- * path outside `excludeDir` — "how much code moved since this stamp".
- * Null when git can't resolve the range (commit rebased away, gc'd, or
- * not a repo): the caller decides whether unknowable means stale.
+ * path outside `excludeDir` and the non-code prose above — "how much code
+ * moved since this stamp". Null when git can't resolve the range (commit
+ * rebased away, gc'd, or not a repo): the caller decides whether
+ * unknowable means stale.
  *
  * :param projectDir: repository root
  * :param commit: the stamp's commit
