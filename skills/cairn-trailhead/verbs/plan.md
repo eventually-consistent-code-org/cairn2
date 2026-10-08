@@ -122,7 +122,7 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
 7. Adopt: `plan_unplanned()` — for any unplanned issue that belongs to this
    phase, add its id via `plan_issues_set` and re-phase it in the tracker
    with `issue_update(id, phase: <N>)` — phase takes the cairn phase number
-   or the tracker's phase id (#142). A backend that can't re-parent says so
+   (#142, #271). A backend that can't re-parent says so
    via `phaseSkipped` in the result; relay that instead of assuming the
    move happened. Ask before adopting.
 8. Report the plan summary and next step `/cairn:work <N>`.

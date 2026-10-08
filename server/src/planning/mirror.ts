@@ -10,32 +10,64 @@ import { projectStatus } from "./status.js";
 export const canonicalPhaseName = (number: number, name: string) =>
   `Phase ${number}: ${name}`;
 
-// Tool-layer phase-param resolution (#138). issue_create's `phase` used to
-// demand the tracker's internal phase-object id -- a mapping only
+// Tool-layer phase-param resolution (#138, #271). issue_create's `phase`
+// used to demand the tracker's internal phase-object id -- a mapping only
 // plan_phase_ensure's return value knew, so passing the cairn phase number
-// ("14") 422'd on GitHub. Resolve here, once, for every backend: an existing
-// phase id passes through untouched (id wins on collision -- backward
-// compatible), and a phase NUMBER resolves through the same canonical
-// "Phase N: <name>" convention ensurePhase writes. One listPhases fetch
-// serves both checks; no cross-call state.
+// ("14") 422'd on GitHub. Resolve here, once, for every backend.
+//
+// A number-shaped value is ALWAYS a cairn phase number and resolves only
+// through the canonical "Phase N: <name>" title ensurePhase writes. It used
+// to try the tracker id first, which was fine until GitHub's milestone
+// numbers caught up with the phase numbers: cairn phase 21 matched
+// milestone #21 -- titled "Phase 23" -- and ten issues landed under the
+// wrong phase. GitLab ids, ClickUp list ids and Asana gids are bare digits
+// too, so the rule is about the shape, not the backend.
+//
+// A raw tracker id still passes through when it isn't number-shaped (Jira
+// keys, Linear/Azure GUIDs, local ids), or when written explicitly as
+// `id:<raw>` -- the only way to name a number-shaped id. One listPhases
+// fetch serves every check; no cross-call state.
 const PHASE_NUMBER_RE = /^\d+(\.\d+)?$/;
+const EXPLICIT_ID_PREFIX = "id:";
 
 export async function resolvePhaseParam(
   tracker: Tracker, phase: string,
 ): Promise<string> {
+  const explicitId = phase.startsWith(EXPLICIT_ID_PREFIX)
+    ? phase.slice(EXPLICIT_ID_PREFIX.length)
+    : undefined;
   // backends without phases keep their existing adapter-side error path
-  if (!tracker.capabilities.hasPhases) return phase;
+  if (!tracker.capabilities.hasPhases) return explicitId ?? phase;
   const phases = await tracker.listPhases();
-  const byId = phases.find((p) => p.id === phase);
-  if (byId) return byId.id;
+
+  // Explicit id -- exact match, never a title lookup
+  if (explicitId !== undefined) {
+    const byId = phases.find((p) => p.id === explicitId);
+    if (byId) return byId.id;
+    throw new CairnError("NOT_FOUND",
+      `phase '${phase}' names tracker phase id '${explicitId}', which matched no existing tracker phase`,
+      "phase_list shows valid ids");
+  }
+
+  // Cairn phase number -- title only, the id is never consulted
   if (PHASE_NUMBER_RE.test(phase)) {
     const prefix = `Phase ${phase}:`;
-    const byNumber = phases.find((p) => p.name.startsWith(prefix));
-    if (byNumber) return byNumber.id;
+    const byNumber = phases.filter((p) => p.name.startsWith(prefix));
+    if (byNumber.length === 1) return byNumber[0].id;
+    if (byNumber.length > 1) {
+      // picking the first would be the same silent misfile, one layer down
+      throw new CairnError("PRECONDITION_FAILED",
+        `phase '${phase}' matched ${byNumber.length} phases titled 'Phase ${phase}: ...' (ids ${byNumber.map((p) => p.id).join(", ")})`,
+        "pass the intended one as 'id:<raw>', and rename or close the other");
+    }
     throw new CairnError("NOT_FOUND",
-      `phase '${phase}' matched neither an existing tracker phase id nor a phase named 'Phase ${phase}: ...'`,
-      "phase_list shows valid ids; plan_phase_ensure creates the 'Phase N: <name>' phase first");
+      `phase '${phase}' is a cairn phase number and matched no phase named 'Phase ${phase}: ...' -- a number-shaped value resolves by title only, never as a tracker phase id`,
+      `plan_phase_ensure creates the 'Phase N: <name>' phase first; to pass a number-shaped tracker id as-is, write it as 'id:${phase}'`);
   }
+
+  // Anything else is a raw tracker id
+  const byId = phases.find((p) => p.id === phase);
+  if (byId) return byId.id;
   throw new CairnError("NOT_FOUND",
     `phase '${phase}' matched no existing tracker phase id, and it is not a cairn phase number (integer or decimal), so the 'Phase N:' name lookup was skipped`,
     "phase_list shows valid ids; plan_phase_ensure creates the 'Phase N: <name>' phase first");

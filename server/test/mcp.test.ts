@@ -14,6 +14,7 @@ import { join, delimiter } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
+import type { Phase } from "../src/tracker/types.js";
 import { handoffPath } from "../src/core/continuity.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { listSessions } from "../src/sessions/store.js";
@@ -397,15 +398,16 @@ describe("cairn MCP server", () => {
     expect(made.json.phase).toBe(ensured.json.id);
   });
 
-  it("issue_create with an unmatched phase errors naming both interpretations tried (#138)", async () => {
+  it("issue_create with an unmatched phase number errors naming the title lookup and the id: escape (#138, #271)", async () => {
     const res = await call("issue_create", {
       title: "no such phase",
       phase: "99",
     });
     expect(res.isError).toBe(true);
     expect(res.json.code).toBe("NOT_FOUND");
-    expect(res.json.message).toContain("tracker phase id");
     expect(res.json.message).toContain("Phase 99:");
+    expect(res.json.message).toContain("never as a tracker phase id");
+    expect(res.json.nextAction).toContain("id:99");
   });
 
   it("issue_create with a non-numeric unmatched phase errors explaining the skipped number lookup (#138)", async () => {
@@ -449,13 +451,13 @@ describe("cairn MCP server", () => {
     expect(updated.json.phase).toBe(ensured.json.id);
   });
 
-  it("issue_update with an unmatched phase errors naming both interpretations tried (#142)", async () => {
+  it("issue_update with an unmatched phase number errors naming the title lookup and the id: escape (#142, #271)", async () => {
     const made = await call("issue_create", { title: "bad re-phase target" });
     const res = await call("issue_update", { id: made.json.id, phase: "99" });
     expect(res.isError).toBe(true);
     expect(res.json.code).toBe("NOT_FOUND");
-    expect(res.json.message).toContain("tracker phase id");
     expect(res.json.message).toContain("Phase 99:");
+    expect(res.json.nextAction).toContain("id:99");
   });
 
   it("issue_list resolves a cairn phase number in the phase filter (#142)", async () => {
@@ -488,7 +490,7 @@ describe("cairn MCP server", () => {
     expect(ids).toContain(inPhase.json.id);
   });
 
-  it("issue_list with an unmatched phase filter is NOT_FOUND naming both interpretations (#142)", async () => {
+  it("issue_list with an unmatched phase-number filter is NOT_FOUND naming the title lookup (#142, #271)", async () => {
     const res = await call("issue_list", { phase: "98" });
     expect(res.isError).toBe(true);
     expect(res.json.code).toBe("NOT_FOUND");
@@ -1730,6 +1732,86 @@ describe("cairn MCP server", () => {
     });
     expect(closed.isError).toBeFalsy();
     expect(closed.json.incompleteSeats).toEqual(["grok"]);
+  });
+});
+
+describe("phase param over a numeric-id tracker (#271)", () => {
+  // GitHub milestone numbers are bare digits, and once they catch up with
+  // the phase numbers a raw id and a cairn phase number look the same. The
+  // shared fake mints "FP-n" ids, so this fixture seeds the live shape that
+  // misfiled ten issues: milestone #21 is titled "Phase 23".
+  class NumericPhaseTracker extends FakeTracker {
+    private numbered: Phase[] = [];
+    seed(id: string, name: string): void {
+      this.numbered.push({ id, name, state: "open" });
+    }
+    override async listPhases(): Promise<Phase[]> {
+      return this.numbered.map((p) => ({ ...p }));
+    }
+  }
+
+  let projectDir: string;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { ...res, json: JSON.parse(text) };
+  };
+
+  beforeAll(async () => {
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-numeric-phase-"));
+    writeFileSync(
+      join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+    const tracker = new NumericPhaseTracker();
+    tracker.seed("19", "Phase 21: the-refutation");
+    tracker.seed("21", "Phase 23: the-method");
+    tracker.seed("25", "Phase 24.7: measured-actuals");
+    const server = buildServer({ projectDir, tracker });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-numeric-phase", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+  });
+
+  afterAll(() => {
+    rmSync(handoffPath(projectDir), { force: true });
+    rmSync(outlookMirrorPath(projectDir), { force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it("issue_create files cairn phase 21 under the milestone titled 'Phase 21', not milestone #21", async () => {
+    const made = await call("issue_create", { title: "refutation work", phase: "21" });
+    expect(made.isError).toBeFalsy();
+    expect(made.json.phase).toBe("19");
+  });
+
+  it("issue_update re-phases by title, and id:<raw> reaches a number-shaped id", async () => {
+    const made = await call("issue_create", { title: "moves twice", phase: "23" });
+    expect(made.json.phase).toBe("21");
+    const byNumber = await call("issue_update", { id: made.json.id, phase: "21" });
+    expect(byNumber.json.phase).toBe("19");
+    const byId = await call("issue_update", { id: made.json.id, phase: "id:21" });
+    expect(byId.json.phase).toBe("21");
+  });
+
+  it("issue_list filters by the titled phase, not the colliding id", async () => {
+    const inPhase = await call("issue_create", { title: "method work", phase: "23" });
+    const decoy = await call("issue_create", { title: "refutation decoy", phase: "21" });
+    const listed = await call("issue_list", { phase: "23" });
+    const ids = listed.json.map((i: { id: string }) => i.id);
+    expect(ids).toContain(inPhase.json.id);
+    expect(ids).not.toContain(decoy.json.id);
+  });
+
+  it("a milestone number with no matching title is NOT_FOUND, and the hint names the id: form", async () => {
+    // milestone #25 exists; nothing is titled 'Phase 25:'
+    const res = await call("issue_create", { title: "nowhere", phase: "25" });
+    expect(res.isError).toBe(true);
+    expect(res.json.code).toBe("NOT_FOUND");
+    expect(res.json.message).toContain("Phase 25:");
+    expect(res.json.nextAction).toContain("id:25");
   });
 });
 

@@ -23,8 +23,10 @@ Verify the given phase per the `cairn-planning` skill.
    run — and judged, not auto-failed: a declaration that turned out to be
    the wrong check is a legitimate finding about the plan, as long as it
    is written down rather than quietly ignored.
-3. `issue_list(phase: <tracker phase id>, state: "open")` — must be empty; report
-   stragglers instead of closing them unexamined.
+3. `issue_list(phase: "<N>")` — no state filter: every issue it returns
+   must have `category: "closed"`. Anything still `open` or `in_progress`
+   (whatever its board state name) FAILS verification — report each
+   straggler with its state instead of closing it unexamined.
 4. TDD evidence: for every id in PLAN.md `tdd:` frontmatter, this phase's
    LEDGER.md line for that id must carry a `tdd <red>..<green>` segment.
    Any TDD task missing its pair → the phase FAILS verification — report
