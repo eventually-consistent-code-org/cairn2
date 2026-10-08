@@ -1,0 +1,104 @@
+/**
+ * Purpose: #270 -- the shell reader both PreToolUse guards share. Pins what
+ *   each `read` option turns on, that heredoc bodies stay data on their
+ *   segment, and how unwrap / shellCommandString find the real command.
+ *   The guards' own suites pin the allow/refuse results end to end; this
+ *   pins the module they both stand on, so a fix is tested once.
+ * Author(s): John Reed
+ */
+
+import { describe, it, expect } from "vitest";
+// @ts-expect-error untyped hook module
+import { WRAPPERS, shellSegments, unwrap, shellCommandString } from "../../hooks/scripts/shell-words.mjs";
+
+type Seg = { words: string[]; redirects: string[]; heredocs: Array<{ delim: string; body: string }> };
+
+/** Just the words of each segment, for the cases that only split. */
+const words = (command: string, read: Record<string, boolean> = {}): string[][] =>
+  (shellSegments(command, read) as Seg[]).map((s) => s.words);
+
+describe("shellSegments", () => {
+  it("quoted text stays inside its word; ; & | and newlines always split", () => {
+    expect(words('git commit -m "explain git reset --hard"'))
+      .toEqual([["git", "commit", "-m", "explain git reset --hard"]]);
+    expect(words("a 'b c' d\\ e")).toEqual([["a", "b c", "d e"]]);
+    expect(words("a; b && c || d | e & f\ng")).toEqual([["a"], ["b"], ["c"], ["d"], ["e"], ["f"], ["g"]]);
+  });
+
+  it("each read option turns on exactly the feature it names", () => {
+    expect(words("(a) `b` c", {})).toEqual([["(a)", "`b`", "c"]]);
+    expect(words("(a) `b` c", { subshells: true })).toEqual([["a"], ["b"], ["c"]]);
+    expect(words("a # b", {})).toEqual([["a", "#", "b"]]);
+    expect(words("a # b\nc", { comments: true })).toEqual([["a"], ["c"]]);
+    expect(words('echo "$(rm x)"', {})).toEqual([["echo", "$(rm x)"]]);
+    expect(words('echo "$(rm x)" "`ls`"', { substitutions: true }))
+      .toEqual([["echo", "$(rm x)", "`ls`"], ["rm", "x"], ["ls"]]);
+    expect(words("a \\\nb", {})).toEqual([["a", "\\"], ["b"]]);
+    expect(words("a \\\nb", { continuation: true })).toEqual([["a", "b"]]);
+    expect(words('"a\\b"', {})).toEqual([["ab"]]);
+    expect(words('"a\\b"', { posixEscapes: true })).toEqual([["a\\b"]]);
+    expect(words("a\rb", {})).toEqual([["a\rb"]]);
+    expect(words("a\rb", { anyWhitespace: true })).toEqual([["a", "b"]]);
+  });
+
+  it("redirects: targets are collected, descriptors and input are not", () => {
+    const [seg] = shellSegments("cmd 2>&1 >out 2>>err &>both < in <<< str", { redirects: true }) as Seg[];
+    expect(seg.words).toEqual(["cmd"]);
+    expect(seg.redirects).toEqual(["out", "err", "both"]);
+    expect(words("cmd > out", {})).toEqual([["cmd", ">", "out"]]);
+  });
+
+  it("redirects: a heredoc body is data, kept on the segment that opened it", () => {
+    const segs = shellSegments("cat <<'EOF' > f\nrm x\nEOF\nls", { redirects: true }) as Seg[];
+    expect(segs.map((s) => s.words)).toEqual([["cat"], ["ls"]]);
+    expect(segs[0].redirects).toEqual(["f"]);
+    expect(segs[0].heredocs).toEqual([{ delim: "EOF", body: "rm x\n" }]);
+    // <<- matches a tab-indented delimiter line
+    const tabbed = shellSegments("cat <<-END\n\tbody\n\tEND\nls", { redirects: true }) as Seg[];
+    expect(tabbed.map((s) => s.words)).toEqual([["cat"], ["ls"]]);
+  });
+});
+
+describe("unwrap", () => {
+  it("skips a wrapper's flag values and basenames the wrapper (#254, #270)", () => {
+    for (const line of [
+      "sudo -u root git reset --hard",
+      "/usr/bin/sudo -n git reset --hard",
+      "timeout -s KILL 5 git reset --hard",
+      "nice -n 5 git reset --hard",
+      "env -u FOO git reset --hard",
+      "stdbuf -o0 git reset --hard",
+      "doas -u root git reset --hard",
+      "xargs -n 1 git reset --hard",
+      "nohup sudo -u root env -i nice -n 1 git reset --hard",
+      "env -S 'git reset --hard'",
+    ]) {
+      const [seg] = shellSegments(line) as Seg[];
+      expect(unwrap(seg.words).words, line).toEqual(["git", "reset", "--hard"]);
+    }
+  });
+
+  it("collects every assignment on the way in, and files a wrapper writes", () => {
+    const r = unwrap(["A=1", "sudo", "B=2", "env", "-i", "C=3", "time", "-o", "log", "cmd", "D=4"]);
+    expect(r.words).toEqual(["cmd", "D=4"]);
+    expect(r.assigns).toEqual(["A=1", "B=2", "C=3"]);
+    expect(r.writes).toEqual(["log"]);
+  });
+
+  it("covers the wrappers the issue names", () => {
+    for (const w of ["sudo", "doas", "env", "nice", "timeout", "xargs", "stdbuf", "exec", "time", "nohup"]) {
+      expect(WRAPPERS.has(w), w).toBe(true);
+    }
+  });
+});
+
+describe("shellCommandString", () => {
+  it("finds the -c string after any options, and never mistakes a script path for one", () => {
+    expect(shellCommandString(["-lc", "x"])).toBe("x");
+    expect(shellCommandString(["-o", "pipefail", "-c", "x"])).toBe("x");
+    expect(shellCommandString(["-c", "-x", "x"])).toBe("x");
+    expect(shellCommandString(["-c", "--", "x"])).toBe("x");
+    expect(shellCommandString(["script.sh", "-c", "x"])).toBeNull();
+    expect(shellCommandString(["-x", "script.sh"])).toBeNull();
+  });
+});

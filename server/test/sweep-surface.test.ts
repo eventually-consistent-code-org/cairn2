@@ -39,6 +39,7 @@ describe("sunset clauses (#210)", () => {
       "server/src/audit/record.ts",
       "hooks/scripts/pretooluse-leakguard.mjs",
       "hooks/scripts/pretooluse-runguard.mjs",
+      "hooks/scripts/shell-words.mjs",
       "hooks/scripts/posttooluse-loopcheck.mjs",
       "hooks/scripts/stop-costtracker.mjs",
       "hooks/scripts/sessionstart-continuity.mjs",
