@@ -491,7 +491,7 @@ layer does the tracker mirroring on top.
 
 | tool | purpose |
 |---|---|
-| `plan_check` | Read-only scan of a phase's (or the whole project's) `PLAN.md` files for two detector classes: `contract-drift` and `unanchored-threshold`. Returns `{ findings, scanned }`, deterministically ordered (plan path, then line) and byte-equal across calls on an unchanged tree |
+| `plan_check` | Read-only scan of a phase's (or the whole project's) `PLAN.md` files for four detector classes: `contract-drift`, `unanchored-threshold`, `missing-verify` and `missing-approaches`. Returns `{ findings, scanned }`, deterministically ordered (plan path, then line) and byte-equal across calls on an unchanged tree |
 | `audit_record` | Single-writer: `audit_record(scope, verdict, findings)` writes `.cairn/audit/<scope>-<YYYY-MM-DD>.md`. `verdict` must be `pass` (zero findings) or `findings` (one or more) — a mismatch throws. Re-running the same scope on the same day overwrites that file; prior dates are untouched. Returns `{ path, findings: <count> }` |
 
 ### `plan_check` detector rules
@@ -511,6 +511,14 @@ layer does the tracker mirroring on top.
   an immediately adjacent line (that isn't itself a separate threshold
   statement) is an `unanchored-threshold` finding with the plan, line, and
   matched text.
+- **Missing verify** — in a planned, non-quick, not-yet-verified phase, a
+  task line in `PLAN.md` with no `verify: <command>` clause is a
+  `missing-verify` finding on that line. Criteria written after the work
+  are chosen to fit what happened.
+- **Missing approaches** — a planned, non-quick, not-yet-verified phase
+  whose `CONTEXT.md` lacks the `## Approaches considered` block (two or
+  more candidates plus a chosen line) is a `missing-approaches` finding,
+  anchored on `CONTEXT.md`.
 - Findings are sorted by plan path, then line, then type, then
   counterpart, then detail — never filesystem/readdir order — so two calls
   against an unchanged tree are byte-equal JSON.
