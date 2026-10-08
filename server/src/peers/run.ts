@@ -5,8 +5,9 @@
  * scratch dir under the OS tmpdir with the capped input staged beside it
  * as packet.txt, so the screened packet is all a peer can see (#74).
  * cwdMode "project" is the explicit escape hatch back to the project-dir
- * cwd (#56) for callers that NEED repo access. Never exec, never
- * shell interpolation — argv is always one of the four fixed templates
+ * cwd (#56), refused unless the peer's cairn.json entry says execCapable;
+ * every send is leak-scanned before anything spawns (#268). Never exec,
+ * never shell interpolation — argv is always one of the four fixed templates
  * below plus (for argv-mode peers) the capped input as the single final
  * element; stdin-mode peers get input piped instead, per each CLI's
  * verified prompt convention. A peer's non-zero exit is a result, not an
@@ -25,6 +26,7 @@ import { CairnError } from "../errors.js";
 import { loadConfig } from "../config.js";
 import { PROVIDERS, type Provider } from "./providers.js";
 import { concurrencyBudget } from "./throttle.js";
+import { scanForLeaks, type LeakHit } from "./leak-scan.js";
 
 export { PROVIDERS };
 export type { Provider };
@@ -89,7 +91,8 @@ const TEMPLATES: Record<Provider, {
 
 // The two cwd stances a peer child can run under. "scratch" (default) is
 // containment; "project" is the repo-access grant the peers verb hands
-// ONLY to execCapable seats on the functionality dimension.
+// ONLY to execCapable seats on the functionality dimension — and peerRun
+// refuses it outright for a peer cairn.json doesn't mark execCapable (#268).
 export type PeerCwdMode = "scratch" | "project";
 
 const INSTALL_HINTS: Record<Provider, string> = {
@@ -121,6 +124,11 @@ const DEFAULT_MAX_INPUT_CHARS = 200_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 
+// How many hit line numbers a leak refusal lists before it summarizes —
+// a 200k-char packet can trip hundreds of lines, and the message only
+// needs enough to point the caller at what to redact.
+const MAX_HIT_LINES_LISTED = 10;
+
 // Probes PATH entries for a binary of this name. POSIX-only — no PATHEXT /
 // .exe suffix handling. Windows support for peer adapters is a non-goal.
 function onPath(bin: string): boolean {
@@ -134,6 +142,21 @@ function capInput(input: string, maxChars: number): { text: string; truncated: b
   if (input.length <= maxChars) return { text: input, truncated: false };
   const marker = `[cairn: input truncated at ${maxChars} chars]`;
   return { text: `${input.slice(0, maxChars)}\n${marker}`, truncated: true };
+}
+
+// Turns leak hits into a refusal that names the KINDS and the line numbers
+// and never the matched text — the error travels back through the agent
+// and can land in a tracker comment, so repeating the leak there would be
+// the leak.
+function leakRefusal(provider: Provider, hits: LeakHit[]): CairnError {
+  const kinds = [...new Set(hits.map((h) => h.name))].sort().join(", ");
+  const lines = [...new Set(hits.map((h) => h.line))];
+  const listed = lines.slice(0, MAX_HIT_LINES_LISTED).join(", ");
+  const more = lines.length > MAX_HIT_LINES_LISTED
+    ? ` (+${lines.length - MAX_HIT_LINES_LISTED} more)` : "";
+  return new CairnError("PRECONDITION_FAILED",
+    `peer '${provider}' input hit the leak guard (${kinds}) on line(s) ${listed}${more} — nothing was sent`,
+    "redact and retry, or skip this peer");
 }
 
 /**
@@ -177,14 +200,22 @@ export function peerList(projectDir: string): {
  * the given (or default) timeout. Resolves with the child's real exit code
  * on success AND on a non-zero exit — peers are advisory, so a bad exit is
  * data, not a failure. Only genuinely precondition-failed states (disabled
- * provider, missing binary, timeout) throw.
+ * provider, project mode for a peer not marked execCapable, missing binary,
+ * a leak-pattern hit in the outgoing input, timeout) throw.
  *
  * Contained by default (#74): the child runs from a fresh scratch dir with
  * the capped input staged as packet.txt — a live council run showed a peer
  * with project cwd reading repo internals its screened packet never
  * carried, straight around the leak gate. Pass cwdMode "project" to
  * restore the #56 project-dir cwd — that grant belongs ONLY to
- * execCapable peers on the functionality dimension.
+ * execCapable peers on the functionality dimension, and the execCapable
+ * half is enforced here, not left to the caller (#268). The functionality
+ * half stays the peers verb's call — this layer has no idea what
+ * dimension a send belongs to.
+ *
+ * The outbound leak gate is enforced here too (#268): the capped input —
+ * the exact bytes the child would get — is scanned before any scratch
+ * dir or child process exists, and a hit refuses the run.
  *
  * :param opts.cwdMode: "scratch" (default) or "project"
  */
@@ -201,6 +232,15 @@ export async function peerRun(projectDir: string, provider: Provider,
       `enable it — set peers.${provider}.enabled to true, or drop the override`);
   }
 
+  // Repo access is a trust grant, and the grant lives in cairn.json —
+  // never in the call (#268). Same default as peerList: absent = untrusted.
+  if (cwdMode === "project" && peerCfg.execCapable !== true) {
+    throw new CairnError("PRECONDITION_FAILED",
+      `peer '${provider}' is not execCapable — cwdMode 'project' refused`,
+      `drop cwdMode to run it contained; repo access needs the user to set ` +
+      `peers.${provider}.execCapable to true in cairn.json`);
+  }
+
   const { argv, tail, inputVia, scratchSandboxArgs } = TEMPLATES[provider];
   const [bin, ...templateArgs] = argv;
   // Name the binary once: the parenthetical only earns its place when the
@@ -214,6 +254,12 @@ export async function peerRun(projectDir: string, provider: Provider,
 
   const maxInputChars = peerCfg.maxInputChars ?? DEFAULT_MAX_INPUT_CHARS;
   const { text: sendInput, truncated: truncatedInput } = capInput(input, maxInputChars);
+
+  // Outbound leak gate (#268): scan exactly what would leave the machine,
+  // before the scratch dir or the child exists — a refused send leaves
+  // nothing behind and starts nothing.
+  const leakHits = scanForLeaks(sendInput, cfg);
+  if (leakHits.length > 0) throw leakRefusal(provider, leakHits);
 
   // argv-mode peers get the capped input as the final argv element (execFile
   // argv array — no shell ever sees it); stdin-mode peers get it piped.

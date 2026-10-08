@@ -1574,6 +1574,36 @@ describe("cairn MCP server", () => {
     }
   });
 
+  // #268: both refusals live in peerRun itself, so they hold for the tool
+  // as served — a caller passing cwdMode or a leaky input over the wire
+  // gets a structured PRECONDITION_FAILED and the stub never runs.
+  it("peer_run refuses project mode without execCapable and leaky input, over the wire", async () => {
+    const ORIGINAL_PATH = process.env.PATH;
+    const stubDir = mkdtempSync(join(tmpdir(), "cairn-mcp-peer-stub-"));
+    const mark = join(stubDir, "ran");
+    const stubPath = join(stubDir, "codex");
+    writeFileSync(stubPath, `#!/bin/sh\ncat > /dev/null\ntouch '${mark}'\necho ran\n`);
+    chmodSync(stubPath, 0o755);
+    process.env.PATH = `${stubDir}${delimiter}${ORIGINAL_PATH}`;
+    try {
+      const project = await call("peer_run", { provider: "codex", input: "hello", cwdMode: "project" });
+      expect(project.isError).toBe(true);
+      expect(project.json.code).toBe("PRECONDITION_FAILED");
+      expect(project.json.message).toContain("execCapable");
+
+      const leaky = await call("peer_run", { provider: "codex", input: "see .cairn" + "/plans/x" });
+      expect(leaky.isError).toBe(true);
+      expect(leaky.json.code).toBe("PRECONDITION_FAILED");
+      expect(leaky.json.message).toContain("cairn-path");
+      expect(leaky.json.nextAction).toBe("redact and retry, or skip this peer");
+
+      expect(existsSync(mark)).toBe(false);
+    } finally {
+      process.env.PATH = ORIGINAL_PATH;
+      rmSync(stubDir, { recursive: true, force: true });
+    }
+  });
+
   // peer_state's envelope is a permissive object with in-handler op checks
   // -- the wire test covers the dispatch plus the structured CONFIG_INVALID
   // for a missing op-specific field (never a raw SDK -32602).

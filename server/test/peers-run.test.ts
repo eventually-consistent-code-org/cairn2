@@ -332,10 +332,12 @@ describe("peerRun", () => {
 
   // cwdMode "project" is the explicit escape hatch — the #56 behavior,
   // granted by the peers verb ONLY to execCapable seats on the
-  // functionality dimension. No packet.txt gets staged into the repo.
+  // functionality dimension (and, since #268, refused by the server for
+  // any peer cairn.json doesn't mark execCapable — so every project-mode
+  // test below carries the flag). No packet.txt gets staged into the repo.
   it("cwdMode 'project' restores the project-dir cwd and stages no packet.txt", async () => {
     runnableStubPath({ grok: PWD_ECHO });
-    const d = projectDir();
+    const d = projectDir({ peers: { grok: { execCapable: true } } });
     const result = await peerRun(d, "grok", "hello", undefined, { cwdMode: "project" });
     expect(result.output.trim()).toBe(`cwd:${realpathSync(d)}`);
     expect(existsSync(join(d, "packet.txt"))).toBe(false);
@@ -346,7 +348,7 @@ describe("peerRun", () => {
   // without it (verified live, codex-cli 0.146.0, 2026-08-09).
   it("codex: --skip-git-repo-check rides in both cwd modes", async () => {
     runnableStubPath({ codex: ARGS_ECHO });
-    const d = projectDir();
+    const d = projectDir({ peers: { codex: { execCapable: true } } });
     const scratch = await peerRun(d, "codex", "hello");
     expect(scratch.output).toContain("--skip-git-repo-check");
     const project = await peerRun(d, "codex", "hello", undefined, { cwdMode: "project" });
@@ -360,7 +362,7 @@ describe("peerRun", () => {
   // agy 1.1.12 (`agy --help`). grok/opencode document no sandbox flag.
   it("codex: adds --sandbox read-only in scratch mode only", async () => {
     runnableStubPath({ codex: ARGS_ECHO });
-    const d = projectDir();
+    const d = projectDir({ peers: { codex: { execCapable: true } } });
     const scratch = await peerRun(d, "codex", "hello");
     expect(scratch.output).toContain("--sandbox read-only");
     const project = await peerRun(d, "codex", "hello", undefined, { cwdMode: "project" });
@@ -369,7 +371,7 @@ describe("peerRun", () => {
 
   it("antigravity: adds --sandbox in scratch mode only", async () => {
     runnableStubPath({ agy: ARGS_ECHO });
-    const d = projectDir();
+    const d = projectDir({ peers: { antigravity: { execCapable: true } } });
     const scratch = await peerRun(d, "antigravity", "hello");
     expect(scratch.output).toContain("--sandbox");
     const project = await peerRun(d, "antigravity", "hello", undefined, { cwdMode: "project" });
@@ -410,5 +412,181 @@ describe("peerRun", () => {
     expect(caught).toMatchObject({ code: "PRECONDITION_FAILED" });
     expect((caught as Error).message).toMatch(/grok/);
     expect(caught).not.toMatchObject({ exitCode: expect.anything() });
+  });
+});
+
+// #268: both peer_run rules used to be verb prose — the server took
+// cwdMode from the caller without reading execCapable, and the "a hit
+// blocks that peer_run call" leak gate was something the agent was told
+// to do. The server now enforces both. Every refusal must happen BEFORE a
+// child exists, so these stubs drop a marker file when they run and the
+// tests assert it never appears.
+describe("peerRun — server-enforced rules (#268)", () => {
+  // Fixture leaks are concatenated so this file's own diff never trips the
+  // commit-time leak guard (same trick as leak-patterns.test.ts).
+  const PLANNING_PATH = "see .cairn" + "/plans/roadmap.md for the contract";
+  const PHASE_REF = "context lives in phases/" + "03-switchback";
+  const LABEL = 'label: "cairn' + ':seed"';
+  const TRACKER_ID = "tracked as DRILL" + "-42";
+
+  // A stub that proves whether it ran: it touches a marker file when spawned.
+  function markingStub(name: string): string {
+    const d = mkdtempSync(join(tmpdir(), "cairn-mark-"));
+    const mark = join(d, "ran");
+    runnableStubPath({ [name]: `#!/bin/sh\ncat > /dev/null\ntouch '${mark}'\necho ran\n` });
+    return mark;
+  }
+
+  type Refusal = { code?: string; message: string; nextAction?: string };
+  async function refusal(p: Promise<unknown>): Promise<Refusal> {
+    try {
+      await p;
+    } catch (e) {
+      return e as Refusal;
+    }
+    throw new Error("expected peerRun to refuse");
+  }
+
+  describe("execCapable gate on cwdMode 'project'", () => {
+    it("refuses project mode when cairn.json has no execCapable for the peer — nothing spawns", async () => {
+      const mark = markingStub("grok");
+      const d = projectDir();
+      const err = await refusal(peerRun(d, "grok", "hello", undefined, { cwdMode: "project" }));
+      expect(err.code).toBe("PRECONDITION_FAILED");
+      expect(err.message).toContain("grok");
+      expect(err.message).toContain("execCapable");
+      expect(err.nextAction).toContain("peers.grok.execCapable");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("refuses project mode on an explicit execCapable: false", async () => {
+      const mark = markingStub("codex");
+      const d = projectDir({ peers: { codex: { execCapable: false } } });
+      const err = await refusal(peerRun(d, "codex", "hello", undefined, { cwdMode: "project" }));
+      expect(err.code).toBe("PRECONDITION_FAILED");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("trust is per peer — codex's flag does not open project mode for grok", async () => {
+      const mark = markingStub("grok");
+      const d = projectDir({ peers: { codex: { execCapable: true } } });
+      const err = await refusal(peerRun(d, "grok", "hello", undefined, { cwdMode: "project" }));
+      expect(err.code).toBe("PRECONDITION_FAILED");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("allows project mode for a peer marked execCapable: true", async () => {
+      const mark = markingStub("grok");
+      const d = projectDir({ peers: { grok: { execCapable: true } } });
+      const result = await peerRun(d, "grok", "hello", undefined, { cwdMode: "project" });
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(mark)).toBe(true);
+    });
+
+    it("scratch mode (default and explicit) needs no trust flag", async () => {
+      const mark = markingStub("grok");
+      const d = projectDir();
+      expect((await peerRun(d, "grok", "hello")).exitCode).toBe(0);
+      expect((await peerRun(d, "grok", "hello", undefined, { cwdMode: "scratch" })).exitCode).toBe(0);
+      expect(existsSync(mark)).toBe(true);
+    });
+
+    it("a disabled peer still reports disabled first, even in project mode", async () => {
+      markingStub("grok");
+      const d = projectDir({ peers: { grok: { enabled: false } } });
+      const err = await refusal(peerRun(d, "grok", "hello", undefined, { cwdMode: "project" }));
+      expect(err.message).toContain("disabled");
+    });
+  });
+
+  describe("outbound leak scan", () => {
+    it("refuses a planning-path leak before anything spawns, naming kind + line, never the text", async () => {
+      const mark = markingStub("codex");
+      const d = projectDir();
+      const input = ["review this diff:", `+ // ${PLANNING_PATH}`, "+ fetch(url)"].join("\n");
+      const err = await refusal(peerRun(d, "codex", input));
+      expect(err.code).toBe("PRECONDITION_FAILED");
+      expect(err.message).toContain("codex");
+      expect(err.message).toContain("cairn-path");
+      expect(err.message).toContain("line(s) 2");
+      expect(err.message).toContain("nothing was sent");
+      // never echo the leak back — the refusal can land in a tracker comment
+      expect(err.message).not.toContain("roadmap");
+      expect(err.message).not.toContain(".cairn");
+      expect(err.nextAction).toBe("redact and retry, or skip this peer");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("catches every built-in kind, listing kinds once and sorted", async () => {
+      markingStub("grok");
+      const d = projectDir({
+        tracker: { type: "jira", config: { projectKey: "DRILL" } },
+      });
+      const input = [PLANNING_PATH, PHASE_REF, LABEL, TRACKER_ID, PLANNING_PATH].join("\n");
+      const err = await refusal(peerRun(d, "grok", input));
+      expect(err.message).toContain("(cairn-label, cairn-path, phase-ref, tracker-id)");
+      expect(err.message).toContain("line(s) 1, 2, 3, 4, 5");
+    });
+
+    it("honours leakGuard.extraPatterns, and an invalid one never crashes the scan", async () => {
+      const mark = markingStub("opencode");
+      const d = projectDir({ leakGuard: { extraPatterns: ["([", "AKIA[0-9A-Z]{16}"] } });
+      const err = await refusal(peerRun(d, "opencode", "const key = 'AKIA" + "IOSFODNN7EXAMPLE'"));
+      expect(err.message).toContain("(extra)");
+      expect(err.message).not.toContain("IOSFODNN7EXAMPLE");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("leakGuard.enabled: false turns the scan off — the user's switch, same as the commit guard", async () => {
+      const mark = markingStub("codex");
+      const d = projectDir({ leakGuard: { enabled: false } });
+      const result = await peerRun(d, "codex", PLANNING_PATH);
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(mark)).toBe(true);
+    });
+
+    it("clean input passes and runs", async () => {
+      const mark = markingStub("codex");
+      const d = projectDir();
+      const result = await peerRun(d, "codex", "export handler falls through to res.ok on disk full");
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(mark)).toBe(true);
+    });
+
+    // The scan covers the exact bytes sent — after capInput. A leak past
+    // the cap never leaves the machine, so it can't block the send; a
+    // leak inside the cap always does.
+    it("scans the capped input: a leak past the cap is not sent and does not refuse", async () => {
+      runnableStubPath({ codex: STDIN_LENGTH });
+      const d = projectDir({ peers: { codex: { maxInputChars: 40 } } });
+      const input = `${"x".repeat(40)}\n${PLANNING_PATH}`;
+      const result = await peerRun(d, "codex", input);
+      expect(result.truncatedInput).toBe(true);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("scans the capped input: a leak inside the cap refuses", async () => {
+      const mark = markingStub("codex");
+      const d = projectDir({ peers: { codex: { maxInputChars: 40 } } });
+      const err = await refusal(peerRun(d, "codex", `${PLANNING_PATH}\n${"x".repeat(100)}`));
+      expect(err.code).toBe("PRECONDITION_FAILED");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("applies in project mode too — trust to read the repo is not a pass to send leaks", async () => {
+      const mark = markingStub("grok");
+      const d = projectDir({ peers: { grok: { execCapable: true } } });
+      const err = await refusal(peerRun(d, "grok", LABEL, undefined, { cwdMode: "project" }));
+      expect(err.message).toContain("cairn-label");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("summarizes past ten hit lines instead of listing hundreds", async () => {
+      markingStub("codex");
+      const d = projectDir();
+      const input = Array.from({ length: 25 }, () => PLANNING_PATH).join("\n");
+      const err = await refusal(peerRun(d, "codex", input));
+      expect(err.message).toContain("line(s) 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 (+15 more)");
+    });
   });
 });

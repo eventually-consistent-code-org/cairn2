@@ -2594,10 +2594,10 @@ export function buildServer(deps: {
     {
       description:
         "Run one external peer CLI with capped stdin input — advisory output, non-zero exit is a result. " +
-        "Outbound content leaves the machine; callers MUST leak-scan the input first — this layer does not scan. " +
+        "Outbound content leaves the machine: the capped input is leak-scanned first and a hit refuses the run. " +
         "cwdMode 'scratch' (default) runs the child contained in a throwaway temp dir with the capped input " +
-        "staged as packet.txt — the peer never sees the repo; 'project' runs from the project dir and is " +
-        "granted ONLY to execCapable peers on the functionality dimension (that is what the trust flag means)",
+        "staged as packet.txt — the peer never sees the repo; 'project' runs from the project dir, refused " +
+        "unless cairn.json marks the peer execCapable — grant it only on the functionality dimension",
       inputSchema: z.object({
         provider: z.enum(PROVIDERS),
         input: z.string().min(1),
