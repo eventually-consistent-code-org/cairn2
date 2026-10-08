@@ -24,7 +24,7 @@ same way: a record, then tracker issues for anything that matters.
 | `docs [scope]` | sweep README/docs claims against the codebase | read every claim a README or `docs/**` file makes about what's shipped (tool counts, verb lists, table shapes, file paths, commands) and check each one against the real codebase — `check-surface.mjs`'s numbers, `server/src/index.ts`'s registry, the actual files on disk. A claim that's drifted from what's actually there is a finding, same severity scale as every other mode. No `scope` means sweep every README + `docs/**` file; a `scope` narrows to one file or directory. |
 | `memory` | the card store's health | `mem_stats` returns the evidence under `cards`: cards that FAIL TO PARSE (the rot that matters — `mem_card_list` and recall skip them silently, so a corrupted card vanishes from every surface without announcing itself), provenance whose file is gone or whose commit no longer resolves, near-duplicate bodies, aged low-confidence cards, and counts by type and confidence. Score against the rubric below, report before editing, and propose edits with a diff and a why — never rewrite a card body (they are immutable; a correction is a NEW card). A malformed card is `important`: it is invisible rot. Broken provenance is `important` when the file is gone, `minor` when only the commit is unresolvable. Near-duplicates and aged cards are `minor` and route to retro's compaction rather than to a fix here. The card health block reads plain files and git, so it survives a broken index binding — if `indexUnavailable` appears alongside it, report that separately and carry on |
 | `simplify [phase]` | quality-only sweep over what recently changed | refine, never rewrite: the target is the files touched in the phase's ledgered commit ranges (no phase → the most recently active one); the clarity and architecture seats supply the eye — nesting that hides the happy path, redundant abstraction, misleading names, work in the wrong layer — and every finding names the exact behavior that must NOT change as its `failure_scenario` ("after the change, X still does Y"). Clarity over brevity; fewer lines is never the goal. Quality findings are `minor` unless the complexity demonstrably hides a defect (then it's a normal finding at its real severity). A BUG found mid-sweep is filed as a finding, never fixed in-band — `review` stays the bug hunt. `--fix` runs the staged-patch discipline over EVERY finding of the sweep (minors included — the sweep IS the apply), one patch per finding, `behavior_unchanged` the claim the verifier must actually run the tests to state |
-| `sweep [--fix]` | the whole project, every leg, against the last sweep | the full-project rescan: the legs below in order, each closing exactly as its own mode does, then ONE `sweep-<date>` manifest record whose server-computed delta says what is new, persisting, fixed, or regressed since the previous sweep — see **Sweep** below |
+| `sweep [--fix]` | the whole project, every leg, against the last sweep | the full-project rescan: the legs below in order, each closing exactly as its own mode does, then ONE `sweep-<date>` manifest record whose server-computed delta says what is new, persisting, fixed, regressed, or unchecked since the previous sweep — see **Sweep** below |
 
 **Rule-to-control coverage (`security --surface`):** a "never" in
 CLAUDE.md is a wish until something deterministic refuses the act. The
@@ -273,14 +273,21 @@ leg that didn't run.
 from its leg — title, severity, `failure_scenario`, `panel`, `seats`,
 `issue` — so the server re-reads the same votes and lands the same
 outcome; refuted findings stay in their leg's record and out of the
-union. `verdict` is `pass` only when the union is empty. The server
+union. The server refuses a survivor that matches nothing in any listed
+leg and a leg path with no record behind it; a record listed twice
+counts once. `verdict` is `pass` only when the union is empty. The server
 stamps the cairn version, writes the leg index, attributes each finding
 to its leg, and returns `delta` — `null` on the first sweep (this run IS
 the baseline), otherwise `{ baseline, codeCommitsSince, new, persisting,
-fixed, regressed }`. It matches findings across sweeps by exact title,
+fixed, regressed, unchecked, uncoveredLegs }`. A prior finding gone now
+is `fixed` only when its own leg scope is in this index; one whose leg
+was retargeted (`security-26` instead of `security-25`), skipped, or
+never named is `unchecked`, and its leg lands in `uncoveredLegs`.
+Unchecked items carry into the next sweep's comparison, so a re-raise
+reads persisting. It matches findings across sweeps by exact title,
 then by scenario similarity, so carry a leg's titles unedited: a
-reworded title over a reworded scenario reads as one fixed plus one new.
-The verb never computes the delta itself.
+reworded title over a reworded scenario reads as one fixed (or
+unchecked) plus one new. The verb never computes the delta itself.
 
 **Report — one prioritized backlog, then the context.**
 
@@ -292,9 +299,11 @@ The verb never computes the delta itself.
    regressed important → new important → persisting important. Minors as
    counts only (regressed / new / persisting). Then "fixed since the
    baseline: N" with their titles — that line is the payoff, so never
-   drop it. On a first sweep every survivor is new; say so once instead
-   of labelling each line. Close with the panel line summed across legs:
-   "panel: N confirmed, N plausible, N refuted (not filed)".
+   drop it. Then "unchecked: N — legs not re-run: <uncoveredLegs>";
+   never fold those into fixed — re-running those legs over their old
+   targets settles them. On a first sweep every survivor is new; say so
+   once instead of labelling each line. Close with the panel line summed
+   across legs: "panel: N confirmed, N plausible, N refuted (not filed)".
 3. Eval table — reported, never run: the latest
    `evals/results/*/aggregate-result.json` (or a CI artifact path the
    user names) through `node scripts/eval-verdicts.mjs <that file>
@@ -317,7 +326,8 @@ findings in its own scratch dir (`fix/<leg-scope>-<date>/`), with its
 own verifier round and its own apply ask, before the next leg starts.
 Never one patch spanning two legs' findings, never one ask across legs.
 The manifest still lists findings as their legs found them; a fix
-applied here reads as `fixed` in the NEXT sweep's delta. `docs`' prose exception and `simplify`'s
+applied here reads as `fixed` in the NEXT sweep's delta once that leg
+re-runs under the same scope. `docs`' prose exception and `simplify`'s
 every-finding scope apply inside their own legs as usual.
 
 ## Paper trail

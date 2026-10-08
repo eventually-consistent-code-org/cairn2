@@ -315,7 +315,8 @@ describe("cairn MCP server", () => {
     const clean = await call("audit_record", { scope: "docs-full", verdict: "pass", findings: [] });
     const second = await call("audit_record", { scope: "sweep-2026-01-02", verdict: "pass", findings: [],
       legs: [{ scope: "docs-full", path: clean.json.path }] });
-    expect(second.json.delta).toMatchObject({ baseline: { path: first.json.path }, new: [], persisting: [], regressed: [] });
+    expect(second.json.delta).toMatchObject({ baseline: { path: first.json.path }, new: [], persisting: [], regressed: [],
+      unchecked: [], uncoveredLegs: [] });
     expect(second.json.delta.fixed.map((f: { title: string }) => f.title)).toEqual(["settings footer is stale"]);
   });
 
