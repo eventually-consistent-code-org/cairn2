@@ -3,12 +3,14 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CairnError } from "../src/errors.js";
 import { FakeTracker } from "../src/tracker/fake.js";
+import type { Phase } from "../src/tracker/types.js";
 import { writeAuditRecord } from "../src/audit/record.js";
 import { scaffoldPhase, scaffoldProject, writePlanIssues } from "../src/planning/artifacts.js";
 import {
-  canonicalPhaseName, ensurePhase, driftReport, roadmapRowDrift,
-  staleAuditDrift, staleBranchDrift,
+  canonicalPhaseName, ensurePhase, driftReport, resolvePhaseParam,
+  roadmapRowDrift, staleAuditDrift, staleBranchDrift,
 } from "../src/planning/mirror.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "cairn-mirror-"));
@@ -45,6 +47,98 @@ describe("ensurePhase", () => {
     });
     await expect(ensurePhase(t, 1, "X"))
       .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+});
+
+// A tracker whose phase ids are bare numbers, the way GitHub milestone
+// numbers (and GitLab, ClickUp and Asana ids) are. The plain fake mints
+// "FP-n" ids, so it can never reproduce the #271 collision.
+class NumericPhaseTracker extends FakeTracker {
+  private numbered: Phase[] = [];
+  seed(id: string, name: string): Phase {
+    const p: Phase = { id, name, state: "open" };
+    this.numbered.push(p);
+    return { ...p };
+  }
+  override async createPhase(name: string): Promise<Phase> {
+    return this.seed(String(this.numbered.length + 1), name);
+  }
+  override async listPhases(): Promise<Phase[]> {
+    return this.numbered.map((p) => ({ ...p }));
+  }
+}
+
+/** The live GitHub shape that misfiled ten issues: milestone #21 is phase 23. */
+function collidingTracker(): NumericPhaseTracker {
+  const t = new NumericPhaseTracker();
+  t.seed("19", "Phase 21: the-refutation");
+  t.seed("20", "Phase 22: the-drill");
+  t.seed("21", "Phase 23: the-method");
+  t.seed("25", "Phase 24.7: measured-actuals");
+  t.seed("27", "Phase 25.7: the-hardening");
+  return t;
+}
+
+describe("resolvePhaseParam (#271)", () => {
+  it("a number-shaped value resolves by title even when it equals another phase's id", async () => {
+    const t = collidingTracker();
+    // '21' is milestone #21's id, but it names cairn phase 21 -- milestone #19
+    expect(await resolvePhaseParam(t, "21")).toBe("19");
+    expect(await resolvePhaseParam(t, "23")).toBe("21");
+  });
+
+  it("a decimal phase number resolves by title, not by a colliding id", async () => {
+    const t = collidingTracker();
+    expect(await resolvePhaseParam(t, "25.7")).toBe("27");
+    expect(await resolvePhaseParam(t, "24.7")).toBe("25");
+  });
+
+  it("a number-shaped value with no title match is NOT_FOUND, even when an id matches, and the hint names the id: form", async () => {
+    const t = collidingTracker();
+    // milestone #25 exists, but nothing is titled 'Phase 25:'
+    const err = await resolvePhaseParam(t, "25").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CairnError);
+    expect(err).toMatchObject({ code: "NOT_FOUND" });
+    expect((err as CairnError).message).toContain("Phase 25:");
+    expect((err as CairnError).nextAction).toContain("id:25");
+  });
+
+  it("id:<raw> passes a number-shaped tracker id through untouched", async () => {
+    const t = collidingTracker();
+    expect(await resolvePhaseParam(t, "id:21")).toBe("21");
+    expect(await resolvePhaseParam(t, "id:25")).toBe("25");
+  });
+
+  it("id:<raw> naming no existing phase is NOT_FOUND", async () => {
+    const t = collidingTracker();
+    await expect(resolvePhaseParam(t, "id:99"))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("a raw id that isn't number-shaped still passes through", async () => {
+    const t = new FakeTracker();
+    const p = await ensurePhase(t, 3, "Raw");
+    expect(await resolvePhaseParam(t, p.id)).toBe(p.id);
+    expect(await resolvePhaseParam(t, `id:${p.id}`)).toBe(p.id);
+  });
+
+  it("two phases titled with the same number refuse to pick one silently", async () => {
+    const t = collidingTracker();
+    t.seed("30", "Phase 21: renamed later"); // a re-ensured phase under a new name
+    const err = await resolvePhaseParam(t, "21").catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect((err as CairnError).message).toContain("19");
+    expect((err as CairnError).message).toContain("30");
+    expect((err as CairnError).nextAction).toContain("id:");
+  });
+
+  it("backends without phases get the value back, id: prefix stripped", async () => {
+    const t = new FakeTracker();
+    Object.defineProperty(t, "capabilities", {
+      value: { ...t.capabilities, hasPhases: false },
+    });
+    expect(await resolvePhaseParam(t, "7")).toBe("7");
+    expect(await resolvePhaseParam(t, "id:7")).toBe("7");
   });
 });
 

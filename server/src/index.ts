@@ -490,9 +490,9 @@ export function buildServer(deps: {
     "issue_create",
     {
       description:
-        "Create an issue in the configured tracker. `phase` accepts the " +
-        "tracker's phase id OR the cairn phase number ('14', '1.5' -- " +
-        "resolved via the 'Phase N: <name>' convention). Estimates " +
+        "Create an issue in the configured tracker. `phase`: cairn phase " +
+        "number ('14', '1.5' -- matches the 'Phase N: <name>' title) or " +
+        "tracker phase id ('id:<raw>' if numeric). Estimates " +
         "(story points / original minutes) land in the backend's native " +
         "fields where supported; elsewhere they're skipped and the result " +
         "says so via estimateSkipped",
@@ -519,7 +519,7 @@ export function buildServer(deps: {
         const wantsEstimate =
           estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
-        // phase accepts a tracker phase id OR a cairn phase number (#138)
+        // phase is a cairn phase number (by title) or a raw id (#138, #271)
         const phase =
           input.phase === undefined
             ? undefined
@@ -562,9 +562,9 @@ export function buildServer(deps: {
     {
       description:
         "Update an issue (title/body/state/labels/assignee/estimate/phase). " +
-        "`phase` re-parents the issue and accepts the tracker's phase id OR " +
-        "the cairn phase number ('14', '1.5' -- resolved via the " +
-        "'Phase N: <name>' convention); backends that can't re-parent skip " +
+        "`phase` re-parents it: cairn phase number ('14', '1.5' -- matches " +
+        "the 'Phase N: <name>' title) or tracker phase id ('id:<raw>' if " +
+        "numeric); backends that can't re-parent skip " +
         "it and the result says so via phaseSkipped",
       inputSchema: z.object({
         id: z.string(),
@@ -596,7 +596,7 @@ export function buildServer(deps: {
           estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
         const canRephase = tracker.capabilities.hasPhaseReassign;
-        // phase accepts a tracker phase id OR a cairn phase number (#138) —
+        // phase is a cairn phase number (by title) or a raw id (#138, #271) —
         // resolved only where the backend can actually re-parent; elsewhere
         // it's dropped with a note (mirrors the estimate degradation).
         const phase =
@@ -940,8 +940,8 @@ export function buildServer(deps: {
     "issue_list",
     {
       description:
-        "List issues, optionally by phase/state (phase accepts the tracker's " +
-        "phase id OR the cairn phase number; state matches the semantic " +
+        "List issues, optionally by phase/state (phase: cairn phase number " +
+        "or tracker phase id, 'id:<raw>' if numeric; state matches the semantic " +
         "category — open/in_progress/closed — or an exact state name)",
       inputSchema: z.object({
         phase: z.string().optional(),
@@ -950,7 +950,7 @@ export function buildServer(deps: {
     },
     wrap(async (a: { phase?: string; state?: IssueState }) => {
       const tracker = await getTracker();
-      // phase accepts a tracker phase id OR a cairn phase number (#138/#142)
+      // phase is a cairn phase number (by title) or a raw id (#138/#142/#271)
       const phase =
         a.phase === undefined
           ? undefined

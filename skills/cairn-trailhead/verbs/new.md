@@ -39,8 +39,10 @@ Start a new cairn 2.0 project in this repo, per the `cairn-planning` skill.
    vision and requirements into `.cairn/plans/PROJECT.md` and the phase table
    into `roadmap.md`.
 4. For each phase N: `plan_scaffold_phase(number, name)` and
-   `plan_phase_ensure(number, name)` → tracker phase id.
-5. For each requirement: `issue_create(title, body, phase: <phase id>)`, then
+   `plan_phase_ensure(number, name)` → the tracker's `Phase N: <name>` phase.
+5. For each requirement: `issue_create(title, body, phase: "<N>")` — the
+   cairn phase number, never the tracker's phase id (on GitHub that id is a
+   milestone number, and a bare number always means a cairn phase) — then
    record the ids per phase with `plan_issues_set(phaseDir, issues)`.
 6. Report: phases created, issues created, next step `/cairn:survey`
    (project-wide research while unknowns are at their peak), then

@@ -41,7 +41,7 @@
     },
     {
       "name": "issue_create",
-      "description": "Create an issue in the configured tracker. `phase` accepts the tracker's phase id OR the cairn phase number ('14', '1.5' -- resolved via the 'Phase N: <name>' convention). Estimates (story points / original minutes) land in the backend's native fields where supported; elsewhere they're skipped and the result says so via estimateSkipped",
+      "description": "Create an issue in the configured tracker. `phase`: cairn phase number ('14', '1.5' -- matches the 'Phase N: <name>' title) or tracker phase id ('id:<raw>' if numeric). Estimates (story points / original minutes) land in the backend's native fields where supported; elsewhere they're skipped and the result says so via estimateSkipped",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -94,7 +94,7 @@
     },
     {
       "name": "issue_update",
-      "description": "Update an issue (title/body/state/labels/assignee/estimate/phase). `phase` re-parents the issue and accepts the tracker's phase id OR the cairn phase number ('14', '1.5' -- resolved via the 'Phase N: <name>' convention); backends that can't re-parent skip it and the result says so via phaseSkipped",
+      "description": "Update an issue (title/body/state/labels/assignee/estimate/phase). `phase` re-parents it: cairn phase number ('14', '1.5' -- matches the 'Phase N: <name>' title) or tracker phase id ('id:<raw>' if numeric); backends that can't re-parent skip it and the result says so via phaseSkipped",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -301,7 +301,7 @@
     },
     {
       "name": "issue_list",
-      "description": "List issues, optionally by phase/state (phase accepts the tracker's phase id OR the cairn phase number; state matches the semantic category — open/in_progress/closed — or an exact state name)",
+      "description": "List issues, optionally by phase/state (phase: cairn phase number or tracker phase id, 'id:<raw>' if numeric; state matches the semantic category — open/in_progress/closed — or an exact state name)",
       "inputSchema": {
         "type": "object",
         "properties": {
