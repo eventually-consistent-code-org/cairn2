@@ -1569,12 +1569,12 @@ clearly mechanical means investigation-shaped by default — the safe side to
 be wrong on.
 
 The plan-quality scan behind `audit plans` runs four deterministic
-detectors: **contract drift** (a consumer's Produces/Consumes contract text
+detectors: **contract drift** (`contract-drift`: a consumer's Produces/Consumes contract text
 sharing a named symbol with a producer's but not matching it),
-**unanchored thresholds** (a quantitative bound — `< 100ms`, `at least
+**unanchored thresholds** (`unanchored-threshold`: a quantitative bound — `< 100ms`, `at least
 99.9%` — with no benchmark, fixture, spec, or measurement anchor nearby),
-**missing verify** (a task in a planned, non-quick, unverified phase with
-no `verify:` clause), and **missing approaches** (a planned, non-quick,
+**missing verify** (`missing-verify`: a task in a planned, non-quick, unverified phase with
+no `verify:` clause), and **missing approaches** (`missing-approaches`: a planned, non-quick,
 unverified phase whose CONTEXT.md lacks the `## Approaches considered`
 block).
 Deterministically ordered, byte-equal across runs on an unchanged tree.
