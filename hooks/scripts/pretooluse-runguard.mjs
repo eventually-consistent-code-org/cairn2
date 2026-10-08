@@ -29,9 +29,10 @@
  *   refused unless the run manifest grants pushAuth for its phases. No
  *   override: push authority is the owner's staging decision (ADR 0007).
  *
- *   Commands are matched on parsed shell words, not a raw regex: quoted
- *   text (`git commit -m "explain git reset --hard"`) is never a refusal,
- *   but command substitution inside double quotes is run by the shell, so
+ *   Commands are read as shell words by shell-words.mjs, the reader this
+ *   guard shares with the harness guard (#270), never by a raw regex.
+ *   Quoted text (`git commit -m "explain git reset --hard"`) is never a
+ *   refusal, but command substitution inside double quotes still runs, so
  *   its body is checked as a command of its own (#257).
  *
  * removeWhen: headless runs execute in platform-provided isolated
@@ -44,9 +45,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { SHELLS, shellSegments } from "./shell-words.mjs";
 
-// Same per-machine hashing scheme as lib.mjs / server continuity -- inlined
-// so this guard stays importable from a bare node with no sibling loads.
+// Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
+// keeps its copy private and pins every path under the real home, while
+// this guard honours CAIRN_HOME, so the few lines live here too.
 function pathHash(projectDir) {
   const abs = resolve(projectDir);
   return { base: basename(abs), hash: createHash("sha256").update(abs).digest("hex").slice(0, 16) };
@@ -61,8 +64,16 @@ const WRAPPERS = new Set(["sudo", "env", "command", "exec", "nohup", "time"]);
 // git global options that eat the following word as their value.
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
 
-// Shells whose `-c <script>` argument is itself a command line worth parsing.
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+/**
+ * How this guard reads a command line (shell-words.mjs): ( ), backticks and
+ * # comments end a command, quoted $(...) bodies are commands (#257), and
+ * backslash-newline joins lines. Redirects and heredocs are not modelled,
+ * so a heredoc body line reads as a command of its own.
+ */
+const READ = {
+  subshells: true, comments: true, substitutions: true,
+  continuation: true, posixEscapes: true, anyWhitespace: true,
+};
 
 // The session-wide escape for the always-on destructive refusals. Same shape
 // as CAIRN_HARNESS_EDIT: set in the environment, or as the leading
@@ -76,117 +87,6 @@ const UNSHIPPED_ENV = "CAIRN_ALLOW_UNSHIPPED_PUSH";
 const DEFAULT_BRANCHES = ["main", "master"];
 
 /**
- * Index of the `)` closing a `$(` whose body starts at `i` -- nesting-aware,
- * so parens inside quotes, inner substitutions and backticks don't close it
- * early. Unterminated runs to the end of the line.
- */
-function closeParen(line, i) {
-  let depth = 1;
-  for (; i < line.length; i++) {
-    const c = line[i];
-    if (c === "\\") { i++; continue; }
-    if (c === "'") { const j = line.indexOf("'", i + 1); i = j < 0 ? line.length : j; continue; }
-    if (c === "`") { i = closeTick(line, i + 1); continue; }
-    if (c === '"') {
-      for (i++; i < line.length && line[i] !== '"'; i++) {
-        if (line[i] === "\\") i++;
-        else if (line[i] === "$" && line[i + 1] === "(") i = closeParen(line, i + 2);
-        else if (line[i] === "`") i = closeTick(line, i + 1);
-      }
-      continue;
-    }
-    if (c === "(") depth++;
-    else if (c === ")" && --depth === 0) return i;
-  }
-  return line.length;
-}
-
-/** Index of the unescaped backtick closing one whose body starts at `i`. */
-function closeTick(line, i) {
-  for (; i < line.length; i++) {
-    if (line[i] === "\\") i++;
-    else if (line[i] === "`") return i;
-  }
-  return line.length;
-}
-
-/**
- * Splits a shell line into segments (one per simple command) of words,
- * honouring single/double quotes and backslash escapes. Quoted text stays
- * inside its word, so `git commit -m "explain git reset --hard"` is one git
- * commit with a message -- never a reset. Separators: ; & | ( ) ` and
- * newlines; an unquoted # at a word start comments out the rest of its line.
- *
- * Command substitution inside double quotes (`"$(...)"`, `"`...`"`) is NOT
- * plain text -- the shell really runs it (#257). Its body is split as a
- * command line of its own and its segments join the result, so
- * `echo "$(git reset --hard)"` is still seen as a reset.
- * Not a full shell grammar -- just enough to find the command words.
- */
-function shellSegments(line) {
-  const segs = [];
-  const subs = []; // bodies of quoted command substitutions, split at the end
-  let words = [];
-  let cur = null;
-  const endWord = () => { if (cur !== null) { words.push(cur); cur = null; } };
-  const endSeg = () => { endWord(); if (words.length) segs.push(words); words = []; };
-
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === "'") {
-      const j = line.indexOf("'", i + 1);
-      const stop = j < 0 ? line.length : j;
-      cur = (cur ?? "") + line.slice(i + 1, stop);
-      i = stop;
-    } else if (c === '"') {
-      let s = "";
-      i++;
-      while (i < line.length && line[i] !== '"') {
-        if (line[i] === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1])) {
-          s += line[i + 1];
-          i += 2;
-          continue;
-        }
-        // "$( ... )" and "` ... `" run a command -- keep the text in the
-        // word, and queue the body to be checked as a command line itself
-        if (line[i] === "$" && line[i + 1] === "(") {
-          const end = closeParen(line, i + 2);
-          subs.push(line.slice(i + 2, end));
-          s += line.slice(i, end + 1);
-          i = end + 1;
-          continue;
-        }
-        if (line[i] === "`") {
-          const end = closeTick(line, i + 1);
-          subs.push(line.slice(i + 1, end).replace(/\\([`\\$])/g, "$1"));
-          s += line.slice(i, end + 1);
-          i = end + 1;
-          continue;
-        }
-        s += line[i];
-        i++;
-      }
-      cur = (cur ?? "") + s;
-    } else if (c === "\\") {
-      if (i + 1 < line.length && line[i + 1] !== "\n") cur = (cur ?? "") + line[i + 1];
-      i++;
-    } else if (c === "\n" || ";&|()`".includes(c)) {
-      endSeg();
-    } else if (/\s/.test(c)) {
-      endWord();
-    } else if (c === "#" && cur === null) {
-      const j = line.indexOf("\n", i);
-      i = j < 0 ? line.length : j - 1;
-    } else {
-      cur = (cur ?? "") + c;
-    }
-  }
-  endSeg();
-  for (const body of subs) segs.push(...shellSegments(body));
-  return segs;
-}
-
-/**
  * Every git invocation in a command line, parsed: the leading VAR=value
  * assignments, the -C directories in order, the subcommand, and its args
  * (cut at a bare `--`, past which words are paths, not flags). Recurses
@@ -194,7 +94,7 @@ function shellSegments(line) {
  */
 function gitInvocations(line, depth = 0) {
   const found = [];
-  for (const words of shellSegments(line)) {
+  for (const { words } of shellSegments(line, READ)) {
     let i = 0;
     const assigns = [];
     while (i < words.length) {
