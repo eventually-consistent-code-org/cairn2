@@ -229,7 +229,9 @@ export function patchClaimsHold(c: PatchClaims): boolean {
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
  *   failure_scenario, a missing panel, or (sweeps) a finding its leg
- *   refuted or carried with fewer votes than its leg required
+ *   refuted or carried with fewer votes than its leg required, a
+ *   surviving finding no listed leg raised, or a leg path with no
+ *   readable record behind it
  */
 export function writeAuditRecord(projectDir: string, scope: string,
   verdict: "pass" | "findings", findings: AuditFinding[],
@@ -311,8 +313,20 @@ export function writeAuditRecord(projectDir: string, scope: string,
   const read = sweep ? readLegs(projectDir, legs) : [];
   const attributed = sweep ? attributeLegs(read, findings) : [];
   attributed.forEach((a, i) => {
-    if (!a) return;
     const f = findings[i];
+    // #259: with a leg index given, every survivor must trace to a leg —
+    // an unattributed one would skip both checks below. (No index at all
+    // stays legal; the delta then calls nothing fixed.)
+    if (!a) {
+      if (legs.length > 0 && results[i].survived) {
+        throw new CairnError("PRECONDITION_FAILED",
+          `finding '${f.title}' matches nothing in any listed leg — a sweep manifest only carries ` +
+          "findings its legs raised, so each one must trace back to its leg's record",
+          "carry the finding's title and scenario unedited from the leg record that holds it, or add " +
+          "that leg's record to legs");
+      }
+      return;
+    }
     if (a.match.outcome === "refuted" && results[i].survived) {
       throw new CairnError("PRECONDITION_FAILED",
         `finding '${f.title}' was refuted in leg '${a.leg}' — a sweep manifest carries survivors only`,
@@ -349,8 +363,8 @@ export function writeAuditRecord(projectDir: string, scope: string,
 
   const body = [`# Audit: ${scope}`, ""];
   if (sweep) {
-    for (const l of legs) body.push(`leg: ${l.scope.trim()} => ${l.path.trim()}`);
-    if (legs.length > 0) body.push("");
+    for (const l of read) body.push(`leg: ${l.scope} => ${l.path}`);
+    if (read.length > 0) body.push("");
     body.push(...renderDelta(delta), "");
   }
   findings.forEach((f, i) => {
@@ -734,15 +748,17 @@ function under(base: string, p: string): boolean {
 /**
  * Where a leg's record may be read from: a regular file under the
  * project's audit dir, symlinks resolved — the leg index is caller input,
- * and the manifest must not become a reader of arbitrary files. A path
- * that doesn't exist yet is not refused; it attributes nothing.
+ * and the manifest must not become a reader of arbitrary files. Since
+ * #259 a path that names no file is refused too: a leg the manifest can't
+ * read would silently attribute nothing and skip its leg's checks.
  *
  * :param projectDir: repository root (relative leg paths resolve here)
  * :param leg: one leg index entry
- * :returns: the absolute record path, or null when the file is absent
- * :raises CairnError: UNSUPPORTED when the path escapes the audit dir or isn't a regular file
+ * :returns: the record's real (symlink-free) absolute path
+ * :raises CairnError: UNSUPPORTED when the path escapes the audit dir or
+ *   isn't a regular file; PRECONDITION_FAILED when no file is there
  */
-function legRecordPath(projectDir: string, leg: SweepLeg): string | null {
+function legRecordPath(projectDir: string, leg: SweepLeg): string {
   const dir = resolve(auditDir(projectDir));
   const p = resolve(projectDir, leg.path.trim());
   const refuse = (why: string) => new CairnError("UNSUPPORTED",
@@ -750,69 +766,84 @@ function legRecordPath(projectDir: string, leg: SweepLeg): string | null {
     "pass the path the leg's own audit_record call returned");
   if (!under(dir, p)) throw refuse("is outside the audit dir");
   let st;
-  try { st = lstatSync(p); } catch { return null; }
+  try { st = lstatSync(p); } catch {
+    throw new CairnError("PRECONDITION_FAILED",
+      `leg '${leg.scope.trim()}' points at a record that isn't there (${leg.path.trim()}) — ` +
+      "a sweep can only index legs that wrote a record",
+      "pass the exact path that leg's own audit_record call returned; a leg that didn't run stays " +
+      "out of the index as a 'leg skipped' line");
+  }
   if (!st.isFile()) throw refuse("is not a regular file");
-  if (!under(realpathSync(dir), realpathSync(p))) throw refuse("resolves outside the audit dir");
-  return p;
+  const real = realpathSync(p);
+  if (!under(realpathSync(dir), real)) throw refuse("resolves outside the audit dir");
+  return real;
 }
 
 /** One leg as the manifest read it: its index entry and its record. */
 interface ReadLeg {
   /** The leg's scope as the index names it. */
   scope: string;
-  /** The leg record read back — null when the path resolves to no readable record. */
-  record: ParsedAuditRecord | null;
+  /** The leg's path as the index gives it (what the manifest writes back). */
+  path: string;
+  /** The scope the leg record itself was written under. */
+  recordScope: string;
+  /** The leg record, read back. */
+  record: ParsedAuditRecord;
 }
 
 /**
- * Reads every leg record the index names. A leg whose record can't be
- * read comes back with record null: it attributes nothing and covers
- * nothing — the manifest still writes.
+ * Reads every leg record the index names, once per file: entries that
+ * resolve to the same record collapse to the first (#259). Every entry
+ * must resolve to a readable audit record — one that won't parse, or
+ * carries no scope of its own, is refused rather than quietly
+ * attributing nothing.
  *
  * :param projectDir: repository root (relative leg paths resolve here)
  * :param legs: the leg index
- * :returns: one ReadLeg per index entry, in index order
- * :raises CairnError: UNSUPPORTED on a leg path outside the audit dir
+ * :returns: one ReadLeg per distinct record, in index order
+ * :raises CairnError: UNSUPPORTED on a leg path outside the audit dir;
+ *   PRECONDITION_FAILED on a leg path with no readable record behind it
  */
 function readLegs(projectDir: string, legs: SweepLeg[]): ReadLeg[] {
-  return legs.map((l) => {
-    const p = legRecordPath(projectDir, l);
-    let record: ParsedAuditRecord | null = null;
-    if (p) { try { record = parseAuditRecord(p); } catch { record = null; } }
-    return { scope: l.scope.trim(), record };
-  });
+  const seen = new Set<string>();
+  const out: ReadLeg[] = [];
+  for (const l of legs) {
+    const real = legRecordPath(projectDir, l);
+    if (seen.has(real)) continue;
+    seen.add(real);
+    const unreadable = (why: string) => new CairnError("PRECONDITION_FAILED",
+      `leg '${l.scope.trim()}' points at a file that isn't a readable audit record (${l.path.trim()}): ${why}`,
+      "pass the exact path that leg's own audit_record call returned");
+    let record: ParsedAuditRecord;
+    try { record = parseAuditRecord(real); } catch (e) {
+      throw unreadable(e instanceof Error ? e.message : String(e));
+    }
+    const own = record.frontmatter.scope;
+    if (typeof own !== "string" || own.trim() === "") throw unreadable("it names no scope");
+    out.push({ scope: l.scope.trim(), path: l.path.trim(), recordScope: own.trim(), record });
+  }
+  return out;
 }
-
-/** The scope a leg record was written under ("" when it names none). */
-const recordScopeOf = (r: ParsedAuditRecord | null): string => {
-  const fm = r?.frontmatter.scope;
-  return typeof fm === "string" ? fm.trim() : "";
-};
 
 /**
  * Which leg scopes this sweep actually re-checked (#266): a leg covers
- * its index scope only when its record was read AND was written under
- * that same scope — a mislabelled index entry (scope security-25 pointing
- * at a security-26 record) covers nothing, so it can't turn untouched
- * findings into a false fixed.
+ * its index scope only when its record was written under that same
+ * scope — a mislabelled index entry (scope security-25 pointing at a
+ * security-26 record) covers nothing, so it can't turn untouched findings
+ * into a false fixed.
  *
  * :param read: the legs as readLegs returned them
  * :returns: the covered scopes
  */
 function coveredScopes(read: ReadLeg[]): Set<string> {
-  const out = new Set<string>();
-  for (const l of read) {
-    const own = recordScopeOf(l.record);
-    if (l.record && (own === "" || own === l.scope)) out.add(l.scope);
-  }
-  return out;
+  return new Set(read.filter((l) => l.recordScope === l.scope).map((l) => l.scope));
 }
 
 /** One manifest finding's leg: who raised it, and how that leg judged it. */
 interface LegAttribution {
   /** The leg's scope as the index names it. */
   leg: string;
-  /** The scope the leg record itself was written under ("" when absent). */
+  /** The scope the leg record itself was written under. */
   recordScope: string;
   /** The leg record's own copy of the finding. */
   match: ParsedFinding;
@@ -820,15 +851,14 @@ interface LegAttribution {
 
 /**
  * Which leg raised each finding: match every finding against the legs'
- * records by the delta's identity rule. A leg with no record attributes
- * nothing.
+ * records by the delta's identity rule.
  *
  * :param read: the legs as readLegs returned them
  * :param findings: the manifest's findings
  * :returns: leg attribution per finding index (undefined when unattributed)
  */
 function attributeLegs(read: ReadLeg[], findings: AuditFinding[]): (LegAttribution | undefined)[] {
-  const legFindings = read.map((l) => l.record?.findings ?? []);
+  const legFindings = read.map((l) => l.record.findings);
   // Within a leg, a surviving copy wins over a refuted one of the same identity.
   const pick = (fs: ParsedFinding[], same: (x: ParsedFinding) => boolean) =>
     fs.find((x) => same(x) && x.outcome !== "refuted") ?? fs.find(same);
@@ -841,6 +871,6 @@ function attributeLegs(read: ReadLeg[], findings: AuditFinding[]): (LegAttributi
     if (k < 0) { same = fuzzy; k = legFindings.findIndex((fs) => fs.some(fuzzy)); }
     const match = k >= 0 ? pick(legFindings[k], same) : undefined;
     if (!match) return undefined;
-    return { leg: read[k].scope, recordScope: recordScopeOf(read[k].record), match };
+    return { leg: read[k].scope, recordScope: read[k].recordScope, match };
   });
 }

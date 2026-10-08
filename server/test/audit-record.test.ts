@@ -511,11 +511,64 @@ describe("sweep manifest + baseline delta (#215)", () => {
       symlinkSync(outside, link);
       expect(() => writeAuditRecord(repo, "sweep-2026-01-01", "pass", [],
         { legs: [{ scope: "x", path: link }] })).toThrow(/not a regular file/);
-      // A relative path under the audit dir, and a missing one, are both fine.
+      // A relative path under the audit dir is fine.
       const rel = idx[1].path.slice(repo.length + 1);
       expect(writeAuditRecord(repo, "sweep-2026-01-01", "findings", [STALE_CACHE],
-        { legs: [{ scope: "review-working", path: rel },
-          { scope: "gone", path: join(repo, ".cairn", "audit", "gone.md") }] }).survived).toBe(1);
+        { legs: [{ scope: "review-working", path: rel }] }).survived).toBe(1);
+    });
+
+    /** The CairnError a call throws (fails the test when it doesn't throw). */
+    function refusal(fn: () => unknown): { code: string; message: string } {
+      try { fn(); } catch (e) { return e as { code: string; message: string }; }
+      throw new Error("expected a refusal");
+    }
+
+    it("refuses a surviving finding no listed leg raised — a reworded copy can't slip past its leg's checks (#259)", () => {
+      const repo = freshRepo();
+      const idx = legs(repo);
+      // The refuted TOKEN_LEAK, retitled and rescoped so no leg matches it.
+      const reworded: AuditFinding = { ...TOKEN_LEAK, title: "Credential exposure in comments",
+        failure_scenario: "a failed tracker call posts the access secret where reviewers can read it",
+        panel: [vote("a", "CONFIRMED"), vote("b", "CONFIRMED")] };
+      const e = refusal(() => writeAuditRecord(repo, "sweep-2026-01-01", "findings", [STALE_CACHE, reworded], { legs: idx }));
+      expect(e.code).toBe("PRECONDITION_FAILED");
+      expect(e.message).toMatch(/'Credential exposure in comments' matches nothing in any listed leg/);
+      expect(listAuditRecords(repo).some((r) => r.scope.startsWith("sweep-"))).toBe(false);
+      // A finding this manifest's own panel refuted isn't filed anyway, so it isn't held to attribution.
+      const dead: AuditFinding = { ...reworded, panel: [vote("a", "REFUTED")] };
+      expect(writeAuditRecord(repo, "sweep-2026-01-01", "findings", [STALE_CACHE, dead], { legs: idx }).survived).toBe(1);
+    });
+
+    it("refuses a leg path with no readable record behind it (#259)", () => {
+      const repo = freshRepo();
+      const idx = legs(repo);
+      const audit = join(repo, ".cairn", "audit");
+      // A wrong date: the security leg's record isn't at that path, so its checks would silently switch off.
+      const wrongDate = refusal(() => writeAuditRecord(repo, "sweep-2026-01-01", "findings", [STALE_CACHE],
+        { legs: [{ scope: "security-25", path: join(audit, "security-25-1999-01-01.md") }, idx[1]] }));
+      expect(wrongDate.code).toBe("PRECONDITION_FAILED");
+      expect(wrongDate.message).toMatch(/leg 'security-25' points at a record that isn't there/);
+      // A file under the audit dir that isn't an audit record — no scope, or broken frontmatter.
+      writeFileSync(join(audit, "notes.md"), "just some notes\n");
+      writeFileSync(join(audit, "broken.md"), "---\nscope: security-25\n");
+      for (const name of ["notes.md", "broken.md"]) {
+        const e = refusal(() => writeAuditRecord(repo, "sweep-2026-01-01", "findings", [STALE_CACHE],
+          { legs: [idx[1], { scope: "security-25", path: join(audit, name) }] }));
+        expect(e.code, name).toBe("PRECONDITION_FAILED");
+        expect(e.message, name).toMatch(/isn't a readable audit record/);
+      }
+      expect(listAuditRecords(repo).some((r) => r.scope.startsWith("sweep-"))).toBe(false);
+    });
+
+    it("dedupes legs that resolve to the same record — first entry wins (#259)", () => {
+      const repo = freshRepo();
+      const idx = legs(repo);
+      const rel = idx[0].path.slice(repo.length + 1);
+      const out = writeAuditRecord(repo, "sweep-2026-01-01", "findings", [SECRET_LOG, STALE_CACHE],
+        { legs: [idx[0], idx[1], { scope: "security-25", path: rel }, idx[1]] });
+      const raw = readFileSync(out.path, "utf8");
+      expect(raw.match(/^leg: /gm)).toHaveLength(2);
+      expect(parseAuditRecord(out.path).legs).toEqual(idx);
     });
   });
 

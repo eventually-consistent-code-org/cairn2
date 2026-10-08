@@ -273,7 +273,9 @@ leg that didn't run.
 from its leg — title, severity, `failure_scenario`, `panel`, `seats`,
 `issue` — so the server re-reads the same votes and lands the same
 outcome; refuted findings stay in their leg's record and out of the
-union. `verdict` is `pass` only when the union is empty. The server
+union. The server refuses a survivor that matches nothing in any listed
+leg and a leg path with no record behind it; a record listed twice
+counts once. `verdict` is `pass` only when the union is empty. The server
 stamps the cairn version, writes the leg index, attributes each finding
 to its leg, and returns `delta` — `null` on the first sweep (this run IS
 the baseline), otherwise `{ baseline, codeCommitsSince, new, persisting,
