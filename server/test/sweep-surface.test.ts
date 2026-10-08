@@ -136,6 +136,33 @@ describe("audit sweep mode (#179)", () => {
   });
 });
 
+describe("verify's straggler check (#272)", () => {
+  // Step 3 runs from its numeral to step 4's, both at column 0.
+  const verify = read("skills/cairn-trailhead/verbs/verify.md");
+  const from = verify.indexOf("\n3. ");
+  const to = verify.indexOf("\n4. ");
+  const step3 = verify.slice(from, to).replace(/\s+/g, " ");
+
+  it("step 3 exists where the verb says it does", () => {
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+  });
+
+  it("lists the phase's issues by cairn number with no state filter", () => {
+    // state: "open" never matched an in_progress issue, so one slipped through
+    expect(step3).toContain('`issue_list(phase: "<N>")`');
+    expect(step3).not.toMatch(/state:/);
+  });
+
+  it("requires every issue closed, fails open and in_progress alike, and reports stragglers", () => {
+    expect(step3).toMatch(/every issue[^.;]*closed/i);
+    expect(step3).toContain("open");
+    expect(step3).toContain("in_progress");
+    expect(step3).toMatch(/fail/i);
+    expect(step3).toContain("straggler");
+  });
+});
+
 describe("rule coverage candidate cap (#207)", () => {
   it(`a rule matching more controls than MAX_CANDIDATES (${MAX_CANDIDATES}) lists only the cap`, () => {
     const rule: RuleLine = { file: "CLAUDE.md", line: 1, text: "Never commit secrets to the repo.", keyword: "never", polarity: "prohibition", sourceKind: "instructions" };
