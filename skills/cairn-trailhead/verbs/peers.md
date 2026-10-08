@@ -209,7 +209,13 @@ mutates before that gate, in any mode.
    gets `peer_run` with `cwdMode: "project"` (repo cwd access is exactly
    what the trust flag grants); every other peer runs contained (the
    scratch-cwd default) and judges the captured transcripts instead —
-   never skipped, and exec is never granted implicitly. Record as replies land, `review`'s exact discipline:
+   never skipped, and exec is never granted implicitly. The server holds
+   the trust half of that line: `peer_run` refuses `cwdMode: "project"`
+   with `PRECONDITION_FAILED` for any peer `cairn.json` doesn't mark
+   `execCapable`, so a refusal there means the roster read was wrong,
+   not that the flag needs flipping — only the user grants it. The
+   dimension half (functionality only) is still this verb's call.
+   Record as replies land, `review`'s exact discipline:
    `record_output`, then `parseFindings`, then `record_findings` —
    judge the `unparsed` pile too. No peers at all → the absent-peers
    rule below: cairn's own pass still writes the report.
@@ -269,11 +275,26 @@ input instead of a git diff). A hit STOPS the send: name the matching
 lines to the user and let them decide whether to redact and retry or skip
 that peer entirely. This is never a soft warning that gets sent anyway —
 a hit blocks that `peer_run` call, full stop, until the user says
-otherwise. Containment backs the gate from the other side: `peer_run`
-runs every peer from a throwaway scratch dir by default, so a peer can
-no longer read around the screened packet via the project cwd — the
-gate decides what goes out, and the scratch cwd guarantees nothing else
-is reachable.
+otherwise.
+
+The server enforces the same rule, so the gate no longer rests on this
+step being remembered: `peer_run` scans the capped input — the exact
+bytes the child would get — with its own port of those patterns
+(honouring `leakGuard.enabled` and `extraPatterns`) before anything
+spawns. A hit refuses the call with `PRECONDITION_FAILED` naming the hit
+kinds and line numbers, never the matched text, and nothing is sent.
+Treat that refusal exactly like a hit of your own: take it to the user
+— redact and retry, or skip that peer — and never reword content just
+to slip it past the scan. Know the limits: the built-in patterns cover
+planning paths, phase refs, cairn labels and Jira-style tracker ids;
+credentials are caught only by patterns the user adds to
+`leakGuard.extraPatterns`.
+
+Containment backs the gate from the other side: `peer_run` runs every
+peer from a throwaway scratch dir by default, so a peer can no longer
+read around the screened packet via the project cwd — the gate decides
+what goes out, and the scratch cwd guarantees nothing else is
+reachable.
 
 ## Absent peers
 
