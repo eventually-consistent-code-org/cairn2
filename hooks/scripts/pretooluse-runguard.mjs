@@ -46,7 +46,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, shellSegments, unwrap } from "./shell-words.mjs";
+import { SHELLS, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -97,10 +97,11 @@ function gitInvocations(line, depth = 0) {
     const { words, assigns } = unwrap(seg.words, READ);
     const cmd = basename(words[0] ?? "");
 
-    // sh -c / bash -lc: the script is one quoted word -- parse it too
+    // sh -c / bash -lc: the script is one quoted word -- parse it too,
+    // found the same way the harness guard finds it (#270)
     if (SHELLS.has(cmd) && depth < 2) {
-      const flag = words.findIndex((w, k) => k > 0 && /^-[a-z]*c[a-z]*$/.test(w));
-      if (flag > 0 && words[flag + 1]) found.push(...gitInvocations(words[flag + 1], depth + 1));
+      const script = shellCommandString(words.slice(1));
+      if (script) found.push(...gitInvocations(script, depth + 1));
       continue;
     }
     if (cmd !== "git") continue;

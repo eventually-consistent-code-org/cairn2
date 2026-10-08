@@ -310,6 +310,29 @@ describe("run guard: a wrapper's flags and their values don't hide git (#270)", 
     }
   });
 
+  it("a shell's -c string is found the way the harness guard finds it", () => {
+    const { proj, home } = fixture();
+    // The string is the first bare word after the shell's options -- not
+    // whatever word follows the first -c-looking flag
+    for (const c of [
+      "bash -c -x 'git reset --hard'",
+      "bash -c -- 'git reset --hard'",
+      "bash -Bc 'git reset --hard'",
+      "sh -o pipefail -c 'git push --force'",
+      "bash -O extglob -c 'git reset --hard'",
+      "bash --norc -lc 'git reset --hard'",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(2);
+    }
+    // ...and a script path's arguments are not a command string
+    for (const c of [
+      "bash script.sh -c 'git reset --hard'",
+      "sh -x check.sh 'git push --force'",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
   it("the leading override still unlocks exactly one wrapped command; a flag value is no override", () => {
     const { proj, home } = fixture();
     expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 timeout 5 git reset --hard").status).toBe(0);
