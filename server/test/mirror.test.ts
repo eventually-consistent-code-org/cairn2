@@ -217,6 +217,18 @@ describe("staleAuditDrift (#195)", () => {
     expect(report.flagged).toEqual([]);
   });
 
+  it("readme, changelog and license commits keep it current; CLAUDE.md stales it (#279)", () => {
+    const d = repo();
+    writeAuditRecord(d, "security-1", "pass", []);
+    commit(d, "README.md", "readme only");
+    commit(d, "server/README.md", "nested readme only");
+    commit(d, "CHANGELOG.md", "release notes only");
+    commit(d, "LICENSE", "license only");
+    expect(staleAuditDrift(d)).toBeNull();
+    commit(d, "CLAUDE.md", "agent instructions are code");
+    expect(staleAuditDrift(d)).toMatchObject({ cause: "code-moved", codeCommitsSince: 1 });
+  });
+
   it("code commits after the stamp flag the LATEST security record as stale", async () => {
     const d = repo();
     writeAuditRecord(d, "security-1", "pass", []);

@@ -57,10 +57,23 @@ export function revisionStamp(projectDir: string): RevisionStamp | null {
 }
 
 /**
+ * Paths whose edits never move what an audit examined: readmes and release
+ * notes at any depth, plus the root license (#279). Agent instruction files
+ * (CLAUDE.md, harness/, skills/, commands/, templates/) are deliberately NOT
+ * here — they steer behavior, so they count as code.
+ */
+const NON_CODE_PATHSPECS = [
+  ":(exclude,glob)**/README.md",
+  ":(exclude,glob)**/CHANGELOG.md",
+  ":(exclude)LICENSE",
+];
+
+/**
  * Counts commits reachable from HEAD but not from `commit` that touch any
- * path outside `excludeDir` — "how much code moved since this stamp".
- * Null when git can't resolve the range (commit rebased away, gc'd, or
- * not a repo): the caller decides whether unknowable means stale.
+ * path outside `excludeDir` and the non-code prose above — "how much code
+ * moved since this stamp". Null when git can't resolve the range (commit
+ * rebased away, gc'd, or not a repo): the caller decides whether
+ * unknowable means stale.
  *
  * :param projectDir: repository root
  * :param commit: the stamp's commit
@@ -72,7 +85,8 @@ export function codeCommitsSince(
 ): number | null {
   try {
     const raw = execFileSync("git",
-      ["rev-list", "--count", `${commit}..HEAD`, "--", ".", `:(exclude)${excludeDir}`],
+      ["rev-list", "--count", `${commit}..HEAD`, "--", ".", `:(exclude)${excludeDir}`,
+        ...NON_CODE_PATHSPECS],
       { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return Number.parseInt(raw.trim(), 10);
   } catch {
