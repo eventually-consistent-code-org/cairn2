@@ -30,17 +30,10 @@ In Claude Code:
 /plugin install cairn@cairn-dev
 ```
 
-Then build the MCP server the plugin launches — the one manual build step:
-
-```bash
-cd ~/.claude/plugins/cache/*/cairn/*/server   # cache/<marketplace>/<plugin>/<version>
-npm ci
-npm run build
-```
-
-Why: the plugin's `.mcp.json` starts `server/dist/index.js`, and `dist/`
-is produced by that build. Restart Claude Code afterward so the server
-connects.
+Restart Claude Code afterward so the MCP server connects. The server's
+`dist/` is committed and the installer installs its runtime dependencies,
+so there is no build step. (Running from a plain source checkout instead?
+Run `npm ci && npm run build` in `server/` first.)
 
 ## Step 2 — create your tracker credentials (outside Claude)
 
