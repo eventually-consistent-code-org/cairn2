@@ -27,9 +27,11 @@
  *   wrappers, bash -c, su -c, find -exec, xargs and a heredoc fed to a
  *   shell. A relative path is judged from every folder a cd, env -C or git
  *   -C on the line can reach (#258); after a cd it can't follow, refused.
- *   Removing a protected folder or one holding it counts. A path only READ
- *   passes (#240). Not seen: a write inside an interpreter (python -c) or
- *   $(...), an archive's members, paths an upstream command finds itself.
+ *   Removing a protected folder or one holding it counts, and so does
+ *   changing its mode, owner, flags or ACL (chmod, chown, chflags, setfacl,
+ *   xattr -w, #299). A path only READ passes (#240). Not seen: a write in
+ *   an interpreter (python -c) or $(...), an archive's members, paths an
+ *   upstream command finds itself, modes copied by cp -p, rsync or tar.
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
@@ -148,7 +150,11 @@ const FIND_WRITES = new Set(["-fprint", "-fprint0", "-fls", "-fprintf"]);
 // Commands that remove, create, or change every path operand they are given.
 const REMOVES = new Set(["rm", "rmdir", "unlink", "shred"]);
 const CREATES = new Set(["mkdir", "touch"]);
-const CHANGES = new Set(["tee", "truncate", "chmod", "chown", "chgrp"]);
+const CHANGES = new Set(["tee", "truncate"]);
+// Commands that change a path's mode, owner, flags or ACL: a folder
+// holding a protected place counts, as it does for removal (#299). chmod
+// 000 on the cairn home leaves the run guard reading nothing.
+const PERMS = new Set(["chmod", "chown", "chgrp", "chflags", "chattr", "setfacl", "setfattr"]);
 
 // Commands that read their sources and write a destination (or -t DIR),
 // with the flags that swallow a value -- so `--exclude x` never reads as
@@ -337,6 +343,11 @@ function expandHome(raw) {
   return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
 }
 
+/** expandHome, and $CAIRN_HOME too -- the run guard's own cairn home (#263, #299). */
+function expandVars(raw) {
+  return expandHome(raw).replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
+}
+
 /**
  * The protected places outside the project (#263): the ship-gate stamp
  * and the run manifests the run guard trusts, in every cairn home they
@@ -428,7 +439,11 @@ function dirRule(abs) {
   return null;
 }
 
-/** Removing the project, or any folder above it, removes everything in it (#265). */
+/**
+ * Removing the project, or any folder above it, removes everything in it
+ * (#265); locking one with chmod, chown or an ACL locks everything in it
+ * too (#299). The same goes for the home folder and each cairn home.
+ */
 function holderRule(abs) {
   if (ROOTS.some((root) => holds(abs, root))) {
     return "the folder holding the hook directory and settings";
@@ -543,7 +558,7 @@ function globRule(abs, mode) {
   }
   const zone = zoneGlob(p, remove);
   if (zone) return zone;
-  if (remove) {
+  if (remove || mode === "perm") {
     for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
       const d = dir.split(sep).filter(Boolean);
       if (p.length <= d.length && p.every((x, j) => could(x, d[j]))) return holderRule(dir);
@@ -555,15 +570,17 @@ function globRule(abs, mode) {
 /**
  * Which protected thing a path would change, or null. `mode` is what the
  * command does to it: write (the file, or into the folder it names),
- * create (mkdir/touch -- an empty folder changes nothing), or remove.
- * Both the path as written and its real path are checked, so a symlinked
- * project folder can't hide either spelling.
+ * create (mkdir/touch -- an empty folder changes nothing), remove, or perm
+ * (chmod and kin, #299: like remove, a folder holding a protected place
+ * counts). Both the path as written and its real path are checked, so a
+ * symlinked project folder can't hide either spelling.
  */
 function judge(abs, mode, literal = false) {
+  const holder = mode === "remove" || mode === "perm";
   for (const p of spellings(abs)) {
     const what = fileRule(p) ??
       (mode !== "create" ? dirRule(p) : null) ??
-      (mode === "remove" ? holderRule(p) : null) ??
+      (holder ? holderRule(p) : null) ??
       (!literal && HAS_STANDIN.test(p) ? globRule(p, mode) : null);
     if (what) return what;
   }
@@ -845,21 +862,37 @@ function protectedEntries() {
 }
 
 /**
+ * The folders from `start` down to each protected place under it -- the
+ * project, the home folder, each zone -- every one a folder holding it.
+ */
+function holdersUnder(start) {
+  const out = [];
+  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
+    const rest = below(start, anchor);
+    if (rest) for (let k = 0; k <= rest.length; k++) out.push(join(start, ...rest.slice(0, k)));
+  }
+  return out;
+}
+
+/**
  * Would find, walking from `dir`, reach a protected path its tests select?
  * A start inside hooks/ (or a protected file or folder tree) is hit
  * whatever the tests say; a start holding one is hit when a test can
  * select it, when nothing narrows the walk (no name test, or a negated
- * one), or when it holds a zone too big to list.
+ * one), or when it holds a zone too big to list. Removing or chmod-ing
+ * what it walks also counts the folders holding one (#299): `find ~
+ * -name .cairn -exec chmod 000 {} +`.
  */
-function walkHit(spec, dir) {
+function walkHit(spec, dir, mode = "write") {
   for (const s of spec.starts) {
-    const start = resolveIn(dir, expandHome(s)); // `find ~/.cairn` walks the home folder (#263)
+    const start = resolveIn(dir, expandVars(s)); // `find ~/.cairn` walks the home folder (#263)
     const inside = fileRule(start) ?? treeRule(start);
     if (inside) return { path: s, what: inside };
     const entries = protectedEntries();
     const unlisted = UNLISTED.find((z) => holds(start, z.dir));
     if (unlisted) return { path: s, what: unlisted.what };
-    for (const entry of entries) {
+    const holders = mode === "remove" || mode === "perm" ? holdersUnder(start) : [];
+    for (const entry of [...entries, ...holders]) {
       if (!holds(start, entry)) continue;
       const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
       if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
@@ -917,7 +950,7 @@ function feedHit(feed, mode) {
   for (const u of feed.up) {
     const w = unwrap(u.words, READ).words;
     if (cmdName(w[0]) === "find") {
-      const hit = walkHit(parseFind(w.slice(1)), feed.dir);
+      const hit = walkHit(parseFind(w.slice(1)), feed.dir, mode);
       if (hit) return hit;
       continue;
     }
@@ -927,7 +960,8 @@ function feedHit(feed, mode) {
   for (const t of texts) words.push(...t.split(/\s+/));
   for (const x of words) {
     if (!x || x.startsWith("-")) continue;
-    const what = judge(resolveIn(feed.dir, x), mode);
+    // `echo ~/.cairn | xargs chmod 000`: the shell spelled out ~ before echo saw it (#299)
+    const what = judge(resolveIn(feed.dir, expandVars(x)), mode);
     if (what) return { path: x, what };
   }
   return null;
@@ -940,7 +974,9 @@ function copyTargets(cmd, args, add) {
   const { opts, operands } = parseOpts(args, COPIES.get(cmd));
   const rsync = cmd === "rsync";
   if (cmd === "install" && hasOpt(opts, "-d", "--directory")) {
-    for (const o of operands) add(o, "create");
+    // -m, -o and -g also reset a folder that already exists (#299)
+    const mode = hasOpt(opts, "-m", "--mode", "-o", "--owner", "-g", "--group") ? "perm" : "create";
+    for (const o of operands) add(o, mode);
     return;
   }
   if (rsync) for (const o of opts) if (RSYNC_WRITES.includes(o.name) && o.value) add(o.value);
@@ -968,6 +1004,28 @@ function copyTargets(cmd, args, add) {
     else if (hasOpt(opts, "--parents")) add(join(dest, local));
     else if (basename(local)) add(join(dest, basename(local)));
   }
+}
+
+/**
+ * chmod, chown, chgrp, chflags, chattr, setfacl, setfattr (#299): every
+ * operand, the mode or owner word too (harmless as a path), and each path
+ * a setfacl / setfattr --restore dump names on its `# file:` lines.
+ */
+function permTargets(args, ctx, add) {
+  for (const o of plain(args)) add(o, "perm");
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const dump = a === "--restore" ? args[i + 1] : a.startsWith("--restore=") ? a.slice(10) : null;
+    const text = dump ? readText(resolveIn(ctx.dir, expandVars(dump))) : null;
+    for (const m of text?.matchAll(/^# file: (.+)$/gm) ?? []) add(m[1], "perm");
+  }
+}
+
+/** xattr (macOS): -w NAME VALUE, -d NAME and -c change the files after them; a listing or -p only reads (#299). */
+function xattrTargets(args, add) {
+  const { opts, operands } = parseOpts(args);
+  const skip = hasOpt(opts, "-w") ? 2 : hasOpt(opts, "-d") ? 1 : hasOpt(opts, "-c") ? 0 : -1;
+  if (skip >= 0) for (const o of operands.slice(skip)) add(o, "perm");
 }
 
 /** curl: -o files, the -O download folder and names, and the other files it can write. */
@@ -1166,9 +1224,8 @@ function writeTargets(seg, ctx) {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
     // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command sees them (#258, #263)
-    const r = expandHome((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir))
-      .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
+    const r = expandVars((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir));
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
     out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
   };
@@ -1241,6 +1298,8 @@ function writeTargets(seg, ctx) {
   if (REMOVES.has(cmd)) for (const o of plain(args)) add(o, "remove");
   else if (CREATES.has(cmd)) for (const o of plain(args)) add(o, "create");
   else if (CHANGES.has(cmd)) for (const o of plain(args)) add(o);
+  else if (PERMS.has(cmd)) permTargets(args, ctx, add);
+  else if (cmd === "xattr") xattrTargets(args, add);
   else if (COPIES.has(cmd)) copyTargets(cmd, args, add);
   else if ((cmd === "sed" || cmd === "perl") &&
       args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith("--in-place"))) {
@@ -1458,8 +1517,8 @@ function judgeTarget(t) {
   }
   if (lead === WALK) {
     if (!t.walk) return null;
-    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandHome(s))))) return lost;
-    return walkHit(t.walk.spec, t.walk.dir);
+    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandVars(s))))) return lost;
+    return walkHit(t.walk.spec, t.walk.dir, t.mode);
   }
   if (isLost(t.abs)) return lost;
   const what = judge(t.abs, t.mode);

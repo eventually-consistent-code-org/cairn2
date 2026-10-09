@@ -1625,6 +1625,105 @@ describe("harness guard protects the other MCP server configs (#298)", () => {
   });
 });
 
+// #299: the holder rule ran only for removal, so `chmod 000` on the cairn
+// home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
+// the stamp or the run list, then let an unshipped push through. Changing
+// the mode, owner, flags or ACL of a folder holding a protected place is
+// refused now, through every write shape; the same change to an unrelated
+// folder, or to the run report, still passes.
+describe("harness guard keeps the cairn home's mode and owner (#299)", () => {
+  // `@cairn` is the cairn home folder, spelled apart for the commit leak guard (see #263 above).
+  const sh = (s: string) => s.replaceAll("@cairn", ".cairn");
+  const bash = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command: sh(command) }, cwd: "" });
+
+  /** A project, a home and a separate CAIRN_HOME, each cairn home holding a stamp, a manifest and a report. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-perm-proj-");
+    const home = freshDir("cairn-hooks-perm-home-");
+    const cairnHome = freshDir("cairn-hooks-perm-cairnhome-");
+    for (const base of [join(home, ".cairn"), cairnHome]) {
+      mkdirSync(join(base, "ship-gate"), { recursive: true });
+      mkdirSync(join(base, "runs"), { recursive: true });
+      mkdirSync(join(base, "handoff"), { recursive: true });
+      writeFileSync(join(base, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+      writeFileSync(join(base, "runs", "r1.json"), "{}");
+      writeFileSync(join(base, "runs", "r1-report.md"), "# run\n");
+    }
+    return { p, home, cairnHome, env: { HOME: home, CAIRN_HOME: cairnHome } };
+  }
+
+  it("refuses a mode, owner, flags or ACL change to the cairn home or a folder above it", () => {
+    const { p, home, cairnHome, env } = fixture();
+    writeFileSync(join(p, "acl.txt"), `# file: ${join(home, ".cairn")}\n# owner: nobody\nuser::---\n`);
+    for (const c of [
+      "chmod 000 ~/@cairn",
+      "chmod -R 000 ~/@cairn",
+      "chmod 000 $CAIRN_HOME",
+      `chmod 000 ${cairnHome}`,
+      "chmod 000 ~",
+      "chown -R nobody ~/@cairn",
+      "chgrp -R wheel $CAIRN_HOME",
+      "chflags uchg ~/@cairn",
+      "chattr +i ~/@cairn",
+      "setfacl -m u:nobody:--- ~/@cairn",
+      "setfacl --restore=acl.txt",
+      "chmod +a 'everyone deny list' ~/@cairn",
+      "xattr -w com.example.lock 1 ~/@cairn",
+      "xattr -c $CAIRN_HOME",
+      "sudo chmod 000 ~/@cairn",
+      "cd ~ && chmod 000 @cairn",
+      "echo ~/@cairn | xargs chmod 000",
+      "echo $CAIRN_HOME | xargs chown nobody",
+      "find ~ -maxdepth 1 -name @cairn -exec chmod 000 {} +",
+      "find ~ -maxdepth 1 -name @cairn | xargs chmod 000",
+      "install -d -m 000 ~/@cairn",
+      "chmod 000 ~/.ca*",
+      "chmod 000 ~/.CAIRN",
+    ]) {
+      const r = runHookRaw(HARNESSGUARD, p, bash(c), env);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toMatch(/folder holding|ship-gate stamp|run manifests/);
+    }
+  });
+
+  it("the same changes to an unrelated folder, the run report or a plain listing pass", () => {
+    const { p, env } = fixture();
+    writeFileSync(join(p, "acl.txt"), "# file: /tmp/unrelated\n# owner: nobody\nuser::rwx\n");
+    for (const c of [
+      "chmod 755 build",
+      "chmod -R u+w build",
+      "chmod +x scripts/run.sh",
+      "chmod 700 ~/.ssh",
+      "chown -R nobody /tmp/unrelated",
+      "chmod 600 ~/@cairn/runs/r1-report.md",
+      "chmod 755 ~/@cairn/handoff",
+      "find ~/@cairn/handoff -type f -exec chmod 644 {} +",
+      "setfacl --restore=acl.txt",
+      "xattr -l ~/@cairn",
+      "xattr -p com.apple.quarantine $CAIRN_HOME",
+      "ls -ld ~/@cairn && stat $CAIRN_HOME",
+      "install -d ~/@cairn/handoff",
+      "mkdir -p ~/@cairn",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bash(c), env).status, c).toBe(0);
+    }
+  });
+
+  it("the project folder and the folders above it count as holders too", () => {
+    const { p, env } = fixture();
+    for (const [locked, ordinary] of [
+      ["chmod -R 000 .", "chmod -R 755 build"],
+      ["chown -R nobody ..", "chown -R nobody dist"],
+      ["chmod 000 ../*", "chmod 644 ./*.md"],
+      ["chflags -R uchg .", "chflags -R nouchg build"],
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bash(locked), env).status, locked).toBe(2);
+      expect(runHookRaw(HARNESSGUARD, p, bash(ordinary), env).status, ordinary).toBe(0);
+    }
+  });
+});
+
 describe("stop-costtracker + cost-report", () => {
   const COSTTRACKER = join(scriptsDir, "stop-costtracker.mjs");
   const COSTREPORT = join(scriptsDir, "cost-report.mjs");
