@@ -546,22 +546,24 @@ describe("run guard: mid-run push needs manifest push authority (#252)", () => {
     expect(guard(proj, home, "git push origin runbranch", {}, wt).status).toBe(2);
   });
 
-  it("allows git push while running when authority is granted for the manifest's phases", () => {
-    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+  it("allows git push while running when authority is granted and a manifest phase is in flight", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 3 });
     expect(guard(proj, home, "git push origin main").status).toBe(0);
   });
 
   it("granted authority over no phases, or a foreign scope, covers nothing", () => {
-    const empty = fixture({ status: "running", phases: [], pushAuth: granted });
+    const empty = fixture({ status: "running", phases: [], pushAuth: granted, currentPhase: 3 });
     expect(guard(empty.proj, empty.home, "git push").status).toBe(2);
-    const wide = fixture({ status: "running", phases, pushAuth: { ...granted, scope: "all" } });
+    const wide = fixture({
+      status: "running", phases, pushAuth: { ...granted, scope: "all" }, currentPhase: 3,
+    });
     expect(guard(wide.proj, wide.home, "git push").status).toBe(2);
-    const missing = fixture({ status: "running", phases });
+    const missing = fixture({ status: "running", phases, currentPhase: 3 });
     expect(guard(missing.proj, missing.home, "git push").status).toBe(2);
   });
 
   it("granted authority does not license a force-push", () => {
-    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 3 });
     expect(guard(proj, home, "git push --force-with-lease").status).toBe(2);
   });
 
@@ -572,6 +574,44 @@ describe("run guard: mid-run push needs manifest push authority (#252)", () => {
     }
     const { proj, home } = fixture({ status: "running", phases, pushAuth: { granted: false } });
     expect(guard(proj, home, 'git commit -m "git push later"').status).toBe(0);
+  });
+});
+
+describe("run guard: push authority needs the phase in flight (#260)", () => {
+  const phase = (number: number) =>
+    ({ number, name: `p${number}`, estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } });
+  const phases = [phase(3), phase(4)];
+  const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };
+
+  it("a running manifest with no currentPhase refuses pushes -- older manifests included", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+    const r = guard(proj, home, "git push origin main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(r.stderr).toContain("set_phase");
+  });
+
+  it("a currentPhase outside the manifest's phases refuses, naming it", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 9 });
+    const r = guard(proj, home, "git push origin main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("phase 9");
+    const odd = fixture({ status: "running", phases, pushAuth: granted, currentPhase: "3" });
+    expect(guard(odd.proj, odd.home, "git push origin main").status).toBe(2);
+  });
+
+  it("each manifest phase in flight carries the grant", () => {
+    for (const currentPhase of [3, 4]) {
+      const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase });
+      expect(guard(proj, home, "git push origin main").status, String(currentPhase)).toBe(0);
+    }
+  });
+
+  it("a phase in flight does not grant what staging withheld", () => {
+    const { proj, home } = fixture({
+      status: "running", phases, pushAuth: { granted: false, scope: "manifest-phases" }, currentPhase: 3,
+    });
+    expect(guard(proj, home, "git push origin main").status).toBe(2);
   });
 });
 

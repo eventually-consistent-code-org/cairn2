@@ -118,6 +118,7 @@ import {
   createRunManifest,
   grantPushAuth,
   readRunManifestWithPath,
+  setCurrentPhase,
   setRunStatus,
   type ManifestPhase,
   type RunStatus,
@@ -1685,16 +1686,15 @@ export function buildServer(deps: {
     "run_manifest",
     {
       description:
-        "The run manifest for headless batch runs (#132) — the staging interview's output and "
-        + "the executor's SOLE source of authority. action 'create' writes a fresh manifest "
-        + "(one per run; pushAuth ALWAYS starts false), 'read' returns it without mutation "
-        + "plus its file path (the run report writes beside the manifest), "
-        + "'grant_push' records the staging gate's explicit push pre-authorization (REC-5 at "
-        + "run start, scope-limited to the manifest's phases; staged runs only), 'set_status' "
-        + "advances the lifecycle staged → running → complete|stopped. Lives under "
-        + "~/.cairn/runs/ — never the repo",
+        "The run manifest for headless batch runs (#132) — the executor's SOLE source of "
+        + "authority, under ~/.cairn/runs/ (never the repo). action 'create' writes one per "
+        + "run (pushAuth ALWAYS starts false); 'read' returns it plus its file path (the run "
+        + "report writes beside it); 'grant_push' records the staging gate's push "
+        + "pre-authorization (REC-5, the manifest's phases only; staged runs only); "
+        + "'set_status' moves staged → running → complete|stopped; 'set_phase' marks the "
+        + "phase in flight (running, forward-only) — no push without one",
       inputSchema: z.object({
-        action: z.enum(["create", "read", "grant_push", "set_status"]),
+        action: z.enum(["create", "read", "grant_push", "set_status", "set_phase"]),
         runId: z.string(),
         phases: z
           .array(
@@ -1722,17 +1722,19 @@ export function buildServer(deps: {
           )
           .optional(),
         status: z.enum(["staged", "running", "complete", "stopped"]).optional(),
+        phase: z.number().optional(),
       }),
     },
     wrap(
       (a: {
-        action: "create" | "read" | "grant_push" | "set_status";
+        action: "create" | "read" | "grant_push" | "set_status" | "set_phase";
         runId: string;
         phases?: ManifestPhase[];
         ceilingTokens?: number;
         ceilingUsd?: number;
         answers?: StagedAnswer[];
         status?: RunStatus;
+        phase?: number;
       }) => {
         const d = dir();
         switch (a.action) {
@@ -1765,6 +1767,15 @@ export function buildServer(deps: {
                 "pass status: staged|running|complete|stopped");
             }
             return setRunStatus(d, a.runId, a.status);
+          }
+          case "set_phase": {
+            // #260 -- the run guard ties push authority to the phase in flight
+            if (a.phase === undefined) {
+              throw new CairnError("CONFIG_INVALID",
+                "set_phase needs a phase",
+                "pass phase: one of the manifest's phases[].number");
+            }
+            return setCurrentPhase(d, a.runId, a.phase);
           }
         }
       },

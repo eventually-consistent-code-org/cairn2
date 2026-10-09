@@ -27,14 +27,14 @@
  *   own checkout (see isMainWorktree) are refused -- they change the
  *   human's files underneath them, mid-edit. CAIRN_RUN_OK=1 as the leading
  *   assignment overrides that once. And `git push`, from any worktree, is
- *   refused unless the run manifest grants pushAuth for its phases. No
- *   override: push authority is the owner's staging decision (ADR 0007).
+ *   refused unless the run manifest grants pushAuth and marks one of its
+ *   phases in flight (#260). No override: push authority is the owner's
+ *   staging decision (ADR 0007).
  *
- *   Commands are read as shell words by shell-words.mjs, shared with the
- *   harness guard (#270), so every rule sees through wrappers and their
- *   flag values (sudo -u root, timeout 5). Quoted text is never a refusal,
- *   but a double-quoted $(...) still runs, so its body is checked as a
- *   command of its own (#257).
+ *   Commands are read by shell-words.mjs, shared with the harness guard
+ *   (#270), so rules see through wrappers and their flag values (sudo -u
+ *   root, timeout 5). Quoted text never refuses, but a double-quoted $(...)
+ *   still runs, so its body is checked as a command of its own (#257).
  *
  * removeWhen: headless runs execute in platform-provided isolated
  *   checkouts that cannot reach the human's working directory.
@@ -184,15 +184,29 @@ function liveRuns(projectDir, baseDir) {
 }
 
 /**
- * True when a running manifest authorizes pushes. The manifest records
- * push authority as granted + a scope that is always "manifest-phases" --
- * it stores no per-push phase, so "covers the phase being pushed" reduces
- * to: granted, scoped to the manifest, and the manifest has phases at all.
+ * Why a running manifest doesn't authorize a push now, or null when it
+ * does. Push authority is granted + scoped to "manifest-phases" at staging;
+ * #260 adds the phase: run_manifest set_phase records `currentPhase` at
+ * each phase start, and only a currentPhase that is one of the manifest's
+ * phases carries the grant. No currentPhase (an older manifest, or a run
+ * between phases) refuses. It can't prove the pushed commits belong to
+ * that phase -- only that a phase the owner authorized is in flight.
  */
-function pushAuthorized(state) {
+function pushRefusal(state) {
   const auth = state?.pushAuth;
-  return auth?.granted === true && auth.scope === "manifest-phases"
-    && Array.isArray(state.phases) && state.phases.length > 0;
+  const phases = Array.isArray(state?.phases) ? state.phases : [];
+  if (auth?.granted !== true || auth.scope !== "manifest-phases" || !phases.length) {
+    return "without push authority for its phases — nothing pushes until the owner grants it at staging";
+  }
+  const current = state.currentPhase;
+  if (typeof current !== "number") {
+    return "without a phase marked in flight (run_manifest set_phase) — a push can't be tied to " +
+      "a phase the owner authorized";
+  }
+  if (!phases.some((p) => p?.number === current)) {
+    return `marking phase ${current} in flight, which is not one of its phases`;
+  }
+  return null;
 }
 
 // git push options that eat the following word as their value.
@@ -540,17 +554,16 @@ try {
       }
     }
 
-    // #252 -- mid-run, a push needs the authority granted at the staging
-    // gate. From ANY worktree -- the run's own is exactly where it pushes.
+    // #252, #260 -- mid-run, a push needs the authority granted at the
+    // staging gate and a manifest phase in flight. From ANY worktree --
+    // the run's own is exactly where it pushes.
     if (inv.sub === "push") {
-      const unauthorized = currentRuns().find((r) => !pushAuthorized(r.state));
-      if (unauthorized) {
-        console.error(
-          `cairn run guard: a batch run (${unauthorized.runId}) is in flight without push ` +
-          "authority for its phases — nothing pushes until the owner grants it at staging.",
-        );
+      for (const run of currentRuns()) {
+        const why = pushRefusal(run.state);
+        if (!why) continue;
+        console.error(`cairn run guard: a batch run (${run.runId}) is in flight ${why}.`);
         console.error("  the phase ends verified-not-pushed; push it yourself from your own");
-        console.error("  terminal once the run is done, or stage a run with push authority.");
+        console.error("  terminal once the run is done.");
         process.exit(2);
       }
       continue;

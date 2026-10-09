@@ -2530,3 +2530,76 @@ describe("docs tools over an injected fake connector", () => {
     }
   });
 });
+
+describe("run_manifest set_phase over MCP (#260)", () => {
+  // run_manifest writes under ~/.cairn/runs, so HOME points at a scratch
+  // dir for this block -- a running manifest must never land in the real
+  // home, where the run guard would read it as a live run.
+  let projectDir: string;
+  let home: string;
+  let savedHome: string | undefined;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { ...res, json: JSON.parse(text) };
+  };
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "cairn-runphase-home-"));
+    process.env.HOME = home;
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-runphase-"));
+    writeFileSync(
+      join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+    const server = buildServer({ projectDir, tracker: new FakeTracker() });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-runphase", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const estimate = { low: 1, high: 2, estUsd: { low: 0, high: 0 } };
+
+  it("marks the phase in flight while running, forward-only, persisted beside the run", async () => {
+    const made = await call("run_manifest", {
+      action: "create", runId: "run-mcp",
+      phases: [{ number: 7, name: "a", estimate }, { number: 8, name: "b", estimate }],
+    });
+    expect(made.isError).toBeFalsy();
+    expect(made.json.currentPhase).toBeUndefined();
+
+    const early = await call("run_manifest", { action: "set_phase", runId: "run-mcp", phase: 7 });
+    expect(early.isError).toBe(true);
+    expect(early.json.code).toBe("PRECONDITION_FAILED");
+
+    await call("run_manifest", { action: "set_status", runId: "run-mcp", status: "running" });
+    const missing = await call("run_manifest", { action: "set_phase", runId: "run-mcp" });
+    expect(missing.isError).toBe(true);
+    expect(missing.json.code).toBe("CONFIG_INVALID");
+
+    const foreign = await call("run_manifest", { action: "set_phase", runId: "run-mcp", phase: 9 });
+    expect(foreign.json.code).toBe("PRECONDITION_FAILED");
+
+    const first = await call("run_manifest", { action: "set_phase", runId: "run-mcp", phase: 7 });
+    expect(first.isError).toBeFalsy();
+    expect(first.json.currentPhase).toBe(7);
+    const next = await call("run_manifest", { action: "set_phase", runId: "run-mcp", phase: 8 });
+    expect(next.json.currentPhase).toBe(8);
+    const back = await call("run_manifest", { action: "set_phase", runId: "run-mcp", phase: 7 });
+    expect(back.json.code).toBe("PRECONDITION_FAILED");
+
+    const read = await call("run_manifest", { action: "read", runId: "run-mcp" });
+    expect(read.json.currentPhase).toBe(8);
+    expect(read.json.path.startsWith(join(home, ".cairn", "runs"))).toBe(true);
+  });
+});

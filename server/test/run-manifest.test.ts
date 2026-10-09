@@ -1,7 +1,8 @@
 // The run manifest (#132): the staging interview's output and the headless
 // executor's sole source of authority. These tests cover the store contract —
 // round-trip fidelity, the version gate, runId isolation, pushAuth starting
-// false until explicitly granted, and the one-way status lifecycle.
+// false until explicitly granted, the one-way status lifecycle, and the
+// forward-only phase in flight (#260).
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -13,6 +14,7 @@ import {
   readRunManifest,
   readRunManifestWithPath,
   runManifestPath,
+  setCurrentPhase,
   setRunStatus,
 } from "../src/planning/run-manifest.js";
 import type { ManifestPhase } from "../src/planning/run-manifest.js";
@@ -281,5 +283,74 @@ describe("status lifecycle", () => {
     }
     expect(() => setRunStatus(projectDir, "run-1", "stopped", baseDir))
       .toThrowError(/cannot move/);
+  });
+});
+
+describe("currentPhase (#260)", () => {
+  /** A running manifest over PHASES (15, then 16). */
+  function running() {
+    const s = setup();
+    createRunManifest(s.projectDir, {
+      runId: "run-1", phases: PHASES, createdAt: CREATED, baseDir: s.baseDir,
+    });
+    setRunStatus(s.projectDir, "run-1", "running", s.baseDir);
+    return s;
+  }
+
+  it("is absent on a fresh manifest, and an older manifest without it still reads", () => {
+    const { projectDir, baseDir } = running();
+    expect(readRunManifest(projectDir, "run-1", baseDir).currentPhase).toBeUndefined();
+    const path = runManifestPath(projectDir, "run-1", baseDir);
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    expect("currentPhase" in doc).toBe(false);
+  });
+
+  it("marks a manifest phase in flight, persisted", () => {
+    const { projectDir, baseDir } = running();
+    expect(setCurrentPhase(projectDir, "run-1", 15, baseDir).currentPhase).toBe(15);
+    expect(readRunManifest(projectDir, "run-1", baseDir).currentPhase).toBe(15);
+  });
+
+  it("moves forward in manifest order; re-marking the current phase is a no-op", () => {
+    const { projectDir, baseDir } = running();
+    setCurrentPhase(projectDir, "run-1", 15, baseDir);
+    expect(setCurrentPhase(projectDir, "run-1", 15, baseDir).currentPhase).toBe(15);
+    expect(setCurrentPhase(projectDir, "run-1", 16, baseDir).currentPhase).toBe(16);
+    expect(() => setCurrentPhase(projectDir, "run-1", 15, baseDir))
+      .toThrowError(/comes before it/);
+    expect(readRunManifest(projectDir, "run-1", baseDir).currentPhase).toBe(16);
+  });
+
+  it("refuses a phase the manifest doesn't stage", () => {
+    const { projectDir, baseDir } = running();
+    try {
+      setCurrentPhase(projectDir, "run-1", 99, baseDir);
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CairnError);
+      expect((e as CairnError).code).toBe("PRECONDITION_FAILED");
+      expect((e as CairnError).message).toMatch(/phase 99 is not in run/);
+    }
+  });
+
+  it("refuses unless the run is running -- staged, complete and stopped have no phase in flight", () => {
+    const { projectDir, baseDir } = setup();
+    createRunManifest(projectDir, {
+      runId: "run-1", phases: PHASES, createdAt: CREATED, baseDir,
+    });
+    expect(() => setCurrentPhase(projectDir, "run-1", 15, baseDir)).toThrowError(/'staged'/);
+    setRunStatus(projectDir, "run-1", "running", baseDir);
+    setCurrentPhase(projectDir, "run-1", 15, baseDir);
+    setRunStatus(projectDir, "run-1", "complete", baseDir);
+    expect(() => setCurrentPhase(projectDir, "run-1", 16, baseDir)).toThrowError(/'complete'/);
+  });
+
+  it("a hand-written non-number currentPhase fails the schema instead of passing as a phase", () => {
+    const { projectDir, baseDir } = running();
+    const path = runManifestPath(projectDir, "run-1", baseDir);
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    doc.currentPhase = "15";
+    writeFileSync(path, JSON.stringify(doc));
+    expect(() => readRunManifest(projectDir, "run-1", baseDir)).toThrowError(/currentPhase/);
   });
 });
