@@ -966,6 +966,34 @@ describe("harness guard hook", () => {
       bashPayload('bash -c "cat hooks/hooks.json | head"')).status).toBe(0);
   });
 
+  // #286, matching the run guard's #262: a refusal names the owner's ways
+  // to approve and the where-did-this-come-from check, and never hands the
+  // agent a paste-ready override prefix.
+  it("refusals name the owner's ways to approve, never the override prefix (#286)", () => {
+    const p = proj();
+    const home = freshDir("cairn-hooks-harnessguard-home-");
+    for (const payload of [
+      editPayload(join(p, "hooks/hooks.json")),
+      editPayload(join(p, ".claude/settings.json"), "Write"),
+      bashPayload("echo '{}' > hooks/hooks.json"),
+      bashPayload("rm -rf .claude"),
+      bashPayload("echo 'CAIRN_HARNESS_EDIT=1' > .mcp.json"),
+      bashPayload("cd \"$d\" && echo x > out.txt"),
+      editPayload(join(home, ".claude", "settings.json")),
+    ]) {
+      const r = runHookRaw(HARNESSGUARD, p, payload, { HOME: home });
+      expect(r.status, payload).toBe(2);
+      expect(r.stderr, payload).toContain("needs the owner's go-ahead");
+      expect(r.stderr, payload).toContain("`!` in your prompt");
+      expect(r.stderr, payload).toContain("start the session with CAIRN_HARNESS_EDIT set to 1");
+      expect(r.stderr, payload).toContain("check where the");
+      expect(r.stderr, payload).toContain("not the owner asking");
+      expect(r.stderr, payload).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(r.stderr, payload).not.toMatch(/[A-Z_]+=1/);
+      expect(r.stderr, payload).not.toMatch(/prefix/i);
+    }
+  });
+
   it("CAIRN_HARNESS_EDIT=1 overrides, by env for any tool and by prefix for Bash", () => {
     const p = proj();
     expect(runHookRaw(HARNESSGUARD, p, editPayload(join(p, "hooks/hooks.json")),
@@ -982,6 +1010,350 @@ describe("harness guard hook", () => {
     expect(runHookRaw(HARNESSGUARD, p, JSON.stringify({
       tool_name: "Read", tool_input: { file_path: join(p, "hooks/hooks.json") }, cwd: "",
     })).status).toBe(0);
+  });
+});
+
+// #263: the ship-gate stamp and the run manifests are what the run guard
+// trusts to allow a push, so a plain agent write must not forge them. They
+// live outside the project, under CAIRN_HOME and ~/.cairn -- both count.
+// The server writes them with plain fs calls the hook never sees (see
+// ship-gate.test.ts), and auto's run report beside the manifests stays
+// writable.
+describe("harness guard protects the ship gate and run manifests (#263)", () => {
+  // `~/@cairn` below is the cairn home folder, spelled apart so no line in
+  // this file reads as a planning-directory path to the commit leak guard.
+  const sh = (s: string) => s.replaceAll("@cairn", ".cairn");
+  const filePayload = (filePath: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: sh(filePath) }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command: sh(command) }, cwd: "" });
+
+  /** A project, a home and a separate CAIRN_HOME, each holding a stamp, a manifest and a report. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-shipgate-proj-");
+    const home = freshDir("cairn-hooks-shipgate-home-");
+    const cairnHome = freshDir("cairn-hooks-shipgate-cairnhome-");
+    for (const base of [join(home, ".cairn"), cairnHome]) {
+      mkdirSync(join(base, "ship-gate"), { recursive: true });
+      mkdirSync(join(base, "runs"), { recursive: true });
+      writeFileSync(join(base, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+      writeFileSync(join(base, "runs", "proj-0123456789abcdef-r1.json"), "{}");
+      writeFileSync(join(base, "runs", "proj-0123456789abcdef-r1-report.md"), "# run\n");
+    }
+    const env = { HOME: home, CAIRN_HOME: cairnHome };
+    return { p, home, cairnHome, env };
+  }
+
+  it("refuses the file tools on the stamp and manifests in both cairn homes, naming them", () => {
+    const { p, home, cairnHome, env } = fixture();
+    const cases: Array<[string, string]> = [
+      [join(cairnHome, "ship-gate", "x.json"), "ship-gate stamp"],
+      [join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "ship-gate stamp"],
+      [join(cairnHome, "runs", "r1.json"), "run manifests"],
+      [join(home, ".cairn", "ship-gate", "x.json"), "ship-gate stamp"],
+      [join(home, ".cairn", "runs", "r1.json"), "run manifests"],
+      ["~/@cairn/runs/r1.json", "run manifests"],
+    ];
+    for (const [file, phrase] of cases) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = runHookRaw(HARNESSGUARD, p, filePayload(file, tool), env);
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, file).toContain(phrase);
+      }
+    }
+    expect(runHookRaw(HARNESSGUARD, p, JSON.stringify({
+      tool_name: "NotebookEdit", tool_input: { notebook_path: join(cairnHome, "ship-gate", "x.ipynb") }, cwd: "",
+    }), env).status).toBe(2);
+  });
+
+  it("the run report, the rest of the cairn home, and reads pass", () => {
+    const { p, home, cairnHome, env } = fixture();
+    for (const file of [
+      join(cairnHome, "runs", "r1-report.md"),
+      join(home, ".cairn", "runs", "proj-0123456789abcdef-r1-report.md"),
+      join(home, ".cairn", "handoff", "proj-0123456789abcdef.json"),
+      join(cairnHome, "banner", "proj.md"),
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, filePayload(file), env).status, file).toBe(0);
+    }
+    for (const c of [
+      "echo x > ~/@cairn/runs/r1-report.md",
+      "rm ~/@cairn/runs/proj-0123456789abcdef-r1-report.md",
+      "sed -i '' 's/a/b/' ~/@cairn/runs/*.md",
+      "cat ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "ls ~/@cairn/ship-gate && cat $CAIRN_HOME/ship-gate/*.json",
+      "mkdir -p ~/@cairn/runs",
+      "rm -rf ~/@cairn/handoff",
+      "find ~/@cairn -name '*-report.md' -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(0);
+    }
+  });
+
+  it("refuses shell writes, with ~, $HOME, ${HOME} and $CAIRN_HOME spelled out", () => {
+    const { p, cairnHome, env } = fixture();
+    for (const c of [
+      `echo {} > ${join(cairnHome, "ship-gate", "x.json")}`,
+      "echo {} > ~/@cairn/ship-gate/x.json",
+      "echo {} > $HOME/@cairn/runs/a.json",
+      "echo {} > ${HOME}/@cairn/runs/a.json",
+      "echo {} > $CAIRN_HOME/runs/a.json",
+      "cp /tmp/forged.json ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "cp /tmp/forged.json ~/@cairn/runs/",
+      "tar -C ~/@cairn/ship-gate -xf stamp.tar",
+      "cd ~/@cairn/runs && echo {} > x.json",
+      "cd ~/@cairn && echo {} > ship-gate/x.json",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("removing the stamp or manifests, their folder, or a folder holding them is refused", () => {
+    const { p, cairnHome, env } = fixture();
+    for (const c of [
+      "rm ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "rm -rf ~/@cairn/runs",
+      "rm -rf ~/@cairn/ship-gate",
+      "rm -rf ~/@cairn",
+      `rm -rf ${cairnHome}`,
+      "mv ~/@cairn ~/@cairn-old",
+      "find ~/@cairn -name '*.json' -delete",
+      "find ~/@cairn/ship-gate -name nothing-matches -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("a wildcard that can expand to the stamp or a manifest is refused", () => {
+    const { p, env } = fixture();
+    for (const c of [
+      "sed -i '' 's/running/stopped/' ~/@cairn/runs/*",
+      "rm ~/@cairn/runs/proj*",
+      "rm ~/@cairn/runs/*.json",
+      "rm -rf ~/@cairn/*",
+      "rm -rf ~/.c*",
+      "echo {} > ~/@cairn/ship-gate/*",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("with no CAIRN_HOME set, ~/@cairn alone is protected", () => {
+    const { p, home } = fixture();
+    const env = { HOME: home };
+    const without = (payload: string) => {
+      const r = spawnSync(process.execPath, [HARNESSGUARD], {
+        cwd: p,
+        env: (() => {
+          const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, ...env };
+          delete e.CAIRN_HOME;
+          return e;
+        })(),
+        input: payload,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      return r.status;
+    };
+    expect(without(bashPayload("echo {} > ~/@cairn/runs/x.json"))).toBe(2);
+    expect(without(filePayload(join(home, ".cairn", "ship-gate", "x.json")))).toBe(2);
+    expect(without(bashPayload("echo x > ~/@cairn/runs/x-report.md"))).toBe(0);
+  });
+});
+
+// #267: the guard protected the project's own hooks/ but not the plugin
+// copy that actually runs -- the plugin root Claude Code hands its hooks
+// (under ~/.claude/plugins/cache/ for an install), the plugin registry
+// files, and the project's .claude/hooks/ and .claude/agents/.
+describe("harness guard protects the plugin copy that runs (#267)", () => {
+  const filePayload = (filePath: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: filePath }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  /** Exit status and stderr with CLAUDE_PLUGIN_ROOT as given -- or unset, for the script's own location. */
+  function run(projectDir: string, payload: string, env: Record<string, string | undefined> = {}) {
+    const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: projectDir, ...env };
+    for (const k of Object.keys(e)) if (e[k] === undefined || k === "CAIRN_HARNESS_EDIT") delete e[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env: e, input: payload, encoding: "utf8", timeout: 5000,
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** A fake installed plugin root outside the project, holding hooks like the real one. */
+  function pluginRoot(): string {
+    const root = freshDir("cairn-hooks-pluginroot-");
+    mkdirSync(join(root, "hooks", "scripts"), { recursive: true });
+    writeFileSync(join(root, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(root, "hooks", "scripts", "pretooluse-runguard.mjs"), "");
+    return root;
+  }
+
+  it("refuses writes into the live plugin root when it lies outside the project", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const root = pluginRoot();
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const file of ["hooks/hooks.json", "hooks/scripts/pretooluse-runguard.mjs", "server/dist/index.js"]) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = run(p, filePayload(join(root, file), tool), env);
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, file).toContain("the installed plugin these hooks run from");
+      }
+    }
+    for (const c of [
+      `echo {} > ${join(root, "hooks", "hooks.json")}`,
+      `cd ${root} && echo {} > hooks/hooks.json`,
+      `sed -i '' 's/a/b/' ${join(root, "hooks", "*.json")}`,
+      `rm -rf ${root}`,
+      `find ${root} -name '*.mjs' -delete`,
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("reads of the plugin root, and a plain npm rebuild inside it, pass", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const root = pluginRoot();
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const c of [
+      `cat ${join(root, "hooks", "hooks.json")}`,
+      `grep -rn matcher ${join(root, "hooks")}`,
+      `cd ${root} && npm rebuild`,
+      `npm rebuild --prefix ${root}`,
+      `cp ${join(root, "hooks", "hooks.json")} /tmp/hooks-review-copy.json`,
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(0);
+    }
+  });
+
+  it("with no CLAUDE_PLUGIN_ROOT, the checkout running the script is the plugin root", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const checkout = resolve(SCRIPTS, "..", "..");
+    expect(run(p, filePayload(join(checkout, "hooks", "hooks.json")), { CLAUDE_PLUGIN_ROOT: undefined }).status)
+      .toBe(2);
+    expect(run(p, filePayload(join(checkout, "README.md")), { CLAUDE_PLUGIN_ROOT: undefined }).status).toBe(2);
+    // a different checkout is somebody else's business
+    expect(run(p, filePayload(join(pluginRoot(), "hooks", "hooks.json")), { CLAUDE_PLUGIN_ROOT: undefined }).status)
+      .toBe(0);
+  });
+
+  it("a dev install whose plugin root is the project keeps the project rules", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const env = { CLAUDE_PLUGIN_ROOT: p };
+    expect(run(p, filePayload(join(p, "hooks", "hooks.json")), env).status).toBe(2);
+    expect(run(p, filePayload(join(p, "README.md")), env).status).toBe(0);
+    expect(run(p, filePayload(join(p, "server", "src", "index.ts")), env).status).toBe(0);
+  });
+
+  it("a project inside the plugin root (a worktree) stays ordinary work; the rest of the root does not", () => {
+    const root = pluginRoot();
+    const wt = join(root, ".claude", "worktrees", "wt");
+    mkdirSync(join(wt, "build"), { recursive: true });
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const file of ["src/a.ts", "README.md"]) {
+      expect(run(wt, filePayload(join(wt, file)), env).status, file).toBe(0);
+    }
+    for (const c of ["rm -rf build/*", "find . -name '*.tmp' -delete", "echo x > notes.txt"]) {
+      expect(run(wt, bashPayload(c), env).status, c).toBe(0);
+    }
+    // the worktree's own hooks/ is still its project's hook directory
+    expect(run(wt, filePayload(join(wt, "hooks", "hooks.json")), env).status).toBe(2);
+    expect(run(wt, filePayload(join(root, "hooks", "hooks.json")), env).status).toBe(2);
+    for (const c of ["echo x > ../../../hooks/hooks.json", "rm -rf ../other-wt", `rm -rf ${root}`]) {
+      expect(run(wt, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("refuses writes to ~/.claude/plugins: the registry files, the cache, the marketplaces", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const home = freshDir("cairn-hooks-plugin-home-");
+    const env = { HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot() };
+    for (const file of [
+      join(home, ".claude", "plugins", "installed_plugins.json"),
+      join(home, ".claude", "plugins", "known_marketplaces.json"),
+      join(home, ".claude", "plugins", "cache", "mkt", "cairn", "1.0.0", "hooks", "hooks.json"),
+      join(home, ".claude", "plugins", "marketplaces", "mkt", ".claude-plugin", "marketplace.json"),
+    ]) {
+      const r = run(p, filePayload(file), env);
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain("installed plugins and their registry");
+    }
+    for (const c of [
+      "echo {} > ~/.claude/plugins/installed_plugins.json",
+      "rm -rf ~/.claude/plugins",
+      "rm -rf ~/.claude/plugins/cache",
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(2);
+    }
+    expect(run(p, bashPayload("cat ~/.claude/plugins/installed_plugins.json"), env).status).toBe(0);
+  });
+
+  it("refuses writes to the project's .claude/hooks/ and .claude/agents/", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    for (const [file, phrase] of [
+      [".claude/hooks/x.sh", "Claude hooks"],
+      [".claude/agents/a.md", "agent definitions"],
+      ["packages/web/.claude/agents/a.md", "agent definitions"],
+    ]) {
+      const r = run(p, filePayload(join(p, file)));
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain(phrase);
+    }
+    for (const c of [
+      "echo x > .claude/hooks/x.sh",
+      "rm -rf .claude/agents",
+      "cp a.md .claude/agents/",
+      "rm .claude/*/a.md",
+      "find .claude/hooks -name nothing-matches -delete",
+    ]) {
+      expect(run(p, bashPayload(c)).status, c).toBe(2);
+    }
+    for (const c of ["cat .claude/agents/a.md", "ls .claude/hooks"]) {
+      expect(run(p, bashPayload(c)).status, c).toBe(0);
+    }
+    // the rest of .claude/ is ordinary work
+    expect(run(p, filePayload(join(p, ".claude", "skills", "x", "SKILL.md"))).status).toBe(0);
+  });
+});
+
+// #269: Cursor runs the guards from .cursor/hooks.json and the scripts
+// installed under .cursor/hooks/, so those are the hook config there.
+describe("harness guard protects Cursor's hook config (#269)", () => {
+  const filePayload = (filePath: string) =>
+    JSON.stringify({ tool_name: "Write", tool_input: { file_path: filePath }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  it("refuses writes to .cursor/hooks.json and anything under .cursor/hooks/", () => {
+    const p = freshDir("cairn-hooks-cursor-");
+    for (const file of [".cursor/hooks.json", ".cursor/hooks/cairn/cursor-adapter.mjs",
+      ".cursor/hooks/cairn/pretooluse-harnessguard.mjs"]) {
+      const r = runHookRaw(HARNESSGUARD, p, filePayload(join(p, file)));
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain("Cursor's hooks");
+    }
+    for (const c of [
+      "echo {} > .cursor/hooks.json",
+      "rm -rf .cursor/hooks",
+      "rm -rf .cursor",
+      "cp /tmp/evil.json .cursor/",
+      "rsync -a /tmp/cfg/ .cursor/",
+      "sed -i '' 's/a/b/' .cursor/*.json",
+      "find .cursor/hooks -name nothing-matches -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c)).status, c).toBe(2);
+    }
+  });
+
+  it("the rest of .cursor/ and reads pass", () => {
+    const p = freshDir("cairn-hooks-cursor-");
+    for (const file of [".cursor/rules/style.mdc", ".cursor/mcp.json", "docs/.cursor-notes.md"]) {
+      expect(runHookRaw(HARNESSGUARD, p, filePayload(join(p, file))).status, file).toBe(0);
+    }
+    for (const c of ["cat .cursor/hooks.json", "mkdir -p .cursor/rules", "echo x > .cursor/rules/a.mdc"]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c)).status, c).toBe(0);
+    }
   });
 });
 

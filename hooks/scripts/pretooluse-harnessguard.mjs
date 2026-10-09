@@ -3,21 +3,27 @@
 /**
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
- *   server config, the settings cascade, and the plugin manifest. An agent
- *   that can rewrite its own hooks can switch off every other control in a
- *   single edit, so this is the backstop the rule-to-control check points
- *   at. Exit 2 blocks the tool call; ANY internal error exits 0 -- never
- *   block work because the guard itself broke.
+ *   server config, the settings cascade, the plugin manifest, .claude/hooks
+ *   and .claude/agents (and Cursor's .cursor/hooks.json and hooks/, #269),
+ *   the plugin copy that runs (#267: its root when outside the project,
+ *   and ~/.claude/plugins with its registry), and the ship-gate stamp and
+ *   run manifests the run guard trusts (#263: under CAIRN_HOME and
+ *   ~/.cairn; the run report stays writable, and the server's own writes
+ *   never pass a hook). An agent that can rewrite its own hooks can switch
+ *   off every other control in one edit, so this is the backstop the
+ *   rule-to-control check points at. Exit 2 blocks; ANY internal error
+ *   exits 0. Residual (#263): run_manifest set_status running->stopped is
+ *   a legal server call and lifts the mid-run push block.
  *
  *   Threat model, stated plainly so nobody over-trusts it: the realistic
- *   attack is INDIRECT -- instructions embedded in text the agent reads
- *   (an issue body, a review comment, a fetched page) steering it into a
- *   harness edit it would not otherwise make. This guard turns that from a
- *   silent success into a refusal the human sees. It is NOT a sandbox: the
- *   CAIRN_HARNESS_EDIT=1 escape exists for the human, and text that can
- *   steer the agent can also ask for the prefix -- which exempts only the
- *   one command it prefixes (#265). Visibility is the control; isolation is
- *   the operating system's job. Bash is read the way a shell would read it
+ *   attack is INDIRECT -- text the agent reads (an issue body, a review
+ *   comment, a fetched page) steering it into a harness edit it would not
+ *   otherwise make. This guard turns that from a silent success into a
+ *   refusal the human sees. It is NOT a sandbox: CAIRN_HARNESS_EDIT=1 is
+ *   the owner's escape, and text that can steer the agent can still ask
+ *   for the prefix (it exempts only its own command, #265) -- refusals just
+ *   never teach it (#286). Visibility is the control; isolation is the
+ *   operating system's job. Bash is read the way a shell would read it
  *   (shell-words.mjs, shared with the run guard, #270) to find what it
  *   WRITES: redirects, and the operands of commands that change files (rm,
  *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
@@ -38,6 +44,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
 } from "./shell-words.mjs";
@@ -54,11 +61,26 @@ const PROTECTED = [
   { re: /^\.mcp\.json$/, what: "the MCP server config" },
   { re: /^(?:.*\/)?\.claude\/settings(?:\.[\w-]+)?\.json$/, what: "a settings file" },
   { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/, what: "the plugin manifest" },
+  { re: /^(?:.*\/)?\.claude\/hooks\//, what: "the project's Claude hooks" },
+  { re: /^(?:.*\/)?\.claude\/agents\//, what: "the project's agent definitions" },
+  { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/, what: "Cursor's hooks" },
 ];
 
-// Names a wildcard is tested against inside .claude/ and .claude-plugin/.
+// Folders whose whole contents are protected, as [parent, folder, what]
+// (#267; Cursor's, #269).
+const SUB_TREES = [
+  [".claude", "hooks", "the project's Claude hooks"],
+  [".claude", "agents", "the project's agent definitions"],
+  [".cursor", "hooks", "Cursor's hooks"],
+];
+
+// Folders whose whole contents are protected: a find started in one is a hit whatever it tests.
+const TREES = new Set(["the hook directory", ...SUB_TREES.map(([, , what]) => what)]);
+
+// Names a wildcard is tested against inside .claude/, .claude-plugin/ and .cursor/.
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
 const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
+const CURSOR_NAMES = ["hooks.json"];
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -197,12 +219,23 @@ const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude",
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--config-env", "--super-prefix"]);
 
+// The most entries listed under one protected folder outside the project
+// before the rest counts as unlisted -- and so as reachable (see walkHit).
+const LIST_CAP = 500;
+
 // Variables -- the folders every rule is measured against, set per payload.
 // Each holds the path as given and its real path, when a symlink differs.
 let ROOTS = [];
 let HOMES = [];
-// The protected paths find could walk to, listed once per run.
+// Protected places outside the project (#263, #267), each { dir, what,
+// tree, carve }: `tree` protects everything under dir, else only the
+// *.json files directly in it (the way the run guard reads runs/); `carve`
+// lists project folders inside dir that stay ordinary work.
+let ZONES = [];
+// The protected paths find could walk to, listed once per run, and the
+// zones too big to list in full.
 let ENTRIES = null;
+let UNLISTED = [];
 
 // Paths
 
@@ -260,6 +293,54 @@ function holds(abs, dir) {
   return abs === dir || dir.startsWith(abs.endsWith(sep) ? abs : abs + sep);
 }
 
+/** ~, $HOME and ${HOME} at the front of a path, spelled out the way the shell does (#258, #263). */
+function expandHome(raw) {
+  return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
+}
+
+/**
+ * The protected places outside the project (#263): the ship-gate stamp
+ * and the run manifests the run guard trusts, in every cairn home they
+ * can live in -- CAIRN_HOME (the run guard reads it) and ~/.cairn (the
+ * server writes it). The run report beside the manifests stays writable.
+ *
+ * And the plugin copy that actually runs (#267): everything under
+ * ~/.claude/plugins (the registry files, the cache each install runs
+ * from, the marketplaces), and the live plugin root -- CLAUDE_PLUGIN_ROOT,
+ * which Claude Code hands its hooks, else the folder two up from this
+ * script -- when it lies outside the project. A dev install whose root IS
+ * the project is covered by PROTECTED; a project inside the plugin root
+ * (a worktree) is carved out of it.
+ */
+function outsideZones() {
+  const zones = [];
+  const add = (dir, what, tree, carve = []) => {
+    for (const d of spellings(dir)) zones.push({ dir: d, what, tree, carve });
+  };
+  for (const base of [process.env.CAIRN_HOME, ...HOMES.map((h) => join(h, ".cairn"))]) {
+    if (!base) continue;
+    add(join(base, "ship-gate"), "the ship-gate stamp", true);
+    add(join(base, "runs"), "the run manifests", false);
+  }
+  for (const home of HOMES) add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL("../..", import.meta.url));
+  const plugin = spellings(pluginRoot);
+  if (!plugin.some((r) => ROOTS.some((root) => holds(root, r)))) {
+    const carve = ROOTS.filter((root) => plugin.some((r) => holds(r, root)));
+    add(pluginRoot, "the installed plugin these hooks run from", true, carve);
+  }
+  return zones;
+}
+
+/** The protected place outside the project a path lies inside, or null. */
+function zoneOf(abs) {
+  for (const z of ZONES) {
+    if (abs === z.dir || !holds(z.dir, abs) || z.carve.some((c) => holds(c, abs))) continue;
+    if (z.tree || (dirname(abs) === z.dir && abs.endsWith(".json"))) return z.what;
+  }
+  return null;
+}
+
 /**
  * Text of a regular file, or null when it can't be read. Devices, FIFOs
  * and huge files are never read: `git apply /dev/zero` would hang the
@@ -282,8 +363,10 @@ function fileRule(abs) {
     if (abs === join(home, ".claude", "settings.json") ||
       abs === join(home, ".claude", "settings.local.json")) return "your machine-wide Claude settings";
   }
+  const zone = zoneOf(abs);
+  if (zone) return zone;
   const rel = projectRelative(abs);
-  if (rel === null) return null; // outside the project -- not this guard's business
+  if (rel === null) return null; // elsewhere outside the project -- not this guard's business
   for (const p of PROTECTED) if (p.re.test(rel)) return p.what;
   return null;
 }
@@ -293,12 +376,16 @@ function dirRule(abs) {
   for (const home of HOMES) {
     if (abs === join(home, ".claude")) return "your machine-wide Claude settings";
   }
+  const zone = ZONES.find((z) => z.dir === abs);
+  if (zone) return zone.what;
   const rel = projectRelative(abs);
   if (!rel) return null;
   if (rel === "hooks") return "the hook directory";
+  for (const [up, sub, what] of SUB_TREES) if (rel === `${up}/${sub}` || rel.endsWith(`/${up}/${sub}`)) return what;
   const name = rel.split("/").pop();
   if (name === ".claude") return "a Claude settings directory";
   if (name === ".claude-plugin") return "the plugin manifest";
+  if (name === ".cursor") return "Cursor's settings directory";
   return null;
 }
 
@@ -309,6 +396,35 @@ function holderRule(abs) {
   }
   if (HOMES.some((home) => holds(abs, home))) {
     return "the folder holding your machine-wide Claude settings";
+  }
+  const zone = ZONES.find((z) => holds(abs, z.dir));
+  return zone ? `the folder holding ${zone.what}` : null;
+}
+
+/** Could this name, once the shell expands it in `dir`, be a *.json file there? */
+function couldManifest(comp, dir) {
+  if (STANDINS.includes(comp) || comp.endsWith(".json")) return true;
+  let names = [];
+  try { names = readdirSync(dir); } catch { /* nothing there to expand to */ }
+  return names.some((n) => n.endsWith(".json") && could(comp, n));
+}
+
+/** The protected place outside the project a wildcard path could reach (#263). */
+function zoneGlob(p, remove) {
+  for (const z of ZONES) {
+    const d = z.dir.split(sep).filter(Boolean);
+    const n = d.length;
+    if (!n || p.length < n || !d.slice(0, -1).every((x, j) => could(p[j], x))) continue;
+    // a path spelled plainly into a carved-out project folder is that project's business
+    const carved = z.carve.some((c) => {
+      const cc = c.split(sep).filter(Boolean);
+      return p.length >= cc.length && cc.every((x, j) => p[j] === x);
+    });
+    if (carved) continue;
+    if (p.length === n) {
+      if (could(p[n - 1], d[n - 1], remove)) return z.what;
+    } else if (could(p[n - 1], d[n - 1]) &&
+      (z.tree || (p.length === n + 1 && couldManifest(p[n], z.dir)))) return z.what;
   }
   return null;
 }
@@ -351,11 +467,17 @@ function globRule(abs, mode) {
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
     for (let i = 0; i < c.length; i++) {
       for (const [dir, names, what] of [[".claude", SETTINGS_NAMES, "a settings file"],
-        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"]]) {
+        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"]]) {
         // the folder itself, or a settings / manifest file directly inside it
         if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
         const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
         if (named && could(c[i], dir)) return what;
+      }
+      // .claude/hooks/, .claude/agents/ and .cursor/hooks/, the folder or anything in it (#267, #269)
+      for (const [up, sub, what] of SUB_TREES) {
+        if (i + 1 < c.length && could(c[i], up) && could(c[i + 1], sub, i + 2 < c.length || remove)) {
+          return what;
+        }
       }
     }
   }
@@ -372,8 +494,10 @@ function globRule(abs, mode) {
       return "your machine-wide Claude settings";
     }
   }
+  const zone = zoneGlob(p, remove);
+  if (zone) return zone;
   if (remove) {
-    for (const dir of [...ROOTS, ...HOMES]) {
+    for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
       const d = dir.split(sep).filter(Boolean);
       if (p.length <= d.length && p.every((x, j) => could(x, d[j]))) return holderRule(dir);
     }
@@ -596,15 +720,48 @@ function testSelects(t, entry, shown) {
   }
 }
 
-/** Every protected path find could reach: the fixed surfaces, and what hooks/ holds on disk. */
+/** Everything under `dir` but `skip`, nearest first, up to LIST_CAP entries; true when some was left unlisted. */
+function listTree(dir, out, skip = []) {
+  const queue = [dir];
+  let n = 0;
+  while (queue.length) {
+    const d = queue.shift();
+    let found = [];
+    try { found = readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of found) {
+      const p = join(d, e.name);
+      if (skip.some((s) => holds(s, p))) continue;
+      if (++n > LIST_CAP) return true;
+      out.push(p);
+      if (e.isDirectory()) queue.push(p);
+    }
+  }
+  return false;
+}
+
+/** The folder a find start names whose whole contents are protected, or null. */
+function treeRule(abs) {
+  const zone = ZONES.find((z) => z.tree && z.dir === abs);
+  if (zone) return zone.what;
+  const what = dirRule(abs);
+  return TREES.has(what) ? what : null;
+}
+
+/**
+ * Every protected path find could reach: the fixed surfaces, what hooks/
+ * holds on disk, and the protected places outside the project (#263) --
+ * a zone too big to list goes in UNLISTED.
+ */
 function protectedEntries() {
   if (ENTRIES) return ENTRIES;
   ENTRIES = [];
   for (const root of ROOTS) {
+    const trees = SUB_TREES.map(([up, sub]) => join(root, up, sub));
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
-      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)),
-      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)));
-    const stack = [join(root, "hooks")];
+      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)), ...trees,
+      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)),
+      join(root, ".cursor"), ...CURSOR_NAMES.map((n) => join(root, ".cursor", n)));
+    const stack = [join(root, "hooks"), ...trees];
     while (stack.length && ENTRIES.length < 2000) {
       const d = stack.pop();
       let found = [];
@@ -618,22 +775,36 @@ function protectedEntries() {
   for (const home of HOMES) {
     ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
   }
+  for (const z of ZONES) {
+    if (!existsSync(z.dir)) continue;
+    ENTRIES.push(z.dir);
+    if (z.tree) {
+      if (listTree(z.dir, ENTRIES, z.carve)) UNLISTED.push(z);
+      continue;
+    }
+    let names = [];
+    try { names = readdirSync(z.dir); } catch { /* not a folder */ }
+    for (const n of names) if (n.endsWith(".json")) ENTRIES.push(join(z.dir, n));
+  }
   return ENTRIES;
 }
 
 /**
  * Would find, walking from `dir`, reach a protected path its tests select?
- * A start inside hooks/ (or a protected file) is hit whatever the tests
- * say; a start holding one is hit when a test can select it, or when
- * nothing narrows the walk (no name test, or a negated one).
+ * A start inside hooks/ (or a protected file or folder tree) is hit
+ * whatever the tests say; a start holding one is hit when a test can
+ * select it, when nothing narrows the walk (no name test, or a negated
+ * one), or when it holds a zone too big to list.
  */
 function walkHit(spec, dir) {
   for (const s of spec.starts) {
-    const start = resolveIn(dir, s);
-    const hooks = dirRule(start) === "the hook directory" ? "the hook directory" : null;
-    const inside = fileRule(start) ?? hooks;
+    const start = resolveIn(dir, expandHome(s)); // `find ~/.cairn` walks the home folder (#263)
+    const inside = fileRule(start) ?? treeRule(start);
     if (inside) return { path: s, what: inside };
-    for (const entry of protectedEntries()) {
+    const entries = protectedEntries();
+    const unlisted = UNLISTED.find((z) => holds(start, z.dir));
+    if (unlisted) return { path: s, what: unlisted.what };
+    for (const entry of entries) {
       if (!holds(start, entry)) continue;
       const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
       if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
@@ -939,10 +1110,10 @@ function writeTargets(seg, ctx) {
   const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
-    // the shell spells out $PWD, $HOME and ~ before the command sees them (#258)
-    const r = (mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir)
-      .replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
+    // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command sees them (#258, #263)
+    const r = expandHome((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir))
+      .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
     out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
   };
@@ -1232,7 +1403,7 @@ function judgeTarget(t) {
   }
   if (lead === WALK) {
     if (!t.walk) return null;
-    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, s)))) return lost;
+    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandHome(s))))) return lost;
     return walkHit(t.walk.spec, t.walk.dir);
   }
   if (isLost(t.abs)) return lost;
@@ -1252,6 +1423,7 @@ try {
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   ROOTS = spellings(projectDir);
   HOMES = spellings(homedir());
+  ZONES = outsideZones();
   // Relative paths resolve where the tool runs -- the payload's cwd -- not
   // at the project root (#258): the shell and the file tools agree.
   const cwd = payload?.cwd ? resolveIn(ROOTS[0], payload.cwd) : ROOTS[0];
@@ -1271,7 +1443,7 @@ try {
     }
   } else {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-    const what = p ? judge(resolveIn(cwd, p), "write", true) : null;
+    const what = p ? judge(resolveIn(cwd, expandHome(String(p))), "write", true) : null;
     if (what) hit = { path: p, what };
   }
 
@@ -1293,9 +1465,12 @@ try {
     );
     console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
   }
-  console.error("  if you asked for this, set CAIRN_HARNESS_EDIT=1 for the session (or prefix a");
-  console.error("  shell command with it) and run it again. If you did not ask for this, something");
-  console.error("  the agent read did — check where the instruction came from before allowing it.");
+  // #286, like the run guard's #262: name the owner's ways to approve, never
+  // a paste-ready prefix -- the inline override is still honoured, just not taught
+  console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
+  console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  console.error("  If you did not ask for this, something the agent read did — check where the");
+  console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
   process.exit(2);
 } catch {
   process.exit(0); // guard must never block work because IT broke

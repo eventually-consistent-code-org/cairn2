@@ -1179,13 +1179,30 @@ same spelling as Claude Code.
 Cursor additionally gets the hooks port: `cairn-setup cursor` installs a
 single adapter (`.cursor/hooks/cairn/cursor-adapter.mjs`) plus the cairn
 hook scripts, and merges entries into `.cursor/hooks.json` — sessionStart
-resumes continuity (banner + handoff as `additional_context`),
-beforeShellExecution runs the leak guard (deny with the offending lines),
+resumes continuity (banner + handoff as `additional_context`), preToolUse
+runs the run guard and the harness guard (Shell through both, file writes
+through the harness guard; the entry fails closed), beforeShellExecution
+runs the leak guard (deny with the offending lines),
 afterShellExecution/afterFileEdit capture breadcrumbs + observations, and
 preCompact refreshes the handoff. OpenCode gets an `opencode.json` `mcp`
 entry plus `/cairn-plan|work|status|verify|ship` command files in
 `.opencode/commands/`; Zed gets a `context_servers.cairn` entry in
 `.zed/settings.json` and reads `AGENTS.md` natively.
+
+Which guards actually run, per harness — the leak guard (internal refs in
+a commit), the run guard (destructive git, the ship gate, pushes mid-run)
+and the harness guard (hooks, settings, the installed plugin, the
+ship-gate stamp and run manifests):
+
+| Harness | Leak guard | Run guard | Harness guard |
+|---|---|---|---|
+| Claude Code | yes | yes | yes |
+| Cursor | yes | yes | yes — file-tool path field assumed; an unreadable call is denied |
+| Codex, Gemini CLI, Copilot CLI, OpenCode, Grok Build, Zed | no | no | no |
+
+Where a guard doesn't run, its rule is prose in `AGENTS.md` and nothing
+stops the agent. Codex, Gemini, Copilot and OpenCode all have blocking
+pre-tool hooks the guards could be wired into; that is follow-up work.
 
 What degrades, honestly: no slash-command ergonomics in Grok Build, Cursor,
 or Zed (verbs run by name), and the cost tracker stays Claude Code-only
