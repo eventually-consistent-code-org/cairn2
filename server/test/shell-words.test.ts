@@ -48,6 +48,14 @@ describe("shellSegments", () => {
     expect(words("cmd > out", {})).toEqual([["cmd", ">", "out"]]);
   });
 
+  it("redirects: `< file` and here-string text are kept apart from the words (#265)", () => {
+    const [seg] = shellSegments("patch -p1 < fix.diff <<< 'rm x'", { redirects: true }) as Array<
+      Seg & { inputs: string[]; herestrings: string[] }>;
+    expect(seg.words).toEqual(["patch", "-p1"]);
+    expect(seg.inputs).toEqual(["fix.diff"]);
+    expect(seg.herestrings).toEqual(["rm x"]);
+  });
+
   it("redirects: a heredoc body is data, kept on the segment that opened it", () => {
     const segs = shellSegments("cat <<'EOF' > f\nrm x\nEOF\nls", { redirects: true }) as Seg[];
     expect(segs.map((s) => s.words)).toEqual([["cat"], ["ls"]]);

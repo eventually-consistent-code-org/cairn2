@@ -97,17 +97,19 @@ function closeTick(line, i) {
 
 /**
  * Splits a shell command line into simple-command segments, each
- * { words, redirects, heredocs: [{ delim, body }] }. Single and double
- * quotes and backslashes are honoured, so quoted text stays inside its
- * word: `git commit -m "explain git reset --hard"` is one git commit with a
- * message, never a reset, and a `>` in a quoted pattern is text. Segments
- * break at ; & | and newlines, plus whatever `read` turns on:
+ * { words, redirects, heredocs: [{ delim, body }], herestrings, inputs }.
+ * Single and double quotes and backslashes are honoured, so quoted text
+ * stays inside its word: `git commit -m "explain git reset --hard"` is one
+ * git commit with a message, never a reset, and a `>` in a quoted pattern
+ * is text. Segments break at ; & | and newlines, plus whatever `read`
+ * turns on:
  *
  *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
- *                  a descriptor, not a file); `<` and `<<<` operands are input
- *                  and dropped; a `<<` heredoc body is data -- skipped through
- *                  its delimiter line and kept on its segment. Off: those
- *                  characters are word text and body lines are commands.
+ *                  a descriptor, not a file); `<` operands go to `inputs` and
+ *                  `<<<` text to `herestrings` -- read, never words; a `<<`
+ *                  heredoc body is data -- skipped through its delimiter line
+ *                  and kept on its segment. Off: those characters are word
+ *                  text and body lines are commands.
  *   subshells      `(` `)` and an unquoted backtick end a command.
  *   comments       an unquoted `#` at a word start comments out its line.
  *   substitutions  `$(...)` and backticks inside double quotes are run by
@@ -128,8 +130,11 @@ export function shellSegments(command, read = {}) {
   let words = [];
   let redirects = [];
   let heredocs = [];
+  let herestrings = [];
+  let inputs = [];
   let cur = null;
-  let next = "word"; // what the next completed word is: word | redirect | skip | heredoc
+  // what the next completed word is: word | redirect | skip | heredoc | herestring | input
+  let next = "word";
   let strip = false; // `<<-` strips leading tabs before matching the delimiter
 
   const pushWord = () => {
@@ -139,16 +144,20 @@ export function shellSegments(command, read = {}) {
       const doc = { delim: cur, body: "" };
       heredocs.push(doc);
       pending.push({ doc, strip });
-    } else if (next === "word") words.push(cur);
+    } else if (next === "herestring") herestrings.push(cur);
+    else if (next === "input") inputs.push(cur);
+    else if (next === "word") words.push(cur);
     next = "word";
     cur = null;
   };
   const endSeg = () => {
     pushWord();
-    if (words.length || redirects.length) segs.push({ words, redirects, heredocs });
+    if (words.length || redirects.length) segs.push({ words, redirects, heredocs, herestrings, inputs });
     words = [];
     redirects = [];
     heredocs = [];
+    herestrings = [];
+    inputs = [];
   };
   const blank = read.anyWhitespace ? (c) => /\s/.test(c) : (c) => c === " " || c === "\t";
   const breaks = read.subshells ? ";&|()`" : ";&|";
@@ -255,14 +264,14 @@ export function shellSegments(command, read = {}) {
 
     if (read.redirects && c === "<") {
       pushWord();
-      if (command.startsWith("<<<", i)) { next = "skip"; i += 3; continue; }
+      if (command.startsWith("<<<", i)) { next = "herestring"; i += 3; continue; }
       if (n === "<") {
         strip = command[i + 2] === "-";
         next = "heredoc";
         i += strip ? 3 : 2;
         continue;
       }
-      next = "skip"; // `< file` is read
+      next = "input"; // `< file` is read
       i++;
       continue;
     }
