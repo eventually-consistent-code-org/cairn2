@@ -80,6 +80,57 @@ describe("shellSegments: operators (#258)", () => {
   });
 });
 
+describe("shellSegments: reserved words and grouping (#285)", () => {
+  /** The command words found anywhere in the line, after unwrap. */
+  const commands = (line: string): string[][] =>
+    (shellSegments(line, { subshells: true }) as Seg[]).map((s) => unwrap(s.words).words);
+
+  it("a keyword, a group or a loop header never stands in for the command word", () => {
+    for (const line of [
+      "if git reset --hard; then :; fi",
+      "{ git reset --hard; }",
+      "! git reset --hard",
+      "while git reset --hard; do :; done",
+      "until git reset --hard; do :; done",
+      "if true; then git reset --hard; fi",
+      "if a; then b; elif git reset --hard; then :; else c; fi",
+      "if a; then b; else git reset --hard; fi",
+      "for i in 1; do git reset --hard; done",
+      "for i do git reset --hard; done",
+      "select x in a b; do git reset --hard; done",
+      "case x in x) git reset --hard;; esac",
+      "true && { git reset --hard; }",
+      "function f { git reset --hard; }; f",
+      "function f() { git reset --hard; }",
+      "f() { git reset --hard; }",
+      "time { git reset --hard; }",
+      "time -p ! git reset --hard",
+      "! time git reset --hard",
+      "coproc git reset --hard",
+      "coproc worker { git reset --hard; }",
+    ]) {
+      expect(commands(line), line).toContainEqual(["git", "reset", "--hard"]);
+    }
+  });
+
+  it("the plain neighbours read the same command, and a loop header is never one", () => {
+    expect(commands("if git status; then :; fi")).toEqual([["git", "status"], [":"], []]);
+    expect(commands("{ git status; }")).toEqual([["git", "status"], []]);
+    expect(commands('for f in *; do cat "$f"; done')).toEqual([[], ["cat", "$f"], []]);
+    // the word list is data, even when a word in it names a command
+    expect(commands("for x in rm -rf hooks; do echo $x; done")).toEqual([[], ["echo", "$x"], []]);
+    // only command position counts: an argument named `if` is an argument
+    expect(commands("echo if then { git reset --hard")).toEqual([["echo", "if", "then", "{", "git", "reset", "--hard"]]);
+  });
+
+  it("the words it skips are kept on the segment as `reserved`", () => {
+    const segs = shellSegments("if cd x; then rm y; fi", { subshells: true }) as Array<Seg & { reserved: string[] }>;
+    expect(segs.map((s) => [s.reserved, s.words])).toEqual([
+      [["if"], ["cd", "x"]], [["then"], ["rm", "y"]], [["fi"], []],
+    ]);
+  });
+});
+
 describe("unwrap", () => {
   it("skips a wrapper's flag values and basenames the wrapper (#254, #270)", () => {
     for (const line of [
@@ -110,6 +161,26 @@ describe("unwrap", () => {
     const r = unwrap(["sudo", "-u", "root", "xargs", "-n", "1", "-I{}", "rm", "{}"]);
     expect(r.words).toEqual(["rm", "{}"]);
     expect(r.wrappers).toEqual([{ name: "sudo", args: ["-u", "root"] }, { name: "xargs", args: ["-n", "1", "-I{}"] }]);
+  });
+
+  it("an xargs flag whose value is optional never swallows the command (#285)", () => {
+    for (const args of [
+      ["--replace", "rm", "{}"],
+      ["--replace=R", "rm", "R"],
+      ["-i", "rm", "{}"],
+      ["-iP", "rm", "P"], // P is -P's letter, but here it is -i's replace string
+      ["-I", "R", "rm", "R"],
+      ["--eof", "rm", "{}"],
+      ["-e", "rm", "{}"],
+      ["--max-lines", "rm", "{}"],
+      ["-l", "rm", "{}"],
+      ["--process-slot-var", "N", "rm", "{}"],
+      ["-J", "%", "rm", "{}"], // BSD xargs, as macOS ships it
+      ["-R", "1", "-I", "R", "rm", "{}"],
+    ]) {
+      expect(unwrap(["xargs", ...args]).words[0], args.join(" ")).toBe("rm");
+    }
+    expect(unwrap(["xargs", "--replace", "echo", "{}"]).words).toEqual(["echo", "{}"]);
   });
 
   it("covers the wrappers the issue names", () => {

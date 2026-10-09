@@ -35,12 +35,20 @@ const SHELL_VALUE_OPTS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-fi
 // A NAME=value word in command position: an assignment, not the command.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+// Reserved words that open, continue or close a compound command; the
+// command word comes after them (#285).
+const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until",
+  "do", "done", "esac"]);
+
 /**
  * Prefixes that run a later word as the real command, each with the flags
  * that swallow a value (`sudo -u root`, `env -u NAME`, `nice -n 5`). A
  * wrapper's other flags are skipped as plain switches. `positional` counts
  * the bare words a wrapper takes before the command (timeout's duration).
  * Missing these flags is how `sudo -u root tee hooks/a` slipped past (#254).
+ * `opt` letters take an optional value, only ever the rest of their cluster
+ * (`-i{}`), and a long flag with an optional value takes it only after `=`
+ * (`--replace=R`) -- never the next word, which is the command (#285).
  */
 export const WRAPPERS = new Map([
   ["sudo", { short: "ugpChDRTUrt", long: ["--user", "--group", "--host", "--prompt",
@@ -49,8 +57,9 @@ export const WRAPPERS = new Map([
   ["env", { short: "uCS", long: ["--unset", "--chdir", "--split-string"] }],
   ["nice", { short: "n", long: ["--adjustment"] }],
   ["timeout", { short: "sk", long: ["--signal", "--kill-after"], positional: 1 }],
-  ["xargs", { short: "ILnPsdEa", long: ["--max-args", "--max-procs", "--max-chars",
-    "--delimiter", "--arg-file", "--eof", "--replace", "--max-lines"] }],
+  // GNU and BSD (-J -R -S) flags; -e -i -l, --eof --replace --max-lines: optional values
+  ["xargs", { short: "ILnPsdEaJRS", opt: "eil", long: ["--max-args", "--max-procs",
+    "--max-chars", "--delimiter", "--arg-file", "--process-slot-var"] }],
   ["exec", { short: "a", long: [] }],
   ["time", { short: "fo", long: ["--format", "--output"] }],
   ["command", { short: "", long: [] }],
@@ -96,15 +105,43 @@ function closeTick(line, i) {
 }
 
 /**
+ * Index of a word list's command word, past the reserved words and grouping
+ * in front of it (#285): `if` `then` `elif` `else` `while` `until` `do` `!`
+ * `{` and the closers, a `for NAME in ...` (or select) header up to its
+ * `do`, `case WORD in` (each pattern ends at its `)`, a subshell break),
+ * `function NAME`, and `coproc` with the name before its body. Before #285
+ * the first word was the command, so `if git reset --hard; then` read as a
+ * command named `if` and nothing refused it.
+ */
+function commandStart(words) {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i];
+    if (RESERVED.has(w)) i++;
+    else if (w === "for" || w === "select") {
+      i += 2; // the keyword and the loop's NAME
+      if (words[i] === "in") i = words.length; // its word list runs to the `;` or newline
+    } else if (w === "case") i += 3;
+    else if (w === "function") i += words[i + 2] === "()" ? 3 : 2;
+    else if (w === "coproc") i += words[i + 2] === "{" ? 2 : 1;
+    else break;
+  }
+  return Math.min(i, words.length);
+}
+
+/**
  * Splits a shell command line into simple-command segments, each
- * { words, redirects, heredocs: [{ delim, body }], herestrings, inputs, op }.
- * Single and double quotes and backslashes are honoured, so quoted text
- * stays inside its word: `git commit -m "explain git reset --hard"` is one
- * git commit with a message, never a reset, and a `>` in a quoted pattern
- * is text. Segments break at ; & | and newlines, plus whatever `read`
- * turns on. `op` is the operator that ended the segment (`|` `|&` `||`
- * `&&` `;` `&`, a newline, a subshell character, or null at the end), so
- * a reader can tell a pipeline from a list (#258):
+ * { words, reserved, redirects, heredocs: [{ delim, body }], herestrings,
+ * inputs, op }. Single and double quotes and backslashes are honoured, so
+ * quoted text stays inside its word: `git commit -m "explain git reset
+ * --hard"` is one git commit with a message, never a reset, and a `>` in a
+ * quoted pattern is text. Segments break at ; & | and newlines, plus
+ * whatever `read` turns on. `words` start at the command word: the
+ * reserved words and grouping in front of it (`if`, `do`, `{`, a `for`
+ * header -- see commandStart) move to `reserved`, so they never stand in
+ * for the command (#285). `op` is the operator that ended the segment (`|`
+ * `|&` `||` `&&` `;` `&`, a newline, a subshell character, or null at the
+ * end), so a reader can tell a pipeline from a list (#258):
  *
  *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
  *                  a descriptor, not a file); `<` operands go to `inputs` and
@@ -155,7 +192,9 @@ export function shellSegments(command, read = {}) {
   const endSeg = (op = null) => {
     pushWord();
     if (words.length || redirects.length) {
-      segs.push({ words, redirects, heredocs, herestrings, inputs, op });
+      const at = commandStart(words);
+      segs.push({ words: words.slice(at), reserved: words.slice(0, at), redirects, heredocs,
+        herestrings, inputs, op });
     }
     words = [];
     redirects = [];
@@ -351,8 +390,10 @@ export function unwrap(words, read = {}) {
       if (a.startsWith("-") && a.length > 1) {
         take();
         // A short cluster: the first value-taking letter eats the rest of
-        // the cluster, or the next word when it ends the cluster.
+        // the cluster, or the next word when it ends the cluster -- unless
+        // its value is optional, when the next word is never it.
         for (let k = 1; k < a.length; k++) {
+          if (spec.opt?.includes(a[k])) break;
           if (!spec.short.includes(a[k])) continue;
           const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? take() : null);
           if (val !== null && name === "env" && a[k] === "S") w = splitWords(val, read).concat(w);
@@ -364,6 +405,8 @@ export function unwrap(words, read = {}) {
       break;
     }
     while (positional-- > 0 && w.length) take();
+    // `time` is a keyword too: `time { git reset --hard; }` times the group (#285)
+    if (name === "time") w = w.slice(commandStart(w));
   }
   return { words: w, assigns, writes, wrappers };
 }

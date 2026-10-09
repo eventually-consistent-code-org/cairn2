@@ -493,3 +493,44 @@ describe("harness guard sees su, find, xargs, cwd and heredoc writes (#258)", ()
     }
   });
 });
+
+describe("harness guard reads the command after shell keywords and grouping words (#285)", () => {
+  it("a write after a shell keyword or grouping word is still a write (#285)", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["{ rm hooks/hooks.json; }", "{ cat hooks/hooks.json; }"],
+      ["if true; then rm hooks/hooks.json; fi", "if true; then cat hooks/hooks.json; fi"],
+      ["if tee hooks/hooks.json; then :; fi", "if git status; then :; fi"],
+      ["! rm hooks/hooks.json", "! cat hooks/hooks.json"],
+      ["while true; do echo x > hooks/hooks.json; done", "while true; do cat hooks/hooks.json; done"],
+      ["for f in a; do rm hooks/hooks.json; done", "for f in *; do cat \"$f\"; done"],
+      ["case x in x) rm -rf hooks;; esac", "case x in x) ls hooks;; esac"],
+      ["function f { rm hooks/hooks.json; }", "function f { cat hooks/hooks.json; }"],
+      ["time { rm hooks/hooks.json; }", "time { cat hooks/hooks.json; }"],
+      ["coproc rm hooks/hooks.json", "coproc cat hooks/hooks.json"],
+      ["echo hooks/hooks.json | xargs --replace rm {}", "xargs --replace echo {}"],
+      ["echo hooks/hooks.json | xargs -iP rm P", "echo src/a | xargs -iP rm P"],
+      ["echo hooks/hooks.json | xargs --eof rm", "echo src/a | xargs --eof rm"],
+      ["ls | xargs -J % cp % hooks/", "ls | xargs -J % cp % src/"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+    // a loop's word list is data: naming a protected path there writes nothing
+    expect(guard(p, "for f in hooks/*; do echo \"$f\"; done")).toBe(0);
+  });
+
+  it("a cd behind a keyword may never run, so it never moves a write out of a protected folder (#285)", () => {
+    const p = proj();
+    for (const c of [
+      "if false; then cd /tmp; fi; echo x > hooks/hooks.json",
+      "while false; do cd /tmp; done; echo x > hooks/hooks.json",
+      "f() { cd /tmp; }; echo x > hooks/hooks.json",
+      "{ cd /tmp; } | cat; echo x > hooks/hooks.json",
+      "coproc cd /tmp; echo x > hooks/hooks.json",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+    }
+  });
+});

@@ -616,13 +616,13 @@ function walkHit(spec, dir) {
   return null;
 }
 
-/** xargs's command line with its stdin paths in place: at the end, or where -I's string sits. */
+/** xargs's command line with its stdin paths in place: at the end, or where -I's (BSD -J's) string sits. */
 function withStdin(words, xargsArgs) {
   let rep = null;
   for (let i = 0; i < xargsArgs.length; i++) {
     const a = xargsArgs[i];
-    if (a === "-I") rep = xargsArgs[i + 1] ?? null;
-    else if (a.startsWith("-I")) rep = a.slice(2);
+    if (a === "-I" || a === "-J") rep = xargsArgs[i + 1] ?? null;
+    else if (a.startsWith("-I") || a.startsWith("-J")) rep = a.slice(2);
     else if (a === "-i" || a === "--replace") rep = "{}";
     else if (a.startsWith("--replace=")) rep = a.slice("--replace=".length);
     else if (a.startsWith("-i")) rep = a.slice(2);
@@ -988,6 +988,9 @@ function exempt(words) {
  * paths keep resolving from where the shell was.
  */
 function moveDir(seg, at) {
+  // A cd behind a keyword may never run (`if false; then cd /tmp; fi`), so
+  // it moves nothing -- as before #285, when the keyword read as the command
+  if (seg.reserved?.length) return;
   const w = unwrap(seg.words, READ).words;
   const cmd = basename(w[0] ?? "");
   if (cmd === "popd") {
