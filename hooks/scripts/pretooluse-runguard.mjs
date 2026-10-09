@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249, #250, #251, #252, #257, #270) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #264, #270) --
  *   refuses the git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks
  *   the tool call; ANY internal error exits 0 -- never block work because
  *   the guard itself broke.
  *
- *   Always, in every session: `git reset --hard` (any flag order, any -C
- *   target) and force-pushes (--force, -f / -fu, --force-with-lease,
- *   --force-if-includes, a `+refspec`) are refused. They throw away work
- *   with no undo, and no cairn verb ever needs them. The owner's escape is
+ *   Always, in every session: the git commands that throw work away with
+ *   no undo (the table in destructive(): hard reset; force, mirror and
+ *   prune pushes, or one deleting the default branch; forced or whole-tree
+ *   checkout/restore; a discarding switch; clean; stash clear; reflog
+ *   expire). Their everyday neighbours stay allowed. The owner's escape is
  *   CAIRN_ALLOW_DESTRUCTIVE_GIT=1 -- set for the session, or as the leading
  *   assignment of the one command it unlocks.
  *
@@ -29,12 +30,11 @@
  *   refused unless the run manifest grants pushAuth for its phases. No
  *   override: push authority is the owner's staging decision (ADR 0007).
  *
- *   Commands are read as shell words by shell-words.mjs, the reader this
- *   guard shares with the harness guard (#270), so every rule sees through
- *   wrappers and their flag values (sudo -u root, timeout 5, nice -n 5).
- *   Quoted text (`git commit -m "explain git reset --hard"`) is never a
- *   refusal, but command substitution inside double quotes still runs, so
- *   its body is checked as a command of its own (#257).
+ *   Commands are read as shell words by shell-words.mjs, shared with the
+ *   harness guard (#270), so every rule sees through wrappers and their
+ *   flag values (sudo -u root, timeout 5). Quoted text is never a refusal,
+ *   but a double-quoted $(...) still runs, so its body is checked as a
+ *   command of its own (#257).
  *
  * removeWhen: headless runs execute in platform-provided isolated
  *   checkouts that cannot reach the human's working directory.
@@ -85,9 +85,10 @@ const DEFAULT_BRANCHES = ["main", "master"];
 
 /**
  * Every git invocation in a command line, parsed: the leading VAR=value
- * assignments, the -C directories in order, the subcommand, and its args
- * (cut at a bare `--`, past which words are paths, not flags). Recurses
- * into `sh -c '<script>'` style wrappers.
+ * assignments, the -C directories in order, the -c config values, the
+ * subcommand, its args (cut at a bare `--`) and the paths past that `--`,
+ * which are paths, not flags -- `git checkout -- .` (#264). Recurses into
+ * `sh -c '<script>'` style wrappers.
  */
 function gitInvocations(line, depth = 0) {
   const found = [];
@@ -108,8 +109,10 @@ function gitInvocations(line, depth = 0) {
 
     let i = 1;
     const dirs = [];
+    const configs = [];
     while (i < words.length && words[i].startsWith("-")) {
       if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
+      if (words[i] === "-c") configs.push(words[i + 1] ?? "");
       i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
     }
     const rest = words.slice(i + 1);
@@ -117,8 +120,10 @@ function gitInvocations(line, depth = 0) {
     found.push({
       assigns,
       dirs,
+      configs,
       sub: words[i] ?? "",
       args: dashes < 0 ? rest : rest.slice(0, dashes),
+      paths: dashes < 0 ? [] : rest.slice(dashes + 1),
     });
   }
   return found;
@@ -219,8 +224,8 @@ function isForcePush(args) {
 }
 
 /** Prints the refusal for an always-on destructive command and blocks. */
-function refuseDestructive(name, why) {
-  console.error(`cairn run guard: \`${name}\` is refused in every session — ${why}`);
+function refuseDestructive(what, why) {
+  console.error(`cairn run guard: ${what} is refused in every session — ${why}`);
   console.error(`  if you really mean it, set ${DESTRUCTIVE_ENV}=1 for the session,`);
   console.error(`  or prefix this one command with ${DESTRUCTIVE_ENV}=1.`);
   process.exit(2);
@@ -300,6 +305,149 @@ function defaultBranchSources(args, dir) {
 }
 
 /**
+ * A git subcommand's args split into the flags it sets and its bare words,
+ * skipping the values valued flags swallow: `-b name`, `--source x`, and a
+ * short cluster's tail after a valued letter (`-sHEAD`). `--x=v` keeps `--x`.
+ */
+function readArgs(args, valuedShort = "", valuedLong = []) {
+  const flags = new Set();
+  const words = [];
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      flags.add(name);
+      if (eq < 0 && valuedLong.includes(name)) k++;
+      continue;
+    }
+    if (/^-[^-]/.test(a)) {
+      for (let c = 1; c < a.length; c++) {
+        flags.add(`-${a[c]}`);
+        if (valuedShort.includes(a[c])) {
+          if (c === a.length - 1) k++; // value is the next word
+          break; // ...or the rest of this one
+        }
+      }
+      continue;
+    }
+    words.push(a);
+  }
+  return { flags, words };
+}
+
+/**
+ * True for a pathspec that names the whole tree rather than a file in it:
+ * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, `*`. A single path --
+ * `src/a.ts`, `.gitignore`, `:/src` -- is not.
+ */
+function wholeTree(p) {
+  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*\/?|\*)?$/.test(p);
+}
+
+/** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
+const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
+
+/**
+ * True when this push mirrors -- `--mirror`, `-c remote.<r>.mirror=true`,
+ * or a remote configured to mirror already (`git remote add --mirror=push`,
+ * `git config remote.<r>.mirror true`), which turns a plain `git push <r>`
+ * into one that force-updates and deletes every remote ref.
+ */
+function isMirrorPush(inv, flags, words, dir) {
+  if (flags.has("--mirror")) return true;
+  const key = /^remote\.(.+)\.mirror(?:=(.*))?$/i;
+  if (inv.configs.some((c) => { const m = key.exec(c); return m && truthy(m[2] ?? "true"); })) {
+    return true;
+  }
+  const set = gitOut(dir, ["config", "--get-regexp", "^remote\\..*\\.mirror$"]);
+  if (!set) return false;
+  const remote = words[0];
+  return set.split("\n").some((line) => {
+    const m = /^remote\.(.+)\.mirror\s*(.*)$/i.exec(line.trim());
+    return m && truthy(m[2] || "true") && (remote === undefined || remote === m[1]);
+  });
+}
+
+/**
+ * The always-on table (#249, #250, #264): why `inv` throws work away with
+ * no undo, as [what, why] -- or null. Every row is refused in every session
+ * behind the one CAIRN_ALLOW_DESTRUCTIVE_GIT escape. The everyday
+ * neighbours stay allowed because they are routine or recoverable: a
+ * single-path checkout/restore, `stash drop`, `branch -D`, `restore
+ * --staged .` (the index only, like a plain `git reset`), deleting a
+ * feature branch, and `clean -n`.
+ */
+function destructive(inv, dir) {
+  const { sub, args, paths } = inv;
+  const discards = "it discards uncommitted work with no undo.";
+  switch (sub) {
+    case "reset":
+      return args.includes("--hard") ? ["`git reset --hard`", discards] : null;
+
+    case "checkout": {
+      const { flags, words } = readArgs(args, "bB",
+        ["--orphan", "--conflict", "--pathspec-from-file"]);
+      if (flags.has("-f") || flags.has("--force")) return ["`git checkout --force`", discards];
+      return [...words, ...paths].some(wholeTree) ? ["a whole-tree `git checkout`", discards] : null;
+    }
+
+    case "switch": {
+      const { flags } = readArgs(args, "cC",
+        ["--create", "--force-create", "--orphan", "--conflict"]);
+      return flags.has("--discard-changes") || flags.has("-f") || flags.has("--force")
+        ? ["`git switch --discard-changes`", discards] : null;
+    }
+
+    case "restore": {
+      const { flags, words } = readArgs(args, "s",
+        ["--source", "--pathspec-from-file", "--conflict"]);
+      // the work tree is restored unless only --staged is asked for
+      const worktree = flags.has("-W") || flags.has("--worktree")
+        || !(flags.has("-S") || flags.has("--staged"));
+      return worktree && [...words, ...paths].some(wholeTree)
+        ? ["a whole-tree `git restore`", discards] : null;
+    }
+
+    case "clean": {
+      // Every clean but a dry run: plain `git clean` only refuses on its own
+      // while clean.requireForce holds, and `-c clean.requireForce=false`
+      // or a repo config turns that off -- so the -f isn't what to look for
+      const { flags } = readArgs(args, "e", ["--exclude"]);
+      return flags.has("-n") || flags.has("--dry-run") ? null
+        : ["`git clean`", "it deletes untracked files, which git never had a copy of."];
+    }
+
+    case "stash":
+      return args[0] === "clear" ? ["`git stash clear`", "it drops every stash at once."] : null;
+
+    case "reflog":
+      return args[0] === "expire"
+        ? ["`git reflog expire`", "it erases the record git recovers lost commits from."] : null;
+
+    case "push": {
+      // Past a bare `--` a push's words are still refspecs, not paths
+      const all = [...args, ...paths];
+      if (isForcePush(all)) {
+        return ["`git push --force`",
+          "it overwrites remote history other people may already have pulled."];
+      }
+      const { flags, words } = readArgs(all, "o",
+        ["--push-option", "--repo", "--receive-pack", "--exec"]);
+      if (isMirrorPush(inv, flags, words, dir)) {
+        return ["`git push --mirror`", "it force-updates and deletes remote refs to match this clone."];
+      }
+      if (flags.has("--prune")) {
+        return ["`git push --prune`", "it deletes every remote branch this clone doesn't have."];
+      }
+      return defaultBranchSources(all, dir).includes(null)
+        ? ["a push deleting the default branch", "everyone's shared history hangs off it."] : null;
+    }
+  }
+  return null;
+}
+
+/**
  * Why this push may not land on the default branch yet, or null when the
  * ship gate is satisfied or doesn't apply (#251). The stamp is plan_drift's
  * record of its last run: { head, clean, at }. A missing stamp is a
@@ -358,23 +506,17 @@ try {
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
     const hardReset = inv.sub === "reset" && inv.args.includes("--hard");
+    const dir = targetDir(inv.dirs, cwd);
 
-    // #249 -- hard reset, every session
-    if (hardReset && !allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
-      refuseDestructive("git reset --hard",
-        "it discards uncommitted work with no undo.");
-    }
-
-    // #250 -- force-push, every session
-    if (inv.sub === "push" && isForcePush(inv.args) && !allowDestructive
-      && !prefixed(DESTRUCTIVE_ENV)) {
-      refuseDestructive("git push --force",
-        "it overwrites remote history other people may already have pulled.");
+    // #249, #250, #264 -- the work-destroying table, every session
+    if (!allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
+      const hit = destructive(inv, dir);
+      if (hit) refuseDestructive(...hit);
     }
 
     // #251 -- the default branch only takes what a clean drift check saw
     if (inv.sub === "push" && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
-      const why = shipGateRefusal(inv.args, targetDir(inv.dirs, cwd), projectDir, baseDir);
+      const why = shipGateRefusal([...inv.args, ...inv.paths], dir, projectDir, baseDir);
       if (why) {
         console.error(`cairn run guard: this push lands on the default branch, but ${why}.`);
         console.error("  run /cairn:ship instead -- it runs the drift check first, then pushes.");
@@ -404,7 +546,7 @@ try {
     if (!hardReset && inv.sub !== "checkout" && inv.sub !== "switch") continue;
     if (prefixed("CAIRN_RUN_OK")) continue;
     if (!currentRuns().length) continue; // no unattended run in flight -- ordinary work
-    if (!isMainWorktree(targetDir(inv.dirs, cwd))) continue; // the run's own worktree
+    if (!isMainWorktree(dir)) continue; // the run's own worktree
 
     const name = hardReset ? "git reset --hard" : `git ${inv.sub}`;
     console.error(

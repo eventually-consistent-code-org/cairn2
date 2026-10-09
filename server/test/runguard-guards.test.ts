@@ -226,6 +226,136 @@ describe("run guard: force-push refused in every session (#250)", () => {
   });
 });
 
+describe("run guard: work-destroying equivalents refused in every session (#264)", () => {
+  // Each row: [refused, its allowed everyday neighbour]. The refused form
+  // throws work away with no undo; the neighbour is routine or recoverable
+  // (a single path, the index only, a dry run, a feature branch).
+  const pairs: Array<[refused: string, allowed: string]> = [
+    ["git checkout -- .", "git checkout -- seed.txt"],
+    ["git checkout .", "git checkout seed.txt"],
+    ["git checkout HEAD -- .", "git checkout HEAD -- seed.txt"],
+    ["git checkout -- :/", "git checkout -- :/src"],
+    ["git checkout HEAD~1 ./", "git checkout HEAD~1 -- ./seed.txt"],
+    ["git checkout :/", "git checkout main"],
+    ["git checkout -f", "git checkout main"],
+    ["git checkout --force main", "git checkout -b feature"],
+    ["git checkout -fb x", "git checkout -b fx"],
+    ["git restore .", "git restore seed.txt"],
+    ["git restore --staged --worktree .", "git restore --staged ."],
+    ["git restore -SW :/", "git restore -S :/"],
+    ["git restore -- .", "git restore -- seed.txt"],
+    ["git restore --source=HEAD~1 .", "git restore --source HEAD~1 seed.txt"],
+    ["git restore -s HEAD ../..", "git restore -s HEAD .gitignore"],
+    ["git switch --discard-changes main", "git switch main"],
+    ["git switch -f main", "git switch -c feature"],
+    ["git switch --force main", "git switch -C feature"],
+    ["git clean -f", "git clean -n"],
+    ["git clean -fd", "git clean -nd"],
+    ["git clean -fdx", "git clean -fdxn"],
+    ["git clean -xdf", "git clean --dry-run -xdf"],
+    ["git clean --force -d", "git clean -e '*.log' -n"],
+    ["git -c clean.requireForce=false clean -d", "git clean -d --dry-run"],
+    ["git stash clear", "git stash drop"],
+    ["git -C . stash clear", "git stash drop stash@{0}"],
+    ["git reflog expire --expire=now --all", "git reflog show"],
+    ["git push --mirror origin", "git push origin feature"],
+    ["git push --prune origin 'refs/heads/*:refs/heads/*'", "git push origin feature"],
+    ["git push origin --delete main", "git push origin --delete feature"],
+    ["git push origin -d master", "git push origin -d feature"],
+    ["git push origin :main", "git push origin :feature"],
+    ["git push origin :refs/heads/master", "git push origin :refs/heads/feature"],
+    ["git push origin -- :main", "git push origin -- :feature"],
+    ["git push origin -- +main", "git push origin -- feature"],
+    ["git -c remote.origin.mirror=true push origin", "git -c remote.origin.mirror=false push origin feature"],
+    ["sudo -u root git clean -fdx", "sudo -u root git clean -n"],
+    ["timeout 5 git stash clear", "timeout 5 git stash drop"],
+    ['echo "$(git checkout -- .)"', 'echo "$(git checkout -- seed.txt)"'],
+  ];
+
+  it("each refused form exits 2, naming the escape; its everyday neighbour exits 0", () => {
+    const { proj, home } = fixture();
+    for (const [refused, allowed] of pairs) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(r.stderr, refused).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+
+  it("branch -D and other routine commands stay allowed", () => {
+    const { proj, home } = fixture();
+    git(proj, "branch", "feature");
+    for (const c of [
+      "git branch -D feature",
+      "git branch -d feature",
+      "git stash",
+      "git stash pop",
+      "git checkout -",
+      "git restore --staged -- .",
+      "git reflog",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("quoted mentions pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      'git commit -m "never git checkout -- ."',
+      "git commit -m 'git clean -fdx'",
+      "echo git stash clear",
+      'git commit -m "git push --mirror origin"',
+      "git log --oneline # git reflog expire --all",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a remote already configured to mirror turns a plain push into a refused one", () => {
+    const { proj, home } = fixture();
+    git(proj, "config", "remote.origin.mirror", "true");
+    for (const c of ["git push origin", "git push", "git push origin main"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("git push --mirror");
+    }
+    // ...a different remote is a plain push
+    expect(guard(proj, home, "git push upstream feature").status).toBe(0);
+  });
+
+  it("CAIRN_ALLOW_DESTRUCTIVE_GIT=1 unlocks the table from env or as the leading assignment only", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git checkout -- .", "git restore .", "git switch -f main", "git clean -fdx",
+      "git stash clear", "git reflog expire --all", "git push --mirror origin",
+      "git push --prune origin",
+    ]) {
+      expect(guard(proj, home, c, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, c).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`).status, c).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true && ${c}`).status, c).toBe(2);
+    }
+  });
+
+  it("deleting the default branch still meets the ship gate once the table is unlocked", () => {
+    const { proj, home } = fixture();
+    const r = guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git push origin --delete main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("deletes the default branch");
+    expect(guard(proj, home, "git push origin --delete main", {
+      CAIRN_ALLOW_DESTRUCTIVE_GIT: "1", CAIRN_ALLOW_UNSHIPPED_PUSH: "1",
+    }).status).toBe(0);
+  });
+
+  it("the remote's HEAD branch counts as default for a deleting push", () => {
+    const { proj, home } = fixture();
+    git(proj, "update-ref", "refs/remotes/origin/trunk", "HEAD");
+    git(proj, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+    expect(guard(proj, home, "git push origin --delete trunk").status).toBe(2);
+    expect(guard(proj, home, "git push origin --delete feature").status).toBe(0);
+  });
+});
+
 describe("run guard: a wrapper's flags and their values don't hide git (#270)", () => {
   // Each row: [wrapped form, plain form]. The wrapper must change nothing --
   // refused exactly where the plain form is. Before #270 the run guard
@@ -422,7 +552,7 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
       "git push origin feature:refs/heads/main",
       "git push origin master",
       "git push --all origin",
-      "git push origin --delete main",
+      "git push origin -- main",
       'echo "$(git push origin main)"',
     ]) {
       const r = guard(proj, home, c);
