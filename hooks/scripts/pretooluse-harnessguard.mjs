@@ -3,7 +3,8 @@
 /**
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
- *   server config, the settings cascade, the plugin manifest, .claude/hooks
+ *   server configs (.mcp.json, ~/.claude.json, Cursor's project and home
+ *   mcp.json, #298), the settings cascade, the plugin manifest, .claude/hooks
  *   and agents (and Cursor's hooks, #269), the plugin copy that runs (#267:
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
@@ -59,6 +60,7 @@ const PROTECTED = [
   { re: /^(?:.*\/)?\.claude\/hooks\//i, what: "the project's Claude hooks" },
   { re: /^(?:.*\/)?\.claude\/agents\//i, what: "the project's agent definitions" },
   { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/i, what: "Cursor's hooks" },
+  { re: /^(?:.*\/)?\.cursor\/mcp\.json$/i, what: "Cursor's MCP server config" },
 ];
 
 // Folders whose whole contents are protected, as [parent, folder, what]
@@ -76,6 +78,16 @@ const TREES = new Set(["the hook directory", ...SUB_TREES.map(([, , what]) => wh
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
 const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
 const CURSOR_NAMES = ["hooks.json"];
+const CURSOR_MCP = ["mcp.json"];
+
+// Files in the home folder that set up every session, as [folder, names,
+// what]: the machine-wide settings, and the MCP server configs Claude Code
+// (~/.claude.json, "" being the home folder itself) and Cursor read (#298).
+const HOME_FILES = [
+  [".claude", SETTINGS_NAMES, "your machine-wide Claude settings"],
+  ["", [".claude.json"], "your machine-wide MCP server config"],
+  [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
+];
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -387,7 +399,7 @@ function readText(abs) {
 /** The file itself is protected (the check every version of this guard made), letter case aside (#295). */
 function fileRule(abs) {
   for (const home of HOMES) {
-    if (SETTINGS_NAMES.some((n) => same(abs, join(home, ".claude", n)))) return "your machine-wide Claude settings";
+    for (const [dir, names, what] of HOME_FILES) if (names.some((n) => same(abs, join(home, dir, n)))) return what;
   }
   const zone = zoneOf(abs);
   if (zone) return zone;
@@ -400,7 +412,7 @@ function fileRule(abs) {
 /** The path names a protected FOLDER: writing into it, replacing it or removing it (#265), letter case aside (#295). */
 function dirRule(abs) {
   for (const home of HOMES) {
-    if (same(abs, join(home, ".claude"))) return "your machine-wide Claude settings";
+    for (const [dir, , what] of HOME_FILES) if (dir && same(abs, join(home, dir))) return what;
   }
   const zone = ZONES.find((z) => same(z.dir, abs));
   if (zone) return zone.what;
@@ -498,7 +510,8 @@ function globRule(abs, mode) {
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
     for (let i = 0; i < c.length; i++) {
       for (const [dir, names, what] of [[".claude", SETTINGS_NAMES, "a settings file"],
-        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"]]) {
+        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"],
+        [".cursor", CURSOR_MCP, "Cursor's MCP server config"]]) {
         // the folder itself, or a settings / manifest file directly inside it
         if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
         const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
@@ -517,12 +530,15 @@ function globRule(abs, mode) {
     const d = dir.split(sep).filter(Boolean);
     return p.length >= d.length && d.every((x, j) => could(p[j], x));
   };
+  // the home folder's files (#298): `~/.c*.json`, `cp -r src/. ~`, `~/.claude/*.json`
   for (const home of HOMES) {
     const n = home.split(sep).filter(Boolean).length;
-    if (!under(home) || !could(p[n] ?? "", ".claude")) continue;
-    if ((p.length === n + 1 && could(p[n], ".claude", remove)) ||
-      (p.length === n + 2 && SETTINGS_NAMES.some((s) => could(p[n + 1], s)))) {
-      return "your machine-wide Claude settings";
+    if (!under(home) || p.length <= n || p.length > n + 2) continue;
+    for (const [dir, names, what] of HOME_FILES) {
+      if (dir && !could(p[n], dir)) continue;
+      if (dir && p.length === n + 1 && could(p[n], dir, remove)) return what; // the folder itself
+      const rest = p.slice(dir ? n + 1 : n);
+      if (rest.length === 1 && names.some((s) => could(rest[0], s))) return what;
     }
   }
   const zone = zoneGlob(p, remove);
@@ -796,7 +812,7 @@ function protectedEntries() {
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
       join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)), ...trees,
       join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)),
-      join(root, ".cursor"), ...CURSOR_NAMES.map((n) => join(root, ".cursor", n)));
+      join(root, ".cursor"), ...[...CURSOR_NAMES, ...CURSOR_MCP].map((n) => join(root, ".cursor", n)));
     const stack = [join(root, "hooks"), ...trees];
     while (stack.length && ENTRIES.length < 2000) {
       const d = stack.pop();
@@ -809,7 +825,10 @@ function protectedEntries() {
     }
   }
   for (const home of HOMES) {
-    ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
+    for (const [dir, names] of HOME_FILES) {
+      if (dir) ENTRIES.push(join(home, dir));
+      ENTRIES.push(...names.map((n) => join(home, dir, n)));
+    }
   }
   for (const z of ZONES) {
     if (!existsSync(z.dir)) continue;

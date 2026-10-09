@@ -1346,9 +1346,10 @@ describe("harness guard protects Cursor's hook config (#269)", () => {
     }
   });
 
+  // .cursor/mcp.json left this list with #298: it is Cursor's MCP server config.
   it("the rest of .cursor/ and reads pass", () => {
     const p = freshDir("cairn-hooks-cursor-");
-    for (const file of [".cursor/rules/style.mdc", ".cursor/mcp.json", "docs/.cursor-notes.md"]) {
+    for (const file of [".cursor/rules/style.mdc", ".cursor/mcp.json.bak", "docs/.cursor-notes.md"]) {
       expect(runHookRaw(HARNESSGUARD, p, filePayload(join(p, file))).status, file).toBe(0);
     }
     for (const c of ["cat .cursor/hooks.json", "mkdir -p .cursor/rules", "echo x > .cursor/rules/a.mdc"]) {
@@ -1526,6 +1527,100 @@ describe("harness guard matches protected paths in any letter case (#295)", () =
     }
     for (const c of ["cat ~/.CLAUDE/settings.json", "ls ~/.CAIRN/ship-gate", "echo x > ~/.CAIRN/runs/r1-report.md"]) {
       expect(run(p, bash(c), env).status, c).toBe(0);
+    }
+  });
+});
+
+// #298: .mcp.json was the only MCP server config protected, but Claude
+// Code also starts the servers in ~/.claude.json (user and local scope,
+// with no project trust prompt), and Cursor reads .cursor/mcp.json (which
+// cairn-setup writes) and ~/.cursor/mcp.json. A server entry is a command
+// the harness runs with the user's credentials, so all three are refused
+// like .mcp.json; reading them stays frictionless.
+describe("harness guard protects the other MCP server configs (#298)", () => {
+  const write = (file: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: file }, cwd: "" });
+  const bash = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  /** A project and a home holding each config, as cairn-setup and the harnesses leave them. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-mcp-proj-");
+    const home = freshDir("cairn-hooks-mcp-home-");
+    mkdirSync(join(p, ".cursor"), { recursive: true });
+    mkdirSync(join(home, ".cursor"), { recursive: true });
+    for (const f of [join(p, ".cursor", "mcp.json"), join(home, ".claude.json"), join(home, ".cursor", "mcp.json")]) {
+      writeFileSync(f, JSON.stringify({ mcpServers: {} }));
+    }
+    return { p, home, env: { HOME: home } };
+  }
+
+  it("refuses Write and Edit on each config, in any letter case, naming it", () => {
+    const { p, home, env } = fixture();
+    const cases: Array<[string, string]> = [
+      [join(home, ".claude.json"), "your machine-wide MCP server config"],
+      ["~/.claude.json", "your machine-wide MCP server config"],
+      [join(home, ".CLAUDE.json"), "your machine-wide MCP server config"],
+      [join(p, ".cursor", "mcp.json"), "Cursor's MCP server config"],
+      [join(p, ".Cursor", "MCP.json"), "Cursor's MCP server config"],
+      [join(p, "packages", "web", ".cursor", "mcp.json"), "Cursor's MCP server config"],
+      [join(home, ".cursor", "mcp.json"), "your machine-wide Cursor MCP server config"],
+      ["~/.CURSOR/mcp.json", "your machine-wide Cursor MCP server config"],
+    ];
+    for (const [file, phrase] of cases) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = runHookRaw(HARNESSGUARD, p, write(file, tool), env);
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, `${tool} ${file}`).toContain(phrase);
+      }
+    }
+  });
+
+  it("refuses the shell writes an agent would use, and passes their reads", () => {
+    const { p, env } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["echo '{}' > ~/.claude.json", "cat ~/.claude.json"],
+      ["jq '.mcpServers.x={}' ~/.claude.json > /tmp/c.json && mv /tmp/c.json ~/.claude.json",
+        "jq '.mcpServers' ~/.claude.json > /tmp/servers.json"],
+      ["sed -i '' 's/a/b/' $HOME/.claude.json", "grep -n mcpServers $HOME/.claude.json"],
+      ["cp /tmp/evil.json ~/.claude.json", "cp ~/.claude.json /tmp/claude-backup.json"],
+      ["sed -i '' 's/a/b/' .cursor/mcp.json", "cat .cursor/mcp.json"],
+      ["tee .cursor/mcp.json < /tmp/evil.json", "tee /tmp/copy.json < .cursor/mcp.json"],
+      ["echo '{}' > ~/.cursor/mcp.json", "cat ~/.cursor/mcp.json"],
+      ["cd ~/.cursor && echo '{}' > mcp.json", "cd ~/.cursor && cat mcp.json"],
+      ["rm ~/.claude.json", "ls -la ~/.claude.json"],
+      ["rm -rf ~/.cursor", "ls ~/.cursor"],
+      ["mv /tmp/cfg ~/.cursor", "stat ~/.cursor"],
+    ];
+    for (const [w, read] of pairs) {
+      expect(runHookRaw(HARNESSGUARD, p, bash(w), env).status, w).toBe(2);
+      expect(runHookRaw(HARNESSGUARD, p, bash(read), env).status, read).toBe(0);
+    }
+  });
+
+  it("a wildcard or a folder's contents that can land on one is refused", () => {
+    const { p, env } = fixture();
+    for (const c of [
+      "echo '{}' > ~/.c*.json",
+      "rm ~/.claude*",
+      "cp -r /tmp/cfg/. ~",
+      "rsync -a /tmp/cfg/ ~/",
+      "sed -i '' 's/a/b/' ~/.cursor/*.json",
+      "sed -i '' 's/a/b/' .cursor/*.json",
+      "find ~ -maxdepth 1 -name '.claude.json' -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bash(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("their neighbours stay ordinary work", () => {
+    const { p, home, env } = fixture();
+    for (const file of [join(home, ".claude.json.bak"), join(home, ".cursor", "argv.json"),
+      join(p, ".cursor", "rules", "a.mdc"), join(p, "mcp.json"), join(p, "docs", "claude.json")]) {
+      expect(runHookRaw(HARNESSGUARD, p, write(file), env).status, file).toBe(0);
+    }
+    for (const c of ["echo x > ~/.cursor/argv.json", "mkdir -p .cursor/rules", "cat ~/.claude.json | jq ."]) {
+      expect(runHookRaw(HARNESSGUARD, p, bash(c), env).status, c).toBe(0);
     }
   });
 });
