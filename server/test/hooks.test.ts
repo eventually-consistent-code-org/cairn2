@@ -631,6 +631,10 @@ describe("run guard hook", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain(runId);
     expect(r.stderr).toContain("git checkout");
+    // #262 -- names the owner's way to approve, never the override prefix
+    expect(r.stderr).toContain("needs the owner's go-ahead");
+    expect(r.stderr).toContain("not the owner asking");
+    expect(r.stderr).not.toContain("CAIRN_RUN_OK");
   });
 
   it("blocks git switch and git reset --hard the same way", () => {

@@ -38,6 +38,21 @@ function guard(proj: string, home: string, command: string, extraEnv: Record<str
   return { status: r.status, stderr: r.stderr ?? "" };
 }
 
+/**
+ * The refusal tail (#262): the owner's ways to approve (`!`, the session
+ * env when there is one), the harness guard's where-did-this-come-from
+ * line, and never a copy-paste NAME=1 prefix.
+ */
+function expectOwnerTail(stderr: string, label: string, env?: string): void {
+  expect(stderr, label).toContain("needs the owner's go-ahead");
+  expect(stderr, label).toContain("`!` in your prompt");
+  expect(stderr, label).toContain("check where the");
+  expect(stderr, label).toContain("not the owner asking");
+  expect(stderr, label).not.toMatch(/[A-Z_]+=1/);
+  expect(stderr, label).not.toMatch(/prefix/i);
+  if (env) expect(stderr, label).toContain(`start the session with ${env} set to 1`);
+}
+
 /** Same plain-resolve() project hash the guard derives from CLAUDE_PROJECT_DIR. */
 function projKey(proj: string): string {
   const abs = resolve(proj);
@@ -80,7 +95,7 @@ function fixture(manifest?: Record<string, unknown>, stamped = true): { proj: st
 }
 
 describe("run guard: hard reset refused in every session (#249)", () => {
-  it("refuses git reset --hard with no run, naming the override", () => {
+  it("refuses git reset --hard with no run, naming the owner's ways to approve (#262)", () => {
     const { proj, home } = fixture();
     for (const c of [
       "git reset --hard",
@@ -94,7 +109,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -131,7 +146,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -179,7 +194,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
 });
 
 describe("run guard: force-push refused in every session (#250)", () => {
-  it("refuses every force shape with no run, naming the override", () => {
+  it("refuses every force shape with no run, naming the owner's ways to approve (#262)", () => {
     const { proj, home } = fixture();
     for (const c of [
       "git push --force",
@@ -197,7 +212,7 @@ describe("run guard: force-push refused in every session (#250)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -353,6 +368,38 @@ describe("run guard: work-destroying equivalents refused in every session (#264)
     git(proj, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
     expect(guard(proj, home, "git push origin --delete trunk").status).toBe(2);
     expect(guard(proj, home, "git push origin --delete feature").status).toBe(0);
+  });
+});
+
+describe("run guard: refusals name the owner's ways, never the override prefix (#262)", () => {
+  it("destructive, unshipped-push and mid-run refusals all carry the owner tail", () => {
+    const { proj, home } = fixture(undefined, false);
+    const reset = guard(proj, home, "git reset --hard");
+    expect(reset.status).toBe(2);
+    expectOwnerTail(reset.stderr, "reset", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    const clean = guard(proj, home, "git clean -fdx");
+    expect(clean.status).toBe(2);
+    expectOwnerTail(clean.stderr, "clean", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    const ship = guard(proj, home, "git push origin main");
+    expect(ship.status).toBe(2);
+    expect(ship.stderr).toContain("/cairn:ship");
+    expectOwnerTail(ship.stderr, "ship", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+
+    // mid-run has no session env to name -- `!` and the run's own worktree
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const mid = guard(live.proj, live.home, "git checkout main");
+    expect(mid.status).toBe(2);
+    expect(mid.stderr).toContain("run's own worktree");
+    expectOwnerTail(mid.stderr, "mid-run");
+    expect(mid.stderr).not.toContain("CAIRN_RUN_OK");
+  });
+
+  it("the inline overrides the refusals no longer teach are still honoured", () => {
+    const { proj, home } = fixture(undefined, false);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard").status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_UNSHIPPED_PUSH=1 git push origin main").status).toBe(0);
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    expect(guard(live.proj, live.home, "CAIRN_RUN_OK=1 git checkout main").status).toBe(0);
   });
 });
 
@@ -540,7 +587,7 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
     return f;
   }
 
-  it("missing stamp: every default-branch push shape is refused, naming ship and the override", () => {
+  it("missing stamp: every default-branch push shape is refused, naming ship and the owner's ways to approve", () => {
     const { proj, home } = branched();
     for (const c of [
       "git push",
@@ -558,7 +605,7 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
       expect(r.stderr, c).toContain("/cairn:ship");
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_UNSHIPPED_PUSH");
     }
   });
 
