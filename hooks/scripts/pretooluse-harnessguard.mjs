@@ -3,38 +3,35 @@
 /**
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
- *   server config, the settings cascade, the plugin manifest, .claude/hooks
- *   and .claude/agents (and Cursor's .cursor/hooks.json and hooks/, #269),
- *   the plugin copy that runs (#267: its root when outside the project,
- *   and ~/.claude/plugins with its registry), and the ship-gate stamp and
- *   run manifests the run guard trusts (#263: under CAIRN_HOME and
- *   ~/.cairn; the run report stays writable, and the server's own writes
- *   never pass a hook). An agent that can rewrite its own hooks can switch
- *   off every other control in one edit, so this is the backstop the
- *   rule-to-control check points at. Exit 2 blocks; ANY internal error
- *   exits 0. Residual (#263): run_manifest set_status running->stopped is
- *   a legal server call and lifts the mid-run push block.
+ *   server configs (.mcp.json, ~/.claude.json, Cursor's project and home
+ *   mcp.json, #298), the settings cascade, the plugin manifest, .claude/hooks
+ *   and agents (and Cursor's hooks, #269), the plugin copy that runs (#267:
+ *   its root outside the project, ~/.claude/plugins), and the ship-gate
+ *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
+ *   and ~/.cairn; the run report stays writable, the server's writes never
+ *   pass a hook). Letter case never counts (#295): a path is read in its
+ *   on-disk case and compared case-folded, and so is a command's name, so a
+ *   Mac's volume can't hide either -- a real HOOKS/ on a case-sensitive
+ *   volume is refused too. An agent that can rewrite its own hooks can
+ *   switch off every other control in one edit; this is the backstop. Exit
+ *   2 blocks; ANY internal error exits 0. Residual (#263): run_manifest
+ *   set_status running->stopped is legal and lifts the mid-run push block.
  *
- *   Threat model, stated plainly so nobody over-trusts it: the realistic
- *   attack is INDIRECT -- text the agent reads (an issue body, a review
- *   comment, a fetched page) steering it into a harness edit it would not
- *   otherwise make. This guard turns that from a silent success into a
- *   refusal the human sees. It is NOT a sandbox: CAIRN_HARNESS_EDIT=1 is
- *   the owner's escape, and text that can steer the agent can still ask
- *   for the prefix (it exempts only its own command, #265) -- refusals just
- *   never teach it (#286). Visibility is the control; isolation is the
- *   operating system's job. Bash is read the way a shell would read it
- *   (shell-words.mjs, shared with the run guard, #270) to find what it
- *   WRITES: redirects, and the operands of commands that change files (rm,
- *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
- *   find -delete/-exec, paths piped to xargs), through wrappers, bash -c,
- *   su -c and a heredoc fed to a shell. A relative path is judged from the
- *   payload cwd and every folder a cd, env -C or git -C on the line can
- *   reach, in any order (#258); after a cd the guard can't follow, it is
- *   refused. Removing a protected folder, or one holding it, counts. Other
- *   heredocs are data; a path only READ passes (#240). Not seen: a write
- *   inside an interpreter (python -c) or $(...), an archive's members,
- *   piped paths an upstream command finds itself (git ls-files | xargs rm).
+ *   Threat model: the realistic attack is INDIRECT -- text the agent reads
+ *   (an issue, a review, a fetched page) steering it into a harness edit.
+ *   This turns a silent success into a refusal the human sees. NOT a
+ *   sandbox: CAIRN_HARNESS_EDIT=1 is the owner's escape (inline, it exempts
+ *   only its own command, #265), never taught by a refusal (#286). Bash is
+ *   read as a shell reads it (shell-words.mjs, #270) for what it WRITES:
+ *   redirects and the operands of commands that change files, through
+ *   wrappers, bash -c, su -c, find -exec, xargs and a heredoc fed to a
+ *   shell. A relative path is judged from every folder a cd, env -C or git
+ *   -C on the line can reach (#258); after a cd it can't follow, refused.
+ *   Removing a protected folder or one holding it counts, and so does
+ *   changing its mode, owner, flags or ACL (chmod, chown, chflags, setfacl,
+ *   xattr -w, #299). A path only READ passes (#240). Not seen: a write in
+ *   an interpreter (python -c) or $(...), an archive's members, paths an
+ *   upstream command finds itself, modes copied by cp -p, rsync or tar.
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
@@ -43,7 +40,7 @@
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
@@ -53,17 +50,19 @@ import {
 
 /**
  * Protected shapes, matched against a path relative to the project root
- * (POSIX separators). Kept as one list so the refusal line can name which
- * rule fired and `audit security --surface` has one place to read.
+ * (POSIX separators), case-folded first (#295). Kept as one list so the
+ * refusal line can name which rule fired and `audit security --surface`
+ * has one place to read.
  */
 const PROTECTED = [
-  { re: /^hooks\//, what: "the hook directory" },
-  { re: /^\.mcp\.json$/, what: "the MCP server config" },
-  { re: /^(?:.*\/)?\.claude\/settings(?:\.[\w-]+)?\.json$/, what: "a settings file" },
-  { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/, what: "the plugin manifest" },
-  { re: /^(?:.*\/)?\.claude\/hooks\//, what: "the project's Claude hooks" },
-  { re: /^(?:.*\/)?\.claude\/agents\//, what: "the project's agent definitions" },
-  { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/, what: "Cursor's hooks" },
+  { re: /^hooks\//i, what: "the hook directory" },
+  { re: /^\.mcp\.json$/i, what: "the MCP server config" },
+  { re: /^(?:.*\/)?\.claude\/settings(?:\.[\w-]+)?\.json$/i, what: "a settings file" },
+  { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/i, what: "the plugin manifest" },
+  { re: /^(?:.*\/)?\.claude\/hooks\//i, what: "the project's Claude hooks" },
+  { re: /^(?:.*\/)?\.claude\/agents\//i, what: "the project's agent definitions" },
+  { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/i, what: "Cursor's hooks" },
+  { re: /^(?:.*\/)?\.cursor\/mcp\.json$/i, what: "Cursor's MCP server config" },
 ];
 
 // Folders whose whole contents are protected, as [parent, folder, what]
@@ -81,6 +80,16 @@ const TREES = new Set(["the hook directory", ...SUB_TREES.map(([, , what]) => wh
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
 const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
 const CURSOR_NAMES = ["hooks.json"];
+const CURSOR_MCP = ["mcp.json"];
+
+// Files in the home folder that set up every session, as [folder, names,
+// what]: the machine-wide settings, and the MCP server configs Claude Code
+// (~/.claude.json, "" being the home folder itself) and Cursor read (#298).
+const HOME_FILES = [
+  [".claude", SETTINGS_NAMES, "your machine-wide Claude settings"],
+  ["", [".claude.json"], "your machine-wide MCP server config"],
+  [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
+];
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -141,7 +150,11 @@ const FIND_WRITES = new Set(["-fprint", "-fprint0", "-fls", "-fprintf"]);
 // Commands that remove, create, or change every path operand they are given.
 const REMOVES = new Set(["rm", "rmdir", "unlink", "shred"]);
 const CREATES = new Set(["mkdir", "touch"]);
-const CHANGES = new Set(["tee", "truncate", "chmod", "chown", "chgrp"]);
+const CHANGES = new Set(["tee", "truncate"]);
+// Commands that change a path's mode, owner, flags or ACL: a folder
+// holding a protected place counts, as it does for removal (#299). chmod
+// 000 on the cairn home leaves the run guard reading nothing.
+const PERMS = new Set(["chmod", "chown", "chgrp", "chflags", "chattr", "setfacl", "setfattr"]);
 
 // Commands that read their sources and write a destination (or -t DIR),
 // with the flags that swallow a value -- so `--exclude x` never reads as
@@ -239,12 +252,35 @@ let UNLISTED = [];
 
 // Paths
 
-/** The real path of the deepest folder that exists, with the rest put back. */
+/**
+ * A name with its letter case folded the way a case-insensitive volume
+ * compares names (#295). Upper then lower also folds the two non-ASCII
+ * letters macOS's APFS treats as ASCII ones: the long s and the Kelvin sign.
+ */
+function fold(s) {
+  return s.toUpperCase().toLowerCase();
+}
+
+/** True when two paths or names are the same, letter case aside (#295). */
+function same(a, b) {
+  return fold(a) === fold(b);
+}
+
+/** A command word's name, path and letter case dropped: macOS runs `/BIN/RM` as rm (#295). */
+function cmdName(word) {
+  return fold(basename(word ?? ""));
+}
+
+/**
+ * The real path of the deepest folder that exists, with the rest put back.
+ * The native realpath returns each name in its on-disk case, so `.CLAUDE`
+ * on a Mac comes back `.claude` (#295); the JS one keeps the case typed.
+ */
 function canonical(abs) {
   const rest = [];
   let head = abs;
   for (;;) {
-    try { return join(realpathSync(head), ...rest); } catch { /* not there yet */ }
+    try { return join(realpathSync.native(head), ...rest); } catch { /* not there yet */ }
     const up = dirname(head);
     if (up === head) return abs;
     rest.unshift(basename(head));
@@ -278,24 +314,38 @@ function union(...lists) {
   return all.length > MAX_PLACES ? [LOST] : all;
 }
 
+/**
+ * The names of `abs` below `dir`, or null when `abs` isn't `dir` or under
+ * it -- letter case aside (#295). Both are resolved absolute paths.
+ */
+function below(dir, abs) {
+  const d = dir.split(sep).filter(Boolean);
+  const a = abs.split(sep).filter(Boolean);
+  return a.length >= d.length && d.every((x, j) => same(x, a[j])) ? a.slice(d.length) : null;
+}
+
 /** Project-relative POSIX path, or null when the path escapes the project. */
 function projectRelative(abs) {
   for (const root of ROOTS) {
-    const rel = relative(root, abs);
-    const escapes = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-    if (!escapes) return rel.split(sep).join("/");
+    const rest = below(root, abs);
+    if (rest) return rest.join("/");
   }
   return null;
 }
 
-/** True when `abs` is `dir` or any folder above it. */
+/** True when `abs` is `dir` or any folder above it, letter case aside (#295). */
 function holds(abs, dir) {
-  return abs === dir || dir.startsWith(abs.endsWith(sep) ? abs : abs + sep);
+  return below(abs, dir) !== null;
 }
 
 /** ~, $HOME and ${HOME} at the front of a path, spelled out the way the shell does (#258, #263). */
 function expandHome(raw) {
   return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
+}
+
+/** expandHome, and $CAIRN_HOME too -- the run guard's own cairn home (#263, #299). */
+function expandVars(raw) {
+  return expandHome(raw).replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
 }
 
 /**
@@ -332,11 +382,11 @@ function outsideZones() {
   return zones;
 }
 
-/** The protected place outside the project a path lies inside, or null. */
+/** The protected place outside the project a path lies inside, or null -- letter case aside (#295). */
 function zoneOf(abs) {
   for (const z of ZONES) {
-    if (abs === z.dir || !holds(z.dir, abs) || z.carve.some((c) => holds(c, abs))) continue;
-    if (z.tree || (dirname(abs) === z.dir && abs.endsWith(".json"))) return z.what;
+    if (same(abs, z.dir) || !holds(z.dir, abs) || z.carve.some((c) => holds(c, abs))) continue;
+    if (z.tree || (same(dirname(abs), z.dir) && fold(abs).endsWith(".json"))) return z.what;
   }
   return null;
 }
@@ -357,39 +407,43 @@ function readText(abs) {
 
 // Rules
 
-/** The file itself is protected (the check every version of this guard made). */
+/** The file itself is protected (the check every version of this guard made), letter case aside (#295). */
 function fileRule(abs) {
   for (const home of HOMES) {
-    if (abs === join(home, ".claude", "settings.json") ||
-      abs === join(home, ".claude", "settings.local.json")) return "your machine-wide Claude settings";
+    for (const [dir, names, what] of HOME_FILES) if (names.some((n) => same(abs, join(home, dir, n)))) return what;
   }
   const zone = zoneOf(abs);
   if (zone) return zone;
   const rel = projectRelative(abs);
   if (rel === null) return null; // elsewhere outside the project -- not this guard's business
-  for (const p of PROTECTED) if (p.re.test(rel)) return p.what;
+  for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
   return null;
 }
 
-/** The path names a protected FOLDER: writing into it, replacing it or removing it (#265). */
+/** The path names a protected FOLDER: writing into it, replacing it or removing it (#265), letter case aside (#295). */
 function dirRule(abs) {
   for (const home of HOMES) {
-    if (abs === join(home, ".claude")) return "your machine-wide Claude settings";
+    for (const [dir, , what] of HOME_FILES) if (dir && same(abs, join(home, dir))) return what;
   }
-  const zone = ZONES.find((z) => z.dir === abs);
+  const zone = ZONES.find((z) => same(z.dir, abs));
   if (zone) return zone.what;
   const rel = projectRelative(abs);
   if (!rel) return null;
-  if (rel === "hooks") return "the hook directory";
-  for (const [up, sub, what] of SUB_TREES) if (rel === `${up}/${sub}` || rel.endsWith(`/${up}/${sub}`)) return what;
-  const name = rel.split("/").pop();
+  const r = fold(rel);
+  if (r === "hooks") return "the hook directory";
+  for (const [up, sub, what] of SUB_TREES) if (r === `${up}/${sub}` || r.endsWith(`/${up}/${sub}`)) return what;
+  const name = r.split("/").pop();
   if (name === ".claude") return "a Claude settings directory";
   if (name === ".claude-plugin") return "the plugin manifest";
   if (name === ".cursor") return "Cursor's settings directory";
   return null;
 }
 
-/** Removing the project, or any folder above it, removes everything in it (#265). */
+/**
+ * Removing the project, or any folder above it, removes everything in it
+ * (#265); locking one with chmod, chown or an ACL locks everything in it
+ * too (#299). The same goes for the home folder and each cairn home.
+ */
 function holderRule(abs) {
   if (ROOTS.some((root) => holds(abs, root))) {
     return "the folder holding the hook directory and settings";
@@ -403,10 +457,10 @@ function holderRule(abs) {
 
 /** Could this name, once the shell expands it in `dir`, be a *.json file there? */
 function couldManifest(comp, dir) {
-  if (STANDINS.includes(comp) || comp.endsWith(".json")) return true;
+  if (STANDINS.includes(comp) || fold(comp).endsWith(".json")) return true;
   let names = [];
   try { names = readdirSync(dir); } catch { /* nothing there to expand to */ }
-  return names.some((n) => n.endsWith(".json") && could(comp, n));
+  return names.some((n) => fold(n).endsWith(".json") && could(comp, n));
 }
 
 /** The protected place outside the project a wildcard path could reach (#263). */
@@ -418,7 +472,7 @@ function zoneGlob(p, remove) {
     // a path spelled plainly into a carved-out project folder is that project's business
     const carved = z.carve.some((c) => {
       const cc = c.split(sep).filter(Boolean);
-      return p.length >= cc.length && cc.every((x, j) => p[j] === x);
+      return p.length >= cc.length && cc.every((x, j) => same(p[j], x));
     });
     if (carved) continue;
     if (p.length === n) {
@@ -446,10 +500,14 @@ function compRe(comp) {
   return new RegExp(`^${re}$`);
 }
 
-/** Could this glob component expand to `name`? A bare stand-in counts only when `anyOk`. */
+/**
+ * Could this glob component expand to `name`, in any letter case (#295)?
+ * Tried as typed and case-folded, so `[!A-Z]ooks` and `HOO*` both count
+ * for hooks. A bare stand-in counts only when `anyOk`.
+ */
 function could(comp, name, anyOk = true) {
   if (STANDINS.includes(comp)) return anyOk;
-  try { return compRe(comp).test(name); } catch { return true; }
+  try { return compRe(comp).test(name) || compRe(fold(comp)).test(fold(name)); } catch { return true; }
 }
 
 /**
@@ -467,7 +525,8 @@ function globRule(abs, mode) {
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
     for (let i = 0; i < c.length; i++) {
       for (const [dir, names, what] of [[".claude", SETTINGS_NAMES, "a settings file"],
-        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"]]) {
+        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"],
+        [".cursor", CURSOR_MCP, "Cursor's MCP server config"]]) {
         // the folder itself, or a settings / manifest file directly inside it
         if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
         const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
@@ -486,17 +545,20 @@ function globRule(abs, mode) {
     const d = dir.split(sep).filter(Boolean);
     return p.length >= d.length && d.every((x, j) => could(p[j], x));
   };
+  // the home folder's files (#298): `~/.c*.json`, `cp -r src/. ~`, `~/.claude/*.json`
   for (const home of HOMES) {
     const n = home.split(sep).filter(Boolean).length;
-    if (!under(home) || !could(p[n] ?? "", ".claude")) continue;
-    if ((p.length === n + 1 && could(p[n], ".claude", remove)) ||
-      (p.length === n + 2 && SETTINGS_NAMES.some((s) => could(p[n + 1], s)))) {
-      return "your machine-wide Claude settings";
+    if (!under(home) || p.length <= n || p.length > n + 2) continue;
+    for (const [dir, names, what] of HOME_FILES) {
+      if (dir && !could(p[n], dir)) continue;
+      if (dir && p.length === n + 1 && could(p[n], dir, remove)) return what; // the folder itself
+      const rest = p.slice(dir ? n + 1 : n);
+      if (rest.length === 1 && names.some((s) => could(rest[0], s))) return what;
     }
   }
   const zone = zoneGlob(p, remove);
   if (zone) return zone;
-  if (remove) {
+  if (remove || mode === "perm") {
     for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
       const d = dir.split(sep).filter(Boolean);
       if (p.length <= d.length && p.every((x, j) => could(x, d[j]))) return holderRule(dir);
@@ -508,15 +570,17 @@ function globRule(abs, mode) {
 /**
  * Which protected thing a path would change, or null. `mode` is what the
  * command does to it: write (the file, or into the folder it names),
- * create (mkdir/touch -- an empty folder changes nothing), or remove.
- * Both the path as written and its real path are checked, so a symlinked
- * project folder can't hide either spelling.
+ * create (mkdir/touch -- an empty folder changes nothing), remove, or perm
+ * (chmod and kin, #299: like remove, a folder holding a protected place
+ * counts). Both the path as written and its real path are checked, so a
+ * symlinked project folder can't hide either spelling.
  */
 function judge(abs, mode, literal = false) {
+  const holder = mode === "remove" || mode === "perm";
   for (const p of spellings(abs)) {
     const what = fileRule(p) ??
       (mode !== "create" ? dirRule(p) : null) ??
-      (mode === "remove" ? holderRule(p) : null) ??
+      (holder ? holderRule(p) : null) ??
       (!literal && HAS_STANDIN.test(p) ? globRule(p, mode) : null);
     if (what) return what;
   }
@@ -634,7 +698,7 @@ function stdinText(seg, dir, up = []) {
   const parts = [...seg.heredocs.map((h) => h.body), ...(seg.herestrings ?? [])];
   const files = [...(seg.inputs ?? [])];
   const feeder = up.length ? unwrap(up[up.length - 1].words, READ).words : [];
-  if (!parts.length && !files.length && basename(feeder[0] ?? "") === "cat") {
+  if (!parts.length && !files.length && cmdName(feeder[0]) === "cat") {
     const last = up[up.length - 1];
     parts.push(...last.heredocs.map((h) => h.body), ...(last.herestrings ?? []));
     files.push(...plain(feeder.slice(1)), ...(last.inputs ?? []));
@@ -709,12 +773,17 @@ function fnmatchRe(pat, ci) {
   return new RegExp(`^${re}$`, ci ? "i" : "");
 }
 
-/** Does this find test select `entry` (printed by find as `shown`)? Unreadable tests select. */
+/**
+ * Does this find test select `entry` (printed by find as `shown`)? A name
+ * on disk may differ from the protected spelling only in case, so a test
+ * is tried as typed and case-folded (#295). Unreadable tests select.
+ */
 function testSelects(t, entry, shown) {
   if (t.kind === "lname") return false; // symlink targets; the protected files are not links
   try {
-    if (t.kind === "regex") return new RegExp(`^(?:${t.pat})$`, t.ci ? "i" : "").test(shown);
-    return fnmatchRe(t.pat, t.ci).test(t.kind === "name" ? basename(entry) : shown);
+    if (t.kind === "regex") return new RegExp(`^(?:${t.pat})$`, "i").test(shown);
+    const x = t.kind === "name" ? basename(entry) : shown;
+    return fnmatchRe(t.pat, t.ci).test(x) || fnmatchRe(fold(t.pat), false).test(fold(x));
   } catch {
     return true;
   }
@@ -741,7 +810,7 @@ function listTree(dir, out, skip = []) {
 
 /** The folder a find start names whose whole contents are protected, or null. */
 function treeRule(abs) {
-  const zone = ZONES.find((z) => z.tree && z.dir === abs);
+  const zone = ZONES.find((z) => z.tree && same(z.dir, abs));
   if (zone) return zone.what;
   const what = dirRule(abs);
   return TREES.has(what) ? what : null;
@@ -760,7 +829,7 @@ function protectedEntries() {
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
       join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)), ...trees,
       join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)),
-      join(root, ".cursor"), ...CURSOR_NAMES.map((n) => join(root, ".cursor", n)));
+      join(root, ".cursor"), ...[...CURSOR_NAMES, ...CURSOR_MCP].map((n) => join(root, ".cursor", n)));
     const stack = [join(root, "hooks"), ...trees];
     while (stack.length && ENTRIES.length < 2000) {
       const d = stack.pop();
@@ -773,7 +842,10 @@ function protectedEntries() {
     }
   }
   for (const home of HOMES) {
-    ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
+    for (const [dir, names] of HOME_FILES) {
+      if (dir) ENTRIES.push(join(home, dir));
+      ENTRIES.push(...names.map((n) => join(home, dir, n)));
+    }
   }
   for (const z of ZONES) {
     if (!existsSync(z.dir)) continue;
@@ -784,9 +856,22 @@ function protectedEntries() {
     }
     let names = [];
     try { names = readdirSync(z.dir); } catch { /* not a folder */ }
-    for (const n of names) if (n.endsWith(".json")) ENTRIES.push(join(z.dir, n));
+    for (const n of names) if (fold(n).endsWith(".json")) ENTRIES.push(join(z.dir, n));
   }
   return ENTRIES;
+}
+
+/**
+ * The folders from `start` down to each protected place under it -- the
+ * project, the home folder, each zone -- every one a folder holding it.
+ */
+function holdersUnder(start) {
+  const out = [];
+  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
+    const rest = below(start, anchor);
+    if (rest) for (let k = 0; k <= rest.length; k++) out.push(join(start, ...rest.slice(0, k)));
+  }
+  return out;
 }
 
 /**
@@ -794,17 +879,20 @@ function protectedEntries() {
  * A start inside hooks/ (or a protected file or folder tree) is hit
  * whatever the tests say; a start holding one is hit when a test can
  * select it, when nothing narrows the walk (no name test, or a negated
- * one), or when it holds a zone too big to list.
+ * one), or when it holds a zone too big to list. Removing or chmod-ing
+ * what it walks also counts the folders holding one (#299): `find ~
+ * -name .cairn -exec chmod 000 {} +`.
  */
-function walkHit(spec, dir) {
+function walkHit(spec, dir, mode = "write") {
   for (const s of spec.starts) {
-    const start = resolveIn(dir, expandHome(s)); // `find ~/.cairn` walks the home folder (#263)
+    const start = resolveIn(dir, expandVars(s)); // `find ~/.cairn` walks the home folder (#263)
     const inside = fileRule(start) ?? treeRule(start);
     if (inside) return { path: s, what: inside };
     const entries = protectedEntries();
     const unlisted = UNLISTED.find((z) => holds(start, z.dir));
     if (unlisted) return { path: s, what: unlisted.what };
-    for (const entry of entries) {
+    const holders = mode === "remove" || mode === "perm" ? holdersUnder(start) : [];
+    for (const entry of [...entries, ...holders]) {
       if (!holds(start, entry)) continue;
       const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
       if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
@@ -861,8 +949,8 @@ function feedHit(feed, mode) {
   const words = [];
   for (const u of feed.up) {
     const w = unwrap(u.words, READ).words;
-    if (basename(w[0] ?? "") === "find") {
-      const hit = walkHit(parseFind(w.slice(1)), feed.dir);
+    if (cmdName(w[0]) === "find") {
+      const hit = walkHit(parseFind(w.slice(1)), feed.dir, mode);
       if (hit) return hit;
       continue;
     }
@@ -872,7 +960,8 @@ function feedHit(feed, mode) {
   for (const t of texts) words.push(...t.split(/\s+/));
   for (const x of words) {
     if (!x || x.startsWith("-")) continue;
-    const what = judge(resolveIn(feed.dir, x), mode);
+    // `echo ~/.cairn | xargs chmod 000`: the shell spelled out ~ before echo saw it (#299)
+    const what = judge(resolveIn(feed.dir, expandVars(x)), mode);
     if (what) return { path: x, what };
   }
   return null;
@@ -885,7 +974,9 @@ function copyTargets(cmd, args, add) {
   const { opts, operands } = parseOpts(args, COPIES.get(cmd));
   const rsync = cmd === "rsync";
   if (cmd === "install" && hasOpt(opts, "-d", "--directory")) {
-    for (const o of operands) add(o, "create");
+    // -m, -o and -g also reset a folder that already exists (#299)
+    const mode = hasOpt(opts, "-m", "--mode", "-o", "--owner", "-g", "--group") ? "perm" : "create";
+    for (const o of operands) add(o, mode);
     return;
   }
   if (rsync) for (const o of opts) if (RSYNC_WRITES.includes(o.name) && o.value) add(o.value);
@@ -913,6 +1004,28 @@ function copyTargets(cmd, args, add) {
     else if (hasOpt(opts, "--parents")) add(join(dest, local));
     else if (basename(local)) add(join(dest, basename(local)));
   }
+}
+
+/**
+ * chmod, chown, chgrp, chflags, chattr, setfacl, setfattr (#299): every
+ * operand, the mode or owner word too (harmless as a path), and each path
+ * a setfacl / setfattr --restore dump names on its `# file:` lines.
+ */
+function permTargets(args, ctx, add) {
+  for (const o of plain(args)) add(o, "perm");
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const dump = a === "--restore" ? args[i + 1] : a.startsWith("--restore=") ? a.slice(10) : null;
+    const text = dump ? readText(resolveIn(ctx.dir, expandVars(dump))) : null;
+    for (const m of text?.matchAll(/^# file: (.+)$/gm) ?? []) add(m[1], "perm");
+  }
+}
+
+/** xattr (macOS): -w NAME VALUE, -d NAME and -c change the files after them; a listing or -p only reads (#299). */
+function xattrTargets(args, add) {
+  const { opts, operands } = parseOpts(args);
+  const skip = hasOpt(opts, "-w") ? 2 : hasOpt(opts, "-d") ? 1 : hasOpt(opts, "-c") ? 0 : -1;
+  if (skip >= 0) for (const o of operands.slice(skip)) add(o, "perm");
 }
 
 /** curl: -o files, the -O download folder and names, and the other files it can write. */
@@ -1111,9 +1224,8 @@ function writeTargets(seg, ctx) {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
     // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command sees them (#258, #263)
-    const r = expandHome((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir))
-      .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
+    const r = expandVars((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir));
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
     out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
   };
@@ -1139,7 +1251,7 @@ function writeTargets(seg, ctx) {
   }
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
-  const cmd = w[0].split("/").pop();
+  const cmd = cmdName(w[0]); // `TEE` and `/BIN/RM` run tee and rm on a Mac (#295)
   let args = w.slice(1);
   // A command handed to another shell as a string is still a command: read
   // it the same way, one level down -- `bash -c`, `eval`, `su -c`, and a
@@ -1186,6 +1298,8 @@ function writeTargets(seg, ctx) {
   if (REMOVES.has(cmd)) for (const o of plain(args)) add(o, "remove");
   else if (CREATES.has(cmd)) for (const o of plain(args)) add(o, "create");
   else if (CHANGES.has(cmd)) for (const o of plain(args)) add(o);
+  else if (PERMS.has(cmd)) permTargets(args, ctx, add);
+  else if (cmd === "xattr") xattrTargets(args, add);
   else if (COPIES.has(cmd)) copyTargets(cmd, args, add);
   else if ((cmd === "sed" || cmd === "perl") &&
       args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith("--in-place"))) {
@@ -1280,7 +1394,7 @@ function segMoves(seg, again) {
       moves.push({ lost: true, again });
     } else if (ops.length) moves.push({ raw: ops[0], cd: true, again });
     else if (cmd === "cd") moves.push({ raw: "~", again });
-  } else if (cmd === "git") {
+  } else if (cmdName(cmd) === "git") { // cd and pushd are builtins, matched as spelled; git is a program (#295)
     for (let k = 1; k < w.length && w[k].startsWith("-"); k += GIT_VALUE_OPTS.has(w[k]) ? 2 : 1) {
       if (w[k] === "-C" && w[k + 1]) moves.push({ raw: w[k + 1], again });
     }
@@ -1403,8 +1517,8 @@ function judgeTarget(t) {
   }
   if (lead === WALK) {
     if (!t.walk) return null;
-    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandHome(s))))) return lost;
-    return walkHit(t.walk.spec, t.walk.dir);
+    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandVars(s))))) return lost;
+    return walkHit(t.walk.spec, t.walk.dir, t.mode);
   }
   if (isLost(t.abs)) return lost;
   const what = judge(t.abs, t.mode);
