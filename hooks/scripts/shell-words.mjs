@@ -97,12 +97,14 @@ function closeTick(line, i) {
 
 /**
  * Splits a shell command line into simple-command segments, each
- * { words, redirects, heredocs: [{ delim, body }], herestrings, inputs }.
+ * { words, redirects, heredocs: [{ delim, body }], herestrings, inputs, op }.
  * Single and double quotes and backslashes are honoured, so quoted text
  * stays inside its word: `git commit -m "explain git reset --hard"` is one
  * git commit with a message, never a reset, and a `>` in a quoted pattern
  * is text. Segments break at ; & | and newlines, plus whatever `read`
- * turns on:
+ * turns on. `op` is the operator that ended the segment (`|` `|&` `||`
+ * `&&` `;` `&`, a newline, a subshell character, or null at the end), so
+ * a reader can tell a pipeline from a list (#258):
  *
  *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
  *                  a descriptor, not a file); `<` operands go to `inputs` and
@@ -150,9 +152,11 @@ export function shellSegments(command, read = {}) {
     next = "word";
     cur = null;
   };
-  const endSeg = () => {
+  const endSeg = (op = null) => {
     pushWord();
-    if (words.length || redirects.length) segs.push({ words, redirects, heredocs, herestrings, inputs });
+    if (words.length || redirects.length) {
+      segs.push({ words, redirects, heredocs, herestrings, inputs, op });
+    }
     words = [];
     redirects = [];
     heredocs = [];
@@ -226,7 +230,7 @@ export function shellSegments(command, read = {}) {
     }
 
     if (c === "\n") {
-      endSeg();
+      endSeg("\n");
       // Heredoc bodies begin on the next line; they are data, so skip each
       // one through its delimiter line, keeping the text on its segment.
       while (pending.length) {
@@ -276,7 +280,14 @@ export function shellSegments(command, read = {}) {
       continue;
     }
 
-    if (breaks.includes(c)) { endSeg(); i++; continue; }
+    if (breaks.includes(c)) {
+      // name the operator; the second character of `||` `&&` `|&` ends an
+      // empty segment, which is never kept, so it can't overwrite this one
+      const pair = c + (n ?? "");
+      endSeg(pair === "||" || pair === "&&" || pair === "|&" ? pair : c);
+      i++;
+      continue;
+    }
 
     if (read.comments && c === "#" && cur === null) {
       const j = command.indexOf("\n", i);
@@ -301,13 +312,16 @@ function splitWords(str, read) {
  * Peels assignments and wrappers (with their flags) off the front of a
  * word list, leaving the real command first. Returns the remaining words,
  * every NAME=value applied to the command along the way (`sudo FOO=1 env
- * BAR=2 cmd` carries both), and any file a wrapper itself writes (GNU
- * `time -o FILE`). An env -S string is split the way `read` reads words.
+ * BAR=2 cmd` carries both), any file a wrapper itself writes (GNU `time -o
+ * FILE`), and each wrapper peeled with the option words it took (#258:
+ * xargs's -I string says where its stdin lands). An env -S string is split
+ * the way `read` reads words.
  */
 export function unwrap(words, read = {}) {
   let w = words.slice();
   const assigns = [];
   const writes = [];
+  const wrappers = [];
   for (;;) {
     while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
     if (!w.length) break;
@@ -315,29 +329,32 @@ export function unwrap(words, read = {}) {
     const spec = WRAPPERS.get(name);
     if (!spec) break;
     w.shift();
+    const args = [];
+    const take = () => { const x = w.shift(); args.push(x); return x; };
+    wrappers.push({ name, args });
     let positional = spec.positional ?? 0;
     // Read the wrapper's own options, stopping at its first bare word.
     while (w.length) {
       const a = w[0];
-      if (a === "--") { w.shift(); break; }
-      if (a === "-") { w.shift(); continue; } // `env -` is `env -i`
+      if (a === "--") { take(); break; }
+      if (a === "-") { take(); continue; } // `env -` is `env -i`
       if (a.startsWith("--")) {
-        w.shift();
+        take();
         const eq = a.indexOf("=");
         const flag = eq < 0 ? a : a.slice(0, eq);
         let val = eq < 0 ? null : a.slice(eq + 1);
-        if (eq < 0 && spec.long.includes(flag) && w.length) val = w.shift();
+        if (eq < 0 && spec.long.includes(flag) && w.length) val = take();
         if (val !== null && name === "env" && flag === "--split-string") w = splitWords(val, read).concat(w);
         if (val !== null && name === "time" && flag === "--output") writes.push(val);
         continue;
       }
       if (a.startsWith("-") && a.length > 1) {
-        w.shift();
+        take();
         // A short cluster: the first value-taking letter eats the rest of
         // the cluster, or the next word when it ends the cluster.
         for (let k = 1; k < a.length; k++) {
           if (!spec.short.includes(a[k])) continue;
-          const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? w.shift() : null);
+          const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? take() : null);
           if (val !== null && name === "env" && a[k] === "S") w = splitWords(val, read).concat(w);
           if (val !== null && name === "time" && a[k] === "o") writes.push(val);
           break;
@@ -346,9 +363,9 @@ export function unwrap(words, read = {}) {
       }
       break;
     }
-    while (positional-- > 0 && w.length) w.shift();
+    while (positional-- > 0 && w.length) take();
   }
-  return { words: w, assigns, writes };
+  return { words: w, assigns, writes, wrappers };
 }
 
 /**
@@ -369,6 +386,51 @@ export function shellCommandString(args) {
       continue;
     }
     return sawC ? a : null; // first bare word: the -c string, or a script path
+  }
+  return null;
+}
+
+/**
+ * True when a shell given these args reads its commands from stdin -- no
+ * -c string and no script path, or an explicit -s -- so a heredoc or
+ * here-string fed to it is a script, not data (#258).
+ */
+export function shellReadsStdin(args) {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === "--" || a === "-") return k + 1 >= args.length;
+    if (SHELL_VALUE_OPTS.has(a)) { k++; continue; }
+    if (a.startsWith("--")) continue;
+    if (/^[-+][A-Za-z]+$/.test(a)) {
+      if (a[0] === "-" && a.includes("c")) return false;
+      if (a[0] === "-" && a.includes("s")) return true;
+      continue;
+    }
+    return false; // a script path
+  }
+  return true;
+}
+
+// su options that take the next word as their value.
+const SU_VALUE_OPTS = "sgGw";
+
+/**
+ * The command string `su` runs, or null (#258). Found wherever it sits:
+ * `su -c CMD`, `su - user -c CMD`, `su --command=CMD`, `su -lc CMD`, and
+ * `su user -c CMD`, where the user's shell gets the -c.
+ */
+export function suCommandString(args) {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === "-c" || a === "--command" || a === "--session-command") return args[k + 1] ?? null;
+    if (a.startsWith("--command=")) return a.slice("--command=".length);
+    if (a.startsWith("--session-command=")) return a.slice("--session-command=".length);
+    if (/^--(shell|group|supp-group|whitelist-environment)$/.test(a)) { k++; continue; }
+    if (!/^-[A-Za-z]+$/.test(a)) continue; // the user name, or words for the shell
+    for (let i = 1; i < a.length; i++) {
+      if (a[i] === "c") return a.slice(i + 1) || (args[k + 1] ?? null);
+      if (SU_VALUE_OPTS.includes(a[i])) { if (i + 1 === a.length) k++; break; }
+    }
   }
   return null;
 }

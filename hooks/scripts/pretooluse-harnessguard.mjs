@@ -19,24 +19,27 @@
  *   one command it prefixes (#265). Visibility is the control; isolation is
  *   the operating system's job. Bash is read the way a shell would read it
  *   (shell-words.mjs, shared with the run guard, #270) to find what it
- *   WRITES: redirect targets, the operands of commands that change files
- *   (tee, rm, sed -i, cp/mv/rsync and the folder they copy into, curl -o,
- *   tar -C, unzip -d, the files a patch names), through wrappers and a
- *   shell's -c string. Removing a protected folder, or one holding it,
- *   counts. Quoted text, heredoc bodies and here-strings are data, and a
- *   path that is only READ passes (#240). Still not a full shell parser: a
- *   write inside an interpreter (python -c), a $(...) substitution, or an
- *   archive's own member list is not seen.
+ *   WRITES: redirects, and the operands of commands that change files (rm,
+ *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
+ *   find -delete/-exec, paths piped to xargs), through wrappers, bash -c,
+ *   su -c and a heredoc fed to a shell. Paths resolve from the payload cwd
+ *   and any cd before them (#258). Removing a protected folder, or one
+ *   holding it, counts. Other heredocs are data; a path only READ passes
+ *   (#240). Not seen: a write inside an interpreter (python -c) or $(...),
+ *   an archive's members, a cd to a computed path, piped paths an upstream
+ *   command finds itself (git ls-files | xargs rm).
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
  * Author(s): John Reed
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { SHELLS, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
+import {
+  SHELLS, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
+} from "./shell-words.mjs";
 
 // Constants
 
@@ -56,9 +59,21 @@ const PROTECTED = [
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
 const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
 
-// An unknown name inside a folder -- what `rsync src/ dir` or `cp -r src/.
-// dir` drops there. Matches any name, dotfiles included.
+// Stand-ins for names the command line doesn't spell out, each matching
+// any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
+// dir` drops in dir. STDIN: a path xargs reads from its input (#258).
+// WALK: a path find walks to, its `{}` (#258).
 const ANY = "\u0001";
+const STDIN = "\u0002";
+const WALK = "\u0003";
+const STANDINS = [ANY, STDIN, WALK];
+const HAS_STANDIN = /[*?[\u0001-\u0003]/;
+
+// `$1`, `${2}`, `$@`, `$*` -- a nested shell's positional arguments.
+const POSITIONAL = /\$\{?[0-9@*]\}?/g;
+
+// Operators that feed one command's output to the next one's input.
+const PIPE = new Set(["|", "|&"]);
 
 // The most of one file the guard reads (a patch, a list of paths).
 const READ_CAP = 32 * 1024 * 1024;
@@ -71,10 +86,21 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * How this guard reads a command line (shell-words.mjs): redirect targets
- * and heredocs are modelled; ( ), backticks, # comments and quoted $(...)
- * are word text, so a write hidden in a substitution is not seen.
+ * and heredocs are modelled, and ( ) and backticks end a command, so
+ * `(cd hooks && rm x)` is a cd and an rm (#258). # comments and quoted
+ * $(...) are word text, so a write hidden in a substitution is not seen.
  */
-const READ = { redirects: true };
+const READ = { redirects: true, subshells: true };
+
+// find: name tests, the primaries that take a value, and the ones that act.
+const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+  "-regex", "-iregex", "-lname", "-ilname"]);
+const FIND_VALUE = new Set(["-newer", "-anewer", "-cnewer", "-type", "-xtype", "-size", "-perm",
+  "-user", "-group", "-uid", "-gid", "-maxdepth", "-mindepth", "-mtime", "-atime", "-ctime",
+  "-mmin", "-amin", "-cmin", "-used", "-links", "-inum", "-samefile", "-fstype", "-context",
+  "-printf", "-files0-from", "-regextype"]);
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_WRITES = new Set(["-fprint", "-fprint0", "-fls", "-fprintf"]);
 
 // Commands that remove, create, or change every path operand they are given.
 const REMOVES = new Set(["rm", "rmdir", "unlink", "shred"]);
@@ -161,6 +187,8 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
 // Each holds the path as given and its real path, when a symlink differs.
 let ROOTS = [];
 let HOMES = [];
+// The protected paths find could walk to, listed once per run.
+let ENTRIES = null;
 
 // Paths
 
@@ -257,13 +285,13 @@ function holderRule(abs) {
   return null;
 }
 
-/** One glob component as a regex; ANY stands for any name. */
+/** One glob component as a regex; a stand-in matches any name. */
 function compRe(comp) {
   let re = /^[*?[]/.test(comp) ? "(?!\\.)" : ""; // a leading wildcard skips dotfiles
   for (let i = 0; i < comp.length; i++) {
     const c = comp[i];
     const close = c === "[" ? comp.indexOf("]", i + 2) : -1;
-    if (c === ANY) re += ".*";
+    if (STANDINS.includes(c)) re += ".*";
     else if (c === "*") re += "[^/]*";
     else if (c === "?") re += "[^/]";
     else if (close > 0) {
@@ -274,9 +302,9 @@ function compRe(comp) {
   return new RegExp(`^${re}$`);
 }
 
-/** Could this glob component expand to `name`? A bare ANY counts only when `anyOk`. */
+/** Could this glob component expand to `name`? A bare stand-in counts only when `anyOk`. */
 function could(comp, name, anyOk = true) {
-  if (comp === ANY) return anyOk;
+  if (STANDINS.includes(comp)) return anyOk;
   try { return compRe(comp).test(name); } catch { return true; }
 }
 
@@ -337,7 +365,7 @@ function judge(abs, mode, literal = false) {
     const what = fileRule(p) ??
       (mode !== "create" ? dirRule(p) : null) ??
       (mode === "remove" ? holderRule(p) : null) ??
-      (!literal && /[*?[]|\u0001/.test(p) ? globRule(p, mode) : null);
+      (!literal && HAS_STANDIN.test(p) ? globRule(p, mode) : null);
     if (what) return what;
   }
   return null;
@@ -445,10 +473,21 @@ function stripped(path, n) {
   return [s];
 }
 
-/** What a segment feeds its command on stdin: heredocs, here-strings, `< file`. */
-function stdinText(seg, dir) {
+/**
+ * What a command reads on stdin, or null when it can't be read: its own
+ * heredocs, here-strings and `< file`, else the files a `cat` piping into
+ * it names (`cat fix.diff | patch -p1`, #258).
+ */
+function stdinText(seg, dir, up = []) {
   const parts = [...seg.heredocs.map((h) => h.body), ...(seg.herestrings ?? [])];
-  for (const f of seg.inputs ?? []) {
+  const files = [...(seg.inputs ?? [])];
+  const feeder = up.length ? unwrap(up[up.length - 1].words, READ).words : [];
+  if (!parts.length && !files.length && basename(feeder[0] ?? "") === "cat") {
+    const last = up[up.length - 1];
+    parts.push(...last.heredocs.map((h) => h.body), ...(last.herestrings ?? []));
+    files.push(...plain(feeder.slice(1)), ...(last.inputs ?? []));
+  }
+  for (const f of files) {
     const t = readText(resolveIn(dir, f));
     if (t !== null) parts.push(t);
   }
@@ -461,6 +500,179 @@ function gitRoot(dir) {
     if (existsSync(join(d, ".git"))) return d;
     if (dirname(d) === d) return dir;
   }
+}
+
+// Streams: what find walks and what xargs reads (#258)
+
+/**
+ * find's start paths, name tests, and what it does to each path it walks:
+ * -delete, -exec/-execdir/-ok/-okdir (with `{}` as WALK), -fprint files.
+ */
+function parseFind(args) {
+  let i = 0;
+  // global options (-H -L -P -O3 -D opts) come before the start paths
+  while (i < args.length && (/^-(H|L|P|O\d*)$/.test(args[i]) || args[i] === "-D")) {
+    i += args[i] === "-D" ? 2 : 1;
+  }
+  const starts = [];
+  while (i < args.length && !/^[-(!]/.test(args[i])) starts.push(args[i++]);
+  const spec = {
+    starts: starts.length ? starts : ["."], tests: [], negated: false, remove: false, execs: [], files: [],
+  };
+  for (; i < args.length; i++) {
+    const a = args[i];
+    if (a === "!" || a === "-not") spec.negated = true;
+    else if (FIND_TESTS.has(a)) {
+      spec.tests.push({ kind: a.replace(/^-i?/, ""), ci: a.startsWith("-i"), pat: args[++i] ?? "" });
+    } else if (a === "-delete") spec.remove = true;
+    else if (FIND_EXEC.has(a)) {
+      // the command runs once per path (or batch, with +), {} standing for it
+      const words = [];
+      for (i++; i < args.length && args[i] !== ";" && args[i] !== "+"; i++) {
+        words.push(args[i].split("{}").join(WALK));
+      }
+      spec.execs.push(words);
+    } else if (FIND_WRITES.has(a)) {
+      spec.files.push(args[++i] ?? "");
+      if (a === "-fprintf") i++;
+    } else if (FIND_VALUE.has(a)) i++;
+  }
+  return spec;
+}
+
+/** fnmatch(3) without FNM_PATHNAME, as find's -name and -path use it. */
+function fnmatchRe(pat, ci) {
+  let re = "";
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    const close = c === "[" ? pat.indexOf("]", i + 2) : -1;
+    if (c === "\\" && i + 1 < pat.length) re += pat[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    else if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (close > 0) {
+      re += `[${pat.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      i = close;
+    } else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, ci ? "i" : "");
+}
+
+/** Does this find test select `entry` (printed by find as `shown`)? Unreadable tests select. */
+function testSelects(t, entry, shown) {
+  if (t.kind === "lname") return false; // symlink targets; the protected files are not links
+  try {
+    if (t.kind === "regex") return new RegExp(`^(?:${t.pat})$`, t.ci ? "i" : "").test(shown);
+    return fnmatchRe(t.pat, t.ci).test(t.kind === "name" ? basename(entry) : shown);
+  } catch {
+    return true;
+  }
+}
+
+/** Every protected path find could reach: the fixed surfaces, and what hooks/ holds on disk. */
+function protectedEntries() {
+  if (ENTRIES) return ENTRIES;
+  ENTRIES = [];
+  for (const root of ROOTS) {
+    ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
+      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)),
+      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)));
+    const stack = [join(root, "hooks")];
+    while (stack.length && ENTRIES.length < 2000) {
+      const d = stack.pop();
+      let found = [];
+      try { found = readdirSync(d, { withFileTypes: true }); } catch { /* no such folder */ }
+      for (const e of found) {
+        ENTRIES.push(join(d, e.name));
+        if (e.isDirectory()) stack.push(join(d, e.name));
+      }
+    }
+  }
+  for (const home of HOMES) {
+    ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
+  }
+  return ENTRIES;
+}
+
+/**
+ * Would find, walking from `dir`, reach a protected path its tests select?
+ * A start inside hooks/ (or a protected file) is hit whatever the tests
+ * say; a start holding one is hit when a test can select it, or when
+ * nothing narrows the walk (no name test, or a negated one).
+ */
+function walkHit(spec, dir) {
+  for (const s of spec.starts) {
+    const start = resolveIn(dir, s);
+    const hooks = dirRule(start) === "the hook directory" ? "the hook directory" : null;
+    const inside = fileRule(start) ?? hooks;
+    if (inside) return { path: s, what: inside };
+    for (const entry of protectedEntries()) {
+      if (!holds(start, entry)) continue;
+      const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
+      if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
+        return { path: shown, what: judge(entry, "remove") ?? "the hook directory" };
+      }
+    }
+  }
+  return null;
+}
+
+/** xargs's command line with its stdin paths in place: at the end, or where -I's string sits. */
+function withStdin(words, xargsArgs) {
+  let rep = null;
+  for (let i = 0; i < xargsArgs.length; i++) {
+    const a = xargsArgs[i];
+    if (a === "-I") rep = xargsArgs[i + 1] ?? null;
+    else if (a.startsWith("-I")) rep = a.slice(2);
+    else if (a === "-i" || a === "--replace") rep = "{}";
+    else if (a.startsWith("--replace=")) rep = a.slice("--replace=".length);
+    else if (a.startsWith("-i")) rep = a.slice(2);
+  }
+  return rep ? words.map((x) => x.split(rep).join(STDIN)) : words.concat(STDIN);
+}
+
+/** The files xargs -a / --arg-file reads its paths from instead of stdin. */
+function argFiles(xargsArgs) {
+  const files = [];
+  for (let i = 0; i < xargsArgs.length; i++) {
+    const a = xargsArgs[i];
+    if (a === "-a" || a === "--arg-file") files.push(xargsArgs[i + 1] ?? "");
+    else if (a.startsWith("--arg-file=")) files.push(a.slice("--arg-file=".length));
+    else if (/^-a./.test(a)) files.push(a.slice(2));
+  }
+  return files.filter(Boolean);
+}
+
+/**
+ * A protected path named by what feeds a command's stdin, or null: its
+ * own heredoc, here-string, `< file` or xargs -a file, and every upstream
+ * command of the pipeline -- its words, and for find, what it walks
+ * (#258). Paths an upstream command discovers itself (git ls-files,
+ * grep -rl .) can't be seen.
+ */
+function feedHit(feed, mode) {
+  const texts = [...feed.seg.heredocs.map((h) => h.body), ...(feed.seg.herestrings ?? [])];
+  for (const f of [...(feed.seg.inputs ?? []), ...(feed.argFiles ?? [])]) {
+    const t = readText(resolveIn(feed.dir, f));
+    if (t !== null) texts.push(t);
+  }
+  const words = [];
+  for (const u of feed.up) {
+    const w = unwrap(u.words, READ).words;
+    if (basename(w[0] ?? "") === "find") {
+      const hit = walkHit(parseFind(w.slice(1)), feed.dir);
+      if (hit) return hit;
+      continue;
+    }
+    words.push(...w.slice(1));
+    texts.push(...u.heredocs.map((h) => h.body), ...(u.herestrings ?? []));
+  }
+  for (const t of texts) words.push(...t.split(/\s+/));
+  for (const x of words) {
+    if (!x || x.startsWith("-")) continue;
+    const what = judge(resolveIn(feed.dir, x), mode);
+    if (what) return { path: x, what };
+  }
+  return null;
 }
 
 // Write models, one per command family. Each calls add(raw, mode, dir).
@@ -615,9 +827,12 @@ function patchTargets(args, seg, ctx, add) {
     return;
   }
   const src = optValue(opts, "-i", "--input");
-  const text = src !== undefined && src !== "-" ? readText(resolveIn(dir, src)) : stdinText(seg, ctx.dir);
+  const text = src !== undefined && src !== "-"
+    ? readText(resolveIn(dir, src))
+    : stdinText(seg, ctx.dir, ctx.up);
   if (text === null) {
-    add(d ?? "."); // a patch we can't read: only the folder it applies in is known
+    add(d ?? "."); // a patch we can't read: only the folder it applies in is known,
+    add(STDIN, "write", ctx.dir, true); // and what feeds the pipe into it (#258)
     return;
   }
   const p = optValue(opts, "-p", "--strip");
@@ -635,12 +850,15 @@ function applyTargets(rest, seg, ctx, add) {
   const n = Number(optValue(opts, "-p") ?? 1);
   const prefix = optValue(opts, "--directory");
   const root = gitRoot(ctx.dir);
-  const piped = () => stdinText(seg, ctx.dir);
+  const piped = () => stdinText(seg, ctx.dir, ctx.up);
   const texts = operands.length
     ? operands.map((o) => (o === "-" ? piped() : readText(resolveIn(ctx.dir, o))))
     : [piped()];
   for (const t of texts) {
-    if (t === null) continue; // a patch we can't read names nothing we can check
+    if (t === null) {
+      add(STDIN, "write", ctx.dir, true); // a patch we can't read: check what feeds it (#258)
+      continue;
+    }
     for (const path of patchPaths(t)) {
       for (const s of stripped(path, Number.isFinite(n) ? n : 1)) {
         add(prefix ? join(prefix, s) : s, "write", root);
@@ -649,22 +867,26 @@ function applyTargets(rest, seg, ctx, add) {
   }
 }
 
-/** git: checkout/restore pathspecs, rm/mv operands, apply's patch. */
+/** git: checkout/restore pathspecs, rm/mv operands, apply's patch -- from its -C folder (#258). */
 function gitTargets(args, seg, ctx, add) {
   let k = 0;
-  while (k < args.length && args[k].startsWith("-")) k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+  let dir = ctx.dir;
+  while (k < args.length && args[k].startsWith("-")) {
+    if (args[k] === "-C" && args[k + 1]) dir = resolveIn(dir, args[k + 1]);
+    k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+  }
   const sub = args[k];
   const ops = plain(args.slice(k + 1));
-  if (sub === "checkout" || sub === "restore") for (const a of ops) add(a);
-  else if (sub === "rm") for (const a of ops) add(a, "remove");
+  if (sub === "checkout" || sub === "restore") for (const a of ops) add(a, "write", dir);
+  else if (sub === "rm") for (const a of ops) add(a, "remove", dir);
   else if (sub === "mv" && ops.length >= 2) {
     const dest = ops.pop();
-    add(dest);
+    add(dest, "write", dir);
     for (const s of ops) {
-      add(s, "remove");
-      add(join(dest, basename(s)));
+      add(s, "remove", dir);
+      add(join(dest, basename(s)), "write", dir);
     }
-  } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, ctx, add);
+  } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
 }
 
 /**
@@ -673,18 +895,64 @@ function gitTargets(args, seg, ctx, add) {
  */
 function writeTargets(seg, ctx) {
   const out = [];
-  const add = (raw, mode = "write", dir = ctx.dir) => out.push({ raw, abs: resolveIn(dir, raw), mode });
+  const { words: w0, writes, wrappers } = unwrap(seg.words, READ);
+  // xargs runs its command with paths read from stdin (#258)
+  const xargs = wrappers.find((x) => x.name === "xargs");
+  // What this command reads on stdin, should a path come from there. A
+  // stdin path in a nested line came from its caller's xargs, unless this
+  // command has an xargs of its own or reads a pipe itself (`pipe`).
+  const own = { seg, up: ctx.up, dir: ctx.dir, argFiles: xargs ? argFiles(xargs.args) : [] };
+  const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
+    // a nested shell's "$1" / "$@" is whatever path its caller handed it
+    const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
+    const r = mapped ? raw.replace(POSITIONAL, ctx.positional) : raw;
+    const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
+    out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
+  };
   for (const r of seg.redirects) if (!DEVICE.test(r)) add(r);
-  const { words: w, writes } = unwrap(seg.words, READ);
   for (const x of writes) add(x);
+  const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
   const cmd = w[0].split("/").pop();
   const args = w.slice(1);
   // A command handed to another shell as a string is still a command: read
-  // it the same way, one level down.
-  if (SHELLS.has(cmd) || cmd === "eval") {
-    const inner = cmd === "eval" ? args.join(" ") : shellCommandString(args);
-    if (inner && ctx.depth < 3) out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1));
+  // it the same way, one level down -- `bash -c`, `eval`, `su -c`, and a
+  // heredoc or here-string fed to a shell (or to su) reading stdin (#258).
+  if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
+    if (ctx.depth >= 3) return out;
+    const nest = (text, rest = []) => {
+      const marker = rest.join(" ").split("").find((c) => c === STDIN || c === WALK);
+      out.push(...lineTargets(text, ctx.dir, ctx.depth + 1, {
+        positional: marker,
+        argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
+        walk: ctx.walk,
+      }));
+    };
+    const str = cmd === "eval" ? args.join(" ")
+      : cmd === "su" ? suCommandString(args) : shellCommandString(args);
+    if (str) {
+      nest(str, cmd === "eval" ? [] : args.slice(args.indexOf(str) + 1));
+      return out;
+    }
+    if (cmd !== "eval" && (cmd === "su" || shellReadsStdin(args))) {
+      // its own heredoc, or the one piped in: `cat <<EOF | sh`
+      for (const s of [seg, ...ctx.up.slice(-1)]) {
+        for (const h of s.heredocs) nest(h.body);
+        for (const x of s.herestrings ?? []) nest(x);
+      }
+    }
+    return out;
+  }
+  // find acts on every path it walks: -delete, and -exec's command with {} in it (#258)
+  if (cmd === "find") {
+    const spec = parseFind(args);
+    for (const f of spec.files) add(f);
+    const walk = { spec, dir: ctx.dir };
+    if (spec.remove) out.push({ raw: WALK, abs: ctx.dir, mode: "remove", walk });
+    for (const words of spec.execs) {
+      const inner = { words, redirects: [], heredocs: [], herestrings: [], inputs: [], op: null };
+      out.push(...writeTargets(inner, { ...ctx, up: [], walk }));
+    }
     return out;
   }
   if (REMOVES.has(cmd)) for (const o of plain(args)) add(o, "remove");
@@ -715,16 +983,62 @@ function exempt(words) {
 }
 
 /**
- * Every path a command line would change. The inline override exempts the
- * one command it prefixes -- never the rest of a chained line (#265).
+ * Where a cd, pushd or popd leaves the shell, or the same place (#258). A
+ * target the line computes ($VAR, ~, $(...)) can't be followed, so later
+ * paths keep resolving from where the shell was.
  */
-function lineTargets(command, dir, depth) {
+function moveDir(seg, at) {
+  const w = unwrap(seg.words, READ).words;
+  const cmd = basename(w[0] ?? "");
+  if (cmd === "popd") {
+    if (at.stack.length) [at.prev, at.cur] = [at.cur, at.stack.pop()];
+    return;
+  }
+  if (cmd !== "cd" && cmd !== "pushd") return;
+  const ops = w.slice(1).filter((a) => a !== "--" && !/^-[LPe@]+$/.test(a));
+  let to;
+  if (!ops.length) to = cmd === "cd" ? resolve(homedir()) : at.stack[at.stack.length - 1];
+  else if (ops[0] === "-") to = at.prev;
+  else if (!/[$`~]|^[+-]\d+$/.test(ops[0])) to = resolveIn(at.cur, ops[0]);
+  if (to === undefined) return;
+  if (cmd === "pushd") at.stack.push(at.cur);
+  [at.prev, at.cur] = [at.cur, to];
+}
+
+/**
+ * Every path a command line would change, each resolved from the folder
+ * the shell is in when it runs: the starting cwd, moved by any cd before
+ * it (#258). The inline override exempts the one command it prefixes --
+ * never the rest of a chained line (#265).
+ */
+function lineTargets(command, dir, depth, extra = {}) {
+  const segs = shellSegments(command, READ);
+  const at = { cur: dir, prev: dir, stack: [] };
   const out = [];
-  for (const seg of shellSegments(command, READ)) {
+  for (let k = 0; k < segs.length; k++) {
+    // the commands piping into this one, nearest last
+    const up = [];
+    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) up.unshift(segs[j]);
     // the prefix counts on a command the human typed, not inside a quoted string
-    if (depth > 0 || !exempt(seg.words)) out.push(...writeTargets(seg, { dir, depth }));
+    if (depth > 0 || !exempt(segs[k].words)) {
+      out.push(...writeTargets(segs[k], { ...extra, dir: at.cur, depth, up }));
+    }
+    moveDir(segs[k], at);
   }
   return out;
+}
+
+/**
+ * The protected thing one target would change, or null. A path that comes
+ * from a stream is checked against the stream: what feeds xargs or a patch
+ * tool, or what find walks.
+ */
+function judgeTarget(t) {
+  const lead = t.raw.replace(/^(\.\/)+/, "")[0];
+  if (lead === STDIN) return t.feed ? feedHit(t.feed, t.mode) : null;
+  if (lead === WALK) return t.walk ? walkHit(t.walk.spec, t.walk.dir) : null;
+  const what = judge(t.abs, t.mode);
+  return what ? { path: t.raw, what } : null;
 }
 
 // Main
@@ -739,34 +1053,36 @@ try {
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   ROOTS = spellings(projectDir);
   HOMES = spellings(homedir());
+  // Relative paths resolve where the tool runs -- the payload's cwd -- not
+  // at the project root (#258): the shell and the file tools agree.
+  const cwd = payload?.cwd ? resolveIn(ROOTS[0], payload.cwd) : ROOTS[0];
 
   // The session-wide override is the human's to set. The Bash prefix form
   // is read per command, in lineTargets.
   if (process.env.CAIRN_HARNESS_EDIT === "1") process.exit(0);
 
-  let hitPath = null;
-  let hitWhat = null;
+  let hit = null;
 
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
     // ordinary work and must stay frictionless (#240).
-    for (const t of lineTargets(payload?.tool_input?.command ?? "", ROOTS[0], 0)) {
-      const what = judge(t.abs, t.mode);
-      if (what) { hitPath = t.raw; hitWhat = what; break; }
+    for (const t of lineTargets(payload?.tool_input?.command ?? "", cwd, 0)) {
+      hit = judgeTarget(t);
+      if (hit) break;
     }
   } else {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-    const what = p ? judge(resolveIn(ROOTS[0], p), "write", true) : null;
-    if (what) { hitPath = p; hitWhat = what; }
+    const what = p ? judge(resolveIn(cwd, p), "write", true) : null;
+    if (what) hit = { path: p, what };
   }
 
-  if (!hitWhat) process.exit(0);
+  if (!hit) process.exit(0);
 
   console.error(
-    `cairn harness guard: this would change ${hitWhat} — the configuration that decides ` +
+    `cairn harness guard: this would change ${hit.what} — the configuration that decides ` +
     "what this agent is allowed to do.",
   );
-  console.error(`  file: ${String(hitPath).split(ANY).join("*")}`);
+  console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
   console.error("  if you asked for this, set CAIRN_HARNESS_EDIT=1 for the session (or prefix a");
   console.error("  shell command with it) and run it again. If you did not ask for this, something");
   console.error("  the agent read did — check where the instruction came from before allowing it.");

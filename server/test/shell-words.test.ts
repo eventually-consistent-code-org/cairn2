@@ -8,8 +8,10 @@
  */
 
 import { describe, it, expect } from "vitest";
+import {
+  WRAPPERS, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
 // @ts-expect-error untyped hook module
-import { WRAPPERS, shellSegments, unwrap, shellCommandString } from "../../hooks/scripts/shell-words.mjs";
+} from "../../hooks/scripts/shell-words.mjs";
 
 type Seg = { words: string[]; redirects: string[]; heredocs: Array<{ delim: string; body: string }> };
 
@@ -67,6 +69,17 @@ describe("shellSegments", () => {
   });
 });
 
+describe("shellSegments: operators (#258)", () => {
+  it("each segment names the operator that ended it, so a pipeline is told from a list", () => {
+    const ops = (line: string) => (shellSegments(line, { redirects: true }) as Array<Seg & { op: string | null }>)
+      .map((s) => [s.words[0], s.op]);
+    expect(ops("a | b |& c || d && e ; f & g\nh")).toEqual([
+      ["a", "|"], ["b", "|&"], ["c", "||"], ["d", "&&"], ["e", ";"], ["f", "&"], ["g", "\n"], ["h", null],
+    ]);
+    expect(ops("a||b&&c|d")).toEqual([["a", "||"], ["b", "&&"], ["c", "|"], ["d", null]]);
+  });
+});
+
 describe("unwrap", () => {
   it("skips a wrapper's flag values and basenames the wrapper (#254, #270)", () => {
     for (const line of [
@@ -93,6 +106,12 @@ describe("unwrap", () => {
     expect(r.writes).toEqual(["log"]);
   });
 
+  it("reports each wrapper peeled with the option words it took (#258)", () => {
+    const r = unwrap(["sudo", "-u", "root", "xargs", "-n", "1", "-I{}", "rm", "{}"]);
+    expect(r.words).toEqual(["rm", "{}"]);
+    expect(r.wrappers).toEqual([{ name: "sudo", args: ["-u", "root"] }, { name: "xargs", args: ["-n", "1", "-I{}"] }]);
+  });
+
   it("covers the wrappers the issue names", () => {
     for (const w of ["sudo", "doas", "env", "nice", "timeout", "xargs", "stdbuf", "exec", "time", "nohup"]) {
       expect(WRAPPERS.has(w), w).toBe(true);
@@ -108,5 +127,31 @@ describe("shellCommandString", () => {
     expect(shellCommandString(["-c", "--", "x"])).toBe("x");
     expect(shellCommandString(["script.sh", "-c", "x"])).toBeNull();
     expect(shellCommandString(["-x", "script.sh"])).toBeNull();
+  });
+});
+
+describe("shellReadsStdin (#258)", () => {
+  it("a shell with no -c and no script, or with -s, reads its commands from stdin", () => {
+    expect(shellReadsStdin([])).toBe(true);
+    expect(shellReadsStdin(["-x"])).toBe(true);
+    expect(shellReadsStdin(["-s", "arg"])).toBe(true);
+    expect(shellReadsStdin(["-o", "pipefail"])).toBe(true);
+    expect(shellReadsStdin(["-c", "x"])).toBe(false);
+    expect(shellReadsStdin(["script.sh"])).toBe(false);
+    expect(shellReadsStdin(["--", "script.sh"])).toBe(false);
+  });
+});
+
+describe("suCommandString (#258)", () => {
+  it("finds su's command string wherever the -c sits, and skips value flags", () => {
+    expect(suCommandString(["-c", "x"])).toBe("x");
+    expect(suCommandString(["-", "root", "-c", "x"])).toBe("x");
+    expect(suCommandString(["root", "-c", "x"])).toBe("x");
+    expect(suCommandString(["-lc", "x"])).toBe("x");
+    expect(suCommandString(["--command=x"])).toBe("x");
+    expect(suCommandString(["--command", "x"])).toBe("x");
+    expect(suCommandString(["-s", "/bin/sh", "-c", "x", "root"])).toBe("x");
+    expect(suCommandString(["-s", "-c"])).toBeNull(); // -s took "-c" as the shell
+    expect(suCommandString(["-", "root"])).toBeNull();
   });
 });

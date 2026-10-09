@@ -5,15 +5,17 @@
  *   rewrite. #265 -- it must see writes that land in a protected folder
  *   (cp/mv/rsync into hooks/ or .claude/, rm -rf of the folder or one
  *   holding it), downloads, extracted archives and applied patches, and the
- *   inline override exempts only the command it prefixes. Every write is
- *   paired with a READ of the same path, so closing a gap never brings back
- *   the #240 false positives. Only command strings are fed to the hook;
- *   nothing is ever run.
+ *   inline override exempts only the command it prefixes. #258 -- writes
+ *   through su -c, find -delete/-exec, paths piped to xargs, a heredoc fed
+ *   to a shell, and relative paths resolved from the payload cwd and any
+ *   cd before them. Every write is paired with a READ of the same path, so
+ *   closing a gap never brings back the #240 false positives. Only command
+ *   strings are fed to the hook; nothing is ever run.
  * Author(s): John Reed
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,18 +39,23 @@ function proj(): string {
   return d;
 }
 
-/** Exit status of the guard for one Bash command string. */
-function guard(projectDir: string, command: string): number | null {
+/** Exit status of the guard for one tool call; `cwd` is the payload's, relative to the project. */
+function call(projectDir: string, tool: string, input: Record<string, string>, cwd?: string): number | null {
   const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
   delete env.CAIRN_HARNESS_EDIT;
   const r = spawnSync(process.execPath, [HARNESSGUARD], {
     cwd: projectDir,
     env,
-    input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: cwd === undefined ? "" : join(projectDir, cwd) }),
     encoding: "utf8",
     timeout: 5000,
   });
   return r.status;
+}
+
+/** Exit status of the guard for one Bash command string. */
+function guard(projectDir: string, command: string, cwd?: string): number | null {
+  return call(projectDir, "Bash", { command }, cwd);
 }
 
 describe("harness guard sees through wrapper flags (#254)", () => {
@@ -322,6 +329,165 @@ describe("harness guard sees folder targets, downloads, archives and patches (#2
       "CAIRN_HARNESS_EDIT=1 cp a hooks/x && npm test",
       "X=1 CAIRN_HARNESS_EDIT=1 rm hooks/a",
       "CAIRN_HARNESS_EDIT=1 bash -c 'rm hooks/a; rm hooks/b'",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
+describe("harness guard sees su, find, xargs, cwd and heredoc writes (#258)", () => {
+  it("su runs its -c string as a command, wherever the -c sits", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["su -c 'rm hooks/hooks.json'", "su -c 'cat hooks/hooks.json'"],
+      ["su - root -c 'echo x > .claude/settings.json'", "su - root -c 'cat .claude/settings.json'"],
+      ["su root -c 'rm -rf hooks'", "su root -c 'ls hooks'"],
+      ["su --command='cp x hooks/a'", "su --command='cp hooks/a /tmp/x'"],
+      ["sudo su -lc 'tee hooks/a'", "sudo su -lc 'grep x hooks/a'"],
+      ["su -s /bin/sh -c 'rm hooks/a' root", "su -s /bin/sh -c 'cat hooks/a' root"],
+      ["su - root <<'EOF'\nrm hooks/hooks.json\nEOF", "su - root <<'EOF'\nls hooks\nEOF"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("find acts on what it walks: -delete and -exec are writes there", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["find hooks -delete", "find hooks -name '*.json'"],
+      ["find hooks -name '*.bak' -delete", "find hooks -name '*.bak'"],
+      ["find . -name hooks.json -delete", "find . -name hooks.json"],
+      ["find . -name '*.json' -delete", "find . -name '*.pyc' -delete"],
+      ["find . -type f -delete", "find . -type f"],
+      ["find . ! -name '*.md' -delete", "find . ! -name '*.md'"],
+      ["find . -path './hooks/*' -delete", "find . -path './node_modules/*' -delete"],
+      ["find .claude -name 'settings*.json' -exec rm {} +", "find .claude -name '*.md' -exec rm {} +"],
+      ["find hooks -type f -exec sed -i 's/a/b/' {} \\;", "find hooks -type f -exec grep -l x {} \\;"],
+      ["find hooks -exec cp /tmp/evil {} \\;", "find src -exec cp /tmp/evil {} \\;"],
+      ["find hooks -exec sh -c 'rm \"$1\"' _ {} \\;", "find hooks -exec sh -c 'cat \"$1\"' _ {} \\;"],
+      ["find . -name '*.log' -fprint hooks/list.txt", "find . -name '*.log' -fprint /tmp/list.txt"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+    // copying what find walks to somewhere else is a read of it
+    expect(guard(p, "find . -name '*.json' -exec cp {} /tmp/backup/ \\;")).toBe(0);
+  });
+
+  it("find's name tests are checked against what hooks/ really holds", () => {
+    const p = proj();
+    expect(guard(p, "find . -name '*.mjs' -delete")).toBe(0);
+    mkdirSync(join(p, "hooks", "scripts"), { recursive: true });
+    writeFileSync(join(p, "hooks", "scripts", "check.mjs"), "");
+    expect(guard(p, "find . -name '*.mjs' -delete")).toBe(2);
+    expect(guard(p, "find . -name '*.mjs'")).toBe(0);
+  });
+
+  it("paths piped to xargs are checked against what feeds the pipe", () => {
+    const p = proj();
+    writeFileSync(join(p, "list.txt"), "hooks/hooks.json\n");
+    const pairs: Array<[write: string, read: string]> = [
+      ["ls hooks/* | xargs rm", "ls hooks/* | xargs cat"],
+      ["echo hooks/hooks.json | xargs rm", "echo src/a.ts | xargs rm"],
+      ["echo .claude/settings.json | xargs -I{} cp /tmp/evil {}", "echo src/a.ts | xargs -I{} cp /tmp/evil {}"],
+      ["find hooks -type f | xargs rm", "find hooks -type f | xargs wc -l"],
+      ["find . -name '*.json' -print0 | xargs -0 rm", "find . -name '*.pyc' -print0 | xargs -0 rm"],
+      ["printf '%s\\n' hooks/a hooks/b | xargs -n1 rm -f", "printf '%s\\n' src/a src/b | xargs -n1 rm -f"],
+      ["git ls-files hooks | xargs sed -i 's/a/b/'", "git ls-files src | xargs sed -i 's/a/b/'"],
+      ["xargs rm <<'EOF'\nhooks/hooks.json\nEOF", "xargs cat <<'EOF'\nhooks/hooks.json\nEOF"],
+      ["xargs rm < list.txt", "xargs cat < list.txt"],
+      ["xargs -a list.txt rm", "xargs -a list.txt cat"],
+      ["echo hooks/a | xargs -I{} sh -c 'rm {}'", "echo src/a | xargs -I{} sh -c 'rm {}'"],
+      ["echo hooks/a | xargs sh -c 'rm \"$@\"' _", "echo src/a | xargs sh -c 'rm \"$@\"' _"],
+      ["ls hooks | xargs -I{} sh -c 'rm hooks/{}'", "ls hooks | xargs -I{} sh -c 'cat hooks/{}'"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a patch piped in is read through the pipe, or checked against what feeds it", () => {
+    const p = proj();
+    patchFile(p, "evil.patch", "hooks/hooks.json");
+    patchFile(p, "ok.patch", "src/a.ts");
+    const pairs: Array<[write: string, read: string]> = [
+      ["cat evil.patch | patch -p1", "cat ok.patch | patch -p1"],
+      ["cat evil.patch | git apply", "cat ok.patch | git apply"],
+      ["git diff hooks/ | git apply -R", "git diff src/ | git apply -R"],
+      ["git show HEAD -- .claude/settings.json | patch -p1 -R", "git show HEAD -- src/a.ts | patch -p1 -R"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("relative paths resolve from the payload cwd, not the project root", () => {
+    const p = proj();
+    const cases: Array<[command: string, cwd: string, want: number]> = [
+      ["echo x > hooks.json", "hooks", 2], ["cat hooks.json", "hooks", 0], ["echo x > hooks.json", "src", 0],
+      ["rm -rf scripts", "hooks", 2], ["rm -rf scripts", "src", 0],
+      ["echo x > settings.json", ".claude", 2], ["echo x > notes.md", ".claude", 0],
+      ["curl -O https://example.com/hooks.json", "hooks", 2], ["curl -O https://example.com/a.tgz", "src", 0],
+      ["tar -xzf /tmp/a.tgz", "hooks", 2], ["tar -xzf /tmp/a.tgz", "src", 0],
+      ["unzip /tmp/a.zip", ".claude", 2], ["unzip /tmp/a.zip", "src", 0],
+      ["patch -p1 < /tmp/unseen.diff", "hooks", 2], ["patch -p1 < /tmp/unseen.diff", "src", 0],
+      // a worktree's own hooks/ is not the project's
+      ["echo x > hooks/hooks.json", ".claude/worktrees/wt", 0],
+    ];
+    for (const [command, cwd, want] of cases) expect(guard(p, command, cwd), `${cwd}: ${command}`).toBe(want);
+  });
+
+  it("the file tools resolve a relative path from the payload cwd too", () => {
+    const p = proj();
+    expect(call(p, "Edit", { file_path: "hooks.json" }, "hooks")).toBe(2);
+    expect(call(p, "Write", { file_path: "settings.json" }, ".claude")).toBe(2);
+    expect(call(p, "Edit", { file_path: "hooks.json" }, "src")).toBe(0);
+    expect(call(p, "Write", { file_path: join(p, ".claude/worktrees/wt/hooks/hooks.json") }, ".claude/worktrees/wt"))
+      .toBe(0);
+  });
+
+  it("a cd earlier in the line moves where later relative paths land", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["cd hooks && echo x > hooks.json", "cd hooks && cat hooks.json"],
+      ["cd hooks; rm -f hooks.json", "cd src; rm -f hooks.json"],
+      ["cd /tmp && cd - && echo x > hooks/hooks.json", "cd /tmp && echo x > hooks/hooks.json"],
+      ["pushd hooks && rm hooks.json", "pushd hooks && popd && rm hooks.json"],
+      ["(cd hooks && echo x > hooks.json)", "(cd hooks && cat hooks.json)"],
+      ["(rm hooks/hooks.json)", "(cat hooks/hooks.json)"],
+      ["git -C hooks checkout -- hooks.json", "git -C hooks diff -- hooks.json"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+    expect(guard(p, "cd .. && rm -rf hooks", "src")).toBe(2);
+    expect(guard(p, "cd hooks && cd .. && echo x > hooks.json")).toBe(0);
+  });
+
+  it("a heredoc or here-string fed to a shell is read as commands", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["bash <<EOF\nrm hooks/hooks.json\nEOF", "bash <<EOF\ncat hooks/hooks.json\nEOF"],
+      ["sh <<'X'\necho x > .claude/settings.json\nX", "sh <<'X'\ngrep x .claude/settings.json\nX"],
+      ["bash -s <<'EOF'\ncp /tmp/evil hooks/hooks.json\nEOF", "bash -s <<'EOF'\ncp hooks/hooks.json /tmp/x\nEOF"],
+      ["cat <<'EOF' | sh\nrm -rf hooks\nEOF", "cat <<'EOF' | sh\nls hooks\nEOF"],
+      ["bash <<< 'rm hooks/hooks.json'", "bash <<< 'ls hooks'"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+    // ...but a heredoc handed to anything else, or to a script, stays data
+    for (const c of [
+      "cat <<'EOF' > notes.md\nrm hooks/hooks.json\nEOF",
+      "bash hooks/scripts/check.sh <<'EOF'\nrm hooks/a\nEOF",
+      "git commit -F - <<'EOF'\nfix: rm hooks/hooks.json wording\nEOF",
     ]) {
       expect(guard(p, c), c).toBe(0);
     }
