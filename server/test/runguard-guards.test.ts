@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -374,6 +374,94 @@ describe("run guard: work-destroying equivalents refused in every session (#264)
     git(proj, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
     expect(guard(proj, home, "git push origin --delete trunk").status).toBe(2);
     expect(guard(proj, home, "git push origin --delete feature").status).toBe(0);
+  });
+});
+
+describe("run guard: a shortened long option is the option git reads it as (#296)", () => {
+  // git's option parser takes any unique start of a long option, so each
+  // row is [shortened, full spelling, an everyday shortened option]. Before
+  // #296 the table matched exact spellings only, and every shortened form
+  // below exited 0 while git threw the work away. An ambiguous start
+  // (`push --f`) is refused too -- git rejects it before doing anything.
+  const rows: Array<[shortened: string, full: string, everyday: string]> = [
+    ["git reset --har", "git reset --hard", "git reset --so HEAD~1"],
+    ["git reset --h HEAD~1", "git reset --hard HEAD~1", "git reset --mi HEAD~1"],
+    ["git reset HEAD~1 --ha", "git reset HEAD~1 --hard", "git reset --qu HEAD~1"],
+    ["sudo -u root git reset --har", "sudo -u root git reset --hard", "sudo -u root git reset --so"],
+    ["git checkout --forc main", "git checkout --force main", "git checkout --det HEAD"],
+    ["git checkout --f", "git checkout -f", "git checkout --orp fresh"],
+    ["git checkout --pathspec-fr=paths.txt", "git checkout --pathspec-from-file=paths.txt",
+      "git checkout --conf=merge seed.txt"],
+    ["git switch --discard main", "git switch --discard-changes main", "git switch --cr feature"],
+    ["git switch --di main", "git switch -f main", "git switch --force-c feature"],
+    ["git switch --forc main", "git switch --force main", "git switch --det HEAD~1"],
+    ["git restore --wor --st .", "git restore --worktree --staged .", "git restore --st ."],
+    ["git restore -S --no-st .", "git restore -S --no-staged .", "git restore -S ."],
+    ["git restore --sou=HEAD .", "git restore --source=HEAD .", "git restore --sou HEAD seed.txt"],
+    ["git clean -n --no-d", "git clean -n --no-dry-run", "git clean --dr -x"],
+    ["git clean --forc -d", "git clean --force -d", "git clean --d -fdx"],
+    ["git push --force-w origin feature", "git push --force-with-lease origin feature",
+      "git push --set-u origin feature"],
+    ["git push --force-w=feature:abc origin feature", "git push --force-with-lease=feature:abc origin feature",
+      "git push --foll origin feature"],
+    ["git push --force-i origin feature", "git push --force-if-includes origin feature",
+      "git push --porc origin feature"],
+    ["git push --f origin feature", "git push --force origin feature", "git push --no-v origin feature"],
+    ["git push --force-w origin main", "git push --force-with-lease origin main", "git push --ato origin main"],
+    ["git push --mirr origin", "git push --mirror origin", "git push --dry origin feature"],
+    ["git push --pru origin", "git push --prune origin", "git push --pro origin feature"],
+    ["git push origin --del main", "git push origin --delete main", "git push origin --del feature"],
+  ];
+
+  it("each shortened form is refused like its full spelling; the everyday shortened option passes", () => {
+    const { proj, home } = fixture();
+    for (const [shortened, full, everyday] of rows) {
+      const s = guard(proj, home, shortened);
+      expect(s.status, shortened).toBe(2);
+      expect(s.stderr, shortened).toContain("refused in every session");
+      expectOwnerTail(s.stderr, shortened, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      expect(guard(proj, home, full).status, full).toBe(2);
+      expect(guard(proj, home, everyday).status, everyday).toBe(0);
+    }
+  });
+
+  it("everyday shortened options of commands outside the table pass", () => {
+    const { proj, home } = fixture();
+    for (const c of ["git status --shor", "git log --onel -1", "git commit --allow-e -m x", "git stash --keep"]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a shortened hard reset still meets the live-run owner-checkout refusal once overridden", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --har");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(r.stderr).toContain("git reset --hard");
+  });
+
+  it("a push option's value is read the way git reads it -- not as the remote", () => {
+    // --recurse-submodules takes the next word: `no` is its value and
+    // `origin` the remote, so this pushes the current branch, main. Read
+    // as remote `no` and refspec `origin`, it passed the ship gate.
+    const { proj, home } = fixture(undefined, false);
+    for (const c of [
+      "git push --recurse-submodules no origin",
+      "git push --recurse-s check origin",
+      "git push --push-o ci.skip origin",
+      "git push --ex /usr/bin/receive origin",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("/cairn:ship");
+    }
+    for (const c of [
+      "git push --recurse-submodules no origin feature",
+      "git push --recurse-submodules=no origin feature",
+      "git push --push-o ci.skip origin feature",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
   });
 });
 
@@ -782,13 +870,241 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
       .toBe(2);
   });
 
-  it("an unreadable stamp dir fails open; a corrupt stamp refuses", () => {
+  it("a shortened --all or --branches pushes every branch, the default one included", () => {
+    const { proj, home } = branched();
+    git(proj, "checkout", "-q", "feature");
+    for (const c of ["git push --al origin", "git push --bra origin", "git push --branches origin"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("/cairn:ship");
+    }
+  });
+
+  it("a stamp dir that can't be read refuses (#299); so does a corrupt stamp", () => {
     const { proj, home } = branched();
     writeFileSync(join(home, "ship-gate"), "a file where the dir should be");
-    expect(guard(proj, home, "git push origin main").status).toBe(0);
+    expect(guard(proj, home, "git push origin main").status).toBe(2);
     rmSync(join(home, "ship-gate"));
     mkdirSync(join(home, "ship-gate"));
     writeFileSync(join(home, "ship-gate", `${projKey(proj)}.json`), "{ nope");
     expect(guard(proj, home, "git push origin main").status).toBe(2);
+  });
+});
+
+describe("run guard: glob, matching and push-everything pushes meet the ship gate (#297)", () => {
+  /**
+   * Unstamped repo checked out on `feature`, one commit ahead of main, plus
+   * `xn` at the same commit -- so a bare push lands nothing on main by itself.
+   */
+  function onFeature(): { proj: string; home: string } {
+    const f = fixture(undefined, false);
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    writeFileSync(join(f.proj, "f.txt"), "f\n");
+    git(f.proj, "add", "f.txt");
+    git(f.proj, "commit", "-q", "-m", "feature", "--no-gpg-sign");
+    git(f.proj, "branch", "xn");
+    return f;
+  }
+
+  // The host's own push.default must not decide these -- the hook's git
+  // reads only the fixture repo's config here
+  const push = (proj: string, home: string, command: string) =>
+    guard(proj, home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" });
+
+  // Each row: [lands main with no drift check, its ordinary feature-branch
+  // neighbour]. Before #297 the destination was compared literally, so a
+  // glob (`*` reads as no branch) and the bare `:` (an empty destination)
+  // carried local main to the remote's main with no stamp at all.
+  const rows: Array<[lands: string, feature: string]> = [
+    ["git push origin 'refs/heads/*:refs/heads/*'", "git push origin 'refs/heads/feat*:refs/heads/feat*'"],
+    ["git push origin refs/heads/*:refs/heads/*", "git push origin refs/heads/feature:refs/heads/feature"],
+    ["git push origin 'refs/heads/*'", "git push origin 'refs/heads/feat*'"],
+    ["git push origin 'refs/heads/ma*:refs/heads/ma*'", "git push origin 'refs/tags/*:refs/tags/*'"],
+    ["git push origin 'ma*:ma*'", "git push origin 'fe*:fe*'"],
+    ["git push origin '*:*'", "git push origin feature:feature"],
+    ["git push origin :", "git push origin feature"],
+    ["git push origin -- :", "git push origin -- feature"],
+    ["git push --all origin", "git push --tags origin"],
+    ["git push --branches origin", "git push -u origin feature"],
+    ["git -c push.default=matching push origin", "git -c push.default=matching push origin feature"],
+    ["git -c push.default=matching push", "git -c push.default=current push"],
+    ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching git push",
+      "GIT_TRACE=0 git push"],
+    ["MODE=matching git --config-env=push.default=MODE push origin", "git push origin"],
+    // config set earlier in the same line: nothing has run when the guard reads it
+    ["git config push.default matching && git push", "git config user.name x && git push"],
+    ["git config set push.default matching; git push origin", "git config --get user.name; git push origin"],
+    ["export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching; git push",
+      "export GIT_TRACE=0; git push"],
+    ["bash -c 'git config push.default matching && git push'", "bash -c 'git status && git push'"],
+  ];
+
+  it("each lands main without a drift check and is refused; its feature-branch neighbour passes", () => {
+    const { proj, home } = onFeature();
+    for (const [lands, feature] of rows) {
+      const r = push(proj, home, lands);
+      expect(r.status, lands).toBe(2);
+      expect(r.stderr, lands).toContain("/cairn:ship");
+      expectOwnerTail(r.stderr, lands, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(push(proj, home, feature).status, feature).toBe(0);
+    }
+  });
+
+  it("push.default=matching in the repo's config makes a bare push one of them", () => {
+    const { proj, home } = onFeature();
+    expect(push(proj, home, "git push").status).toBe(0);
+    git(proj, "config", "push.default", "matching");
+    expect(push(proj, home, "git push").status).toBe(2);
+    expect(push(proj, home, "git push origin").status).toBe(2);
+    expect(push(proj, home, "git push origin feature").status).toBe(0);
+    expect(push(proj, home, "git push --tags").status).toBe(0);
+  });
+
+  it("a clean stamp at main's tip lets them through -- they land the commit it checked", () => {
+    const { proj, home } = onFeature();
+    stamp(proj, home, { head: git(proj, "rev-parse", "main") });
+    for (const c of [
+      "git push origin 'refs/heads/*:refs/heads/*'", "git push origin :", "git push --all origin",
+      "git -c push.default=matching push",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a glob landing another branch on main is checked against that branch's commit", () => {
+    const { proj, home } = onFeature();
+    stamp(proj, home, { head: git(proj, "rev-parse", "main") });
+    // refs/heads/x* maps xn onto refs/heads/mai* + "n" -- main
+    const r = push(proj, home, "git push origin 'refs/heads/x*:refs/heads/mai*'");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("not the commit being pushed");
+    expect(push(proj, home, "git push origin 'refs/heads/x*:refs/heads/y*'").status).toBe(0);
+  });
+
+  it("a tag spelled like the default branch can't stand in for the branch an --all push lands", () => {
+    const { proj, home } = onFeature();
+    git(proj, "tag", "main", "main");
+    stamp(proj, home, { head: git(proj, "rev-parse", "refs/tags/main") });
+    git(proj, "checkout", "-q", "main");
+    git(proj, "merge", "-q", "--ff-only", "feature");
+    git(proj, "checkout", "-q", "feature");
+    const r = push(proj, home, "git push --all origin");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("not the commit being pushed");
+  });
+
+  it("mid-run, a glob or matching push still needs the run's push authority", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    for (const c of ["git push origin 'refs/heads/*:refs/heads/*'", "git push origin :"]) {
+      const r = push(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+    }
+  });
+});
+
+describe("run guard: a stamp or run list that exists but can't be read refuses (#299)", () => {
+  // chmod takes no read access from root, and Windows has no mode bits
+  const canChmod = process.platform !== "win32" && process.getuid?.() !== 0;
+
+  /** Runs `fn` with `path` chmodded to 000, restoring `back` after so cleanup can remove it. */
+  function locked<T>(path: string, back: number, fn: () => T): T {
+    chmodSync(path, 0o000);
+    try {
+      return fn();
+    } finally {
+      chmodSync(path, back);
+    }
+  }
+
+  /** The refusal names what can't be read and the owner's ways, never an override prefix. */
+  function expectUnreadable(r: { status: number | null; stderr: string }, label: string,
+    code: string, env?: string): void {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toMatch(/can't be read|can't read/);
+    expect(r.stderr, label).toContain(code);
+    expect(r.stderr, label).toContain("restore read access");
+    expectOwnerTail(r.stderr, label, env);
+  }
+
+  it("a ship-gate path that can't be read refuses a default-branch push; other pushes pass", () => {
+    const { proj, home } = fixture(undefined, false);
+    writeFileSync(join(home, "ship-gate"), "a file where the dir should be");
+    const r = guard(proj, home, "git push origin main");
+    expectUnreadable(r, "push main", "ENOTDIR", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    expect(r.stderr).not.toContain("/cairn:ship");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    expect(guard(proj, home, "git push origin main", { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+  });
+
+  it.skipIf(!canChmod)("a stamp folder or stamp file chmodded unreadable refuses; restored, it passes", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "git push origin main").status).toBe(0);
+    locked(join(home, "ship-gate"), 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin main"), "dir", "EACCES", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    });
+    locked(join(home, "ship-gate", `${projKey(proj)}.json`), 0o644, () => {
+      expectUnreadable(guard(proj, home, "git push origin main"), "file", "EACCES", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    });
+    expect(guard(proj, home, "git push origin main").status).toBe(0);
+  });
+
+  it("a runs folder that can't be read refuses every push, with no override to name", () => {
+    const { proj, home } = fixture();
+    writeFileSync(join(home, "runs"), "a file where the dir should be");
+    for (const c of ["git push origin feature", "git push origin main", "git push"]) {
+      const r = guard(proj, home, c);
+      expectUnreadable(r, c, "ENOTDIR");
+      expect(r.stderr, c).toContain("batch-run list");
+      expect(r.stderr, c).not.toContain("CAIRN_");
+    }
+    // ...and the session-wide ship-gate escape doesn't reach it
+    expect(guard(proj, home, "git push origin feature", { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(2);
+    expect(guard(proj, home, "git status").status).toBe(0);
+  });
+
+  it("a runs folder that can't be read refuses checkout and switch of the owner's checkout only", () => {
+    const { proj, home } = fixture();
+    writeFileSync(join(home, "runs"), "a file where the dir should be");
+    for (const c of ["git checkout main", "git switch -c x", "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard"]) {
+      const r = guard(proj, home, c);
+      expectUnreadable(r, c, "ENOTDIR");
+      expect(r.stderr, c).not.toContain("CAIRN_RUN_OK");
+    }
+    expect(guard(proj, home, "CAIRN_RUN_OK=1 git checkout main").status).toBe(0);
+    const wt = join(freshDir("cairn-runguard-wt-"), "tree");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "runbranch", wt], { cwd: proj });
+    expect(guard(proj, home, "git switch main", {}, wt).status).toBe(0);
+  });
+
+  it.skipIf(!canChmod)("a runs folder, manifest or cairn home chmodded unreadable refuses the push", () => {
+    const { proj, home } = fixture({ status: "complete", phases: [], pushAuth: { granted: false } });
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    locked(join(home, "runs"), 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "runs dir", "EACCES");
+    });
+    locked(join(home, "runs", `${projKey(proj)}-run-x.json`), 0o644, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "manifest", "EACCES");
+    });
+    // the audit's shape: the whole cairn home locked takes both gates' files away
+    locked(home, 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "home, feature", "EACCES");
+      expectUnreadable(guard(proj, home, "git push origin main"), "home, main", "EACCES",
+        "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    });
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+  });
+
+  it("a missing stamp or runs folder keeps its meaning; a corrupt manifest is still no live run", () => {
+    const { proj, home } = fixture(undefined, false);
+    const none = guard(proj, home, "git push origin main");
+    expect(none.status).toBe(2);
+    expect(none.stderr).toContain("no drift check has been recorded");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    mkdirSync(join(home, "runs"));
+    writeFileSync(join(home, "runs", `${projKey(proj)}-broken.json`), "{ nope");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    expect(guard(proj, home, "git checkout main").status).toBe(0);
   });
 });

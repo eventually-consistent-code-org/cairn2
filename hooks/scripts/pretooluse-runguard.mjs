@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -10,19 +10,19 @@
  *   no undo (the table in destructive(): hard reset; force, mirror and
  *   prune pushes, or one deleting the default branch; forced or whole-tree
  *   checkout/restore; a discarding switch; clean; stash clear; reflog
- *   expire). Their everyday neighbours stay allowed. The owner's escape is
- *   CAIRN_ALLOW_DESTRUCTIVE_GIT=1 -- set for the session, or as the leading
- *   assignment of the one command (honoured, never taught: refusals name
- *   only the owner's ways to approve, #262).
+ *   expire), options shortened as git allows (--har is --hard, #296). Their
+ *   everyday neighbours stay allowed. Escape: CAIRN_ALLOW_DESTRUCTIVE_GIT=1
+ *   -- for the session, or as the leading assignment of the one command
+ *   (honoured, never taught: refusals name only the owner's ways, #262).
  *
  *   Always: an agent push landing on the default branch (main, master, the
- *   remote's HEAD branch) is refused unless the last plan_drift left a
- *   clean ship-gate stamp for the exact commit pushed -- the drift half of
- *   ship's "never push with flagged drift" (#251; open issues stay prose).
- *   Other branches are untouched; a missing stamp refuses, an unreadable
- *   one skips. Escape: CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
+ *   remote's HEAD branch; a glob, `:` or push-everything push may, #297) is
+ *   refused unless the last plan_drift left a clean ship-gate stamp for the
+ *   exact commit pushed (#251; open issues stay prose). Other branches are
+ *   untouched; a missing or unreadable stamp refuses (#299). Escape:
+ *   CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
- *   While an unattended batch run is live (see liveRuns): `git checkout`,
+ *   While a batch run is live, or the run list can't be read (#299): `git checkout`,
  *   `git switch` and the hard reset (even overridden) aimed at the owner's
  *   own checkout (see isMainWorktree) are refused -- they change the
  *   human's files underneath them, mid-edit. CAIRN_RUN_OK=1 as the leading
@@ -85,10 +85,10 @@ const DEFAULT_BRANCHES = ["main", "master"];
 
 /**
  * Every git invocation in a command line, parsed: the leading VAR=value
- * assignments, the -C directories in order, the -c config values, the
- * subcommand, its args (cut at a bare `--`) and the paths past that `--`,
- * which are paths, not flags -- `git checkout -- .` (#264). Recurses into
- * `sh -c '<script>'` style wrappers.
+ * assignments, the -C directories in order, the -c and --config-env
+ * values, the subcommand, its args (cut at a bare `--`) and the paths
+ * past that `--`, which are paths, not flags -- `git checkout -- .`
+ * (#264). Recurses into `sh -c '<script>'` style wrappers.
  */
 function gitInvocations(line, depth = 0) {
   const found = [];
@@ -110,9 +110,12 @@ function gitInvocations(line, depth = 0) {
     let i = 1;
     const dirs = [];
     const configs = [];
+    const configEnvs = [];
     while (i < words.length && words[i].startsWith("-")) {
       if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
       if (words[i] === "-c") configs.push(words[i + 1] ?? "");
+      if (words[i] === "--config-env") configEnvs.push(words[i + 1] ?? "");
+      if (words[i].startsWith("--config-env=")) configEnvs.push(words[i].slice(13));
       i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
     }
     const rest = words.slice(i + 1);
@@ -121,6 +124,7 @@ function gitInvocations(line, depth = 0) {
       assigns,
       dirs,
       configs,
+      configEnvs,
       sub: words[i] ?? "",
       args: dashes < 0 ? rest : rest.slice(0, dashes),
       paths: dashes < 0 ? [] : rest.slice(dashes + 1),
@@ -155,32 +159,39 @@ function isMainWorktree(dir) {
 
 /**
  * Every manifest for this project whose status is `running`, as
- * { runId, state }. "A run is live" is file state in the per-machine cairn
- * home, not an env var, so it survives the agent boundaries an env var
- * would not cross.
+ * { live: [{ runId, state }], unreadable }. "A run is live" is file state
+ * in the per-machine cairn home, not an env var, so it survives the agent
+ * boundaries an env var would not cross. `unreadable` names a runs folder
+ * or manifest that exists but can't be read (#299) -- the guard can't say
+ * no run is live, so the gates that ask refuse instead of skipping.
  */
 function liveRuns(projectDir, baseDir) {
   const { base, hash } = pathHash(projectDir);
   const prefix = `${base}-${hash}-`;
+  const dir = join(baseDir, "runs");
+  const live = [];
   let entries;
   try {
-    entries = readdirSync(join(baseDir, "runs"));
-  } catch {
-    return []; // no runs dir -- this machine has never staged a batch run
+    entries = readdirSync(dir);
+  } catch (e) {
+    // no runs dir -- this machine has never staged a batch run
+    return { live, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
   }
-  const live = [];
   for (const name of entries) {
     if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
     try {
-      const state = JSON.parse(readFileSync(join(baseDir, "runs", name), "utf8"));
+      const state = JSON.parse(readFileSync(join(dir, name), "utf8"));
       if (state?.status === "running") {
         live.push({ runId: state.runId ?? name.slice(prefix.length, -5), state });
       }
-    } catch {
-      continue; // a corrupt manifest is not evidence of a live run
+    } catch (e) {
+      // a corrupt manifest is not evidence of a live run, nor is one
+      // deleted since the listing -- but one that can't be read may be
+      if (e instanceof SyntaxError || e?.code === "ENOENT") continue;
+      return { live, unreadable: `${join(dir, name)} (${e?.code ?? e})` };
     }
   }
-  return live;
+  return { live, unreadable: null };
 }
 
 /**
@@ -209,33 +220,45 @@ function pushRefusal(state) {
   return null;
 }
 
-// git push options that eat the following word as their value.
-const PUSH_VALUE_OPTS = new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec"]);
+/**
+ * The long options in `names` that a typed `--name` stands for, the way
+ * git's option parser reads it (#296): an exact spelling is that option,
+ * and any shorter start of one is it too -- `--har` is `--hard`,
+ * `--force-w` is `--force-with-lease`. A start that fits several counts as
+ * all of them (git refuses an ambiguous one anyway); `--no-x` fits none.
+ */
+function longNames(typed, names) {
+  return names.includes(typed) ? [typed] : names.filter((n) => n.startsWith(typed));
+}
+
+// git push's value-taking options, and how the guard reads a push (#296):
+// -f, -d and -o are --force, --delete and --push-option.
+const PUSH_VALUED = ["--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"];
+const PUSH_READ = {
+  short: "o",
+  longs: ["--force", "--force-with-lease", "--force-if-includes", "--mirror", "--prune", "--delete",
+    "--all", "--branches", "--tags", ...PUSH_VALUED],
+  valued: PUSH_VALUED,
+  alias: { f: "--force", d: "--delete" },
+};
+
+/** A push's flags and bare words -- remote, then refspecs -- read once per invocation. */
+const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.paths], PUSH_READ));
 
 /**
- * True when `git push <args>` overwrites remote history: --force, -f
- * (alone or clustered, e.g. -fu), --force-with-lease[=...],
- * --force-if-includes, or any refspec with a leading `+`.
+ * True when this push overwrites remote history: --force or -f (alone or
+ * clustered, e.g. -fu), --force-with-lease[=...], --force-if-includes --
+ * spelled out or shortened -- or any refspec with a leading `+`.
  */
-function isForcePush(args) {
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (PUSH_VALUE_OPTS.has(a)) { k++; continue; }
-    if (a === "--force" || a === "--force-if-includes" || /^--force-with-lease(=|$)/.test(a)) {
-      return true;
-    }
-    if (/^-[^-]/.test(a)) {
-      // short cluster -- `o` takes the rest of the word as its value
-      for (const ch of a.slice(1)) {
-        if (ch === "o") break;
-        if (ch === "f") return true;
-      }
-      continue;
-    }
-    if (a.startsWith("+")) return true; // +refspec forces that ref
-  }
-  return false;
+function isForcePush(inv) {
+  const { flags, words } = pushArgs(inv);
+  return ["--force", "--force-with-lease", "--force-if-includes"].some((f) => flags.has(f))
+    || words.some((w) => w.startsWith("+")); // +refspec forces that ref
 }
+
+/** True for `git reset --hard`, or any shortened `--hard` git reads as it (#296). */
+const isHardReset = (inv) =>
+  inv.sub === "reset" && readArgs(inv.args, { longs: ["--hard"] }).flags.has("--hard");
 
 /**
  * Prints a refusal and blocks (#262). Every refusal here guards an act
@@ -271,31 +294,71 @@ function gitOut(dir, args) {
 }
 
 /**
+ * True when a command line can change push.default for its own push (#297)
+ * -- a `git config` naming it, or a GIT_CONFIG_* assignment or export
+ * anywhere in the line (`git config push.default matching && git push`).
+ * Nothing in the line has run when the guard reads the repo's config.
+ */
+function linePushConfig(command, invs) {
+  const namesIt = (i) => [...i.args, ...i.paths].some((a) => /^push\.default$/i.test(a));
+  return invs.some((i) => i.sub === "config" && namesIt(i))
+    || shellSegments(command, READ).some((s) => s.words.some((w) => /GIT_CONFIG\w*=/.test(w)));
+}
+
+/** True when `rev` names a commit here. */
+const resolves = (dir, rev) => gitOut(dir, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null;
+
+/**
+ * True when a push with no refspec could push every matching branch
+ * (#297): push.default=matching -- this command's own `-c` first, then
+ * the repo's config -- or config the guard can't read, which counts: a
+ * --config-env for push.default, or a line that sets git config before it
+ * pushes (see linePushConfig), after the guard has read the config.
+ */
+function pushesMatching(inv, dir) {
+  if (inv.lineConfig) return true;
+  if (inv.configEnvs.some((c) => /^push\.default=/i.test(c))) return true;
+  const set = inv.configs.map((c) => /^push\.default=(.*)$/is.exec(c)?.[1]).filter((v) => v !== undefined);
+  const mode = set.length ? set[set.length - 1] : gitOut(dir, ["config", "--get", "push.default"]);
+  return /^\s*matching\s*$/i.test(mode ?? "");
+}
+
+/**
+ * The local branches a glob refspec lands on the default ones (#297). git
+ * maps the src pattern onto the dst pattern through their one `*`, so the
+ * branch landing on refs/heads/<name> is the src with the dst's match put
+ * back in -- `refs/heads/x*:refs/heads/mai*` lands branch `xn` on main.
+ * The dst is tried against the full ref and the bare name both, and only
+ * a source that exists is one. git refuses a glob on one side only.
+ */
+function globSources(src, dst, defaults, dir) {
+  if (!src.includes("*")) return [];
+  const star = dst.indexOf("*");
+  const [pre, suf] = [dst.slice(0, star), dst.slice(star + 1)];
+  const found = [];
+  for (const b of defaults) {
+    for (const name of [`refs/heads/${b}`, b]) {
+      if (name.length < pre.length + suf.length || !name.startsWith(pre) || !name.endsWith(suf)) continue;
+      const from = src.replace("*", () => name.slice(pre.length, name.length - suf.length));
+      if (resolves(dir, from)) found.push(from);
+    }
+  }
+  return found;
+}
+
+/**
  * What `git push <args>` would land on the default branch, as the source
  * revs being pushed there (null for a deletion). Empty when the push never
- * touches the default branch -- feature branches, tags, other refs.
+ * touches the default branch -- feature branches, tags, other refs. A push
+ * of every branch counts (#297): --all, --branches and --mirror, the `:`
+ * matching refspec, a bare push under push.default=matching, and a glob
+ * whose destination can name the default branch.
  */
-function defaultBranchSources(args, dir) {
-  const positional = [];
-  let all = false;
-  let del = false;
-  let tags = false;
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (PUSH_VALUE_OPTS.has(a)) { k++; continue; }
-    if (a === "--all" || a === "--mirror" || a === "--branches") { all = true; continue; }
-    if (a === "--delete") { del = true; continue; }
-    if (a === "--tags") { tags = true; continue; }
-    if (/^-[^-]/.test(a)) {
-      for (const ch of a.slice(1)) {
-        if (ch === "o") break; // -o eats the rest of the word
-        if (ch === "d") del = true;
-      }
-      continue;
-    }
-    if (a.startsWith("-")) continue;
-    positional.push(a);
-  }
+function defaultBranchSources(inv, dir) {
+  const { flags, words: positional } = pushArgs(inv);
+  const all = flags.has("--all") || flags.has("--mirror") || flags.has("--branches");
+  const del = flags.has("--delete");
+  const tags = flags.has("--tags");
 
   // Default branch names: main, master, and the remote's HEAD when known
   const remote = positional[0] ?? "origin";
@@ -306,24 +369,31 @@ function defaultBranchSources(args, dir) {
   }
   const current = gitOut(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
 
+  // Every local default branch, as the full ref -- a tag spelled the same
+  // can't stand in for the branch that actually lands
+  const everyBranch = () => [...defaults].map((b) => `refs/heads/${b}`).filter((r) => resolves(dir, r));
+
   // --all / --mirror push every local branch, the default one included
-  if (all) {
-    return [...defaults].filter((b) => gitOut(dir, ["rev-parse", "--verify", "-q", `refs/heads/${b}`]));
-  }
+  if (all) return everyBranch();
 
   const refspecs = positional.slice(1);
   if (!refspecs.length) {
-    // bare `git push` / `git push origin`: the current branch, unless --tags only
+    // bare `git push` / `git push origin`: the current branch, unless --tags
+    // only -- or every matching branch under push.default=matching
     if (tags) return [];
+    if (pushesMatching(inv, dir)) return everyBranch();
     return current && defaults.has(current) ? ["HEAD"] : [];
   }
 
   const sources = [];
   for (const spec of refspecs) {
     const plain = spec.replace(/^\+/, "");
+    // `:` pushes every branch both sides have, the default one included
+    if (plain === ":") { sources.push(...everyBranch()); continue; }
     const colon = plain.indexOf(":");
     let src = colon < 0 ? plain : plain.slice(0, colon);
     let dst = colon < 0 ? plain : plain.slice(colon + 1);
+    if (dst.includes("*")) { sources.push(...globSources(src, dst, defaults, dir)); continue; }
     if (dst === "HEAD") dst = current ?? "";
     dst = dst.replace(/^refs\/heads\//, "");
     if (!defaults.has(dst)) continue;
@@ -337,23 +407,36 @@ function defaultBranchSources(args, dir) {
  * A git subcommand's args split into the flags it sets and its bare words,
  * skipping the values valued flags swallow: `-b name`, `--source x`, and a
  * short cluster's tail after a valued letter (`-sHEAD`). `--x=v` keeps `--x`.
+ * A typed long option counts as each of `longs` it spells or shortens
+ * (#296), and takes the next word when one of them is `valued`; `alias`
+ * files a short letter under its long name (`f` is `--force`). `flags` is
+ * every flag ever set, for the ones that refuse; `on` is each one's state
+ * after any `--no-` negation, for the ones that make a command safe --
+ * `git clean -n --no-dry-run` deletes.
  */
-function readArgs(args, valuedShort = "", valuedLong = []) {
+function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
   const flags = new Set();
+  const on = new Map();
   const words = [];
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const name = eq < 0 ? a : a.slice(0, eq);
-      flags.add(name);
-      if (eq < 0 && valuedLong.includes(name)) k++;
+      const hit = longNames(name, longs);
+      for (const n of hit) { flags.add(n); on.set(n, true); }
+      if (eq < 0 && hit.some((n) => valued.includes(n))) k++;
+      if (!hit.length && name.startsWith("--no-")) {
+        for (const n of longNames(`--${name.slice(5)}`, longs)) on.set(n, false);
+      }
       continue;
     }
     if (/^-[^-]/.test(a)) {
       for (let c = 1; c < a.length; c++) {
-        flags.add(`-${a[c]}`);
-        if (valuedShort.includes(a[c])) {
+        const f = alias[a[c]] ?? `-${a[c]}`;
+        flags.add(f);
+        on.set(f, true);
+        if (short.includes(a[c])) {
           if (c === a.length - 1) k++; // value is the next word
           break; // ...or the rest of this one
         }
@@ -362,7 +445,7 @@ function readArgs(args, valuedShort = "", valuedLong = []) {
     }
     words.push(a);
   }
-  return { flags, words };
+  return { flags, on, words };
 }
 
 /**
@@ -421,28 +504,32 @@ function destructive(inv, dir) {
   const discards = "it discards uncommitted work with no undo.";
   switch (sub) {
     case "reset":
-      return args.includes("--hard") ? ["`git reset --hard`", discards] : null;
+      return isHardReset(inv) ? ["`git reset --hard`", discards] : null;
 
     case "checkout": {
-      const { flags, words } = readArgs(args, "bB",
-        ["--orphan", "--conflict", "--pathspec-from-file"]);
-      if (flags.has("-f") || flags.has("--force")) return ["`git checkout --force`", discards];
+      const { flags, words } = readArgs(args, { short: "bB", alias: { f: "--force" },
+        longs: ["--force", "--orphan", "--conflict", "--pathspec-from-file"],
+        valued: ["--orphan", "--conflict", "--pathspec-from-file"] });
+      if (flags.has("--force")) return ["`git checkout --force`", discards];
       return wholeTreeSpec(flags, words, paths) ? ["a whole-tree `git checkout`", discards] : null;
     }
 
     case "switch": {
-      const { flags } = readArgs(args, "cC",
-        ["--create", "--force-create", "--orphan", "--conflict"]);
-      return flags.has("--discard-changes") || flags.has("-f") || flags.has("--force")
+      const { flags } = readArgs(args, { short: "cC", alias: { f: "--force" },
+        longs: ["--discard-changes", "--force", "--create", "--force-create", "--orphan", "--conflict"],
+        valued: ["--create", "--force-create", "--orphan", "--conflict"] });
+      return flags.has("--discard-changes") || flags.has("--force")
         ? ["`git switch --discard-changes`", discards] : null;
     }
 
     case "restore": {
-      const { flags, words } = readArgs(args, "s",
-        ["--source", "--pathspec-from-file", "--conflict"]);
-      // the work tree is restored unless only --staged is asked for
-      const worktree = flags.has("-W") || flags.has("--worktree")
-        || !(flags.has("-S") || flags.has("--staged"));
+      const { flags, on, words } = readArgs(args, { short: "s",
+        alias: { s: "--source", S: "--staged", W: "--worktree" },
+        longs: ["--source", "--staged", "--worktree", "--pathspec-from-file", "--conflict"],
+        valued: ["--source", "--pathspec-from-file", "--conflict"] });
+      // the work tree is restored unless only --staged is asked for, and
+      // --no-staged takes that back
+      const worktree = flags.has("--worktree") || on.get("--staged") !== true;
       return worktree && wholeTreeSpec(flags, words, paths)
         ? ["a whole-tree `git restore`", discards] : null;
     }
@@ -450,9 +537,11 @@ function destructive(inv, dir) {
     case "clean": {
       // Every clean but a dry run: plain `git clean` only refuses on its own
       // while clean.requireForce holds, and `-c clean.requireForce=false`
-      // or a repo config turns that off -- so the -f isn't what to look for
-      const { flags } = readArgs(args, "e", ["--exclude"]);
-      return flags.has("-n") || flags.has("--dry-run") ? null
+      // or a repo config turns that off -- so the -f isn't what to look for.
+      // A dry run counts once it's the last word on it: -n --no-dry-run deletes
+      const { on } = readArgs(args, { short: "e", alias: { n: "--dry-run" },
+        longs: ["--dry-run", "--exclude"], valued: ["--exclude"] });
+      return on.get("--dry-run") === true ? null
         : ["`git clean`", "it deletes untracked files, which git never had a copy of."];
     }
 
@@ -464,21 +553,19 @@ function destructive(inv, dir) {
         ? ["`git reflog expire`", "it erases the record git recovers lost commits from."] : null;
 
     case "push": {
-      // Past a bare `--` a push's words are still refspecs, not paths
-      const all = [...args, ...paths];
-      if (isForcePush(all)) {
+      // Past a bare `--` a push's words are still refspecs, not paths (pushArgs)
+      if (isForcePush(inv)) {
         return ["`git push --force`",
           "it overwrites remote history other people may already have pulled."];
       }
-      const { flags, words } = readArgs(all, "o",
-        ["--push-option", "--repo", "--receive-pack", "--exec"]);
+      const { flags, words } = pushArgs(inv);
       if (isMirrorPush(inv, flags, words, dir)) {
         return ["`git push --mirror`", "it force-updates and deletes remote refs to match this clone."];
       }
       if (flags.has("--prune")) {
         return ["`git push --prune`", "it deletes every remote branch this clone doesn't have."];
       }
-      return defaultBranchSources(all, dir).includes(null)
+      return defaultBranchSources(inv, dir).includes(null)
         ? ["a push deleting the default branch", "everyone's shared history hangs off it."] : null;
     }
   }
@@ -486,14 +573,15 @@ function destructive(inv, dir) {
 }
 
 /**
- * Why this push may not land on the default branch yet, or null when the
- * ship gate is satisfied or doesn't apply (#251). The stamp is plan_drift's
- * record of its last run: { head, clean, at }. A missing stamp is a
- * refusal; anything the guard can't read is a skip, not a block.
+ * Why this push may not land on the default branch yet, as [why, what to
+ * do instead?] -- or null when the ship gate is satisfied or doesn't apply
+ * (#251). The stamp is plan_drift's record of its last run: { head, clean,
+ * at }. A missing stamp is a refusal, and so is one that exists but can't
+ * be read (#299): a gate that can't see its stamp refuses, never skips.
  */
-function shipGateRefusal(args, dir, projectDir, baseDir) {
+function shipGateRefusal(inv, dir, projectDir, baseDir) {
   try {
-    const sources = defaultBranchSources(args, dir);
+    const sources = defaultBranchSources(inv, dir);
     if (!sources.length) return null;
 
     const { base, hash } = pathHash(projectDir);
@@ -502,19 +590,20 @@ function shipGateRefusal(args, dir, projectDir, baseDir) {
     try {
       stamp = JSON.parse(readFileSync(path, "utf8"));
     } catch (e) {
-      if (e?.code === "ENOENT") return "no drift check has been recorded for this project";
-      if (e instanceof SyntaxError) return "the last drift check's record is unreadable";
-      return null; // stamp dir/file unreadable -- the guard's problem, not yours
+      if (e?.code === "ENOENT") return ["no drift check has been recorded for this project"];
+      if (e instanceof SyntaxError) return ["the last drift check's record is unreadable"];
+      return [`the last drift check's record can't be read (${e?.code ?? e})`,
+        `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`];
     }
-    if (stamp?.clean !== true) return "the last drift check flagged drift that ship stops on";
+    if (stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
 
     for (const src of sources) {
-      if (src === null) return "it deletes the default branch";
+      if (src === null) return ["it deletes the default branch"];
       const sha = gitOut(dir, ["rev-parse", "--verify", "-q", `${src}^{commit}`]);
       if (sha === null) return null; // git can't resolve it -- the push will fail on its own
       if (sha !== stamp.head) {
-        return `the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
-          `not the commit being pushed (${sha.slice(0, 7)})`;
+        return [`the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
+          `not the commit being pushed (${sha.slice(0, 7)})`];
       }
     }
     return null;
@@ -539,11 +628,14 @@ try {
   let runs;
   const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
 
-  for (const inv of gitInvocations(command)) {
+  const invs = gitInvocations(command);
+  const lineConfig = linePushConfig(command, invs);
+  for (const inv of invs) {
+    inv.lineConfig = lineConfig;
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
-    const hardReset = inv.sub === "reset" && inv.args.includes("--hard");
+    const hardReset = isHardReset(inv);
     const dir = targetDir(inv.dirs, cwd);
 
     // #249, #250, #264 -- the work-destroying table, every session
@@ -554,11 +646,11 @@ try {
 
     // #251 -- the default branch only takes what a clean drift check saw
     if (inv.sub === "push" && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
-      const why = shipGateRefusal([...inv.args, ...inv.paths], dir, projectDir, baseDir);
+      const why = shipGateRefusal(inv, dir, projectDir, baseDir);
       if (why) {
         refuse([
-          `cairn run guard: this push lands on the default branch, but ${why}.`,
-          "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
+          `cairn run guard: this push lands on the default branch, but ${why[0]}.`,
+          why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
         ], UNSHIPPED_ENV);
       }
     }
@@ -567,7 +659,16 @@ try {
     // staging gate and a manifest phase in flight. From ANY worktree --
     // the run's own is exactly where it pushes.
     if (inv.sub === "push") {
-      for (const run of currentRuns()) {
+      const { live, unreadable } = currentRuns();
+      // #299 -- a run list that can't be read can't vouch that no run is live
+      if (unreadable) {
+        refuse([
+          `cairn run guard: can't read the batch-run list at ${unreadable}, so this push ` +
+          "can't be checked against a live run's push authority.",
+          "  the owner should restore read access to it; nothing pushes until the guard can read it.",
+        ]);
+      }
+      for (const run of live) {
         const why = pushRefusal(run.state);
         if (!why) continue;
         console.error(`cairn run guard: a batch run (${run.runId}) is in flight ${why}.`);
@@ -581,12 +682,20 @@ try {
     // #216 -- tree-rewriting commands aimed at the owner's checkout mid-run
     if (!hardReset && inv.sub !== "checkout" && inv.sub !== "switch") continue;
     if (prefixed("CAIRN_RUN_OK")) continue;
-    if (!currentRuns().length) continue; // no unattended run in flight -- ordinary work
+    const { live, unreadable } = currentRuns();
+    if (!live.length && !unreadable) continue; // no unattended run in flight -- ordinary work
     if (!isMainWorktree(dir)) continue; // the run's own worktree
 
     const name = hardReset ? "git reset --hard" : `git ${inv.sub}`;
+    if (unreadable) {
+      refuse([
+        `cairn run guard: can't read the batch-run list at ${unreadable}, so this \`${name}\` of ` +
+        "the checkout you work in can't be checked against a live run.",
+        "  the owner should restore read access to it, or run the command inside a run's own worktree.",
+      ]);
+    }
     refuse([
-      `cairn run guard: a batch run (${runs[0].runId}) is in flight, and this \`${name}\` targets ` +
+      `cairn run guard: a batch run (${live[0].runId}) is in flight, and this \`${name}\` targets ` +
       "the checkout you work in — it would change your files underneath you.",
       "  run the command inside the run's own worktree, or wait for the run to finish.",
     ]);

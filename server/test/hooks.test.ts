@@ -696,6 +696,24 @@ describe("run guard hook", () => {
     expect(runHookRaw(RUNGUARD, proj, cwdPayload("git checkout main", proj),
       { CAIRN_HOME: home }).status).toBe(0);
   });
+
+  it("a runs folder that exists but can't be read can't vouch that no run is live (#299)", () => {
+    const { proj, home } = runFixture();
+    writeFileSync(join(home, "runs"), "a file where the folder should be");
+    const env = { CAIRN_HOME: home };
+    for (const c of ["git checkout main", "git push origin feature"]) {
+      const r = runHookRaw(RUNGUARD, proj, cwdPayload(c, proj), env);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("can't read the batch-run list");
+      expect(r.stderr, c).toContain("needs the owner's go-ahead");
+      expect(r.stderr, c).not.toMatch(/[A-Z_]+=1/);
+    }
+    // ...the run's own worktree is still left alone, and harmless commands pass
+    const wt = join(freshDir("cairn-hooks-runguard-wt-"), "tree");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "runbranch", wt], { cwd: proj });
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("git checkout -b other", wt), env).status).toBe(0);
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("git status", proj), env).status).toBe(0);
+  });
 });
 
 describe("posttooluse-loopcheck", () => {
