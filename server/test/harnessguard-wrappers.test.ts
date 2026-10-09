@@ -85,7 +85,7 @@ describe("harness guard sees through wrapper flags (#254)", () => {
       ["/usr/bin/sudo -n rm hooks/a", "/usr/bin/sudo -n cat hooks/a"],
       ["env -i FOO=1 rm hooks/a", "env -i FOO=1 cat hooks/a"],
       ["env -u HOME rm hooks/a", "env -u HOME cat hooks/a"],
-      ["env -C /tmp rm hooks/a", "env -C /tmp cat hooks/a"],
+      ["env -C . rm hooks/a", "env -C . cat hooks/a"],
       ["env -S 'rm hooks/a'", "env -S 'cat hooks/a'"],
       ["env - rm hooks/a", "env - cat hooks/a"],
       ["nice -n 5 rm hooks/a", "nice -n 5 cat hooks/a"],
@@ -531,6 +531,122 @@ describe("harness guard reads the command after shell keywords and grouping word
       "coproc cd /tmp; echo x > hooks/hooks.json",
     ]) {
       expect(guard(p, c), c).toBe(2);
+    }
+  });
+});
+
+describe("harness guard follows the cd targets it can know and fails closed on the rest (#258)", () => {
+  /** The guard's refusal text for one Bash command string. */
+  function stderrOf(projectDir: string, command: string): string {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+    delete env.CAIRN_HARNESS_EDIT;
+    return spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    }).stderr ?? "";
+  }
+
+  it("$PWD, $HOME, $OLDPWD and ~ resolve to the folders the guard tracks", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["cd $PWD/hooks && echo x > hooks.json", "cd $PWD/hooks && cat hooks.json"],
+      ["cd ${PWD}/hooks && rm hooks.json", "cd ${PWD}/src && rm hooks.json"],
+      ["cd ~+/hooks && tee hooks.json", "cd ~+/src && tee hooks.json"],
+      ["cd /tmp && cd $OLDPWD && echo x > hooks/hooks.json", "cd /tmp && echo x > hooks/hooks.json"],
+      ["cd /tmp && cd ~- && rm hooks/hooks.json", "cd /tmp && cd ~- && cat hooks/hooks.json"],
+      ["cd ~ && echo x > .claude/settings.json", "cd ~ && echo x > hooks/hooks.json"],
+      ["cd $HOME && rm .claude/settings.json", "cd $HOME && cat .claude/settings.json"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a cd target it can't resolve refuses later relative writes, saying why", () => {
+    const p = proj();
+    mkdirSync(join(p, "src"));
+    mkdirSync(join(p, "scripts"));
+    for (const c of [
+      "d=hooks; cd $d && echo x > hooks.json",
+      "cd \"$d\" && echo x > out.txt",
+      "cd $(echo hooks) && echo x > hooks.json",
+      "cd `echo hooks` && echo x > hooks.json",
+      "cd \"$(git rev-parse --show-toplevel)\" && touch a",
+      "cd ${X:-hooks} && rm -f hooks.json",
+      "cd ~someone && echo x > a",
+      "cd {hooks,} && echo x > hooks.json",
+      "cd s* && echo x > out.txt", // src and scripts: two matches
+      "cd - && echo x > out.txt", // no cd yet: $OLDPWD is whatever the shell had
+      "pushd +1 && echo x > a",
+      "cd \"$d\" && rm -rf ../../hooks",
+      "cd \"$d\" && find . -delete",
+      "cd \"$d\" && ls | xargs rm",
+      "env -C \"$d\" rm hooks.json",
+      "if true; then cd \"$d\"; fi; echo x > out.txt",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain("goes somewhere the guard couldn't tell");
+    }
+  });
+
+  it("...but reads, writes to absolute paths, and commands that write nothing pass", () => {
+    const p = proj();
+    for (const c of [
+      "cd \"$d\" && npm test",
+      "cd \"$d\" && cat hooks.json",
+      "cd \"$d\" && git status && ls -la",
+      "cd \"$d\" && echo x > /tmp/out.txt",
+      "cd \"$d\" && find /tmp/cairn-none -delete",
+      "cd \"$d\" 2>/dev/null && grep -r foo . > /dev/null",
+      "cd \"$d\" && cd /tmp && echo x > hooks/hooks.json", // an absolute cd is known again
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+    // an absolute write is judged as itself, lost folder or not
+    const abs = `cd "$d" && echo x > ${join(p, "hooks", "hooks.json")}`;
+    expect(guard(p, abs)).toBe(2);
+    expect(stderrOf(p, abs)).toContain("this would change the hook directory");
+  });
+
+  it("a wildcard cd target with one match is followed there", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"));
+    mkdirSync(join(p, "src"));
+    expect(guard(p, "cd h*s && echo x > hooks.json")).toBe(2);
+    expect(guard(p, "cd sr? && echo x > hooks.json")).toBe(0);
+  });
+
+  it("env -C and sudo -D run the wrapped command in their folder; the shell's redirects stay put", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["env -C hooks sh -c 'echo x > hooks.json'", "env -C hooks sh -c 'cat hooks.json'"],
+      ["env -C hooks rm hooks.json", "env -C hooks cat hooks.json"],
+      ["env --chdir=hooks tee hooks.json", "env --chdir=src tee hooks.json"],
+      ["env --chdir hooks rm hooks.json", "env --chdir hooks wc -l hooks.json"],
+      ["sudo -D hooks rm hooks.json", "sudo -D hooks cat hooks.json"],
+      ["sudo --chdir=hooks rm hooks.json", "sudo --chdir=src rm hooks.json"],
+      ["env -C hooks time -o hooks.json true", "env -C src time -o hooks.json true"],
+      ["env -C src true > hooks/a", "env -C hooks true > out.txt"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+    // the write lands under /tmp, not in the project's hooks/
+    expect(guard(p, "env -C /tmp rm hooks/a")).toBe(0);
+  });
+
+  it("a cd behind a keyword may have moved the shell -- or not", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["{ cd hooks; echo x > hooks.json; }", "{ cd hooks; cat hooks.json; }"],
+      ["if cd hooks; then echo x > hooks.json; fi", "if cd hooks; then cat hooks.json; fi"],
+      ["if true; then cd /tmp; fi; echo x > hooks/hooks.json", "if true; then cd /tmp; fi; echo x > out.txt"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
     }
   });
 });

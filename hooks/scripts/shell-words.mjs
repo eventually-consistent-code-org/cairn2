@@ -352,15 +352,17 @@ function splitWords(str, read) {
  * word list, leaving the real command first. Returns the remaining words,
  * every NAME=value applied to the command along the way (`sudo FOO=1 env
  * BAR=2 cmd` carries both), any file a wrapper itself writes (GNU `time -o
- * FILE`), and each wrapper peeled with the option words it took (#258:
- * xargs's -I string says where its stdin lands). An env -S string is split
- * the way `read` reads words.
+ * FILE`), each wrapper peeled with the option words it took (#258:
+ * xargs's -I string says where its stdin lands), and the folders a wrapper
+ * moves the command into, in order (`env -C DIR`, `sudo -D DIR`, #258). An
+ * env -S string is split the way `read` reads words.
  */
 export function unwrap(words, read = {}) {
   let w = words.slice();
   const assigns = [];
   const writes = [];
   const wrappers = [];
+  const dirs = [];
   for (;;) {
     while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
     if (!w.length) break;
@@ -385,6 +387,7 @@ export function unwrap(words, read = {}) {
         if (eq < 0 && spec.long.includes(flag) && w.length) val = take();
         if (val !== null && name === "env" && flag === "--split-string") w = splitWords(val, read).concat(w);
         if (val !== null && name === "time" && flag === "--output") writes.push(val);
+        if (val !== null && flag === "--chdir" && (name === "env" || name === "sudo")) dirs.push(val);
         continue;
       }
       if (a.startsWith("-") && a.length > 1) {
@@ -398,6 +401,7 @@ export function unwrap(words, read = {}) {
           const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? take() : null);
           if (val !== null && name === "env" && a[k] === "S") w = splitWords(val, read).concat(w);
           if (val !== null && name === "time" && a[k] === "o") writes.push(val);
+          if (val !== null && a[k] === (name === "env" ? "C" : name === "sudo" ? "D" : "")) dirs.push(val);
           break;
         }
         continue;
@@ -408,7 +412,7 @@ export function unwrap(words, read = {}) {
     // `time` is a keyword too: `time { git reset --hard; }` times the group (#285)
     if (name === "time") w = w.slice(commandStart(w));
   }
-  return { words: w, assigns, writes, wrappers };
+  return { words: w, assigns, writes, wrappers, dirs };
 }
 
 /**

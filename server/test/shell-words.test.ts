@@ -163,6 +163,16 @@ describe("unwrap", () => {
     expect(r.wrappers).toEqual([{ name: "sudo", args: ["-u", "root"] }, { name: "xargs", args: ["-n", "1", "-I{}"] }]);
   });
 
+  it("reports the folders env -C and sudo -D move the command into, in order (#258)", () => {
+    expect(unwrap(["env", "-C", "hooks", "sh", "-c", "x"]).dirs).toEqual(["hooks"]);
+    expect(unwrap(["env", "-iC/a", "--chdir=b", "rm", "x"]).dirs).toEqual(["/a", "b"]);
+    expect(unwrap(["sudo", "-D", "/srv", "env", "--chdir", "sub", "rm", "x"]).dirs).toEqual(["/srv", "sub"]);
+    expect(unwrap(["sudo", "--chdir=/srv", "rm", "x"]).dirs).toEqual(["/srv"]);
+    // other wrappers' -C / -D are not folders: doas -C is a config file
+    expect(unwrap(["doas", "-C", "conf", "rm", "x"]).dirs).toEqual([]);
+    expect(unwrap(["env", "-u", "C", "rm", "x"]).dirs).toEqual([]);
+  });
+
   it("an xargs flag whose value is optional never swallows the command (#285)", () => {
     for (const args of [
       ["--replace", "rm", "{}"],
