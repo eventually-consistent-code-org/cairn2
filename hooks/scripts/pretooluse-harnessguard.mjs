@@ -3,7 +3,9 @@
 /**
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
- *   server config, the settings cascade, the plugin manifest, and the
+ *   server config, the settings cascade, the plugin manifest, .claude/hooks
+ *   and .claude/agents, the plugin copy that runs (#267: its root when
+ *   outside the project, and ~/.claude/plugins with its registry), and the
  *   ship-gate stamp and run manifests the run guard trusts (#263: under
  *   CAIRN_HOME and ~/.cairn; the run report stays writable, and the
  *   server's own writes never pass a hook). An agent that can rewrite its
@@ -41,6 +43,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
 } from "./shell-words.mjs";
@@ -57,7 +60,15 @@ const PROTECTED = [
   { re: /^\.mcp\.json$/, what: "the MCP server config" },
   { re: /^(?:.*\/)?\.claude\/settings(?:\.[\w-]+)?\.json$/, what: "a settings file" },
   { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/, what: "the plugin manifest" },
+  { re: /^(?:.*\/)?\.claude\/hooks\//, what: "the project's Claude hooks" },
+  { re: /^(?:.*\/)?\.claude\/agents\//, what: "the project's agent definitions" },
 ];
+
+// Folders inside .claude/ whose whole contents are protected (#267).
+const CLAUDE_TREES = [["hooks", "the project's Claude hooks"], ["agents", "the project's agent definitions"]];
+
+// Folders whose whole contents are protected: a find started in one is a hit whatever it tests.
+const TREES = new Set(["the hook directory", ...CLAUDE_TREES.map(([, what]) => what)]);
 
 // Names a wildcard is tested against inside .claude/ and .claude-plugin/.
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
@@ -208,9 +219,10 @@ const LIST_CAP = 500;
 // Each holds the path as given and its real path, when a symlink differs.
 let ROOTS = [];
 let HOMES = [];
-// Protected places outside the project (#263), each { dir, what, tree }:
-// `tree` protects everything under dir, else only the *.json files
-// directly in it (the way the run guard reads runs/).
+// Protected places outside the project (#263, #267), each { dir, what,
+// tree, carve }: `tree` protects everything under dir, else only the
+// *.json files directly in it (the way the run guard reads runs/); `carve`
+// lists project folders inside dir that stay ordinary work.
 let ZONES = [];
 // The protected paths find could walk to, listed once per run, and the
 // zones too big to list in full.
@@ -283,16 +295,31 @@ function expandHome(raw) {
  * and the run manifests the run guard trusts, in every cairn home they
  * can live in -- CAIRN_HOME (the run guard reads it) and ~/.cairn (the
  * server writes it). The run report beside the manifests stays writable.
+ *
+ * And the plugin copy that actually runs (#267): everything under
+ * ~/.claude/plugins (the registry files, the cache each install runs
+ * from, the marketplaces), and the live plugin root -- CLAUDE_PLUGIN_ROOT,
+ * which Claude Code hands its hooks, else the folder two up from this
+ * script -- when it lies outside the project. A dev install whose root IS
+ * the project is covered by PROTECTED; a project inside the plugin root
+ * (a worktree) is carved out of it.
  */
 function outsideZones() {
   const zones = [];
-  const add = (dir, what, tree) => {
-    for (const d of spellings(dir)) zones.push({ dir: d, what, tree });
+  const add = (dir, what, tree, carve = []) => {
+    for (const d of spellings(dir)) zones.push({ dir: d, what, tree, carve });
   };
   for (const base of [process.env.CAIRN_HOME, ...HOMES.map((h) => join(h, ".cairn"))]) {
     if (!base) continue;
     add(join(base, "ship-gate"), "the ship-gate stamp", true);
     add(join(base, "runs"), "the run manifests", false);
+  }
+  for (const home of HOMES) add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL("../..", import.meta.url));
+  const plugin = spellings(pluginRoot);
+  if (!plugin.some((r) => ROOTS.some((root) => holds(root, r)))) {
+    const carve = ROOTS.filter((root) => plugin.some((r) => holds(r, root)));
+    add(pluginRoot, "the installed plugin these hooks run from", true, carve);
   }
   return zones;
 }
@@ -300,7 +327,7 @@ function outsideZones() {
 /** The protected place outside the project a path lies inside, or null. */
 function zoneOf(abs) {
   for (const z of ZONES) {
-    if (abs === z.dir || !holds(z.dir, abs)) continue;
+    if (abs === z.dir || !holds(z.dir, abs) || z.carve.some((c) => holds(c, abs))) continue;
     if (z.tree || (dirname(abs) === z.dir && abs.endsWith(".json"))) return z.what;
   }
   return null;
@@ -346,6 +373,7 @@ function dirRule(abs) {
   const rel = projectRelative(abs);
   if (!rel) return null;
   if (rel === "hooks") return "the hook directory";
+  for (const [sub, what] of CLAUDE_TREES) if (rel === `.claude/${sub}` || rel.endsWith(`/.claude/${sub}`)) return what;
   const name = rel.split("/").pop();
   if (name === ".claude") return "a Claude settings directory";
   if (name === ".claude-plugin") return "the plugin manifest";
@@ -378,6 +406,12 @@ function zoneGlob(p, remove) {
     const d = z.dir.split(sep).filter(Boolean);
     const n = d.length;
     if (!n || p.length < n || !d.slice(0, -1).every((x, j) => could(p[j], x))) continue;
+    // a path spelled plainly into a carved-out project folder is that project's business
+    const carved = z.carve.some((c) => {
+      const cc = c.split(sep).filter(Boolean);
+      return p.length >= cc.length && cc.every((x, j) => p[j] === x);
+    });
+    if (carved) continue;
     if (p.length === n) {
       if (could(p[n - 1], d[n - 1], remove)) return z.what;
     } else if (could(p[n - 1], d[n - 1]) &&
@@ -429,6 +463,12 @@ function globRule(abs, mode) {
         if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
         const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
         if (named && could(c[i], dir)) return what;
+      }
+      // .claude/hooks/ and .claude/agents/, the folder or anything in it (#267)
+      for (const [sub, what] of CLAUDE_TREES) {
+        if (i + 1 < c.length && could(c[i], ".claude") && could(c[i + 1], sub, i + 2 < c.length || remove)) {
+          return what;
+        }
       }
     }
   }
@@ -671,8 +711,8 @@ function testSelects(t, entry, shown) {
   }
 }
 
-/** Everything under `dir`, nearest first, up to LIST_CAP entries; true when some was left unlisted. */
-function listTree(dir, out) {
+/** Everything under `dir` but `skip`, nearest first, up to LIST_CAP entries; true when some was left unlisted. */
+function listTree(dir, out, skip = []) {
   const queue = [dir];
   let n = 0;
   while (queue.length) {
@@ -680,9 +720,11 @@ function listTree(dir, out) {
     let found = [];
     try { found = readdirSync(d, { withFileTypes: true }); } catch { continue; }
     for (const e of found) {
+      const p = join(d, e.name);
+      if (skip.some((s) => holds(s, p))) continue;
       if (++n > LIST_CAP) return true;
-      out.push(join(d, e.name));
-      if (e.isDirectory()) queue.push(join(d, e.name));
+      out.push(p);
+      if (e.isDirectory()) queue.push(p);
     }
   }
   return false;
@@ -692,7 +734,8 @@ function listTree(dir, out) {
 function treeRule(abs) {
   const zone = ZONES.find((z) => z.tree && z.dir === abs);
   if (zone) return zone.what;
-  return dirRule(abs) === "the hook directory" ? "the hook directory" : null;
+  const what = dirRule(abs);
+  return TREES.has(what) ? what : null;
 }
 
 /**
@@ -703,22 +746,12 @@ function treeRule(abs) {
 function protectedEntries() {
   if (ENTRIES) return ENTRIES;
   ENTRIES = [];
-  for (const z of ZONES) {
-    if (!existsSync(z.dir)) continue;
-    ENTRIES.push(z.dir);
-    if (z.tree) {
-      if (listTree(z.dir, ENTRIES)) UNLISTED.push(z);
-      continue;
-    }
-    let names = [];
-    try { names = readdirSync(z.dir); } catch { /* not a folder */ }
-    for (const n of names) if (n.endsWith(".json")) ENTRIES.push(join(z.dir, n));
-  }
   for (const root of ROOTS) {
+    const trees = CLAUDE_TREES.map(([sub]) => join(root, ".claude", sub));
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
-      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)),
+      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)), ...trees,
       join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)));
-    const stack = [join(root, "hooks")];
+    const stack = [join(root, "hooks"), ...trees];
     while (stack.length && ENTRIES.length < 2000) {
       const d = stack.pop();
       let found = [];
@@ -731,6 +764,17 @@ function protectedEntries() {
   }
   for (const home of HOMES) {
     ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
+  }
+  for (const z of ZONES) {
+    if (!existsSync(z.dir)) continue;
+    ENTRIES.push(z.dir);
+    if (z.tree) {
+      if (listTree(z.dir, ENTRIES, z.carve)) UNLISTED.push(z);
+      continue;
+    }
+    let names = [];
+    try { names = readdirSync(z.dir); } catch { /* not a folder */ }
+    for (const n of names) if (n.endsWith(".json")) ENTRIES.push(join(z.dir, n));
   }
   return ENTRIES;
 }

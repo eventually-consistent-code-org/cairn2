@@ -1133,6 +1133,162 @@ describe("harness guard protects the ship gate and run manifests (#263)", () => 
   });
 });
 
+// #267: the guard protected the project's own hooks/ but not the plugin
+// copy that actually runs -- the plugin root Claude Code hands its hooks
+// (under ~/.claude/plugins/cache/ for an install), the plugin registry
+// files, and the project's .claude/hooks/ and .claude/agents/.
+describe("harness guard protects the plugin copy that runs (#267)", () => {
+  const filePayload = (filePath: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: filePath }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  /** Exit status and stderr with CLAUDE_PLUGIN_ROOT as given -- or unset, for the script's own location. */
+  function run(projectDir: string, payload: string, env: Record<string, string | undefined> = {}) {
+    const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: projectDir, ...env };
+    for (const k of Object.keys(e)) if (e[k] === undefined || k === "CAIRN_HARNESS_EDIT") delete e[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env: e, input: payload, encoding: "utf8", timeout: 5000,
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** A fake installed plugin root outside the project, holding hooks like the real one. */
+  function pluginRoot(): string {
+    const root = freshDir("cairn-hooks-pluginroot-");
+    mkdirSync(join(root, "hooks", "scripts"), { recursive: true });
+    writeFileSync(join(root, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(root, "hooks", "scripts", "pretooluse-runguard.mjs"), "");
+    return root;
+  }
+
+  it("refuses writes into the live plugin root when it lies outside the project", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const root = pluginRoot();
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const file of ["hooks/hooks.json", "hooks/scripts/pretooluse-runguard.mjs", "server/dist/index.js"]) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = run(p, filePayload(join(root, file), tool), env);
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, file).toContain("the installed plugin these hooks run from");
+      }
+    }
+    for (const c of [
+      `echo {} > ${join(root, "hooks", "hooks.json")}`,
+      `cd ${root} && echo {} > hooks/hooks.json`,
+      `sed -i '' 's/a/b/' ${join(root, "hooks", "*.json")}`,
+      `rm -rf ${root}`,
+      `find ${root} -name '*.mjs' -delete`,
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("reads of the plugin root, and a plain npm rebuild inside it, pass", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const root = pluginRoot();
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const c of [
+      `cat ${join(root, "hooks", "hooks.json")}`,
+      `grep -rn matcher ${join(root, "hooks")}`,
+      `cd ${root} && npm rebuild`,
+      `npm rebuild --prefix ${root}`,
+      `cp ${join(root, "hooks", "hooks.json")} /tmp/hooks-review-copy.json`,
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(0);
+    }
+  });
+
+  it("with no CLAUDE_PLUGIN_ROOT, the checkout running the script is the plugin root", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const checkout = resolve(SCRIPTS, "..", "..");
+    expect(run(p, filePayload(join(checkout, "hooks", "hooks.json")), { CLAUDE_PLUGIN_ROOT: undefined }).status)
+      .toBe(2);
+    expect(run(p, filePayload(join(checkout, "README.md")), { CLAUDE_PLUGIN_ROOT: undefined }).status).toBe(2);
+    // a different checkout is somebody else's business
+    expect(run(p, filePayload(join(pluginRoot(), "hooks", "hooks.json")), { CLAUDE_PLUGIN_ROOT: undefined }).status)
+      .toBe(0);
+  });
+
+  it("a dev install whose plugin root is the project keeps the project rules", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const env = { CLAUDE_PLUGIN_ROOT: p };
+    expect(run(p, filePayload(join(p, "hooks", "hooks.json")), env).status).toBe(2);
+    expect(run(p, filePayload(join(p, "README.md")), env).status).toBe(0);
+    expect(run(p, filePayload(join(p, "server", "src", "index.ts")), env).status).toBe(0);
+  });
+
+  it("a project inside the plugin root (a worktree) stays ordinary work; the rest of the root does not", () => {
+    const root = pluginRoot();
+    const wt = join(root, ".claude", "worktrees", "wt");
+    mkdirSync(join(wt, "build"), { recursive: true });
+    const env = { CLAUDE_PLUGIN_ROOT: root };
+    for (const file of ["src/a.ts", "README.md"]) {
+      expect(run(wt, filePayload(join(wt, file)), env).status, file).toBe(0);
+    }
+    for (const c of ["rm -rf build/*", "find . -name '*.tmp' -delete", "echo x > notes.txt"]) {
+      expect(run(wt, bashPayload(c), env).status, c).toBe(0);
+    }
+    // the worktree's own hooks/ is still its project's hook directory
+    expect(run(wt, filePayload(join(wt, "hooks", "hooks.json")), env).status).toBe(2);
+    expect(run(wt, filePayload(join(root, "hooks", "hooks.json")), env).status).toBe(2);
+    for (const c of ["echo x > ../../../hooks/hooks.json", "rm -rf ../other-wt", `rm -rf ${root}`]) {
+      expect(run(wt, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("refuses writes to ~/.claude/plugins: the registry files, the cache, the marketplaces", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    const home = freshDir("cairn-hooks-plugin-home-");
+    const env = { HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot() };
+    for (const file of [
+      join(home, ".claude", "plugins", "installed_plugins.json"),
+      join(home, ".claude", "plugins", "known_marketplaces.json"),
+      join(home, ".claude", "plugins", "cache", "mkt", "cairn", "1.0.0", "hooks", "hooks.json"),
+      join(home, ".claude", "plugins", "marketplaces", "mkt", ".claude-plugin", "marketplace.json"),
+    ]) {
+      const r = run(p, filePayload(file), env);
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain("installed plugins and their registry");
+    }
+    for (const c of [
+      "echo {} > ~/.claude/plugins/installed_plugins.json",
+      "rm -rf ~/.claude/plugins",
+      "rm -rf ~/.claude/plugins/cache",
+    ]) {
+      expect(run(p, bashPayload(c), env).status, c).toBe(2);
+    }
+    expect(run(p, bashPayload("cat ~/.claude/plugins/installed_plugins.json"), env).status).toBe(0);
+  });
+
+  it("refuses writes to the project's .claude/hooks/ and .claude/agents/", () => {
+    const p = freshDir("cairn-hooks-plugin-proj-");
+    for (const [file, phrase] of [
+      [".claude/hooks/x.sh", "Claude hooks"],
+      [".claude/agents/a.md", "agent definitions"],
+      ["packages/web/.claude/agents/a.md", "agent definitions"],
+    ]) {
+      const r = run(p, filePayload(join(p, file)));
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain(phrase);
+    }
+    for (const c of [
+      "echo x > .claude/hooks/x.sh",
+      "rm -rf .claude/agents",
+      "cp a.md .claude/agents/",
+      "rm .claude/*/a.md",
+      "find .claude/hooks -name nothing-matches -delete",
+    ]) {
+      expect(run(p, bashPayload(c)).status, c).toBe(2);
+    }
+    for (const c of ["cat .claude/agents/a.md", "ls .claude/hooks"]) {
+      expect(run(p, bashPayload(c)).status, c).toBe(0);
+    }
+    // the rest of .claude/ is ordinary work
+    expect(run(p, filePayload(join(p, ".claude", "skills", "x", "SKILL.md"))).status).toBe(0);
+  });
+});
+
 describe("stop-costtracker + cost-report", () => {
   const COSTTRACKER = join(scriptsDir, "stop-costtracker.mjs");
   const COSTREPORT = join(scriptsDir, "cost-report.mjs");
