@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -18,11 +18,11 @@
  *   Always: an agent push landing on the default branch (main, master, the
  *   remote's HEAD branch; a glob, `:` or push-everything push may, #297) is
  *   refused unless the last plan_drift left a clean ship-gate stamp for the
- *   exact commit pushed (#251; open issues stay prose).
- *   Other branches are untouched; a missing stamp refuses, an unreadable
- *   one skips. Escape: CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
+ *   exact commit pushed (#251; open issues stay prose). Other branches are
+ *   untouched; a missing or unreadable stamp refuses (#299). Escape:
+ *   CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
- *   While an unattended batch run is live (see liveRuns): `git checkout`,
+ *   While a batch run is live, or the run list can't be read (#299): `git checkout`,
  *   `git switch` and the hard reset (even overridden) aimed at the owner's
  *   own checkout (see isMainWorktree) are refused -- they change the
  *   human's files underneath them, mid-edit. CAIRN_RUN_OK=1 as the leading
@@ -159,32 +159,39 @@ function isMainWorktree(dir) {
 
 /**
  * Every manifest for this project whose status is `running`, as
- * { runId, state }. "A run is live" is file state in the per-machine cairn
- * home, not an env var, so it survives the agent boundaries an env var
- * would not cross.
+ * { live: [{ runId, state }], unreadable }. "A run is live" is file state
+ * in the per-machine cairn home, not an env var, so it survives the agent
+ * boundaries an env var would not cross. `unreadable` names a runs folder
+ * or manifest that exists but can't be read (#299) -- the guard can't say
+ * no run is live, so the gates that ask refuse instead of skipping.
  */
 function liveRuns(projectDir, baseDir) {
   const { base, hash } = pathHash(projectDir);
   const prefix = `${base}-${hash}-`;
+  const dir = join(baseDir, "runs");
+  const live = [];
   let entries;
   try {
-    entries = readdirSync(join(baseDir, "runs"));
-  } catch {
-    return []; // no runs dir -- this machine has never staged a batch run
+    entries = readdirSync(dir);
+  } catch (e) {
+    // no runs dir -- this machine has never staged a batch run
+    return { live, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
   }
-  const live = [];
   for (const name of entries) {
     if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
     try {
-      const state = JSON.parse(readFileSync(join(baseDir, "runs", name), "utf8"));
+      const state = JSON.parse(readFileSync(join(dir, name), "utf8"));
       if (state?.status === "running") {
         live.push({ runId: state.runId ?? name.slice(prefix.length, -5), state });
       }
-    } catch {
-      continue; // a corrupt manifest is not evidence of a live run
+    } catch (e) {
+      // a corrupt manifest is not evidence of a live run, nor is one
+      // deleted since the listing -- but one that can't be read may be
+      if (e instanceof SyntaxError || e?.code === "ENOENT") continue;
+      return { live, unreadable: `${join(dir, name)} (${e?.code ?? e})` };
     }
   }
-  return live;
+  return { live, unreadable: null };
 }
 
 /**
@@ -566,10 +573,11 @@ function destructive(inv, dir) {
 }
 
 /**
- * Why this push may not land on the default branch yet, or null when the
- * ship gate is satisfied or doesn't apply (#251). The stamp is plan_drift's
- * record of its last run: { head, clean, at }. A missing stamp is a
- * refusal; anything the guard can't read is a skip, not a block.
+ * Why this push may not land on the default branch yet, as [why, what to
+ * do instead?] -- or null when the ship gate is satisfied or doesn't apply
+ * (#251). The stamp is plan_drift's record of its last run: { head, clean,
+ * at }. A missing stamp is a refusal, and so is one that exists but can't
+ * be read (#299): a gate that can't see its stamp refuses, never skips.
  */
 function shipGateRefusal(inv, dir, projectDir, baseDir) {
   try {
@@ -582,19 +590,20 @@ function shipGateRefusal(inv, dir, projectDir, baseDir) {
     try {
       stamp = JSON.parse(readFileSync(path, "utf8"));
     } catch (e) {
-      if (e?.code === "ENOENT") return "no drift check has been recorded for this project";
-      if (e instanceof SyntaxError) return "the last drift check's record is unreadable";
-      return null; // stamp dir/file unreadable -- the guard's problem, not yours
+      if (e?.code === "ENOENT") return ["no drift check has been recorded for this project"];
+      if (e instanceof SyntaxError) return ["the last drift check's record is unreadable"];
+      return [`the last drift check's record can't be read (${e?.code ?? e})`,
+        `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`];
     }
-    if (stamp?.clean !== true) return "the last drift check flagged drift that ship stops on";
+    if (stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
 
     for (const src of sources) {
-      if (src === null) return "it deletes the default branch";
+      if (src === null) return ["it deletes the default branch"];
       const sha = gitOut(dir, ["rev-parse", "--verify", "-q", `${src}^{commit}`]);
       if (sha === null) return null; // git can't resolve it -- the push will fail on its own
       if (sha !== stamp.head) {
-        return `the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
-          `not the commit being pushed (${sha.slice(0, 7)})`;
+        return [`the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
+          `not the commit being pushed (${sha.slice(0, 7)})`];
       }
     }
     return null;
@@ -640,8 +649,8 @@ try {
       const why = shipGateRefusal(inv, dir, projectDir, baseDir);
       if (why) {
         refuse([
-          `cairn run guard: this push lands on the default branch, but ${why}.`,
-          "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
+          `cairn run guard: this push lands on the default branch, but ${why[0]}.`,
+          why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
         ], UNSHIPPED_ENV);
       }
     }
@@ -650,7 +659,16 @@ try {
     // staging gate and a manifest phase in flight. From ANY worktree --
     // the run's own is exactly where it pushes.
     if (inv.sub === "push") {
-      for (const run of currentRuns()) {
+      const { live, unreadable } = currentRuns();
+      // #299 -- a run list that can't be read can't vouch that no run is live
+      if (unreadable) {
+        refuse([
+          `cairn run guard: can't read the batch-run list at ${unreadable}, so this push ` +
+          "can't be checked against a live run's push authority.",
+          "  the owner should restore read access to it; nothing pushes until the guard can read it.",
+        ]);
+      }
+      for (const run of live) {
         const why = pushRefusal(run.state);
         if (!why) continue;
         console.error(`cairn run guard: a batch run (${run.runId}) is in flight ${why}.`);
@@ -664,12 +682,20 @@ try {
     // #216 -- tree-rewriting commands aimed at the owner's checkout mid-run
     if (!hardReset && inv.sub !== "checkout" && inv.sub !== "switch") continue;
     if (prefixed("CAIRN_RUN_OK")) continue;
-    if (!currentRuns().length) continue; // no unattended run in flight -- ordinary work
+    const { live, unreadable } = currentRuns();
+    if (!live.length && !unreadable) continue; // no unattended run in flight -- ordinary work
     if (!isMainWorktree(dir)) continue; // the run's own worktree
 
     const name = hardReset ? "git reset --hard" : `git ${inv.sub}`;
+    if (unreadable) {
+      refuse([
+        `cairn run guard: can't read the batch-run list at ${unreadable}, so this \`${name}\` of ` +
+        "the checkout you work in can't be checked against a live run.",
+        "  the owner should restore read access to it, or run the command inside a run's own worktree.",
+      ]);
+    }
     refuse([
-      `cairn run guard: a batch run (${runs[0].runId}) is in flight, and this \`${name}\` targets ` +
+      `cairn run guard: a batch run (${live[0].runId}) is in flight, and this \`${name}\` targets ` +
       "the checkout you work in — it would change your files underneath you.",
       "  run the command inside the run's own worktree, or wait for the run to finish.",
     ]);

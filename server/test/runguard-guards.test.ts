@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -880,10 +880,10 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
     }
   });
 
-  it("an unreadable stamp dir fails open; a corrupt stamp refuses", () => {
+  it("a stamp dir that can't be read refuses (#299); so does a corrupt stamp", () => {
     const { proj, home } = branched();
     writeFileSync(join(home, "ship-gate"), "a file where the dir should be");
-    expect(guard(proj, home, "git push origin main").status).toBe(0);
+    expect(guard(proj, home, "git push origin main").status).toBe(2);
     rmSync(join(home, "ship-gate"));
     mkdirSync(join(home, "ship-gate"));
     writeFileSync(join(home, "ship-gate", `${projKey(proj)}.json`), "{ nope");
@@ -1000,5 +1000,111 @@ describe("run guard: glob, matching and push-everything pushes meet the ship gat
       expect(r.status, c).toBe(2);
       expect(r.stderr, c).toContain("run-x");
     }
+  });
+});
+
+describe("run guard: a stamp or run list that exists but can't be read refuses (#299)", () => {
+  // chmod takes no read access from root, and Windows has no mode bits
+  const canChmod = process.platform !== "win32" && process.getuid?.() !== 0;
+
+  /** Runs `fn` with `path` chmodded to 000, restoring `back` after so cleanup can remove it. */
+  function locked<T>(path: string, back: number, fn: () => T): T {
+    chmodSync(path, 0o000);
+    try {
+      return fn();
+    } finally {
+      chmodSync(path, back);
+    }
+  }
+
+  /** The refusal names what can't be read and the owner's ways, never an override prefix. */
+  function expectUnreadable(r: { status: number | null; stderr: string }, label: string,
+    code: string, env?: string): void {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toMatch(/can't be read|can't read/);
+    expect(r.stderr, label).toContain(code);
+    expect(r.stderr, label).toContain("restore read access");
+    expectOwnerTail(r.stderr, label, env);
+  }
+
+  it("a ship-gate path that can't be read refuses a default-branch push; other pushes pass", () => {
+    const { proj, home } = fixture(undefined, false);
+    writeFileSync(join(home, "ship-gate"), "a file where the dir should be");
+    const r = guard(proj, home, "git push origin main");
+    expectUnreadable(r, "push main", "ENOTDIR", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    expect(r.stderr).not.toContain("/cairn:ship");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    expect(guard(proj, home, "git push origin main", { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+  });
+
+  it.skipIf(!canChmod)("a stamp folder or stamp file chmodded unreadable refuses; restored, it passes", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "git push origin main").status).toBe(0);
+    locked(join(home, "ship-gate"), 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin main"), "dir", "EACCES", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    });
+    locked(join(home, "ship-gate", `${projKey(proj)}.json`), 0o644, () => {
+      expectUnreadable(guard(proj, home, "git push origin main"), "file", "EACCES", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    });
+    expect(guard(proj, home, "git push origin main").status).toBe(0);
+  });
+
+  it("a runs folder that can't be read refuses every push, with no override to name", () => {
+    const { proj, home } = fixture();
+    writeFileSync(join(home, "runs"), "a file where the dir should be");
+    for (const c of ["git push origin feature", "git push origin main", "git push"]) {
+      const r = guard(proj, home, c);
+      expectUnreadable(r, c, "ENOTDIR");
+      expect(r.stderr, c).toContain("batch-run list");
+      expect(r.stderr, c).not.toContain("CAIRN_");
+    }
+    // ...and the session-wide ship-gate escape doesn't reach it
+    expect(guard(proj, home, "git push origin feature", { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(2);
+    expect(guard(proj, home, "git status").status).toBe(0);
+  });
+
+  it("a runs folder that can't be read refuses checkout and switch of the owner's checkout only", () => {
+    const { proj, home } = fixture();
+    writeFileSync(join(home, "runs"), "a file where the dir should be");
+    for (const c of ["git checkout main", "git switch -c x", "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard"]) {
+      const r = guard(proj, home, c);
+      expectUnreadable(r, c, "ENOTDIR");
+      expect(r.stderr, c).not.toContain("CAIRN_RUN_OK");
+    }
+    expect(guard(proj, home, "CAIRN_RUN_OK=1 git checkout main").status).toBe(0);
+    const wt = join(freshDir("cairn-runguard-wt-"), "tree");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "runbranch", wt], { cwd: proj });
+    expect(guard(proj, home, "git switch main", {}, wt).status).toBe(0);
+  });
+
+  it.skipIf(!canChmod)("a runs folder, manifest or cairn home chmodded unreadable refuses the push", () => {
+    const { proj, home } = fixture({ status: "complete", phases: [], pushAuth: { granted: false } });
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    locked(join(home, "runs"), 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "runs dir", "EACCES");
+    });
+    locked(join(home, "runs", `${projKey(proj)}-run-x.json`), 0o644, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "manifest", "EACCES");
+    });
+    // the audit's shape: the whole cairn home locked takes both gates' files away
+    locked(home, 0o755, () => {
+      expectUnreadable(guard(proj, home, "git push origin feature"), "home, feature", "EACCES");
+      expectUnreadable(guard(proj, home, "git push origin main"), "home, main", "EACCES",
+        "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    });
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+  });
+
+  it("a missing stamp or runs folder keeps its meaning; a corrupt manifest is still no live run", () => {
+    const { proj, home } = fixture(undefined, false);
+    const none = guard(proj, home, "git push origin main");
+    expect(none.status).toBe(2);
+    expect(none.stderr).toContain("no drift check has been recorded");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    mkdirSync(join(home, "runs"));
+    writeFileSync(join(home, "runs", `${projKey(proj)}-broken.json`), "{ nope");
+    expect(guard(proj, home, "git push origin feature").status).toBe(0);
+    expect(guard(proj, home, "git checkout main").status).toBe(0);
   });
 });
