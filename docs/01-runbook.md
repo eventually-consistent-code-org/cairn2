@@ -1755,11 +1755,28 @@ nothing.
 | `continuity.recallIndex.enabled` | boolean | `true` | The session-start memory banner |
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
-| `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook |
+| `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
+| `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
 | `leakGuard.extraPatterns` | string[] | `[]` | Additional regex patterns to guard against |
-| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok` — unknown keys are rejected |
+| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok` — unknown provider names are rejected |
 | `peers.<provider>.maxInputChars` | positive integer | `200000` | Input cap per provider; longer input is head-truncated with a verbatim marker line |
+| `peers.<provider>.execCapable` | boolean | `false` when absent | Your declared trust that this CLI may run from the project folder to exercise the product during a functionality review. Without it every peer runs contained in a scratch folder, and `peer_run` refuses project mode. Never probed at runtime |
+| `peerFanout.maxConcurrent` | positive integer | *(optional block)* — absent, sized to the host: min(cores − 1, free memory ÷ 750MB, 8), at least 1 | How many peer CLIs run at once; `peer_list` reports it and the `peers` verb dispatches in batches no wider. Its own block because `peers` is keyed by provider name |
+| `seats.enabled` | string[] | *(optional block)* — absent, every shipped default seat plus any project seat | Picks the seat roster and its order; a name that matches no valid seat definition is skipped with a roster note |
+| `seats.disabled` | string[] | — | Seat names removed from the roster |
+| `seats.dispatch` | `auto \| off` | absent ≡ `off` | What a verb's `inherit` dispatch dial resolves to: `auto` lets diff signals and seat yield pick the seats that fire; `off` fires the full roster |
+| `contextEconomy.autocompactPct` | number 0.05–1, or `null` | `null` | The `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` you want. cairn never sets it; `config_probe` reports when the live value disagrees. `null` leaves the harness default alone |
+
+**Unknown keys are mostly ignored, not rejected.** Most blocks drop a
+key they don't know without a word: a misspelled `ship.confrim` or
+`leakGuard.enabeld` validates, stays in the file, and does nothing,
+while the setting you meant keeps its default. Two places are strict.
+The `seats` block rejects any key it doesn't know, and `peers` rejects a
+provider name outside the four. A field misspelled *inside* a provider's
+entry is dropped like everywhere else, so a typo in `execCapable` leaves
+that peer contained. When a setting seems to have no effect, check its
+spelling first.
 
 **The secrets-in-env rule, enforced:** config writes refuse any
 credential-shaped key (`token`, `apiToken`, `api_key`, `password`,
