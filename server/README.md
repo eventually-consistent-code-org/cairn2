@@ -667,17 +667,19 @@ a transport layer only. It moves bytes in and out of a child process; the
 whatever comes back. Nothing here is guaranteed installed — none of the
 four are assumed present anywhere in the server.
 
-### Templates (fixed argv, stdin-only input)
+### Templates (fixed argv, never a shell)
 
 Each provider has exactly one argv template, a constant, never built from
-user input; input reaches the CLI per its verified prompt convention:
+user input; input reaches the CLI per its verified prompt convention. A
+contained run (the default, below) adds the CLI's own sandbox flags where
+it documents any:
 
-| provider | argv | input |
-|---|---|---|
-| `codex` | `codex exec --skip-git-repo-check -` | stdin (documented `-` convention); the flag keeps codex from refusing directories the host hasn't marked trusted |
-| `opencode` | `opencode run <input>` | argv — `run [message..]` is positional |
-| `antigravity` | `agy -p <input>` | argv — the binary is `agy`; headless `-p` takes the prompt as its value and ignores piped stdin (verified live) |
-| `grok` | `grok -p <input>` | argv — grok's headless mode does not consume piped stdin (verified live, formerly CRN-76 on the retired Jira tracker) |
+| provider | argv | input | sandbox args (scratch runs) |
+|---|---|---|---|
+| `codex` | `codex exec --skip-git-repo-check -` | stdin (documented `-` convention); the flag keeps codex from refusing directories the host hasn't marked trusted, the scratch dir included | `--sandbox read-only` |
+| `opencode` | `opencode run <input>` | argv — `run [message..]` is positional | none documented — scratch cwd only |
+| `antigravity` | `agy -p <input>` | argv — the binary is `agy`; headless `-p` takes the prompt as its value and ignores piped stdin (verified live) | `--sandbox`, placed before `-p` |
+| `grok` | `grok -p <input>` | argv — grok's headless mode does not consume piped stdin (verified live, formerly CRN-76 on the retired Jira tracker) | none documented — scratch cwd only |
 
 Input is NEVER shell-interpolated — `execFile` takes an argv array and
 resolves the binary via PATH itself; no shell ever parses any of it. For
@@ -686,18 +688,52 @@ for argv-mode peers (grok, opencode, antigravity — their CLIs don't read
 piped stdin) the capped input is the single final argv element, which is data
 to `execFile`, not command line to a shell. The child-process surface is
 exactly these four templates; there is no path from any tool argument to
-a shell command string. Every child runs with cwd pinned to the project
-dir — peer results must never depend on where the MCP server process
-happens to be sitting (#56). The 200k default cap keeps argv-mode input well
+a shell command string. The 200k default cap keeps argv-mode input well
 under ARG_MAX.
+
+### Containment (a scratch dir by default)
+
+A peer never runs inside the project unless you've said it may. By
+default (`cwdMode: "scratch"`) every child runs from a fresh scratch dir
+under the OS temp dir (`cairn-peer-*`) with the capped input staged
+beside it as `packet.txt`, so the screened packet is all a peer can see.
+That default exists because a live council run showed a peer with the
+project as its cwd reading repo internals its packet never carried,
+straight around the leak gate (#74). The dir is torn down when the child
+exits, on every path. Peer results still never depend on where the MCP
+server process happens to be sitting (#56): the cwd is always the same
+kind of place.
+
+`cwdMode: "project"` is the explicit way back to the project dir,
+unsandboxed, for a peer that has to run the product during a
+functionality review. That is a trust grant, and the grant lives in
+`cairn.json`, never in the call: `peer_run` refuses project mode with
+`PRECONDITION_FAILED` unless the provider's entry says
+`execCapable: true` (#268). Which review dimension earns the grant stays
+the `peers` verb's call — this layer can't tell what a send is for.
+
+### Outbound leak scan
+
+Before any scratch dir or child process exists, `peer_run` scans the
+capped input — the exact bytes that would leave the machine — with the
+server's port of the commit-time leak-pattern set
+(`src/peers/leak-scan.ts`, held to the hook's set by a parity test):
+planning paths, phase refs, cairn labels, a Jira project's issue ids,
+and anything in `leakGuard.extraPatterns`. A hit throws
+`PRECONDITION_FAILED` naming the pattern kinds and line numbers — never
+the matched text, because the error travels back through the agent and
+can land in a tracker comment — and nothing is sent. `leakGuard.enabled:
+false` turns this scan off along with the commit guard; the
+`leakGuard.allow` path globs don't apply, since the input is text, not a
+file. It is not a secret scanner.
 
 ### Caps (`cairn.json` → `peers` block)
 
 ```jsonc
 "peers": {
-  "codex":       { "enabled": true, "maxInputChars": 200000 },
+  "codex":       { "enabled": true, "maxInputChars": 200000, "execCapable": true },
   "antigravity": { "maxInputChars": 900000 }
-  // absent provider = enabled with the default cap; unknown keys rejected
+  // absent provider = enabled, default cap, not execCapable; unknown provider names rejected
 }
 ```
 
@@ -708,6 +744,11 @@ appended verbatim (`[cairn: input truncated at N chars]`) and
 `truncatedInput: true` in the result — the marker text is part of the
 contract callers can depend on, not cosmetic.
 
+`execCapable` is false when absent and never probed at runtime: it's your
+declared trust that this CLI may run from the project dir. Unknown fields
+inside a provider's entry are dropped without a word, so a misspelled
+`execCapable` leaves the peer contained rather than trusted.
+
 ### Degradation (missing/disabled peers never block)
 
 - Provider not on PATH → `peer_list` reports `onPath: false` (a DETECTED
@@ -715,6 +756,11 @@ contract callers can depend on, not cosmetic.
   naming the provider and an install hint.
 - Provider disabled (`peers.<name>.enabled: false`) → `peer_run` throws
   `PRECONDITION_FAILED` before ever touching PATH.
+- `cwdMode: "project"` for a provider not marked `execCapable` →
+  `PRECONDITION_FAILED`, also before PATH, naming the setting that grants
+  it.
+- A leak-pattern hit in the capped input → `PRECONDITION_FAILED` before
+  anything spawns or touches disk.
 - Timeout (default 120s) → the child is `SIGKILL`ed and `peer_run` throws
   `PRECONDITION_FAILED` naming the provider and elapsed time.
 - Zero peers detected is a normal `peer_list` result, not a warning — the
@@ -728,16 +774,17 @@ contract callers can depend on, not cosmetic.
   process returned, stderr folded into `output` when present.
 - **A spawn/precondition failure THROWS** (`CairnError`, code
   `PRECONDITION_FAILED`): missing binary (`ENOENT`), disabled provider,
-  timeout kill, or any other errno the child never turned into a real
-  exit code (`EACCES`, `EMFILE`, a `maxBuffer` overrun). The process never
-  really ran in these cases, so there's no advisory output to return —
-  it's a tool error, handled the same way every other cairn tool reports
-  a precondition failure.
+  project mode for a peer not marked `execCapable`, a leak-pattern hit in
+  the outgoing input, timeout kill, or any other errno the child never
+  turned into a real exit code (`EACCES`, `EMFILE`, a `maxBuffer`
+  overrun). The process never really ran in these cases, so there's no
+  advisory output to return — it's a tool error, handled the same way
+  every other cairn tool reports a precondition failure.
 
 | tool | purpose |
 |---|---|
-| `peer_list` | Detection/config snapshot per provider: `{ provider, onPath, enabled, maxInputChars }`. Never throws — an absent CLI is data, not an error |
-| `peer_run` | Runs one provider with capped stdin input and a timeout; resolves with the real exit code and output on any completed run (including non-zero exit), throws `PRECONDITION_FAILED` only when the process itself never ran |
+| `peer_list` | Detection/config snapshot: `{ peers: [{ provider, onPath, enabled, maxInputChars, execCapable }], maxConcurrent }`. `maxConcurrent` is the fan-out budget — `peerFanout.maxConcurrent` when set, otherwise min(cores − 1, free memory ÷ 750MB, 8), never below 1. Never throws — an absent CLI is data, not an error |
+| `peer_run` | Runs one provider with capped input (stdin or argv, per its template) and a timeout — contained in a scratch dir unless `cwdMode: "project"` is granted by `execCapable`, and leak-scanned before spawn; resolves with the real exit code and output on any completed run (including non-zero exit), throws `PRECONDITION_FAILED` only when the process itself never ran |
 
 ## Hooks
 
