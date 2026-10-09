@@ -527,6 +527,69 @@ describe("run guard: a wrapper's flags and their values don't hide git (#270)", 
   });
 });
 
+describe("run guard: a shell keyword or grouping word doesn't hide git (#285)", () => {
+  // Each row: [refused form, its plain allowed neighbour]. Before #285 the
+  // first word of each was read as the command -- `if`, `{`, `!`, `do` --
+  // so none of these reached the table.
+  const rows: Array<[refused: string, allowed: string]> = [
+    ["if git reset --hard; then :; fi", "if git status; then :; fi"],
+    ["{ git reset --hard; }", "{ git status; }"],
+    ["! git reset --hard", "! git status"],
+    ["while git reset --hard; do :; done", "while git status; do :; done"],
+    ["until git reset --hard; do :; done", "until git status; do :; done"],
+    ["if true; then git reset --hard; fi", "if true; then git reset --soft; fi"],
+    ["if a; then :; elif b; then :; else git reset --hard; fi", "if a; then :; elif b; then :; else git log; fi"],
+    ["for i in 1; do git reset --hard; done", "for f in *; do cat \"$f\"; done"],
+    ["case x in x) git reset --hard;; esac", "case x in x) git status;; esac"],
+    ["true && { git push --force origin x; }", "true && { git push origin x; }"],
+    ["function f { git reset --hard; }; f", "function f { git status; }; f"],
+    ["f() { git clean -fd; }", "f() { git clean -n; }"],
+    ["time { git reset --hard; }", "time { git status; }"],
+    ["coproc git reset --hard", "coproc git fetch"],
+    ["echo | xargs --replace git reset --hard", "xargs --replace echo {}"],
+    ["echo | xargs -i git push --force", "echo | xargs -i git push"],
+    ["echo | xargs --eof git reset --hard", "echo | xargs --eof git status"],
+  ];
+
+  it("each refused form exits 2 with the table's refusal; its neighbour exits 0", () => {
+    const { proj, home } = fixture();
+    for (const [refused, allowed] of rows) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+
+  it("a loop's word list is data, and the override still prefixes the one command", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "for w in git reset --hard; do echo $w; done").status).toBe(0);
+    expect(guard(proj, home, "if true; then CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard; fi").status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true; { git reset --hard; }").status).toBe(2);
+  });
+});
+
+describe("run guard: macOS env -P and zsh's prefix words don't hide git (#258)", () => {
+  it("each refused form exits 2 with the table's refusal; its neighbour exits 0", () => {
+    const { proj, home } = fixture();
+    const rows: Array<[refused: string, allowed: string]> = [
+      ["env -P /usr/bin git reset --hard", "env -P /usr/bin git status"],
+      ["env -i -P/usr/bin git push --force origin x", "env -i -P/usr/bin git push origin x"],
+      ["noglob git reset --hard", "noglob git status"],
+      ["nocorrect git clean -fd", "nocorrect git clean -n"],
+      ["repeat 2 git reset --hard", "repeat 2 git status"],
+      ["repeat 2 do git stash clear; done", "repeat 2 do git stash list; done"],
+      ["repeat 2 { git checkout -- .; }", "repeat 2 { git checkout -- a.txt; }"],
+    ];
+    for (const [refused, allowed] of rows) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+});
+
 describe("run guard: mid-run push needs manifest push authority (#252)", () => {
   const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
   const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };

@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
+  WRAPPERS, braceExpand, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -80,6 +80,57 @@ describe("shellSegments: operators (#258)", () => {
   });
 });
 
+describe("shellSegments: reserved words and grouping (#285)", () => {
+  /** The command words found anywhere in the line, after unwrap. */
+  const commands = (line: string): string[][] =>
+    (shellSegments(line, { subshells: true }) as Seg[]).map((s) => unwrap(s.words).words);
+
+  it("a keyword, a group or a loop header never stands in for the command word", () => {
+    for (const line of [
+      "if git reset --hard; then :; fi",
+      "{ git reset --hard; }",
+      "! git reset --hard",
+      "while git reset --hard; do :; done",
+      "until git reset --hard; do :; done",
+      "if true; then git reset --hard; fi",
+      "if a; then b; elif git reset --hard; then :; else c; fi",
+      "if a; then b; else git reset --hard; fi",
+      "for i in 1; do git reset --hard; done",
+      "for i do git reset --hard; done",
+      "select x in a b; do git reset --hard; done",
+      "case x in x) git reset --hard;; esac",
+      "true && { git reset --hard; }",
+      "function f { git reset --hard; }; f",
+      "function f() { git reset --hard; }",
+      "f() { git reset --hard; }",
+      "time { git reset --hard; }",
+      "time -p ! git reset --hard",
+      "! time git reset --hard",
+      "coproc git reset --hard",
+      "coproc worker { git reset --hard; }",
+    ]) {
+      expect(commands(line), line).toContainEqual(["git", "reset", "--hard"]);
+    }
+  });
+
+  it("the plain neighbours read the same command, and a loop header is never one", () => {
+    expect(commands("if git status; then :; fi")).toEqual([["git", "status"], [":"], []]);
+    expect(commands("{ git status; }")).toEqual([["git", "status"], []]);
+    expect(commands('for f in *; do cat "$f"; done')).toEqual([[], ["cat", "$f"], []]);
+    // the word list is data, even when a word in it names a command
+    expect(commands("for x in rm -rf hooks; do echo $x; done")).toEqual([[], ["echo", "$x"], []]);
+    // only command position counts: an argument named `if` is an argument
+    expect(commands("echo if then { git reset --hard")).toEqual([["echo", "if", "then", "{", "git", "reset", "--hard"]]);
+  });
+
+  it("the words it skips are kept on the segment as `reserved`", () => {
+    const segs = shellSegments("if cd x; then rm y; fi", { subshells: true }) as Array<Seg & { reserved: string[] }>;
+    expect(segs.map((s) => [s.reserved, s.words])).toEqual([
+      [["if"], ["cd", "x"]], [["then"], ["rm", "y"]], [["fi"], []],
+    ]);
+  });
+});
+
 describe("unwrap", () => {
   it("skips a wrapper's flag values and basenames the wrapper (#254, #270)", () => {
     for (const line of [
@@ -112,10 +163,79 @@ describe("unwrap", () => {
     expect(r.wrappers).toEqual([{ name: "sudo", args: ["-u", "root"] }, { name: "xargs", args: ["-n", "1", "-I{}"] }]);
   });
 
+  it("reports the folders env -C and sudo -D move the command into, in order (#258)", () => {
+    expect(unwrap(["env", "-C", "hooks", "sh", "-c", "x"]).dirs).toEqual(["hooks"]);
+    expect(unwrap(["env", "-iC/a", "--chdir=b", "rm", "x"]).dirs).toEqual(["/a", "b"]);
+    expect(unwrap(["sudo", "-D", "/srv", "env", "--chdir", "sub", "rm", "x"]).dirs).toEqual(["/srv", "sub"]);
+    expect(unwrap(["sudo", "--chdir=/srv", "rm", "x"]).dirs).toEqual(["/srv"]);
+    // other wrappers' -C / -D are not folders: doas -C is a config file
+    expect(unwrap(["doas", "-C", "conf", "rm", "x"]).dirs).toEqual([]);
+    expect(unwrap(["env", "-u", "C", "rm", "x"]).dirs).toEqual([]);
+  });
+
+  it("an xargs flag whose value is optional never swallows the command (#285)", () => {
+    for (const args of [
+      ["--replace", "rm", "{}"],
+      ["--replace=R", "rm", "R"],
+      ["-i", "rm", "{}"],
+      ["-iP", "rm", "P"], // P is -P's letter, but here it is -i's replace string
+      ["-I", "R", "rm", "R"],
+      ["--eof", "rm", "{}"],
+      ["-e", "rm", "{}"],
+      ["--max-lines", "rm", "{}"],
+      ["-l", "rm", "{}"],
+      ["--process-slot-var", "N", "rm", "{}"],
+      ["-J", "%", "rm", "{}"], // BSD xargs, as macOS ships it
+      ["-R", "1", "-I", "R", "rm", "{}"],
+    ]) {
+      expect(unwrap(["xargs", ...args]).words[0], args.join(" ")).toBe("rm");
+    }
+    expect(unwrap(["xargs", "--replace", "echo", "{}"]).words).toEqual(["echo", "{}"]);
+  });
+
+  it("macOS env -P takes its PATH, and zsh's noglob, nocorrect and repeat N are prefixes (#258)", () => {
+    for (const line of [
+      "env -P /usr/bin git reset --hard",
+      "env -iP/usr/bin git reset --hard",
+      "noglob git reset --hard",
+      "nocorrect git reset --hard",
+      "repeat 2 git reset --hard",
+      "repeat 2 do git reset --hard; done",
+      "repeat 2 { git reset --hard; }",
+      "time repeat 2 git reset --hard",
+    ]) {
+      const cmds = (shellSegments(line, { subshells: true }) as Seg[]).map((s) => unwrap(s.words).words);
+      expect(cmds, line).toContainEqual(["git", "reset", "--hard"]);
+    }
+  });
+
   it("covers the wrappers the issue names", () => {
     for (const w of ["sudo", "doas", "env", "nice", "timeout", "xargs", "stdbuf", "exec", "time", "nohup"]) {
       expect(WRAPPERS.has(w), w).toBe(true);
     }
+  });
+});
+
+describe("braceExpand (#258)", () => {
+  it("spells out comma lists and sequences the way bash does", () => {
+    expect(braceExpand("{hooks,}")).toEqual(["hooks", ""]);
+    expect(braceExpand("a/{b,c}/d")).toEqual(["a/b/d", "a/c/d"]);
+    expect(braceExpand("{a,{b,c}}x")).toEqual(["ax", "bx", "cx"]);
+    expect(braceExpand("{x,y}{1,2}")).toEqual(["x1", "x2", "y1", "y2"]);
+    expect(braceExpand("hook{r..t}")).toEqual(["hookr", "hooks", "hookt"]);
+    expect(braceExpand("f{3..1}")).toEqual(["f3", "f2", "f1"]);
+  });
+
+  it("leaves what bash leaves: a parameter, an empty brace, a single word", () => {
+    for (const w of ["${HOME}", "${a,b}", "{}", "{x}", "-I{}", "a{b", "{1..z}", "plain"]) {
+      expect(braceExpand(w), w).toEqual([w]);
+    }
+  });
+
+  it("past its cap, the rest of a brace is the stand-in the caller passes", () => {
+    expect(braceExpand("f{1..1000}", "*")).toEqual(["f*"]);
+    const many = braceExpand(`{${Array.from({ length: 70 }, (_, i) => `n${i}`).join(",")}}`, "*");
+    expect(many).toEqual(["*"]);
   });
 });
 

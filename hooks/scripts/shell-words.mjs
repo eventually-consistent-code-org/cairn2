@@ -35,28 +35,41 @@ const SHELL_VALUE_OPTS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-fi
 // A NAME=value word in command position: an assignment, not the command.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+// Reserved words that open, continue or close a compound command; the
+// command word comes after them (#285).
+const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until",
+  "do", "done", "esac"]);
+
 /**
  * Prefixes that run a later word as the real command, each with the flags
  * that swallow a value (`sudo -u root`, `env -u NAME`, `nice -n 5`). A
  * wrapper's other flags are skipped as plain switches. `positional` counts
  * the bare words a wrapper takes before the command (timeout's duration).
  * Missing these flags is how `sudo -u root tee hooks/a` slipped past (#254).
+ * `opt` letters take an optional value, only ever the rest of their cluster
+ * (`-i{}`), and a long flag with an optional value takes it only after `=`
+ * (`--replace=R`) -- never the next word, which is the command (#285).
  */
 export const WRAPPERS = new Map([
   ["sudo", { short: "ugpChDRTUrt", long: ["--user", "--group", "--host", "--prompt",
     "--close-from", "--chdir", "--role", "--type", "--other-user", "--command-timeout"] }],
   ["doas", { short: "uC", long: [] }],
-  ["env", { short: "uCS", long: ["--unset", "--chdir", "--split-string"] }],
+  // macOS env -P names the PATH to search for the command
+  ["env", { short: "uCSP", long: ["--unset", "--chdir", "--split-string"] }],
   ["nice", { short: "n", long: ["--adjustment"] }],
   ["timeout", { short: "sk", long: ["--signal", "--kill-after"], positional: 1 }],
-  ["xargs", { short: "ILnPsdEa", long: ["--max-args", "--max-procs", "--max-chars",
-    "--delimiter", "--arg-file", "--eof", "--replace", "--max-lines"] }],
+  // GNU and BSD (-J -R -S) flags; -e -i -l, --eof --replace --max-lines: optional values
+  ["xargs", { short: "ILnPsdEaJRS", opt: "eil", long: ["--max-args", "--max-procs",
+    "--max-chars", "--delimiter", "--arg-file", "--process-slot-var"] }],
   ["exec", { short: "a", long: [] }],
   ["time", { short: "fo", long: ["--format", "--output"] }],
   ["command", { short: "", long: [] }],
   ["nohup", { short: "", long: [] }],
   ["builtin", { short: "", long: [] }],
   ["setsid", { short: "", long: [] }],
+  // zsh precommand modifiers
+  ["noglob", { short: "", long: [] }],
+  ["nocorrect", { short: "", long: [] }],
   ["stdbuf", { short: "ioe", long: ["--input", "--output", "--error"] }],
 ]);
 
@@ -96,15 +109,44 @@ function closeTick(line, i) {
 }
 
 /**
+ * Index of a word list's command word, past the reserved words and grouping
+ * in front of it (#285): `if` `then` `elif` `else` `while` `until` `do` `!`
+ * `{` and the closers, a `for NAME in ...` (or select) header up to its
+ * `do`, `case WORD in` (each pattern ends at its `)`, a subshell break),
+ * `function NAME`, `coproc` with the name before its body, and zsh's
+ * `repeat N`. Before #285 the first word was the command, so `if git reset
+ * --hard; then` read as a command named `if` and nothing refused it.
+ */
+function commandStart(words) {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i];
+    if (RESERVED.has(w)) i++;
+    else if (w === "for" || w === "select") {
+      i += 2; // the keyword and the loop's NAME
+      if (words[i] === "in") i = words.length; // its word list runs to the `;` or newline
+    } else if (w === "case") i += 3;
+    else if (w === "repeat") i += 2; // zsh: repeat N cmd, repeat N do ... done
+    else if (w === "function") i += words[i + 2] === "()" ? 3 : 2;
+    else if (w === "coproc") i += words[i + 2] === "{" ? 2 : 1;
+    else break;
+  }
+  return Math.min(i, words.length);
+}
+
+/**
  * Splits a shell command line into simple-command segments, each
- * { words, redirects, heredocs: [{ delim, body }], herestrings, inputs, op }.
- * Single and double quotes and backslashes are honoured, so quoted text
- * stays inside its word: `git commit -m "explain git reset --hard"` is one
- * git commit with a message, never a reset, and a `>` in a quoted pattern
- * is text. Segments break at ; & | and newlines, plus whatever `read`
- * turns on. `op` is the operator that ended the segment (`|` `|&` `||`
- * `&&` `;` `&`, a newline, a subshell character, or null at the end), so
- * a reader can tell a pipeline from a list (#258):
+ * { words, reserved, redirects, heredocs: [{ delim, body }], herestrings,
+ * inputs, op }. Single and double quotes and backslashes are honoured, so
+ * quoted text stays inside its word: `git commit -m "explain git reset
+ * --hard"` is one git commit with a message, never a reset, and a `>` in a
+ * quoted pattern is text. Segments break at ; & | and newlines, plus
+ * whatever `read` turns on. `words` start at the command word: the
+ * reserved words and grouping in front of it (`if`, `do`, `{`, a `for`
+ * header -- see commandStart) move to `reserved`, so they never stand in
+ * for the command (#285). `op` is the operator that ended the segment (`|`
+ * `|&` `||` `&&` `;` `&`, a newline, a subshell character, or null at the
+ * end), so a reader can tell a pipeline from a list (#258):
  *
  *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
  *                  a descriptor, not a file); `<` operands go to `inputs` and
@@ -155,7 +197,9 @@ export function shellSegments(command, read = {}) {
   const endSeg = (op = null) => {
     pushWord();
     if (words.length || redirects.length) {
-      segs.push({ words, redirects, heredocs, herestrings, inputs, op });
+      const at = commandStart(words);
+      segs.push({ words: words.slice(at), reserved: words.slice(0, at), redirects, heredocs,
+        herestrings, inputs, op });
     }
     words = [];
     redirects = [];
@@ -303,6 +347,66 @@ export function shellSegments(command, read = {}) {
   return segs;
 }
 
+// The most words one brace expansion is spelled out to.
+const BRACE_CAP = 64;
+
+/**
+ * The `{...}` in `word` that bash would expand, as { start, end, alts }, or
+ * null: a comma list (`{hooks,}`) or a sequence (`{1..3}`, `{a..c}`). A
+ * `${...}` is a parameter, and a brace with neither is literal (`{}`).
+ * `alts` is null for a sequence too long to spell out.
+ */
+function braceAt(word) {
+  for (let i = word.indexOf("{"); i >= 0; i = word.indexOf("{", i + 1)) {
+    if (word[i - 1] === "$") continue;
+    let depth = 0;
+    const commas = [];
+    let end = -1;
+    for (let j = i; j < word.length && end < 0; j++) {
+      if (word[j] === "{") depth++;
+      else if (word[j] === "}" && --depth === 0) end = j;
+      else if (word[j] === "," && depth === 1) commas.push(j);
+    }
+    if (end < 0) return null;
+    const body = word.slice(i + 1, end);
+    if (commas.length) {
+      const cuts = [i, ...commas, end];
+      return { start: i, end, alts: cuts.slice(1).map((c, k) => word.slice(cuts[k] + 1, c)) };
+    }
+    const m = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])$/.exec(body);
+    if (!m) continue;
+    const num = /\d/.test(m[1]);
+    if (num !== /\d/.test(m[2])) continue;
+    const [a, b] = num ? [Number(m[1]), Number(m[2])] : [m[1].charCodeAt(0), m[2].charCodeAt(0)];
+    if (Math.abs(b - a) >= BRACE_CAP) return { start: i, end, alts: null };
+    const alts = [];
+    for (let v = a; ; v += a <= b ? 1 : -1) {
+      alts.push(num ? String(v) : String.fromCharCode(v));
+      if (v === b) break;
+    }
+    return { start: i, end, alts };
+  }
+  return null;
+}
+
+/**
+ * The words one word brace-expands to, the way bash spells them out before
+ * running a command (#258): `rm -rf {hooks,}` removes hooks. Past BRACE_CAP
+ * words, or for a sequence too long to list, the rest of the brace is
+ * `wild` -- a stand-in the caller treats as any name.
+ */
+export function braceExpand(word, wild = "*") {
+  const out = [];
+  const walk = (w) => {
+    const b = braceAt(w);
+    if (!b) { out.push(w); return; }
+    const alts = b.alts && out.length + b.alts.length <= BRACE_CAP ? b.alts : [wild];
+    for (const alt of alts) walk(w.slice(0, b.start) + alt + w.slice(b.end + 1));
+  };
+  walk(word);
+  return out;
+}
+
 /** Words of a string as the shell would split them (env -S). */
 function splitWords(str, read) {
   return shellSegments(str, read).flatMap((s) => s.words);
@@ -313,15 +417,17 @@ function splitWords(str, read) {
  * word list, leaving the real command first. Returns the remaining words,
  * every NAME=value applied to the command along the way (`sudo FOO=1 env
  * BAR=2 cmd` carries both), any file a wrapper itself writes (GNU `time -o
- * FILE`), and each wrapper peeled with the option words it took (#258:
- * xargs's -I string says where its stdin lands). An env -S string is split
- * the way `read` reads words.
+ * FILE`), each wrapper peeled with the option words it took (#258:
+ * xargs's -I string says where its stdin lands), and the folders a wrapper
+ * moves the command into, in order (`env -C DIR`, `sudo -D DIR`, #258). An
+ * env -S string is split the way `read` reads words.
  */
 export function unwrap(words, read = {}) {
   let w = words.slice();
   const assigns = [];
   const writes = [];
   const wrappers = [];
+  const dirs = [];
   for (;;) {
     while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
     if (!w.length) break;
@@ -346,17 +452,21 @@ export function unwrap(words, read = {}) {
         if (eq < 0 && spec.long.includes(flag) && w.length) val = take();
         if (val !== null && name === "env" && flag === "--split-string") w = splitWords(val, read).concat(w);
         if (val !== null && name === "time" && flag === "--output") writes.push(val);
+        if (val !== null && flag === "--chdir" && (name === "env" || name === "sudo")) dirs.push(val);
         continue;
       }
       if (a.startsWith("-") && a.length > 1) {
         take();
         // A short cluster: the first value-taking letter eats the rest of
-        // the cluster, or the next word when it ends the cluster.
+        // the cluster, or the next word when it ends the cluster -- unless
+        // its value is optional, when the next word is never it.
         for (let k = 1; k < a.length; k++) {
+          if (spec.opt?.includes(a[k])) break;
           if (!spec.short.includes(a[k])) continue;
           const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? take() : null);
           if (val !== null && name === "env" && a[k] === "S") w = splitWords(val, read).concat(w);
           if (val !== null && name === "time" && a[k] === "o") writes.push(val);
+          if (val !== null && a[k] === (name === "env" ? "C" : name === "sudo" ? "D" : "")) dirs.push(val);
           break;
         }
         continue;
@@ -364,8 +474,10 @@ export function unwrap(words, read = {}) {
       break;
     }
     while (positional-- > 0 && w.length) take();
+    // `time` is a keyword too: `time { git reset --hard; }` times the group (#285)
+    if (name === "time") w = w.slice(commandStart(w));
   }
-  return { words: w, assigns, writes, wrappers };
+  return { words: w, assigns, writes, wrappers, dirs };
 }
 
 /**
