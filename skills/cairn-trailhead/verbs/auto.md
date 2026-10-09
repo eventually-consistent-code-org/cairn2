@@ -171,6 +171,11 @@ batch-specific loop.
      plain-language comment on the umbrella issue AND on the stopped
      phase's open issues ("budget ceiling reached — run stopped before
      phase N started; spent ~X of ~Y"), then wrap (step 4).
+   - **Mark the phase in flight.** `run_manifest(action: "set_phase",
+     phase: <N>)` once the budget lets phase N start (a resumed run
+     re-marks its phase; that's a no-op). The run guard honours push
+     authority only while this names a manifest phase, and it only moves
+     forward.
    - **Plan if untasked.** PLAN.md has no tasks → the `plan` verb's
      steps, standard depth. Research already exists — staging's scout
      batch wrote RESEARCH.md and the manifest's `answers` carry the
@@ -206,7 +211,8 @@ batch-specific loop.
      moved to run start, never silently skipped (record that line in
      the push summary). `pushAuth.granted: false` → the phase ends
      verified-not-pushed, recorded for the report; nothing pushes
-     (enforced by the run guard, which refuses `git push` mid-run).
+     (enforced by the run guard, which refuses `git push` mid-run without
+     the grant and a marked phase).
 3. **Tracker-first visibility.** Per-issue claim/close comments already
    come from work's lifecycle — never duplicate them. ADD, on the
    umbrella issue, ONE comment per phase transition: phase N started /

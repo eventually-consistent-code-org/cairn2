@@ -38,6 +38,21 @@ function guard(proj: string, home: string, command: string, extraEnv: Record<str
   return { status: r.status, stderr: r.stderr ?? "" };
 }
 
+/**
+ * The refusal tail (#262): the owner's ways to approve (`!`, the session
+ * env when there is one), the harness guard's where-did-this-come-from
+ * line, and never a copy-paste NAME=1 prefix.
+ */
+function expectOwnerTail(stderr: string, label: string, env?: string): void {
+  expect(stderr, label).toContain("needs the owner's go-ahead");
+  expect(stderr, label).toContain("`!` in your prompt");
+  expect(stderr, label).toContain("check where the");
+  expect(stderr, label).toContain("not the owner asking");
+  expect(stderr, label).not.toMatch(/[A-Z_]+=1/);
+  expect(stderr, label).not.toMatch(/prefix/i);
+  if (env) expect(stderr, label).toContain(`start the session with ${env} set to 1`);
+}
+
 /** Same plain-resolve() project hash the guard derives from CLAUDE_PROJECT_DIR. */
 function projKey(proj: string): string {
   const abs = resolve(proj);
@@ -80,7 +95,7 @@ function fixture(manifest?: Record<string, unknown>, stamped = true): { proj: st
 }
 
 describe("run guard: hard reset refused in every session (#249)", () => {
-  it("refuses git reset --hard with no run, naming the override", () => {
+  it("refuses git reset --hard with no run, naming the owner's ways to approve (#262)", () => {
     const { proj, home } = fixture();
     for (const c of [
       "git reset --hard",
@@ -94,7 +109,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -131,7 +146,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -179,7 +194,7 @@ describe("run guard: hard reset refused in every session (#249)", () => {
 });
 
 describe("run guard: force-push refused in every session (#250)", () => {
-  it("refuses every force shape with no run, naming the override", () => {
+  it("refuses every force shape with no run, naming the owner's ways to approve (#262)", () => {
     const { proj, home } = fixture();
     for (const c of [
       "git push --force",
@@ -197,7 +212,7 @@ describe("run guard: force-push refused in every session (#250)", () => {
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
     }
   });
 
@@ -223,6 +238,174 @@ describe("run guard: force-push refused in every session (#250)", () => {
     expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git push origin +main").status)
       .toBe(0);
     expect(guard(proj, home, "git push -f -m CAIRN_ALLOW_DESTRUCTIVE_GIT=1").status).toBe(2);
+  });
+});
+
+describe("run guard: work-destroying equivalents refused in every session (#264)", () => {
+  // Each row: [refused, its allowed everyday neighbour]. The refused form
+  // throws work away with no undo; the neighbour is routine or recoverable
+  // (a single path, the index only, a dry run, a feature branch).
+  const pairs: Array<[refused: string, allowed: string]> = [
+    ["git checkout -- .", "git checkout -- seed.txt"],
+    ["git checkout .", "git checkout seed.txt"],
+    ["git checkout HEAD -- .", "git checkout HEAD -- seed.txt"],
+    ["git checkout -- :/", "git checkout -- :/src"],
+    ["git checkout HEAD~1 ./", "git checkout HEAD~1 -- ./seed.txt"],
+    ["git checkout :/", "git checkout main"],
+    ["git checkout -- '.'", "git checkout -- 'seed.txt'"],
+    ["git checkout -- '*'", "git checkout -- '*.ts'"],
+    ["git checkout -- '**'", "git checkout -- 'src/**'"],
+    ["git checkout --pathspec-from-file=paths.txt", "git checkout -b paths"],
+    ["git restore './*'", "git restore './src'"],
+    ["git restore --pathspec-from-file paths.txt", "git restore --staged --pathspec-from-file paths.txt"],
+    ["git checkout -f", "git checkout main"],
+    ["git checkout --force main", "git checkout -b feature"],
+    ["git checkout -fb x", "git checkout -b fx"],
+    ["git restore .", "git restore seed.txt"],
+    ["git restore --staged --worktree .", "git restore --staged ."],
+    ["git restore -SW :/", "git restore -S :/"],
+    ["git restore -- .", "git restore -- seed.txt"],
+    ["git restore --source=HEAD~1 .", "git restore --source HEAD~1 seed.txt"],
+    ["git restore -s HEAD ../..", "git restore -s HEAD .gitignore"],
+    ["git switch --discard-changes main", "git switch main"],
+    ["git switch -f main", "git switch -c feature"],
+    ["git switch --force main", "git switch -C feature"],
+    ["git clean -f", "git clean -n"],
+    ["git clean -fd", "git clean -nd"],
+    ["git clean -fdx", "git clean -fdxn"],
+    ["git clean -xdf", "git clean --dry-run -xdf"],
+    ["git clean --force -d", "git clean -e '*.log' -n"],
+    ["git -c clean.requireForce=false clean -d", "git clean -d --dry-run"],
+    ["git stash clear", "git stash drop"],
+    ["git -C . stash clear", "git stash drop stash@{0}"],
+    ["git reflog expire --expire=now --all", "git reflog show"],
+    ["git push --mirror origin", "git push origin feature"],
+    ["git push --prune origin 'refs/heads/*:refs/heads/*'", "git push origin feature"],
+    ["git push origin --delete main", "git push origin --delete feature"],
+    ["git push origin -d master", "git push origin -d feature"],
+    ["git push origin :main", "git push origin :feature"],
+    ["git push origin :refs/heads/master", "git push origin :refs/heads/feature"],
+    ["git push origin -- :main", "git push origin -- :feature"],
+    ["git push origin -- +main", "git push origin -- feature"],
+    ["git -c remote.origin.mirror=true push origin", "git -c remote.origin.mirror=false push origin feature"],
+    ["sudo -u root git clean -fdx", "sudo -u root git clean -n"],
+    ["timeout 5 git stash clear", "timeout 5 git stash drop"],
+    ['echo "$(git checkout -- .)"', 'echo "$(git checkout -- seed.txt)"'],
+  ];
+
+  it("each refused form exits 2, naming the escape; its everyday neighbour exits 0", () => {
+    const { proj, home } = fixture();
+    for (const [refused, allowed] of pairs) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(r.stderr, refused).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+
+  it("branch -D and other routine commands stay allowed", () => {
+    const { proj, home } = fixture();
+    git(proj, "branch", "feature");
+    for (const c of [
+      "git branch -D feature",
+      "git branch -d feature",
+      "git stash",
+      "git stash pop",
+      "git checkout -",
+      "git restore --staged -- .",
+      "git reflog",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("quoted mentions pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      'git commit -m "never git checkout -- ."',
+      "git commit -m 'git clean -fdx'",
+      "echo git stash clear",
+      'git commit -m "git push --mirror origin"',
+      "git log --oneline # git reflog expire --all",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a remote already configured to mirror turns a plain push into a refused one", () => {
+    const { proj, home } = fixture();
+    git(proj, "config", "remote.origin.mirror", "true");
+    for (const c of ["git push origin", "git push", "git push origin main"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("git push --mirror");
+    }
+    // ...a different remote is a plain push
+    expect(guard(proj, home, "git push upstream feature").status).toBe(0);
+  });
+
+  it("CAIRN_ALLOW_DESTRUCTIVE_GIT=1 unlocks the table from env or as the leading assignment only", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git checkout -- .", "git restore .", "git switch -f main", "git clean -fdx",
+      "git stash clear", "git reflog expire --all", "git push --mirror origin",
+      "git push --prune origin",
+    ]) {
+      expect(guard(proj, home, c, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, c).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`).status, c).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true && ${c}`).status, c).toBe(2);
+    }
+  });
+
+  it("deleting the default branch still meets the ship gate once the table is unlocked", () => {
+    const { proj, home } = fixture();
+    const r = guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git push origin --delete main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("deletes the default branch");
+    expect(guard(proj, home, "git push origin --delete main", {
+      CAIRN_ALLOW_DESTRUCTIVE_GIT: "1", CAIRN_ALLOW_UNSHIPPED_PUSH: "1",
+    }).status).toBe(0);
+  });
+
+  it("the remote's HEAD branch counts as default for a deleting push", () => {
+    const { proj, home } = fixture();
+    git(proj, "update-ref", "refs/remotes/origin/trunk", "HEAD");
+    git(proj, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+    expect(guard(proj, home, "git push origin --delete trunk").status).toBe(2);
+    expect(guard(proj, home, "git push origin --delete feature").status).toBe(0);
+  });
+});
+
+describe("run guard: refusals name the owner's ways, never the override prefix (#262)", () => {
+  it("destructive, unshipped-push and mid-run refusals all carry the owner tail", () => {
+    const { proj, home } = fixture(undefined, false);
+    const reset = guard(proj, home, "git reset --hard");
+    expect(reset.status).toBe(2);
+    expectOwnerTail(reset.stderr, "reset", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    const clean = guard(proj, home, "git clean -fdx");
+    expect(clean.status).toBe(2);
+    expectOwnerTail(clean.stderr, "clean", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    const ship = guard(proj, home, "git push origin main");
+    expect(ship.status).toBe(2);
+    expect(ship.stderr).toContain("/cairn:ship");
+    expectOwnerTail(ship.stderr, "ship", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+
+    // mid-run has no session env to name -- `!` and the run's own worktree
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const mid = guard(live.proj, live.home, "git checkout main");
+    expect(mid.status).toBe(2);
+    expect(mid.stderr).toContain("run's own worktree");
+    expectOwnerTail(mid.stderr, "mid-run");
+    expect(mid.stderr).not.toContain("CAIRN_RUN_OK");
+  });
+
+  it("the inline overrides the refusals no longer teach are still honoured", () => {
+    const { proj, home } = fixture(undefined, false);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard").status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_UNSHIPPED_PUSH=1 git push origin main").status).toBe(0);
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    expect(guard(live.proj, live.home, "CAIRN_RUN_OK=1 git checkout main").status).toBe(0);
   });
 });
 
@@ -369,22 +552,24 @@ describe("run guard: mid-run push needs manifest push authority (#252)", () => {
     expect(guard(proj, home, "git push origin runbranch", {}, wt).status).toBe(2);
   });
 
-  it("allows git push while running when authority is granted for the manifest's phases", () => {
-    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+  it("allows git push while running when authority is granted and a manifest phase is in flight", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 3 });
     expect(guard(proj, home, "git push origin main").status).toBe(0);
   });
 
   it("granted authority over no phases, or a foreign scope, covers nothing", () => {
-    const empty = fixture({ status: "running", phases: [], pushAuth: granted });
+    const empty = fixture({ status: "running", phases: [], pushAuth: granted, currentPhase: 3 });
     expect(guard(empty.proj, empty.home, "git push").status).toBe(2);
-    const wide = fixture({ status: "running", phases, pushAuth: { ...granted, scope: "all" } });
+    const wide = fixture({
+      status: "running", phases, pushAuth: { ...granted, scope: "all" }, currentPhase: 3,
+    });
     expect(guard(wide.proj, wide.home, "git push").status).toBe(2);
-    const missing = fixture({ status: "running", phases });
+    const missing = fixture({ status: "running", phases, currentPhase: 3 });
     expect(guard(missing.proj, missing.home, "git push").status).toBe(2);
   });
 
   it("granted authority does not license a force-push", () => {
-    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 3 });
     expect(guard(proj, home, "git push --force-with-lease").status).toBe(2);
   });
 
@@ -395,6 +580,44 @@ describe("run guard: mid-run push needs manifest push authority (#252)", () => {
     }
     const { proj, home } = fixture({ status: "running", phases, pushAuth: { granted: false } });
     expect(guard(proj, home, 'git commit -m "git push later"').status).toBe(0);
+  });
+});
+
+describe("run guard: push authority needs the phase in flight (#260)", () => {
+  const phase = (number: number) =>
+    ({ number, name: `p${number}`, estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } });
+  const phases = [phase(3), phase(4)];
+  const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };
+
+  it("a running manifest with no currentPhase refuses pushes -- older manifests included", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted });
+    const r = guard(proj, home, "git push origin main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(r.stderr).toContain("set_phase");
+  });
+
+  it("a currentPhase outside the manifest's phases refuses, naming it", () => {
+    const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase: 9 });
+    const r = guard(proj, home, "git push origin main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("phase 9");
+    const odd = fixture({ status: "running", phases, pushAuth: granted, currentPhase: "3" });
+    expect(guard(odd.proj, odd.home, "git push origin main").status).toBe(2);
+  });
+
+  it("each manifest phase in flight carries the grant", () => {
+    for (const currentPhase of [3, 4]) {
+      const { proj, home } = fixture({ status: "running", phases, pushAuth: granted, currentPhase });
+      expect(guard(proj, home, "git push origin main").status, String(currentPhase)).toBe(0);
+    }
+  });
+
+  it("a phase in flight does not grant what staging withheld", () => {
+    const { proj, home } = fixture({
+      status: "running", phases, pushAuth: { granted: false, scope: "manifest-phases" }, currentPhase: 3,
+    });
+    expect(guard(proj, home, "git push origin main").status).toBe(2);
   });
 });
 
@@ -410,7 +633,7 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
     return f;
   }
 
-  it("missing stamp: every default-branch push shape is refused, naming ship and the override", () => {
+  it("missing stamp: every default-branch push shape is refused, naming ship and the owner's ways to approve", () => {
     const { proj, home } = branched();
     for (const c of [
       "git push",
@@ -422,13 +645,13 @@ describe("run guard: default-branch push needs a clean drift stamp (#251)", () =
       "git push origin feature:refs/heads/main",
       "git push origin master",
       "git push --all origin",
-      "git push origin --delete main",
+      "git push origin -- main",
       'echo "$(git push origin main)"',
     ]) {
       const r = guard(proj, home, c);
       expect(r.status, c).toBe(2);
       expect(r.stderr, c).toContain("/cairn:ship");
-      expect(r.stderr, c).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH=1");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_UNSHIPPED_PUSH");
     }
   });
 
