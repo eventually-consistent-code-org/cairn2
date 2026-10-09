@@ -15,7 +15,9 @@
  *   pushAuth starts FALSE and only grantPushAuth() flips it — creation can
  *   never smuggle authority in. Status walks a one-way lifecycle:
  *   staged → running → complete|stopped (staged may also go straight to
- *   stopped when a run is abandoned before it starts).
+ *   stopped when a run is abandoned before it starts). currentPhase walks
+ *   forward through the manifest's own phases while running (#260), so
+ *   the run guard can tie a push to a phase the owner authorized.
  *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
@@ -87,6 +89,7 @@ export const RunManifestSchema = z.object({
     }),
     answers: z.array(StagedAnswerSchema).optional(),
     status: z.enum(["staged", "running", "complete", "stopped"]),
+    currentPhase: z.number().optional(),
 });
 // Internals
 /** Reads and validates the manifest file at `path`; null when absent. */
@@ -222,6 +225,41 @@ export function setRunStatus(projectDir, runId, status, baseDir) {
         throw new CairnError("PRECONDITION_FAILED", `run '${runId}' cannot move '${state.status}' → '${status}'`, `legal moves from '${state.status}': ${STATUS_TRANSITIONS[state.status].join(", ") || "(none — terminal)"}`);
     }
     state.status = status;
+    writeManifestFile(path, state);
+    return state;
+}
+/**
+ * Marks which manifest phase is in flight (#260) — auto calls it at each
+ * phase start, and the run guard honours push authority only while it
+ * names one of the manifest's phases. Running runs only, the phase must be
+ * in the manifest, and it only moves forward in manifest order: re-marking
+ * the current phase (a resumed run) is a no-op, an earlier one throws.
+ *
+ * :param projectDir: the project the run belongs to
+ * :param runId: the run to advance
+ * :param phase: a phases[].number from this manifest
+ * :returns the manifest state as written
+ */
+export function setCurrentPhase(projectDir, runId, phase, baseDir) {
+    const base = baseDir ?? join(homedir(), ".cairn");
+    const { path, state } = loadManifest(projectDir, runId, base);
+    if (state.status !== "running") {
+        throw new CairnError("PRECONDITION_FAILED", `run '${runId}' is '${state.status}' — only a running run has a phase in flight`, "set_status running first; a stopped or complete run starts no phase");
+    }
+    const order = state.phases.map((p) => p.number);
+    const at = order.indexOf(phase);
+    if (at < 0) {
+        throw new CairnError("PRECONDITION_FAILED", `phase ${phase} is not in run '${runId}' — its manifest stages ${order.join(", ")}`, "a run only ever works the phases approved at staging");
+    }
+    if (state.currentPhase !== undefined) {
+        const was = order.indexOf(state.currentPhase);
+        if (at === was)
+            return state; // a resumed run re-marking where it was
+        if (at < was) {
+            throw new CairnError("PRECONDITION_FAILED", `run '${runId}' is on phase ${state.currentPhase} — phase ${phase} comes before it`, "the phase in flight only moves forward in manifest order");
+        }
+    }
+    state.currentPhase = phase;
     writeManifestFile(path, state);
     return state;
 }

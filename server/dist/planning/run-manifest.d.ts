@@ -15,7 +15,9 @@
  *   pushAuth starts FALSE and only grantPushAuth() flips it — creation can
  *   never smuggle authority in. Status walks a one-way lifecycle:
  *   staged → running → complete|stopped (staged may also go straight to
- *   stopped when a run is abandoned before it starts).
+ *   stopped when a run is abandoned before it starts). currentPhase walks
+ *   forward through the manifest's own phases while running (#260), so
+ *   the run guard can tie a push to a phase the owner authorized.
  *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
@@ -74,6 +76,10 @@ export interface RunManifestState {
      * the run so the executor never has to ask mid-flight. */
     answers?: StagedAnswer[];
     status: RunStatus;
+    /** The manifest phase in flight (#260), set by setCurrentPhase at each
+     * phase start. Absent until the first phase starts — and on manifests
+     * written before it existed, which the run guard reads as "no push". */
+    currentPhase?: number;
 }
 export declare const RunManifestSchema: z.ZodType<RunManifestState>;
 /**
@@ -128,3 +134,16 @@ export declare function grantPushAuth(projectDir: string, runId: string, opts?: 
  * abandoned before start). Any other move throws.
  */
 export declare function setRunStatus(projectDir: string, runId: string, status: RunStatus, baseDir?: string): RunManifestState;
+/**
+ * Marks which manifest phase is in flight (#260) — auto calls it at each
+ * phase start, and the run guard honours push authority only while it
+ * names one of the manifest's phases. Running runs only, the phase must be
+ * in the manifest, and it only moves forward in manifest order: re-marking
+ * the current phase (a resumed run) is a no-op, an earlier one throws.
+ *
+ * :param projectDir: the project the run belongs to
+ * :param runId: the run to advance
+ * :param phase: a phases[].number from this manifest
+ * :returns the manifest state as written
+ */
+export declare function setCurrentPhase(projectDir: string, runId: string, phase: number, baseDir?: string): RunManifestState;
