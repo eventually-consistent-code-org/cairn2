@@ -966,6 +966,34 @@ describe("harness guard hook", () => {
       bashPayload('bash -c "cat hooks/hooks.json | head"')).status).toBe(0);
   });
 
+  // #286, matching the run guard's #262: a refusal names the owner's ways
+  // to approve and the where-did-this-come-from check, and never hands the
+  // agent a paste-ready override prefix.
+  it("refusals name the owner's ways to approve, never the override prefix (#286)", () => {
+    const p = proj();
+    const home = freshDir("cairn-hooks-harnessguard-home-");
+    for (const payload of [
+      editPayload(join(p, "hooks/hooks.json")),
+      editPayload(join(p, ".claude/settings.json"), "Write"),
+      bashPayload("echo '{}' > hooks/hooks.json"),
+      bashPayload("rm -rf .claude"),
+      bashPayload("echo 'CAIRN_HARNESS_EDIT=1' > .mcp.json"),
+      bashPayload("cd \"$d\" && echo x > out.txt"),
+      editPayload(join(home, ".claude", "settings.json")),
+    ]) {
+      const r = runHookRaw(HARNESSGUARD, p, payload, { HOME: home });
+      expect(r.status, payload).toBe(2);
+      expect(r.stderr, payload).toContain("needs the owner's go-ahead");
+      expect(r.stderr, payload).toContain("`!` in your prompt");
+      expect(r.stderr, payload).toContain("start the session with CAIRN_HARNESS_EDIT set to 1");
+      expect(r.stderr, payload).toContain("check where the");
+      expect(r.stderr, payload).toContain("not the owner asking");
+      expect(r.stderr, payload).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(r.stderr, payload).not.toMatch(/[A-Z_]+=1/);
+      expect(r.stderr, payload).not.toMatch(/prefix/i);
+    }
+  });
+
   it("CAIRN_HARNESS_EDIT=1 overrides, by env for any tool and by prefix for Bash", () => {
     const p = proj();
     expect(runHookRaw(HARNESSGUARD, p, editPayload(join(p, "hooks/hooks.json")),

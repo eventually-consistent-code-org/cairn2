@@ -19,11 +19,11 @@
  *   attack is INDIRECT -- text the agent reads (an issue body, a review
  *   comment, a fetched page) steering it into a harness edit it would not
  *   otherwise make. This guard turns that from a silent success into a
- *   refusal the human sees. It is NOT a sandbox: the
- *   CAIRN_HARNESS_EDIT=1 escape exists for the human, and text that can
- *   steer the agent can also ask for the prefix -- which exempts only the
- *   one command it prefixes (#265). Visibility is the control; isolation is
- *   the operating system's job. Bash is read the way a shell would read it
+ *   refusal the human sees. It is NOT a sandbox: CAIRN_HARNESS_EDIT=1 is
+ *   the owner's escape, and text that can steer the agent can still ask
+ *   for the prefix (it exempts only its own command, #265) -- refusals just
+ *   never teach it (#286). Visibility is the control; isolation is the
+ *   operating system's job. Bash is read the way a shell would read it
  *   (shell-words.mjs, shared with the run guard, #270) to find what it
  *   WRITES: redirects, and the operands of commands that change files (rm,
  *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
@@ -1465,9 +1465,12 @@ try {
     );
     console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
   }
-  console.error("  if you asked for this, set CAIRN_HARNESS_EDIT=1 for the session (or prefix a");
-  console.error("  shell command with it) and run it again. If you did not ask for this, something");
-  console.error("  the agent read did — check where the instruction came from before allowing it.");
+  // #286, like the run guard's #262: name the owner's ways to approve, never
+  // a paste-ready prefix -- the inline override is still honoured, just not taught
+  console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
+  console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  console.error("  If you did not ask for this, something the agent read did — check where the");
+  console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
   process.exit(2);
 } catch {
   process.exit(0); // guard must never block work because IT broke

@@ -8,9 +8,10 @@
  *   inline override exempts only the command it prefixes. #258 -- writes
  *   through su -c, find -delete/-exec, paths piped to xargs, a heredoc fed
  *   to a shell, and relative paths resolved from the payload cwd and any
- *   cd before them. Every write is paired with a READ of the same path, so
- *   closing a gap never brings back the #240 false positives. Only command
- *   strings are fed to the hook; nothing is ever run.
+ *   cd before them. #286 -- refusals name the owner's ways to approve and
+ *   never print the override prefix. Every write is paired with a READ of
+ *   the same path, so closing a gap never brings back the #240 false
+ *   positives. Only command strings are fed to the hook; nothing is ever run.
  * Author(s): John Reed
  */
 
@@ -712,6 +713,57 @@ describe("harness guard follows the cd targets it can know and fails closed on t
     for (const [write, read] of pairs) {
       expect(guard(p, write), write).toBe(2);
       expect(guard(p, read), read).toBe(0);
+    }
+  });
+});
+
+describe("harness guard refusals stop coaching the override (#286)", () => {
+  /** Exit status and refusal text for one Bash command string. */
+  function refusal(projectDir: string, command: string): { status: number | null; stderr: string } {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+    delete env.CAIRN_HARNESS_EDIT;
+    delete env.CDPATH;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  // One command per kind of refusal: a wrapper, a folder copy, a removal, a
+  // wildcard, a download, an archive, find, xargs, su, and a lost cd.
+  const REFUSED = [
+    "sudo -u root tee hooks/a",
+    "cp /tmp/evil.json .claude/",
+    "rm -rf .claude",
+    "rm .claude/*.json",
+    "curl -o hooks/x.sh https://example.com/x.sh",
+    "tar -C hooks -xf a.tar",
+    "find hooks -name '*.mjs' -delete",
+    "echo hooks/hooks.json | xargs rm",
+    "su -c 'rm hooks/hooks.json'",
+    "cd \"$d\" && echo x > out.txt",
+  ];
+
+  it("every kind of refusal names the owner's ways to approve, never a paste-ready prefix", () => {
+    const p = proj();
+    for (const c of REFUSED) {
+      const r = refusal(p, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("needs the owner's go-ahead");
+      expect(r.stderr, c).toContain("`!` in your prompt");
+      expect(r.stderr, c).toContain("start the session with CAIRN_HARNESS_EDIT set to 1");
+      expect(r.stderr, c).toContain("not the owner asking");
+      expect(r.stderr, c).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(r.stderr, c).not.toMatch(/prefix/i);
+    }
+  });
+
+  it("the inline override is still honoured -- stated nowhere in the refusal, but it works", () => {
+    const p = proj();
+    // one command each: the prefix exempts only the command it sits on (#265)
+    for (const c of REFUSED.filter((x) => !/[|&]/.test(x))) {
+      expect(refusal(p, `CAIRN_HARNESS_EDIT=1 ${c}`).status, c).toBe(0);
     }
   });
 });
