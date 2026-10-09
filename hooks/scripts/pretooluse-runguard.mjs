@@ -367,11 +367,20 @@ function readArgs(args, valuedShort = "", valuedLong = []) {
 
 /**
  * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, `*`. A single path --
- * `src/a.ts`, `.gitignore`, `:/src` -- is not.
+ * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, and a bare glob (`*`,
+ * `**`, `./*` -- a pathspec `*` crosses `/`). A single path -- `src/a.ts`,
+ * `.gitignore`, `:/src`, `*.ts` -- is not.
  */
 function wholeTree(p) {
-  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*\/?|\*)?$/.test(p);
+  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p);
+}
+
+/**
+ * True when a checkout/restore's pathspec names the whole tree -- or comes
+ * from --pathspec-from-file, which the guard can't see into.
+ */
+function wholeTreeSpec(flags, words, paths) {
+  return flags.has("--pathspec-from-file") || [...words, ...paths].some(wholeTree);
 }
 
 /** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
@@ -418,7 +427,7 @@ function destructive(inv, dir) {
       const { flags, words } = readArgs(args, "bB",
         ["--orphan", "--conflict", "--pathspec-from-file"]);
       if (flags.has("-f") || flags.has("--force")) return ["`git checkout --force`", discards];
-      return [...words, ...paths].some(wholeTree) ? ["a whole-tree `git checkout`", discards] : null;
+      return wholeTreeSpec(flags, words, paths) ? ["a whole-tree `git checkout`", discards] : null;
     }
 
     case "switch": {
@@ -434,7 +443,7 @@ function destructive(inv, dir) {
       // the work tree is restored unless only --staged is asked for
       const worktree = flags.has("-W") || flags.has("--worktree")
         || !(flags.has("-S") || flags.has("--staged"));
-      return worktree && [...words, ...paths].some(wholeTree)
+      return worktree && wholeTreeSpec(flags, words, paths)
         ? ["a whole-tree `git restore`", discards] : null;
     }
 
