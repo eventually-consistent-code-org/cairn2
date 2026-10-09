@@ -377,6 +377,94 @@ describe("run guard: work-destroying equivalents refused in every session (#264)
   });
 });
 
+describe("run guard: a shortened long option is the option git reads it as (#296)", () => {
+  // git's option parser takes any unique start of a long option, so each
+  // row is [shortened, full spelling, an everyday shortened option]. Before
+  // #296 the table matched exact spellings only, and every shortened form
+  // below exited 0 while git threw the work away. An ambiguous start
+  // (`push --f`) is refused too -- git rejects it before doing anything.
+  const rows: Array<[shortened: string, full: string, everyday: string]> = [
+    ["git reset --har", "git reset --hard", "git reset --so HEAD~1"],
+    ["git reset --h HEAD~1", "git reset --hard HEAD~1", "git reset --mi HEAD~1"],
+    ["git reset HEAD~1 --ha", "git reset HEAD~1 --hard", "git reset --qu HEAD~1"],
+    ["sudo -u root git reset --har", "sudo -u root git reset --hard", "sudo -u root git reset --so"],
+    ["git checkout --forc main", "git checkout --force main", "git checkout --det HEAD"],
+    ["git checkout --f", "git checkout -f", "git checkout --orp fresh"],
+    ["git checkout --pathspec-fr=paths.txt", "git checkout --pathspec-from-file=paths.txt",
+      "git checkout --conf=merge seed.txt"],
+    ["git switch --discard main", "git switch --discard-changes main", "git switch --cr feature"],
+    ["git switch --di main", "git switch -f main", "git switch --force-c feature"],
+    ["git switch --forc main", "git switch --force main", "git switch --det HEAD~1"],
+    ["git restore --wor --st .", "git restore --worktree --staged .", "git restore --st ."],
+    ["git restore -S --no-st .", "git restore -S --no-staged .", "git restore -S ."],
+    ["git restore --sou=HEAD .", "git restore --source=HEAD .", "git restore --sou HEAD seed.txt"],
+    ["git clean -n --no-d", "git clean -n --no-dry-run", "git clean --dr -x"],
+    ["git clean --forc -d", "git clean --force -d", "git clean --d -fdx"],
+    ["git push --force-w origin feature", "git push --force-with-lease origin feature",
+      "git push --set-u origin feature"],
+    ["git push --force-w=feature:abc origin feature", "git push --force-with-lease=feature:abc origin feature",
+      "git push --foll origin feature"],
+    ["git push --force-i origin feature", "git push --force-if-includes origin feature",
+      "git push --porc origin feature"],
+    ["git push --f origin feature", "git push --force origin feature", "git push --no-v origin feature"],
+    ["git push --force-w origin main", "git push --force-with-lease origin main", "git push --ato origin main"],
+    ["git push --mirr origin", "git push --mirror origin", "git push --dry origin feature"],
+    ["git push --pru origin", "git push --prune origin", "git push --pro origin feature"],
+    ["git push origin --del main", "git push origin --delete main", "git push origin --del feature"],
+  ];
+
+  it("each shortened form is refused like its full spelling; the everyday shortened option passes", () => {
+    const { proj, home } = fixture();
+    for (const [shortened, full, everyday] of rows) {
+      const s = guard(proj, home, shortened);
+      expect(s.status, shortened).toBe(2);
+      expect(s.stderr, shortened).toContain("refused in every session");
+      expectOwnerTail(s.stderr, shortened, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      expect(guard(proj, home, full).status, full).toBe(2);
+      expect(guard(proj, home, everyday).status, everyday).toBe(0);
+    }
+  });
+
+  it("everyday shortened options of commands outside the table pass", () => {
+    const { proj, home } = fixture();
+    for (const c of ["git status --shor", "git log --onel -1", "git commit --allow-e -m x", "git stash --keep"]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a shortened hard reset still meets the live-run owner-checkout refusal once overridden", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --har");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(r.stderr).toContain("git reset --hard");
+  });
+
+  it("a push option's value is read the way git reads it -- not as the remote", () => {
+    // --recurse-submodules takes the next word: `no` is its value and
+    // `origin` the remote, so this pushes the current branch, main. Read
+    // as remote `no` and refspec `origin`, it passed the ship gate.
+    const { proj, home } = fixture(undefined, false);
+    for (const c of [
+      "git push --recurse-submodules no origin",
+      "git push --recurse-s check origin",
+      "git push --push-o ci.skip origin",
+      "git push --ex /usr/bin/receive origin",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("/cairn:ship");
+    }
+    for (const c of [
+      "git push --recurse-submodules no origin feature",
+      "git push --recurse-submodules=no origin feature",
+      "git push --push-o ci.skip origin feature",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});
+
 describe("run guard: refusals name the owner's ways, never the override prefix (#262)", () => {
   it("destructive, unshipped-push and mid-run refusals all carry the owner tail", () => {
     const { proj, home } = fixture(undefined, false);

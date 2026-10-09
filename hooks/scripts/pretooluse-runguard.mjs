@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -10,10 +10,10 @@
  *   no undo (the table in destructive(): hard reset; force, mirror and
  *   prune pushes, or one deleting the default branch; forced or whole-tree
  *   checkout/restore; a discarding switch; clean; stash clear; reflog
- *   expire). Their everyday neighbours stay allowed. The owner's escape is
- *   CAIRN_ALLOW_DESTRUCTIVE_GIT=1 -- set for the session, or as the leading
- *   assignment of the one command (honoured, never taught: refusals name
- *   only the owner's ways to approve, #262).
+ *   expire), options shortened as git allows (--har is --hard, #296). Their
+ *   everyday neighbours stay allowed. Escape: CAIRN_ALLOW_DESTRUCTIVE_GIT=1
+ *   -- for the session, or as the leading assignment of the one command
+ *   (honoured, never taught: refusals name only the owner's ways, #262).
  *
  *   Always: an agent push landing on the default branch (main, master, the
  *   remote's HEAD branch) is refused unless the last plan_drift left a
@@ -209,33 +209,45 @@ function pushRefusal(state) {
   return null;
 }
 
-// git push options that eat the following word as their value.
-const PUSH_VALUE_OPTS = new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec"]);
+/**
+ * The long options in `names` that a typed `--name` stands for, the way
+ * git's option parser reads it (#296): an exact spelling is that option,
+ * and any shorter start of one is it too -- `--har` is `--hard`,
+ * `--force-w` is `--force-with-lease`. A start that fits several counts as
+ * all of them (git refuses an ambiguous one anyway); `--no-x` fits none.
+ */
+function longNames(typed, names) {
+  return names.includes(typed) ? [typed] : names.filter((n) => n.startsWith(typed));
+}
+
+// git push's value-taking options, and how the guard reads a push (#296):
+// -f, -d and -o are --force, --delete and --push-option.
+const PUSH_VALUED = ["--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"];
+const PUSH_READ = {
+  short: "o",
+  longs: ["--force", "--force-with-lease", "--force-if-includes", "--mirror", "--prune", "--delete",
+    "--all", "--branches", "--tags", ...PUSH_VALUED],
+  valued: PUSH_VALUED,
+  alias: { f: "--force", d: "--delete" },
+};
+
+/** A push's flags and bare words -- remote, then refspecs -- read once per invocation. */
+const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.paths], PUSH_READ));
 
 /**
- * True when `git push <args>` overwrites remote history: --force, -f
- * (alone or clustered, e.g. -fu), --force-with-lease[=...],
- * --force-if-includes, or any refspec with a leading `+`.
+ * True when this push overwrites remote history: --force or -f (alone or
+ * clustered, e.g. -fu), --force-with-lease[=...], --force-if-includes --
+ * spelled out or shortened -- or any refspec with a leading `+`.
  */
-function isForcePush(args) {
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (PUSH_VALUE_OPTS.has(a)) { k++; continue; }
-    if (a === "--force" || a === "--force-if-includes" || /^--force-with-lease(=|$)/.test(a)) {
-      return true;
-    }
-    if (/^-[^-]/.test(a)) {
-      // short cluster -- `o` takes the rest of the word as its value
-      for (const ch of a.slice(1)) {
-        if (ch === "o") break;
-        if (ch === "f") return true;
-      }
-      continue;
-    }
-    if (a.startsWith("+")) return true; // +refspec forces that ref
-  }
-  return false;
+function isForcePush(inv) {
+  const { flags, words } = pushArgs(inv);
+  return ["--force", "--force-with-lease", "--force-if-includes"].some((f) => flags.has(f))
+    || words.some((w) => w.startsWith("+")); // +refspec forces that ref
 }
+
+/** True for `git reset --hard`, or any shortened `--hard` git reads as it (#296). */
+const isHardReset = (inv) =>
+  inv.sub === "reset" && readArgs(inv.args, { longs: ["--hard"] }).flags.has("--hard");
 
 /**
  * Prints a refusal and blocks (#262). Every refusal here guards an act
@@ -275,27 +287,11 @@ function gitOut(dir, args) {
  * revs being pushed there (null for a deletion). Empty when the push never
  * touches the default branch -- feature branches, tags, other refs.
  */
-function defaultBranchSources(args, dir) {
-  const positional = [];
-  let all = false;
-  let del = false;
-  let tags = false;
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (PUSH_VALUE_OPTS.has(a)) { k++; continue; }
-    if (a === "--all" || a === "--mirror" || a === "--branches") { all = true; continue; }
-    if (a === "--delete") { del = true; continue; }
-    if (a === "--tags") { tags = true; continue; }
-    if (/^-[^-]/.test(a)) {
-      for (const ch of a.slice(1)) {
-        if (ch === "o") break; // -o eats the rest of the word
-        if (ch === "d") del = true;
-      }
-      continue;
-    }
-    if (a.startsWith("-")) continue;
-    positional.push(a);
-  }
+function defaultBranchSources(inv, dir) {
+  const { flags, words: positional } = pushArgs(inv);
+  const all = flags.has("--all") || flags.has("--mirror") || flags.has("--branches");
+  const del = flags.has("--delete");
+  const tags = flags.has("--tags");
 
   // Default branch names: main, master, and the remote's HEAD when known
   const remote = positional[0] ?? "origin";
@@ -337,23 +333,36 @@ function defaultBranchSources(args, dir) {
  * A git subcommand's args split into the flags it sets and its bare words,
  * skipping the values valued flags swallow: `-b name`, `--source x`, and a
  * short cluster's tail after a valued letter (`-sHEAD`). `--x=v` keeps `--x`.
+ * A typed long option counts as each of `longs` it spells or shortens
+ * (#296), and takes the next word when one of them is `valued`; `alias`
+ * files a short letter under its long name (`f` is `--force`). `flags` is
+ * every flag ever set, for the ones that refuse; `on` is each one's state
+ * after any `--no-` negation, for the ones that make a command safe --
+ * `git clean -n --no-dry-run` deletes.
  */
-function readArgs(args, valuedShort = "", valuedLong = []) {
+function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
   const flags = new Set();
+  const on = new Map();
   const words = [];
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const name = eq < 0 ? a : a.slice(0, eq);
-      flags.add(name);
-      if (eq < 0 && valuedLong.includes(name)) k++;
+      const hit = longNames(name, longs);
+      for (const n of hit) { flags.add(n); on.set(n, true); }
+      if (eq < 0 && hit.some((n) => valued.includes(n))) k++;
+      if (!hit.length && name.startsWith("--no-")) {
+        for (const n of longNames(`--${name.slice(5)}`, longs)) on.set(n, false);
+      }
       continue;
     }
     if (/^-[^-]/.test(a)) {
       for (let c = 1; c < a.length; c++) {
-        flags.add(`-${a[c]}`);
-        if (valuedShort.includes(a[c])) {
+        const f = alias[a[c]] ?? `-${a[c]}`;
+        flags.add(f);
+        on.set(f, true);
+        if (short.includes(a[c])) {
           if (c === a.length - 1) k++; // value is the next word
           break; // ...or the rest of this one
         }
@@ -362,7 +371,7 @@ function readArgs(args, valuedShort = "", valuedLong = []) {
     }
     words.push(a);
   }
-  return { flags, words };
+  return { flags, on, words };
 }
 
 /**
@@ -421,28 +430,32 @@ function destructive(inv, dir) {
   const discards = "it discards uncommitted work with no undo.";
   switch (sub) {
     case "reset":
-      return args.includes("--hard") ? ["`git reset --hard`", discards] : null;
+      return isHardReset(inv) ? ["`git reset --hard`", discards] : null;
 
     case "checkout": {
-      const { flags, words } = readArgs(args, "bB",
-        ["--orphan", "--conflict", "--pathspec-from-file"]);
-      if (flags.has("-f") || flags.has("--force")) return ["`git checkout --force`", discards];
+      const { flags, words } = readArgs(args, { short: "bB", alias: { f: "--force" },
+        longs: ["--force", "--orphan", "--conflict", "--pathspec-from-file"],
+        valued: ["--orphan", "--conflict", "--pathspec-from-file"] });
+      if (flags.has("--force")) return ["`git checkout --force`", discards];
       return wholeTreeSpec(flags, words, paths) ? ["a whole-tree `git checkout`", discards] : null;
     }
 
     case "switch": {
-      const { flags } = readArgs(args, "cC",
-        ["--create", "--force-create", "--orphan", "--conflict"]);
-      return flags.has("--discard-changes") || flags.has("-f") || flags.has("--force")
+      const { flags } = readArgs(args, { short: "cC", alias: { f: "--force" },
+        longs: ["--discard-changes", "--force", "--create", "--force-create", "--orphan", "--conflict"],
+        valued: ["--create", "--force-create", "--orphan", "--conflict"] });
+      return flags.has("--discard-changes") || flags.has("--force")
         ? ["`git switch --discard-changes`", discards] : null;
     }
 
     case "restore": {
-      const { flags, words } = readArgs(args, "s",
-        ["--source", "--pathspec-from-file", "--conflict"]);
-      // the work tree is restored unless only --staged is asked for
-      const worktree = flags.has("-W") || flags.has("--worktree")
-        || !(flags.has("-S") || flags.has("--staged"));
+      const { flags, on, words } = readArgs(args, { short: "s",
+        alias: { s: "--source", S: "--staged", W: "--worktree" },
+        longs: ["--source", "--staged", "--worktree", "--pathspec-from-file", "--conflict"],
+        valued: ["--source", "--pathspec-from-file", "--conflict"] });
+      // the work tree is restored unless only --staged is asked for, and
+      // --no-staged takes that back
+      const worktree = flags.has("--worktree") || on.get("--staged") !== true;
       return worktree && wholeTreeSpec(flags, words, paths)
         ? ["a whole-tree `git restore`", discards] : null;
     }
@@ -450,9 +463,11 @@ function destructive(inv, dir) {
     case "clean": {
       // Every clean but a dry run: plain `git clean` only refuses on its own
       // while clean.requireForce holds, and `-c clean.requireForce=false`
-      // or a repo config turns that off -- so the -f isn't what to look for
-      const { flags } = readArgs(args, "e", ["--exclude"]);
-      return flags.has("-n") || flags.has("--dry-run") ? null
+      // or a repo config turns that off -- so the -f isn't what to look for.
+      // A dry run counts once it's the last word on it: -n --no-dry-run deletes
+      const { on } = readArgs(args, { short: "e", alias: { n: "--dry-run" },
+        longs: ["--dry-run", "--exclude"], valued: ["--exclude"] });
+      return on.get("--dry-run") === true ? null
         : ["`git clean`", "it deletes untracked files, which git never had a copy of."];
     }
 
@@ -464,21 +479,19 @@ function destructive(inv, dir) {
         ? ["`git reflog expire`", "it erases the record git recovers lost commits from."] : null;
 
     case "push": {
-      // Past a bare `--` a push's words are still refspecs, not paths
-      const all = [...args, ...paths];
-      if (isForcePush(all)) {
+      // Past a bare `--` a push's words are still refspecs, not paths (pushArgs)
+      if (isForcePush(inv)) {
         return ["`git push --force`",
           "it overwrites remote history other people may already have pulled."];
       }
-      const { flags, words } = readArgs(all, "o",
-        ["--push-option", "--repo", "--receive-pack", "--exec"]);
+      const { flags, words } = pushArgs(inv);
       if (isMirrorPush(inv, flags, words, dir)) {
         return ["`git push --mirror`", "it force-updates and deletes remote refs to match this clone."];
       }
       if (flags.has("--prune")) {
         return ["`git push --prune`", "it deletes every remote branch this clone doesn't have."];
       }
-      return defaultBranchSources(all, dir).includes(null)
+      return defaultBranchSources(inv, dir).includes(null)
         ? ["a push deleting the default branch", "everyone's shared history hangs off it."] : null;
     }
   }
@@ -491,9 +504,9 @@ function destructive(inv, dir) {
  * record of its last run: { head, clean, at }. A missing stamp is a
  * refusal; anything the guard can't read is a skip, not a block.
  */
-function shipGateRefusal(args, dir, projectDir, baseDir) {
+function shipGateRefusal(inv, dir, projectDir, baseDir) {
   try {
-    const sources = defaultBranchSources(args, dir);
+    const sources = defaultBranchSources(inv, dir);
     if (!sources.length) return null;
 
     const { base, hash } = pathHash(projectDir);
@@ -543,7 +556,7 @@ try {
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
-    const hardReset = inv.sub === "reset" && inv.args.includes("--hard");
+    const hardReset = isHardReset(inv);
     const dir = targetDir(inv.dirs, cwd);
 
     // #249, #250, #264 -- the work-destroying table, every session
@@ -554,7 +567,7 @@ try {
 
     // #251 -- the default branch only takes what a clean drift check saw
     if (inv.sub === "push" && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
-      const why = shipGateRefusal([...inv.args, ...inv.paths], dir, projectDir, baseDir);
+      const why = shipGateRefusal(inv, dir, projectDir, baseDir);
       if (why) {
         refuse([
           `cairn run guard: this push lands on the default branch, but ${why}.`,
