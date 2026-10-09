@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -16,9 +16,9 @@
  *   (honoured, never taught: refusals name only the owner's ways, #262).
  *
  *   Always: an agent push landing on the default branch (main, master, the
- *   remote's HEAD branch) is refused unless the last plan_drift left a
- *   clean ship-gate stamp for the exact commit pushed -- the drift half of
- *   ship's "never push with flagged drift" (#251; open issues stay prose).
+ *   remote's HEAD branch; a glob, `:` or push-everything push may, #297) is
+ *   refused unless the last plan_drift left a clean ship-gate stamp for the
+ *   exact commit pushed (#251; open issues stay prose).
  *   Other branches are untouched; a missing stamp refuses, an unreadable
  *   one skips. Escape: CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
@@ -85,10 +85,10 @@ const DEFAULT_BRANCHES = ["main", "master"];
 
 /**
  * Every git invocation in a command line, parsed: the leading VAR=value
- * assignments, the -C directories in order, the -c config values, the
- * subcommand, its args (cut at a bare `--`) and the paths past that `--`,
- * which are paths, not flags -- `git checkout -- .` (#264). Recurses into
- * `sh -c '<script>'` style wrappers.
+ * assignments, the -C directories in order, the -c and --config-env
+ * values, the subcommand, its args (cut at a bare `--`) and the paths
+ * past that `--`, which are paths, not flags -- `git checkout -- .`
+ * (#264). Recurses into `sh -c '<script>'` style wrappers.
  */
 function gitInvocations(line, depth = 0) {
   const found = [];
@@ -110,9 +110,12 @@ function gitInvocations(line, depth = 0) {
     let i = 1;
     const dirs = [];
     const configs = [];
+    const configEnvs = [];
     while (i < words.length && words[i].startsWith("-")) {
       if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
       if (words[i] === "-c") configs.push(words[i + 1] ?? "");
+      if (words[i] === "--config-env") configEnvs.push(words[i + 1] ?? "");
+      if (words[i].startsWith("--config-env=")) configEnvs.push(words[i].slice(13));
       i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
     }
     const rest = words.slice(i + 1);
@@ -121,6 +124,7 @@ function gitInvocations(line, depth = 0) {
       assigns,
       dirs,
       configs,
+      configEnvs,
       sub: words[i] ?? "",
       args: dashes < 0 ? rest : rest.slice(0, dashes),
       paths: dashes < 0 ? [] : rest.slice(dashes + 1),
@@ -283,9 +287,65 @@ function gitOut(dir, args) {
 }
 
 /**
+ * True when a command line can change push.default for its own push (#297)
+ * -- a `git config` naming it, or a GIT_CONFIG_* assignment or export
+ * anywhere in the line (`git config push.default matching && git push`).
+ * Nothing in the line has run when the guard reads the repo's config.
+ */
+function linePushConfig(command, invs) {
+  const namesIt = (i) => [...i.args, ...i.paths].some((a) => /^push\.default$/i.test(a));
+  return invs.some((i) => i.sub === "config" && namesIt(i))
+    || shellSegments(command, READ).some((s) => s.words.some((w) => /GIT_CONFIG\w*=/.test(w)));
+}
+
+/** True when `rev` names a commit here. */
+const resolves = (dir, rev) => gitOut(dir, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null;
+
+/**
+ * True when a push with no refspec could push every matching branch
+ * (#297): push.default=matching -- this command's own `-c` first, then
+ * the repo's config -- or config the guard can't read, which counts: a
+ * --config-env for push.default, or a line that sets git config before it
+ * pushes (see linePushConfig), after the guard has read the config.
+ */
+function pushesMatching(inv, dir) {
+  if (inv.lineConfig) return true;
+  if (inv.configEnvs.some((c) => /^push\.default=/i.test(c))) return true;
+  const set = inv.configs.map((c) => /^push\.default=(.*)$/is.exec(c)?.[1]).filter((v) => v !== undefined);
+  const mode = set.length ? set[set.length - 1] : gitOut(dir, ["config", "--get", "push.default"]);
+  return /^\s*matching\s*$/i.test(mode ?? "");
+}
+
+/**
+ * The local branches a glob refspec lands on the default ones (#297). git
+ * maps the src pattern onto the dst pattern through their one `*`, so the
+ * branch landing on refs/heads/<name> is the src with the dst's match put
+ * back in -- `refs/heads/x*:refs/heads/mai*` lands branch `xn` on main.
+ * The dst is tried against the full ref and the bare name both, and only
+ * a source that exists is one. git refuses a glob on one side only.
+ */
+function globSources(src, dst, defaults, dir) {
+  if (!src.includes("*")) return [];
+  const star = dst.indexOf("*");
+  const [pre, suf] = [dst.slice(0, star), dst.slice(star + 1)];
+  const found = [];
+  for (const b of defaults) {
+    for (const name of [`refs/heads/${b}`, b]) {
+      if (name.length < pre.length + suf.length || !name.startsWith(pre) || !name.endsWith(suf)) continue;
+      const from = src.replace("*", () => name.slice(pre.length, name.length - suf.length));
+      if (resolves(dir, from)) found.push(from);
+    }
+  }
+  return found;
+}
+
+/**
  * What `git push <args>` would land on the default branch, as the source
  * revs being pushed there (null for a deletion). Empty when the push never
- * touches the default branch -- feature branches, tags, other refs.
+ * touches the default branch -- feature branches, tags, other refs. A push
+ * of every branch counts (#297): --all, --branches and --mirror, the `:`
+ * matching refspec, a bare push under push.default=matching, and a glob
+ * whose destination can name the default branch.
  */
 function defaultBranchSources(inv, dir) {
   const { flags, words: positional } = pushArgs(inv);
@@ -302,24 +362,31 @@ function defaultBranchSources(inv, dir) {
   }
   const current = gitOut(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
 
+  // Every local default branch, as the full ref -- a tag spelled the same
+  // can't stand in for the branch that actually lands
+  const everyBranch = () => [...defaults].map((b) => `refs/heads/${b}`).filter((r) => resolves(dir, r));
+
   // --all / --mirror push every local branch, the default one included
-  if (all) {
-    return [...defaults].filter((b) => gitOut(dir, ["rev-parse", "--verify", "-q", `refs/heads/${b}`]));
-  }
+  if (all) return everyBranch();
 
   const refspecs = positional.slice(1);
   if (!refspecs.length) {
-    // bare `git push` / `git push origin`: the current branch, unless --tags only
+    // bare `git push` / `git push origin`: the current branch, unless --tags
+    // only -- or every matching branch under push.default=matching
     if (tags) return [];
+    if (pushesMatching(inv, dir)) return everyBranch();
     return current && defaults.has(current) ? ["HEAD"] : [];
   }
 
   const sources = [];
   for (const spec of refspecs) {
     const plain = spec.replace(/^\+/, "");
+    // `:` pushes every branch both sides have, the default one included
+    if (plain === ":") { sources.push(...everyBranch()); continue; }
     const colon = plain.indexOf(":");
     let src = colon < 0 ? plain : plain.slice(0, colon);
     let dst = colon < 0 ? plain : plain.slice(colon + 1);
+    if (dst.includes("*")) { sources.push(...globSources(src, dst, defaults, dir)); continue; }
     if (dst === "HEAD") dst = current ?? "";
     dst = dst.replace(/^refs\/heads\//, "");
     if (!defaults.has(dst)) continue;
@@ -552,7 +619,10 @@ try {
   let runs;
   const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
 
-  for (const inv of gitInvocations(command)) {
+  const invs = gitInvocations(command);
+  const lineConfig = linePushConfig(command, invs);
+  for (const inv of invs) {
+    inv.lineConfig = lineConfig;
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
