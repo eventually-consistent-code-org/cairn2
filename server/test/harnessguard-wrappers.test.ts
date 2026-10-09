@@ -767,3 +767,46 @@ describe("harness guard refusals stop coaching the override (#286)", () => {
     }
   });
 });
+
+// #295: on a Mac `.Claude/` and `HOOKS/` are the protected folders, so a
+// case variant is refused wherever the write shapes above would see the
+// exact spelling -- through a wrapper, a nested shell, a cd, xargs, find,
+// a heredoc fed to a shell -- and the read of the same variant passes.
+describe("harness guard sees case-variant paths through every write shape (#295)", () => {
+  it("each wrapped or nested write of a case variant is refused next to its exact form; its read passes", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    const rows: Array<[exact: string, variant: string, read: string]> = [
+      ["sudo -u root tee hooks/a", "sudo -u root tee HOOKS/a", "sudo -u root cat HOOKS/hooks.json"],
+      ["env -i FOO=1 rm hooks/a", "env -i FOO=1 rm Hooks/a", "env -i FOO=1 cat Hooks/hooks.json"],
+      ["bash -c 'echo x > .claude/settings.json'", "bash -c 'echo x > .Claude/Settings.json'",
+        "bash -c 'cat .Claude/Settings.json'"],
+      ["su -c 'rm hooks/hooks.json'", "su -c 'rm HOOKS/HOOKS.JSON'", "su -c 'cat HOOKS/HOOKS.JSON'"],
+      ["cd hooks && echo x > a", "cd HOOKS && echo x > a", "cd HOOKS && cat a"],
+      ["env -C hooks touch a", "env -C HOOKS tee a", "env -C HOOKS cat a"],
+      ["echo hooks/a | xargs rm", "echo HOOKS/a | xargs rm", "echo HOOKS/a | xargs cat"],
+      ["find hooks -name '*.json' -exec rm {} +", "find HOOKS -name '*.JSON' -exec rm {} +",
+        "find HOOKS -name '*.JSON' -exec cat {} +"],
+      ["cat <<'EOF' | sh\nrm hooks/a\nEOF", "cat <<'EOF' | sh\nrm Hooks/a\nEOF", "cat <<'EOF' | sh\ncat Hooks/a\nEOF"],
+      ["curl -o .mcp.json https://example.com/x", "curl -o .MCP.JSON https://example.com/x",
+        "curl -o /tmp/x https://example.com/x"],
+      ["tar -C hooks -xf a.tar", "tar -C HOOKS -xf a.tar", "tar -tf a.tar"],
+      ["cp -r payload/. .claude-plugin/", "cp -r payload/. .Claude-Plugin/", "ls .Claude-Plugin/"],
+    ];
+    for (const [exact, variant, read] of rows) {
+      expect(guard(p, exact), exact).toBe(2);
+      expect(guard(p, variant), variant).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("the file tools resolve a case-variant payload cwd the same way", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    expect(call(p, "Write", { file_path: "hooks.json" }, "hooks")).toBe(2);
+    expect(call(p, "Write", { file_path: "hooks.json" }, "HOOKS")).toBe(2);
+    expect(call(p, "Edit", { file_path: "Settings.json" }, ".CLAUDE")).toBe(2);
+    expect(call(p, "Write", { file_path: "notes.md" }, "DOCS")).toBe(0);
+  });
+});

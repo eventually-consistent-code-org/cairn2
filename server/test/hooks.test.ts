@@ -1357,6 +1357,179 @@ describe("harness guard protects Cursor's hook config (#269)", () => {
   });
 });
 
+// #295: on a Mac's case-insensitive volume `.Claude/settings.json` IS
+// `.claude/settings.json` -- same file, same inode -- and `TEE` runs tee.
+// Every protected path now matches in any letter case: read in its on-disk
+// case when it exists, compared case-folded when it doesn't (so the tests
+// hold on a case-sensitive volume too). Each variant is paired with its
+// exact spelling, through Write, Edit and a Bash redirect.
+describe("harness guard matches protected paths in any letter case (#295)", () => {
+  // `@cairn` is the cairn home folder, spelled apart for the commit leak guard (see #263 above).
+  const sh = (s: string) => s.replaceAll("@cairn", ".cairn");
+  const write = (file: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: sh(file) }, cwd: "" });
+  const bash = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command: sh(command) }, cwd: "" });
+
+  /** Exit status and stderr, with no inherited override, CDPATH or cairn home. */
+  function run(p: string, payload: string, env: Record<string, string> = {}) {
+    const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, ...env };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CAIRN_HOME", "CLAUDE_PLUGIN_ROOT"]) if (!(k in env)) delete e[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env: e, input: payload, encoding: "utf8", timeout: 5000,
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** The same folder with its last name upper-cased -- a case variant of a temp dir. */
+  const shout = (dir: string) => join(dirname(dir), basename(dir).toUpperCase());
+
+  // [exact, its case variants, the phrase the refusal names] -- the long s
+  // and the Kelvin sign are letters APFS folds onto s and k.
+  const SURFACES: Array<[string, string[], string]> = [
+    ["hooks/hooks.json", ["HOOKS/hooks.json", "Hooks/Hooks.JSON", "hooKs/hooks.json"], "hook directory"],
+    [".mcp.json", [".MCP.json", ".Mcp.Json"], "MCP server config"],
+    [".claude/settings.json", [".Claude/settings.json", ".claude/SETTINGS.json", ".claude/ſettings.json"],
+      "settings file"],
+    [".claude/settings.local.json", [".CLAUDE/Settings.Local.json"], "settings file"],
+    [".claude-plugin/plugin.json", [".Claude-Plugin/plugin.json", ".claude-plugin/PLUGIN.JSON"], "plugin manifest"],
+    [".claude/hooks/x.sh", [".claude/HOOKS/x.sh", ".Claude/Hooks/x.sh"], "Claude hooks"],
+    [".claude/agents/a.md", [".Claude/Agents/a.md"], "agent definitions"],
+    [".cursor/hooks.json", [".Cursor/hooks.json", ".cursor/HOOKS.json"], "Cursor's hooks"],
+    [".cursor/hooks/cairn/a.mjs", [".CURSOR/Hooks/cairn/a.mjs"], "Cursor's hooks"],
+  ];
+
+  for (const onDisk of [true, false]) {
+    it(`a case variant of a project surface is refused like its exact spelling (${onDisk ? "on disk" : "not there yet"})`, () => {
+      const p = freshDir("cairn-hooks-case-");
+      if (onDisk) {
+        for (const [file] of SURFACES) {
+          mkdirSync(dirname(join(p, file)), { recursive: true });
+          writeFileSync(join(p, file), "{}");
+        }
+      }
+      for (const [exact, variants, phrase] of SURFACES) {
+        for (const file of [exact, ...variants]) {
+          for (const tool of ["Write", "Edit"]) {
+            const r = run(p, write(join(p, file), tool));
+            expect(r.status, `${tool} ${file}`).toBe(2);
+            expect(r.stderr, `${tool} ${file}`).toContain(phrase);
+          }
+          expect(run(p, bash(`echo {} > ${file}`)).status, `redirect ${file}`).toBe(2);
+        }
+      }
+    });
+  }
+
+  it("protected folders, wildcards, find and cd match in any case; reads of the same paths pass", () => {
+    const p = freshDir("cairn-hooks-case-");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    mkdirSync(join(p, ".claude", "agents"), { recursive: true });
+    writeFileSync(join(p, ".claude", "settings.json"), "{}");
+    const pairs: Array<[exact: string, variant: string, read: string]> = [
+      ["rm -rf hooks", "rm -rf HOOKS", "ls HOOKS"],
+      ["rm -rf .claude", "rm -rf .CLAUDE", "ls -la .CLAUDE"],
+      ["mv /tmp/cfg .claude", "mv /tmp/cfg .Claude", "stat .Claude"],
+      ["cp evil.json .claude/", "cp evil.json .CLAUDE/", "cp .CLAUDE/settings.json /tmp/copy.json"],
+      ["rm -rf .claude/agents", "rm -rf .Claude/Agents", "ls .Claude/Agents"],
+      ["rm -rf .cursor", "rm -rf .Cursor", "ls .Cursor"],
+      ["sed -i '' 's/a/b/' .claude/*.json", "sed -i '' 's/a/b/' .CLAUDE/*.json", "grep -n a .CLAUDE/*.json"],
+      ["cp -r payload/* hooks/", "cp -r payload/* Hooks/", "cat Hooks/hooks.json"],
+      ["rm h*/hooks.json", "rm H*/HOOKS.JSON", "cat H*/hooks.json"],
+      ["find hooks -delete", "find HOOKS -delete", "find HOOKS -name '*.json'"],
+      ["find . -name hooks.json -delete", "find . -name 'HOOKS.JSON' -delete", "find . -name 'HOOKS.JSON'"],
+      ["cd hooks && echo x > a", "cd HOOKS && echo x > a", "cd HOOKS && cat hooks.json"],
+      ["git checkout -- hooks/hooks.json", "git checkout -- HOOKS/hooks.json", "git diff -- HOOKS/hooks.json"],
+    ];
+    for (const [exact, variant, read] of pairs) {
+      expect(run(p, bash(exact)).status, exact).toBe(2);
+      expect(run(p, bash(variant)).status, variant).toBe(2);
+      expect(run(p, bash(read)).status, read).toBe(0);
+    }
+  });
+
+  it("a command's name in any case is the same command: TEE runs tee on a Mac", () => {
+    const p = freshDir("cairn-hooks-case-");
+    for (const [exact, variant] of [
+      ["tee hooks/hooks.json", "TEE hooks/hooks.json"],
+      ["rm -rf hooks", "/BIN/RM -rf hooks"],
+      ["cp /tmp/x .claude/settings.json", "Cp /tmp/x .claude/settings.json"],
+      ["sed -i '' 's/a/b/' .mcp.json", "SED -i '' 's/a/b/' .mcp.json"],
+      ["find hooks -delete", "FIND hooks -delete"],
+      ["bash -c 'echo x > hooks/a'", "BASH -c 'echo x > hooks/a'"],
+      ["cat fix.diff | patch -p1", "CAT fix.diff | PATCH -p1"],
+    ]) {
+      if (exact.includes("fix.diff")) {
+        writeFileSync(join(p, "fix.diff"), "--- a/hooks/hooks.json\n+++ b/hooks/hooks.json\n@@ -1 +1 @@\n-{}\n+{\"x\":1}\n");
+      }
+      expect(run(p, bash(exact)).status, exact).toBe(2);
+      expect(run(p, bash(variant)).status, variant).toBe(2);
+    }
+    for (const c of ["CAT hooks/hooks.json", "GREP -n x .mcp.json", "TEE /tmp/out.txt < hooks/hooks.json"]) {
+      expect(run(p, bash(c)).status, c).toBe(0);
+    }
+  });
+
+  it("look-alikes in any case stay ordinary work", () => {
+    const p = freshDir("cairn-hooks-case-");
+    for (const file of ["docs/HOOKS.md", "Hooksy/a.json", "server/Hooks/helper.ts", "SETTINGS.json",
+      "my.MCP.json", ".Claude/Skills/x/SKILL.md", ".Cursor/rules/a.mdc", ".claude/SETTINGS.md"]) {
+      expect(run(p, write(join(p, file))).status, file).toBe(0);
+    }
+  });
+
+  it("outside the project: machine-wide settings, the registry, the cairn home and the plugin root, any case", () => {
+    const p = freshDir("cairn-hooks-case-proj-");
+    const home = freshDir("cairn-hooks-case-home-");
+    const cairnHome = freshDir("cairn-hooks-case-cairnhome-");
+    const root = freshDir("cairn-hooks-case-pluginroot-");
+    mkdirSync(join(home, ".claude", "plugins"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), "{}");
+    writeFileSync(join(home, ".claude", "plugins", "installed_plugins.json"), "{}");
+    for (const base of [join(home, ".cairn"), cairnHome]) {
+      mkdirSync(join(base, "ship-gate"), { recursive: true });
+      mkdirSync(join(base, "runs"), { recursive: true });
+      writeFileSync(join(base, "ship-gate", "x.json"), "{}");
+      writeFileSync(join(base, "runs", "r1.json"), "{}");
+    }
+    mkdirSync(join(root, "hooks"), { recursive: true });
+    writeFileSync(join(root, "hooks", "hooks.json"), "{}");
+    const env = { HOME: home, CAIRN_HOME: cairnHome, CLAUDE_PLUGIN_ROOT: root };
+    const cases: Array<[string, string[], string]> = [
+      [join(home, ".claude", "settings.json"),
+        [join(home, ".CLAUDE", "settings.json"), join(home, ".claude", "Settings.Local.json")], "machine-wide"],
+      ["~/.claude/plugins/installed_plugins.json",
+        ["~/.Claude/Plugins/installed_plugins.json", "~/.claude/PLUGINS/new.json"], "installed plugins"],
+      ["~/@cairn/ship-gate/x.json", ["~/.CAIRN/ship-gate/x.json", "~/@cairn/Ship-Gate/y.json"], "ship-gate stamp"],
+      ["~/@cairn/runs/r1.json", ["~/@cairn/RUNS/r1.JSON", "~/.Cairn/runs/R1.json"], "run manifests"],
+      [join(cairnHome, "ship-gate", "x.json"), [join(shout(cairnHome), "SHIP-GATE", "x.json")], "ship-gate stamp"],
+      [join(root, "hooks", "hooks.json"), [join(shout(root), "HOOKS", "hooks.json")], "installed plugin"],
+    ];
+    for (const [exact, variants, phrase] of cases) {
+      for (const file of [exact, ...variants]) {
+        for (const tool of ["Write", "Edit"]) {
+          const r = run(p, write(file, tool), env);
+          expect(r.status, `${tool} ${file}`).toBe(2);
+          expect(r.stderr, `${tool} ${file}`).toContain(phrase);
+        }
+        expect(run(p, bash(`echo {} > ${file}`), env).status, `redirect ${file}`).toBe(2);
+      }
+    }
+    for (const c of ["rm -rf ~/.CLAUDE", "rm -rf ~/.CAIRN", "mv ~/.Cairn ~/old", `rm -rf ${shout(root)}`,
+      "rm -rf ~/.claude/PLUGINS", "find ~/.CAIRN -name '*.json' -delete"]) {
+      expect(run(p, bash(c), env).status, c).toBe(2);
+    }
+    // the run report and the rest of the cairn home stay writable in any case; reads pass
+    for (const file of ["~/.CAIRN/runs/r1-report.md", "~/.Cairn/handoff/x.json"]) {
+      expect(run(p, write(file), env).status, file).toBe(0);
+    }
+    for (const c of ["cat ~/.CLAUDE/settings.json", "ls ~/.CAIRN/ship-gate", "echo x > ~/.CAIRN/runs/r1-report.md"]) {
+      expect(run(p, bash(c), env).status, c).toBe(0);
+    }
+  });
+});
+
 describe("stop-costtracker + cost-report", () => {
   const COSTTRACKER = join(scriptsDir, "stop-costtracker.mjs");
   const COSTREPORT = join(scriptsDir, "cost-report.mjs");
