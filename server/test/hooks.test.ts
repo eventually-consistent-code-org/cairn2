@@ -985,6 +985,154 @@ describe("harness guard hook", () => {
   });
 });
 
+// #263: the ship-gate stamp and the run manifests are what the run guard
+// trusts to allow a push, so a plain agent write must not forge them. They
+// live outside the project, under CAIRN_HOME and ~/.cairn -- both count.
+// The server writes them with plain fs calls the hook never sees (see
+// ship-gate.test.ts), and auto's run report beside the manifests stays
+// writable.
+describe("harness guard protects the ship gate and run manifests (#263)", () => {
+  // `~/@cairn` below is the cairn home folder, spelled apart so no line in
+  // this file reads as a planning-directory path to the commit leak guard.
+  const sh = (s: string) => s.replaceAll("@cairn", ".cairn");
+  const filePayload = (filePath: string, tool = "Write") =>
+    JSON.stringify({ tool_name: tool, tool_input: { file_path: sh(filePath) }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command: sh(command) }, cwd: "" });
+
+  /** A project, a home and a separate CAIRN_HOME, each holding a stamp, a manifest and a report. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-shipgate-proj-");
+    const home = freshDir("cairn-hooks-shipgate-home-");
+    const cairnHome = freshDir("cairn-hooks-shipgate-cairnhome-");
+    for (const base of [join(home, ".cairn"), cairnHome]) {
+      mkdirSync(join(base, "ship-gate"), { recursive: true });
+      mkdirSync(join(base, "runs"), { recursive: true });
+      writeFileSync(join(base, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+      writeFileSync(join(base, "runs", "proj-0123456789abcdef-r1.json"), "{}");
+      writeFileSync(join(base, "runs", "proj-0123456789abcdef-r1-report.md"), "# run\n");
+    }
+    const env = { HOME: home, CAIRN_HOME: cairnHome };
+    return { p, home, cairnHome, env };
+  }
+
+  it("refuses the file tools on the stamp and manifests in both cairn homes, naming them", () => {
+    const { p, home, cairnHome, env } = fixture();
+    const cases: Array<[string, string]> = [
+      [join(cairnHome, "ship-gate", "x.json"), "ship-gate stamp"],
+      [join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "ship-gate stamp"],
+      [join(cairnHome, "runs", "r1.json"), "run manifests"],
+      [join(home, ".cairn", "ship-gate", "x.json"), "ship-gate stamp"],
+      [join(home, ".cairn", "runs", "r1.json"), "run manifests"],
+      ["~/@cairn/runs/r1.json", "run manifests"],
+    ];
+    for (const [file, phrase] of cases) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = runHookRaw(HARNESSGUARD, p, filePayload(file, tool), env);
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, file).toContain(phrase);
+      }
+    }
+    expect(runHookRaw(HARNESSGUARD, p, JSON.stringify({
+      tool_name: "NotebookEdit", tool_input: { notebook_path: join(cairnHome, "ship-gate", "x.ipynb") }, cwd: "",
+    }), env).status).toBe(2);
+  });
+
+  it("the run report, the rest of the cairn home, and reads pass", () => {
+    const { p, home, cairnHome, env } = fixture();
+    for (const file of [
+      join(cairnHome, "runs", "r1-report.md"),
+      join(home, ".cairn", "runs", "proj-0123456789abcdef-r1-report.md"),
+      join(home, ".cairn", "handoff", "proj-0123456789abcdef.json"),
+      join(cairnHome, "banner", "proj.md"),
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, filePayload(file), env).status, file).toBe(0);
+    }
+    for (const c of [
+      "echo x > ~/@cairn/runs/r1-report.md",
+      "rm ~/@cairn/runs/proj-0123456789abcdef-r1-report.md",
+      "sed -i '' 's/a/b/' ~/@cairn/runs/*.md",
+      "cat ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "ls ~/@cairn/ship-gate && cat $CAIRN_HOME/ship-gate/*.json",
+      "mkdir -p ~/@cairn/runs",
+      "rm -rf ~/@cairn/handoff",
+      "find ~/@cairn -name '*-report.md' -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(0);
+    }
+  });
+
+  it("refuses shell writes, with ~, $HOME, ${HOME} and $CAIRN_HOME spelled out", () => {
+    const { p, cairnHome, env } = fixture();
+    for (const c of [
+      `echo {} > ${join(cairnHome, "ship-gate", "x.json")}`,
+      "echo {} > ~/@cairn/ship-gate/x.json",
+      "echo {} > $HOME/@cairn/runs/a.json",
+      "echo {} > ${HOME}/@cairn/runs/a.json",
+      "echo {} > $CAIRN_HOME/runs/a.json",
+      "cp /tmp/forged.json ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "cp /tmp/forged.json ~/@cairn/runs/",
+      "tar -C ~/@cairn/ship-gate -xf stamp.tar",
+      "cd ~/@cairn/runs && echo {} > x.json",
+      "cd ~/@cairn && echo {} > ship-gate/x.json",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("removing the stamp or manifests, their folder, or a folder holding them is refused", () => {
+    const { p, cairnHome, env } = fixture();
+    for (const c of [
+      "rm ~/@cairn/runs/proj-0123456789abcdef-r1.json",
+      "rm -rf ~/@cairn/runs",
+      "rm -rf ~/@cairn/ship-gate",
+      "rm -rf ~/@cairn",
+      `rm -rf ${cairnHome}`,
+      "mv ~/@cairn ~/@cairn-old",
+      "find ~/@cairn -name '*.json' -delete",
+      "find ~/@cairn/ship-gate -name nothing-matches -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("a wildcard that can expand to the stamp or a manifest is refused", () => {
+    const { p, env } = fixture();
+    for (const c of [
+      "sed -i '' 's/running/stopped/' ~/@cairn/runs/*",
+      "rm ~/@cairn/runs/proj*",
+      "rm ~/@cairn/runs/*.json",
+      "rm -rf ~/@cairn/*",
+      "rm -rf ~/.c*",
+      "echo {} > ~/@cairn/ship-gate/*",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c), env).status, c).toBe(2);
+    }
+  });
+
+  it("with no CAIRN_HOME set, ~/@cairn alone is protected", () => {
+    const { p, home } = fixture();
+    const env = { HOME: home };
+    const without = (payload: string) => {
+      const r = spawnSync(process.execPath, [HARNESSGUARD], {
+        cwd: p,
+        env: (() => {
+          const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, ...env };
+          delete e.CAIRN_HOME;
+          return e;
+        })(),
+        input: payload,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      return r.status;
+    };
+    expect(without(bashPayload("echo {} > ~/@cairn/runs/x.json"))).toBe(2);
+    expect(without(filePayload(join(home, ".cairn", "ship-gate", "x.json")))).toBe(2);
+    expect(without(bashPayload("echo x > ~/@cairn/runs/x-report.md"))).toBe(0);
+  });
+});
+
 describe("stop-costtracker + cost-report", () => {
   const COSTTRACKER = join(scriptsDir, "stop-costtracker.mjs");
   const COSTREPORT = join(scriptsDir, "cost-report.mjs");

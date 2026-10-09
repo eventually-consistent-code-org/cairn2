@@ -3,17 +3,20 @@
 /**
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
- *   server config, the settings cascade, and the plugin manifest. An agent
- *   that can rewrite its own hooks can switch off every other control in a
- *   single edit, so this is the backstop the rule-to-control check points
- *   at. Exit 2 blocks the tool call; ANY internal error exits 0 -- never
- *   block work because the guard itself broke.
+ *   server config, the settings cascade, the plugin manifest, and the
+ *   ship-gate stamp and run manifests the run guard trusts (#263: under
+ *   CAIRN_HOME and ~/.cairn; the run report stays writable, and the
+ *   server's own writes never pass a hook). An agent that can rewrite its
+ *   own hooks can switch off every other control in one edit, so this is
+ *   the backstop the rule-to-control check points at. Exit 2 blocks; ANY
+ *   internal error exits 0. Residual (#263): run_manifest set_status
+ *   running->stopped is a legal server call and lifts the mid-run push block.
  *
  *   Threat model, stated plainly so nobody over-trusts it: the realistic
- *   attack is INDIRECT -- instructions embedded in text the agent reads
- *   (an issue body, a review comment, a fetched page) steering it into a
- *   harness edit it would not otherwise make. This guard turns that from a
- *   silent success into a refusal the human sees. It is NOT a sandbox: the
+ *   attack is INDIRECT -- text the agent reads (an issue body, a review
+ *   comment, a fetched page) steering it into a harness edit it would not
+ *   otherwise make. This guard turns that from a silent success into a
+ *   refusal the human sees. It is NOT a sandbox: the
  *   CAIRN_HARNESS_EDIT=1 escape exists for the human, and text that can
  *   steer the agent can also ask for the prefix -- which exempts only the
  *   one command it prefixes (#265). Visibility is the control; isolation is
@@ -197,12 +200,22 @@ const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude",
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--config-env", "--super-prefix"]);
 
+// The most entries listed under one protected folder outside the project
+// before the rest counts as unlisted -- and so as reachable (see walkHit).
+const LIST_CAP = 500;
+
 // Variables -- the folders every rule is measured against, set per payload.
 // Each holds the path as given and its real path, when a symlink differs.
 let ROOTS = [];
 let HOMES = [];
-// The protected paths find could walk to, listed once per run.
+// Protected places outside the project (#263), each { dir, what, tree }:
+// `tree` protects everything under dir, else only the *.json files
+// directly in it (the way the run guard reads runs/).
+let ZONES = [];
+// The protected paths find could walk to, listed once per run, and the
+// zones too big to list in full.
 let ENTRIES = null;
+let UNLISTED = [];
 
 // Paths
 
@@ -260,6 +273,39 @@ function holds(abs, dir) {
   return abs === dir || dir.startsWith(abs.endsWith(sep) ? abs : abs + sep);
 }
 
+/** ~, $HOME and ${HOME} at the front of a path, spelled out the way the shell does (#258, #263). */
+function expandHome(raw) {
+  return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
+}
+
+/**
+ * The protected places outside the project (#263): the ship-gate stamp
+ * and the run manifests the run guard trusts, in every cairn home they
+ * can live in -- CAIRN_HOME (the run guard reads it) and ~/.cairn (the
+ * server writes it). The run report beside the manifests stays writable.
+ */
+function outsideZones() {
+  const zones = [];
+  const add = (dir, what, tree) => {
+    for (const d of spellings(dir)) zones.push({ dir: d, what, tree });
+  };
+  for (const base of [process.env.CAIRN_HOME, ...HOMES.map((h) => join(h, ".cairn"))]) {
+    if (!base) continue;
+    add(join(base, "ship-gate"), "the ship-gate stamp", true);
+    add(join(base, "runs"), "the run manifests", false);
+  }
+  return zones;
+}
+
+/** The protected place outside the project a path lies inside, or null. */
+function zoneOf(abs) {
+  for (const z of ZONES) {
+    if (abs === z.dir || !holds(z.dir, abs)) continue;
+    if (z.tree || (dirname(abs) === z.dir && abs.endsWith(".json"))) return z.what;
+  }
+  return null;
+}
+
 /**
  * Text of a regular file, or null when it can't be read. Devices, FIFOs
  * and huge files are never read: `git apply /dev/zero` would hang the
@@ -282,8 +328,10 @@ function fileRule(abs) {
     if (abs === join(home, ".claude", "settings.json") ||
       abs === join(home, ".claude", "settings.local.json")) return "your machine-wide Claude settings";
   }
+  const zone = zoneOf(abs);
+  if (zone) return zone;
   const rel = projectRelative(abs);
-  if (rel === null) return null; // outside the project -- not this guard's business
+  if (rel === null) return null; // elsewhere outside the project -- not this guard's business
   for (const p of PROTECTED) if (p.re.test(rel)) return p.what;
   return null;
 }
@@ -293,6 +341,8 @@ function dirRule(abs) {
   for (const home of HOMES) {
     if (abs === join(home, ".claude")) return "your machine-wide Claude settings";
   }
+  const zone = ZONES.find((z) => z.dir === abs);
+  if (zone) return zone.what;
   const rel = projectRelative(abs);
   if (!rel) return null;
   if (rel === "hooks") return "the hook directory";
@@ -309,6 +359,29 @@ function holderRule(abs) {
   }
   if (HOMES.some((home) => holds(abs, home))) {
     return "the folder holding your machine-wide Claude settings";
+  }
+  const zone = ZONES.find((z) => holds(abs, z.dir));
+  return zone ? `the folder holding ${zone.what}` : null;
+}
+
+/** Could this name, once the shell expands it in `dir`, be a *.json file there? */
+function couldManifest(comp, dir) {
+  if (STANDINS.includes(comp) || comp.endsWith(".json")) return true;
+  let names = [];
+  try { names = readdirSync(dir); } catch { /* nothing there to expand to */ }
+  return names.some((n) => n.endsWith(".json") && could(comp, n));
+}
+
+/** The protected place outside the project a wildcard path could reach (#263). */
+function zoneGlob(p, remove) {
+  for (const z of ZONES) {
+    const d = z.dir.split(sep).filter(Boolean);
+    const n = d.length;
+    if (!n || p.length < n || !d.slice(0, -1).every((x, j) => could(p[j], x))) continue;
+    if (p.length === n) {
+      if (could(p[n - 1], d[n - 1], remove)) return z.what;
+    } else if (could(p[n - 1], d[n - 1]) &&
+      (z.tree || (p.length === n + 1 && couldManifest(p[n], z.dir)))) return z.what;
   }
   return null;
 }
@@ -372,8 +445,10 @@ function globRule(abs, mode) {
       return "your machine-wide Claude settings";
     }
   }
+  const zone = zoneGlob(p, remove);
+  if (zone) return zone;
   if (remove) {
-    for (const dir of [...ROOTS, ...HOMES]) {
+    for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
       const d = dir.split(sep).filter(Boolean);
       if (p.length <= d.length && p.every((x, j) => could(x, d[j]))) return holderRule(dir);
     }
@@ -596,10 +671,49 @@ function testSelects(t, entry, shown) {
   }
 }
 
-/** Every protected path find could reach: the fixed surfaces, and what hooks/ holds on disk. */
+/** Everything under `dir`, nearest first, up to LIST_CAP entries; true when some was left unlisted. */
+function listTree(dir, out) {
+  const queue = [dir];
+  let n = 0;
+  while (queue.length) {
+    const d = queue.shift();
+    let found = [];
+    try { found = readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of found) {
+      if (++n > LIST_CAP) return true;
+      out.push(join(d, e.name));
+      if (e.isDirectory()) queue.push(join(d, e.name));
+    }
+  }
+  return false;
+}
+
+/** The folder a find start names whose whole contents are protected, or null. */
+function treeRule(abs) {
+  const zone = ZONES.find((z) => z.tree && z.dir === abs);
+  if (zone) return zone.what;
+  return dirRule(abs) === "the hook directory" ? "the hook directory" : null;
+}
+
+/**
+ * Every protected path find could reach: the fixed surfaces, what hooks/
+ * holds on disk, and the protected places outside the project (#263) --
+ * a zone too big to list goes in UNLISTED.
+ */
 function protectedEntries() {
   if (ENTRIES) return ENTRIES;
   ENTRIES = [];
+  for (const z of ZONES) {
+    if (!existsSync(z.dir)) continue;
+    ENTRIES.push(z.dir);
+    if (z.tree) {
+      if (listTree(z.dir, ENTRIES)) UNLISTED.push(z);
+      continue;
+    }
+    let names = [];
+    try { names = readdirSync(z.dir); } catch { /* not a folder */ }
+    for (const n of names) if (n.endsWith(".json")) ENTRIES.push(join(z.dir, n));
+  }
   for (const root of ROOTS) {
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
       join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)),
@@ -623,17 +737,20 @@ function protectedEntries() {
 
 /**
  * Would find, walking from `dir`, reach a protected path its tests select?
- * A start inside hooks/ (or a protected file) is hit whatever the tests
- * say; a start holding one is hit when a test can select it, or when
- * nothing narrows the walk (no name test, or a negated one).
+ * A start inside hooks/ (or a protected file or folder tree) is hit
+ * whatever the tests say; a start holding one is hit when a test can
+ * select it, when nothing narrows the walk (no name test, or a negated
+ * one), or when it holds a zone too big to list.
  */
 function walkHit(spec, dir) {
   for (const s of spec.starts) {
-    const start = resolveIn(dir, s);
-    const hooks = dirRule(start) === "the hook directory" ? "the hook directory" : null;
-    const inside = fileRule(start) ?? hooks;
+    const start = resolveIn(dir, expandHome(s)); // `find ~/.cairn` walks the home folder (#263)
+    const inside = fileRule(start) ?? treeRule(start);
     if (inside) return { path: s, what: inside };
-    for (const entry of protectedEntries()) {
+    const entries = protectedEntries();
+    const unlisted = UNLISTED.find((z) => holds(start, z.dir));
+    if (unlisted) return { path: s, what: unlisted.what };
+    for (const entry of entries) {
       if (!holds(start, entry)) continue;
       const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
       if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
@@ -939,10 +1056,10 @@ function writeTargets(seg, ctx) {
   const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
-    // the shell spells out $PWD, $HOME and ~ before the command sees them (#258)
-    const r = (mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir)
-      .replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
+    // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command sees them (#258, #263)
+    const r = expandHome((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir))
+      .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
     out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
   };
@@ -1232,7 +1349,7 @@ function judgeTarget(t) {
   }
   if (lead === WALK) {
     if (!t.walk) return null;
-    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, s)))) return lost;
+    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandHome(s))))) return lost;
     return walkHit(t.walk.spec, t.walk.dir);
   }
   if (isLost(t.abs)) return lost;
@@ -1252,6 +1369,7 @@ try {
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   ROOTS = spellings(projectDir);
   HOMES = spellings(homedir());
+  ZONES = outsideZones();
   // Relative paths resolve where the tool runs -- the payload's cwd -- not
   // at the project root (#258): the shell and the file tools agree.
   const cwd = payload?.cwd ? resolveIn(ROOTS[0], payload.cwd) : ROOTS[0];
@@ -1271,7 +1389,7 @@ try {
     }
   } else {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-    const what = p ? judge(resolveIn(cwd, p), "write", true) : null;
+    const what = p ? judge(resolveIn(cwd, expandHome(String(p))), "write", true) : null;
     if (what) hit = { path: p, what };
   }
 
