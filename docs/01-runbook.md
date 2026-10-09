@@ -1979,13 +1979,22 @@ allowing it. The override, `CAIRN_HARNESS_EDIT=1`, is the owner's too:
 set for the session, or as the leading assignment of one command, where
 it exempts that command only, not the rest of a chained line.
 
-The protected set also covers cairn's own trust anchors — the ship-gate
-stamps and run manifests under `~/.cairn` (not the run reports beside
-them), the live plugin folder when it sits outside the project,
-`~/.claude/plugins/`, the project's `.claude/hooks/` and
-`.claude/agents/`, and Cursor's `.cursor/hooks.json` and
-`.cursor/hooks/` — and its refusals, like the run guard's, name the
-owner's ways to approve with no paste-ready prefix.
+The protected set also covers cairn's own trust anchors:
+- the ship-gate stamps and run manifests in the cairn home (`$CAIRN_HOME`
+  when set, `~/.cairn` either way), but not the run reports beside them,
+  which the auto verb writes;
+- the live plugin folder, everything in it except the project itself
+  when the project sits inside it;
+- `~/.claude/plugins/` (the registry and the plugin cache);
+- the project's `.claude/hooks/` and `.claude/agents/`;
+- Cursor's `.cursor/hooks.json` and `.cursor/hooks/`, plus removing or
+  replacing the `.cursor` folder itself.
+
+The server's own writes to the stamp and manifests never pass through
+the hook, so they are unaffected. One known gap is left open on purpose:
+moving a live run to "stopped" is a legal tool action and lifts the
+mid-run push block. Like the run guard's, these refusals name the owner's
+ways to approve and give no paste-ready prefix.
 
 One more hook worth knowing, on the advisory side rather than the
 refusing side: the **loop check** notices when the same tool is called
