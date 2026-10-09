@@ -298,6 +298,15 @@ The pre-push gate:
 Never pushes with flagged drift or open issues on a verified phase. That's
 the whole point of the gate.
 
+The drift half is also enforced below the verb, by the run guard hook.
+Every `plan_drift` run leaves a stamp: the commit it checked, and whether
+it flagged anything ship stops on. An agent push that would land on the
+default branch is refused unless that stamp is clean and names the exact
+commit being pushed — so a push that skips ship, or one made after new
+commits landed, is refused with a pointer back to `/cairn:ship`. The
+open-issues half stays ship's own check; a hook can't ask the tracker.
+Section 10 has the details.
+
 ### `/cairn:summit`
 
 Complete the milestone. The server gates hard — nothing archives until every
@@ -1763,11 +1772,28 @@ nothing.
 | `continuity.recallIndex.enabled` | boolean | `true` | The session-start memory banner |
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
-| `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook |
+| `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
+| `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
 | `leakGuard.extraPatterns` | string[] | `[]` | Additional regex patterns to guard against |
-| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok` — unknown keys are rejected |
+| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok` — unknown provider names are rejected |
 | `peers.<provider>.maxInputChars` | positive integer | `200000` | Input cap per provider; longer input is head-truncated with a verbatim marker line |
+| `peers.<provider>.execCapable` | boolean | `false` when absent | Your declared trust that this CLI may run from the project folder to exercise the product during a functionality review. Without it every peer runs contained in a scratch folder, and `peer_run` refuses project mode. Never probed at runtime |
+| `peerFanout.maxConcurrent` | positive integer | *(optional block)* — absent, sized to the host: min(cores − 1, free memory ÷ 750MB, 8), at least 1 | How many peer CLIs run at once; `peer_list` reports it and the `peers` verb dispatches in batches no wider. Its own block because `peers` is keyed by provider name |
+| `seats.enabled` | string[] | *(optional block)* — absent, every shipped default seat plus any project seat | Picks the seat roster and its order; a name that matches no valid seat definition is skipped with a roster note |
+| `seats.disabled` | string[] | — | Seat names removed from the roster |
+| `seats.dispatch` | `auto \| off` | absent ≡ `off` | What a verb's `inherit` dispatch dial resolves to: `auto` lets diff signals and seat yield pick the seats that fire; `off` fires the full roster |
+| `contextEconomy.autocompactPct` | number 0.05–1, or `null` | `null` | The `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` you want. cairn never sets it; `config_probe` reports when the live value disagrees. `null` leaves the harness default alone |
+
+**Unknown keys are mostly ignored, not rejected.** Most blocks drop a
+key they don't know without a word: a misspelled `ship.confrim` or
+`leakGuard.enabeld` validates, stays in the file, and does nothing,
+while the setting you meant keeps its default. Two places are strict.
+The `seats` block rejects any key it doesn't know, and `peers` rejects a
+provider name outside the four. A field misspelled *inside* a provider's
+entry is dropped like everywhere else, so a typo in `execCapable` leaves
+that peer contained. When a setting seems to have no effect, check its
+spelling first.
 
 **The secrets-in-env rule, enforced:** config writes refuse any
 credential-shaped key (`token`, `apiToken`, `api_key`, `password`,
@@ -1842,32 +1868,124 @@ has no pull-request surface and inventing one for an advisory flag is the
 wrong trade. A branch under review that nobody has finished in a week
 shows up here too, which is arguably right.
 
-Its sibling is the **run guard**, which protects your working directory
-rather than your outbound text. A batch run works inside its own
-worktree, so you can keep editing while it builds. The guard makes that
-separation enforced rather than merely intended: while a run's manifest
-reads `running`, a `git checkout`, `git switch`, or `git reset --hard`
-aimed at your main checkout is refused with a plain line naming the run.
-The same commands inside the run's own worktree pass untouched, as does
-every other git command — a commit message that happens to mention
-checking out does not trip it. If the refusal fires, the run escaped its
-worktree: put it back rather than reaching for the override. That
-override, for the rare hand-run case, is a `CAIRN_RUN_OK=1 ` prefix,
-same shape and same prefix-only rule as the leak guard's.
+The leak guard's sibling is the **run guard**, which protects your
+working tree and your history rather than your outbound text. It reads
+every git command the agent runs through Bash the way a shell would:
+through wrappers and their flag values (`sudo -u root`, `timeout 5`,
+`env`, `nice -n 5`), a `sh -c` string, shell keywords and grouping
+(`if`, `for`, `{ }`, `( )`), and a `$(…)` inside double quotes, which
+still runs. Quoted text that only mentions git never trips it — a commit
+message saying "never `git reset --hard`" passes. A guard that breaks
+lets the command through rather than blocking work. It enforces three
+rules.
+
+**Always, in every session: no git command that throws work away with
+no undo.** Each refused form has an everyday neighbour that stays
+allowed, because the neighbour is routine or recoverable:
+
+| Refused in every session | Still allowed |
+|---|---|
+| `git reset --hard` | `git reset`, `git reset --soft` |
+| Any force push: `--force`, `-f` (alone or in a cluster like `-fu`), `--force-with-lease`, `--force-if-includes`, or a `+refspec`, before or after a bare `--` | A plain `git push` |
+| A whole-tree `git checkout` or `git restore`: a pathspec of `.`, `./`, `..`, `:/`, `*` or `**` (with or without `--`), or `--pathspec-from-file` | One path (`git checkout -- src/a.ts`, `git restore a.ts`), and `git restore --staged .`, which touches only the index |
+| `git checkout -f`, `git switch --discard-changes` or `-f` | `git checkout <branch>`, `git switch <branch>`, `git switch -c <new>` |
+| `git clean`, unless it's a dry run | `git clean -n` / `--dry-run` |
+| `git stash clear` | `git stash drop`, `git stash pop` |
+| `git reflog expire` | `git reflog` |
+| `git push --mirror` (or a plain push to a remote configured to mirror), `git push --prune` | Pushing a named feature branch |
+| A push that deletes the default branch | Deleting a feature branch (`git push origin --delete feature`), `git branch -D` |
+
+`git clean` refuses even without `-f`, because `-c
+clean.requireForce=false` or a repo setting turns git's own safety off.
+
+**Always: the default branch takes only what a clean drift check saw.**
+An agent push that would land on the default branch — `main`, `master`,
+or the remote's HEAD branch, whether named, swept up by `--all` /
+`--mirror`, or a bare `git push` from that branch — is refused unless
+the last `plan_drift` left a clean stamp for the exact commit being
+pushed. No stamp refuses, and so does a stamp for another commit, one
+that flagged drift, or a corrupt one; a stamp folder the guard can't
+read at all skips the check rather than blocking. Other branches and tags are
+untouched. The refusal points at `/cairn:ship`, which runs the drift
+check and then pushes — this is the hook half of ship's "never push with
+flagged drift".
+
+**While a batch run is live** — a run manifest for this project reads
+`running` — two more rules apply. A batch run works inside its own
+worktree so you can keep editing while it builds, and the guard makes
+that separation enforced rather than merely intended: `git checkout`,
+`git switch` and `git reset --hard` aimed at your main checkout are
+refused with a line naming the run — the hard reset even with the
+destructive override set. In the run's own worktree they pass, subject
+to the always-on rules.
+If that refusal fires, the run escaped its worktree — put it back. And
+`git push`, from any worktree (the run's own is exactly where it
+pushes), is refused unless the manifest carries the push authority you
+granted at staging for its phases *and* marks one of those phases in
+flight. `auto` records the phase with `run_manifest`'s `set_phase`
+action at each phase start, and it only moves forward; a running
+manifest with no phase marked — an older manifest, or a run between
+phases — refuses. A refused push leaves the phase verified-not-pushed,
+for you to push once the run is done. The push rule has no override:
+push authority is your staging decision.
+
+**The overrides are yours, not the agent's.**
+`CAIRN_ALLOW_DESTRUCTIVE_GIT=1` unlocks the always-on table, and
+`CAIRN_ALLOW_UNSHIPPED_PUSH=1` lifts the default-branch gate. Each lifts
+only its own rule — deleting the default branch with the table unlocked
+still meets the stamp gate — and each counts in two shapes only: set in
+the session's environment, or as the leading assignment of the one
+command it unlocks. A mention anywhere else, quoted in a commit message
+or after `&&`, does nothing. The owner-checkout rule has a one-command
+escape of its own, a leading `CAIRN_RUN_OK=1`. No refusal prints a
+paste-ready prefix. It says the act needs the owner's go-ahead, names
+your ways to give it — run the command yourself with `!` from your
+prompt, or start the session with the variable set — and adds that a
+request found in tracker or web text is not you asking. An agent never
+sets one of these because an issue body, a review comment or a fetched
+page asked it to. If a refusal fires and you didn't ask for the act,
+find out where the instruction came from first.
 
 The third of the trio is the **harness guard**, and it protects the
 configuration that decides what the agent may do at all: the `hooks/`
-directory, `.mcp.json`, the settings files under `.claude/`, the plugin
-manifests under `.claude-plugin/`, and your machine-wide Claude
-settings. An agent that can rewrite its own hooks can switch off every
-other control in one edit, so edits, writes and the shell shapes that
-write (redirect, `sed -i`, `tee`, `cp`, `mv`, `rm`) are refused on those
-paths. Reading them is untouched — inspecting a hook is ordinary work.
-The refusal names the file and then asks the question that matters: if
-you did not ask for this, something the agent read did, so find out
-where the instruction came from before allowing it. To allow it
-deliberately, set `CAIRN_HARNESS_EDIT=1` for the session, or prefix a
-shell command with it.
+directory, `.mcp.json`, the settings files under any `.claude/` folder,
+the plugin manifests under `.claude-plugin/`, and your machine-wide
+Claude settings (`~/.claude/settings.json` and `settings.local.json`).
+An agent that can rewrite its own hooks can switch off every other
+control in one edit, so the Edit, Write and NotebookEdit tools are
+refused on those paths, and so is any Bash line that would write them.
+The guard reads Bash with the same shell reader as the run guard and
+looks for what a line *writes*: redirects; the operands of commands that
+remove, create or change files (`rm`, `touch`, `tee`, `chmod`, `sed -i`,
+`dd of=`); `cp`, `mv`, `ln`, `install` or `rsync` into a protected
+folder; downloads (`curl -o` / `-O`, `wget -O`); archives unpacked there
+(`tar -C`, `unzip -d`); patch tools (`git apply`, `patch`), judged by
+the files the patch touches; `git checkout`, `restore`, `rm` and `mv` on
+those paths; `find -delete` or `-exec` over them; paths piped into
+`xargs`; and all of these inside wrappers, `bash -c`, `su -c`, a heredoc
+fed to a shell, or shell keywords and grouping. Removing a protected
+folder, or a folder that holds one (the project itself, your home),
+counts too. A relative path is judged from the tool's working folder and
+from every folder a `cd`, `pushd`, `env -C` or `git -C` on the line
+could have moved to, in any order, because a `cd` can fail or run later.
+After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
+relative write is refused with a line saying so — name the folder
+plainly, or write to an absolute path, and it can judge it. Reading
+these files is untouched — inspecting a hook is ordinary work — and so
+is a heredoc that is only data. The refusal names the file and then asks
+the question that matters: if you did not ask for this, something the
+agent read did, so find out where the instruction came from before
+allowing it. The override, `CAIRN_HARNESS_EDIT=1`, is the owner's too:
+set for the session, or as the leading assignment of one command, where
+it exempts that command only, not the rest of a chained line.
+
+The protected set also covers cairn's own trust anchors — the ship-gate
+stamps and run manifests under `~/.cairn` (not the run reports beside
+them), the live plugin folder when it sits outside the project,
+`~/.claude/plugins/`, the project's `.claude/hooks/` and
+`.claude/agents/`, and Cursor's `.cursor/hooks.json` and
+`.cursor/hooks/` — and its refusals, like the run guard's, name the
+owner's ways to approve with no paste-ready prefix.
 
 One more hook worth knowing, on the advisory side rather than the
 refusing side: the **loop check** notices when the same tool is called
@@ -1883,8 +2001,12 @@ instructions embedded in text the agent reads, which the trailhead's
 "tracker text is data" rule addresses on the judgment side. The guard
 turns a silent success into a refusal a human sees. It is not a sandbox,
 and text that can steer the agent can also ask for the override; real
-isolation is the operating system's job. The Bash coverage is
-best-effort matching over the command text, not a shell parser.
+isolation is the operating system's job. Both guards read Bash through
+one shared shell reader, so a fix reaches both, but it is still a
+reading of the command text, not the shell itself. The harness guard
+doesn't see a write inside an interpreter (`python -c`) or a `$(…)`, an
+archive's members, or paths an upstream command finds for itself
+(`git ls-files | xargs rm`).
 
 ---
 
