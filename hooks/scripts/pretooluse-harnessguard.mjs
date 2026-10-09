@@ -15,28 +15,33 @@
  *   harness edit it would not otherwise make. This guard turns that from a
  *   silent success into a refusal the human sees. It is NOT a sandbox: the
  *   CAIRN_HARNESS_EDIT=1 escape exists for the human, and text that can
- *   steer the agent can also ask for the prefix. Visibility is the control;
- *   isolation is the operating system's job. The Bash coverage reads the
- *   command the way a shell would (through shell-words.mjs, the reader the
- *   run guard shares, #270), closely enough to find what it WRITES:
- *   redirect targets, and the path operands of commands that change files
- *   (tee, mv, rm, sed -i, the destination of cp, and so on), seen through
- *   wrappers and their flags (sudo -u root, env -i, timeout 5) and through
- *   a shell's -c string (bash -lc counts, #254). Quoted text,
- *   heredoc bodies and here-strings are data. A protected path that is only
- *   READ -- run, grepped, piped to head -- passes (#240). It is still not a
- *   full shell parser: a write hidden inside an interpreter (python -c,
- *   node -e) or a $(...) substitution is not seen.
+ *   steer the agent can also ask for the prefix -- which exempts only the
+ *   one command it prefixes (#265). Visibility is the control; isolation is
+ *   the operating system's job. Bash is read the way a shell would read it
+ *   (shell-words.mjs, shared with the run guard, #270) to find what it
+ *   WRITES: redirects, and the operands of commands that change files (rm,
+ *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
+ *   find -delete/-exec, paths piped to xargs), through wrappers, bash -c,
+ *   su -c and a heredoc fed to a shell. Paths resolve from the payload cwd
+ *   and any cd before them (#258). Removing a protected folder, or one
+ *   holding it, counts. Other heredocs are data; a path only READ passes
+ *   (#240). Not seen: a write inside an interpreter (python -c) or $(...),
+ *   an archive's members, a cd to a computed path, piped paths an upstream
+ *   command finds itself (git ls-files | xargs rm).
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
  * Author(s): John Reed
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { SHELLS, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  SHELLS, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
+} from "./shell-words.mjs";
+
+// Constants
 
 /**
  * Protected shapes, matched against a path relative to the project root
@@ -50,87 +55,993 @@ const PROTECTED = [
   { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/, what: "the plugin manifest" },
 ];
 
-/** The user's machine-wide settings, protected wherever the project sits. */
-function isGlobalSettings(abs) {
-  const home = resolve(homedir());
-  return abs === join(home, ".claude", "settings.json") ||
-    abs === join(home, ".claude", "settings.local.json");
+// Names a wildcard is tested against inside .claude/ and .claude-plugin/.
+const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
+const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
+
+// Stand-ins for names the command line doesn't spell out, each matching
+// any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
+// dir` drops in dir. STDIN: a path xargs reads from its input (#258).
+// WALK: a path find walks to, its `{}` (#258).
+const ANY = "\u0001";
+const STDIN = "\u0002";
+const WALK = "\u0003";
+const STANDINS = [ANY, STDIN, WALK];
+const HAS_STANDIN = /[*?[\u0001-\u0003]/;
+
+// `$1`, `${2}`, `$@`, `$*` -- a nested shell's positional arguments.
+const POSITIONAL = /\$\{?[0-9@*]\}?/g;
+
+// Operators that feed one command's output to the next one's input.
+const PIPE = new Set(["|", "|&"]);
+
+// The most of one file the guard reads (a patch, a list of paths).
+const READ_CAP = 32 * 1024 * 1024;
+
+// Descriptors and devices, never a file this guard cares about.
+const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
+
+// A NAME=value word in command position.
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * How this guard reads a command line (shell-words.mjs): redirect targets
+ * and heredocs are modelled, and ( ) and backticks end a command, so
+ * `(cd hooks && rm x)` is a cd and an rm (#258). # comments and quoted
+ * $(...) are word text, so a write hidden in a substitution is not seen.
+ */
+const READ = { redirects: true, subshells: true };
+
+// find: name tests, the primaries that take a value, and the ones that act.
+const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+  "-regex", "-iregex", "-lname", "-ilname"]);
+const FIND_VALUE = new Set(["-newer", "-anewer", "-cnewer", "-type", "-xtype", "-size", "-perm",
+  "-user", "-group", "-uid", "-gid", "-maxdepth", "-mindepth", "-mtime", "-atime", "-ctime",
+  "-mmin", "-amin", "-cmin", "-used", "-links", "-inum", "-samefile", "-fstype", "-context",
+  "-printf", "-files0-from", "-regextype"]);
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_WRITES = new Set(["-fprint", "-fprint0", "-fls", "-fprintf"]);
+
+// Commands that remove, create, or change every path operand they are given.
+const REMOVES = new Set(["rm", "rmdir", "unlink", "shred"]);
+const CREATES = new Set(["mkdir", "touch"]);
+const CHANGES = new Set(["tee", "truncate", "chmod", "chown", "chgrp"]);
+
+// Commands that read their sources and write a destination (or -t DIR),
+// with the flags that swallow a value -- so `--exclude x` never reads as
+// the destination.
+const RSYNC_VALUE = [
+  "--rsh", "--exclude", "--include", "--filter", "--files-from", "--exclude-from",
+  "--include-from", "--password-file", "--log-file", "--log-file-format", "--backup-dir",
+  "--temp-dir", "--partial-dir", "--compare-dest", "--link-dest", "--copy-dest",
+  "--block-size", "--max-size", "--min-size", "--timeout", "--contimeout", "--port",
+  "--chmod", "--chown", "--remote-option", "--out-format", "--suffix", "--rsync-path",
+  "--bwlimit", "--iconv", "--usermap", "--groupmap", "--sockopts", "--modify-window",
+  "--info", "--debug", "--checksum-choice", "--compress-choice", "--compress-level",
+  "--skip-compress", "--max-delete", "--protocol", "--outbuf", "--stop-after", "--stop-at",
+  "--write-batch", "--only-write-batch", "--read-batch", "--early-input", "--address",
+];
+const COPIES = new Map([
+  ["cp", { short: "St", long: ["--target-directory", "--suffix"] }],
+  ["mv", { short: "St", long: ["--target-directory", "--suffix"] }],
+  ["ln", { short: "St", long: ["--target-directory", "--suffix"] }],
+  ["install", { short: "Stmog", long: ["--target-directory", "--suffix", "--mode", "--owner",
+    "--group", "--strip-program"] }],
+  ["rsync", { short: "efBTM", long: RSYNC_VALUE }],
+]);
+// rsync flags whose value is a file or folder rsync writes.
+const RSYNC_WRITES = ["--log-file", "--write-batch", "--only-write-batch", "--backup-dir"];
+
+// Downloaders: the value-taking flags, and the ones that name a file written.
+const CURL = {
+  short: "AbcCdDeEFHKmoPQrtTuUwxXyYz",
+  long: ["--output", "--output-dir", "--cookie-jar", "--dump-header", "--trace", "--trace-ascii",
+    "--stderr", "--libcurl", "--etag-save", "--etag-compare", "--hsts", "--alt-svc", "--url",
+    "--data", "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii", "--header",
+    "--user-agent", "--referer", "--user", "--request", "--cookie", "--form", "--form-string",
+    "--config", "--max-time", "--connect-timeout", "--proxy", "--proxy-user", "--cert", "--key",
+    "--cacert", "--capath", "--retry", "--retry-delay", "--retry-max-time", "--range",
+    "--upload-file", "--write-out", "--resolve", "--connect-to", "--limit-rate", "--max-filesize",
+    "--interface", "--oauth2-bearer", "--json", "--variable", "--continue-at", "--quote",
+    "--time-cond", "--max-redirs", "--noproxy", "--unix-socket", "--preproxy", "--proxy-header"],
+};
+const CURL_WRITES = ["-c", "--cookie-jar", "-D", "--dump-header", "--trace", "--trace-ascii",
+  "--stderr", "--libcurl", "--etag-save", "--hsts", "--alt-svc"];
+const CURL_REMOTE_NAME = ["-O", "--remote-name", "--remote-name-all", "-J", "--remote-header-name"];
+const WGET = {
+  short: "OoaPeiBtTwQUlARDIX",
+  long: ["--output-document", "--output-file", "--append-output", "--directory-prefix",
+    "--execute", "--input-file", "--base", "--tries", "--timeout", "--wait", "--quota",
+    "--user-agent", "--level", "--accept", "--reject", "--domains", "--include-directories",
+    "--exclude-directories", "--save-cookies", "--load-cookies", "--rejected-log", "--header",
+    "--user", "--password", "--post-data", "--post-file", "--body-data", "--body-file",
+    "--method", "--referer", "--limit-rate", "--warc-file", "--cut-dirs"],
+};
+const WGET_WRITES = ["-o", "--output-file", "-a", "--append-output", "--save-cookies",
+  "--rejected-log"];
+
+// Archivers and patch tools.
+const TAR = {
+  short: "fCTXbKNgLFHVI",
+  long: ["--file", "--directory", "--files-from", "--exclude-from", "--exclude", "--transform",
+    "--xform", "--strip-components", "--blocking-factor", "--starting-file", "--newer",
+    "--after-date", "--newer-mtime", "--listed-incremental", "--tape-length", "--info-script",
+    "--new-volume-script", "--format", "--label", "--use-compress-program", "--owner",
+    "--group", "--mode", "--mtime", "--to-command", "--index-file", "--rmt-command",
+    "--rsh-command", "--volno-file", "--checkpoint-action", "--warning", "--record-size",
+    "--suffix", "--sort", "--quoting-style"],
+};
+const PATCH = {
+  short: "iodpDFrBzVYg",
+  long: ["--input", "--output", "--directory", "--strip", "--ifdef", "--fuzz", "--reject-file",
+    "--prefix", "--suffix", "--version-control", "--basename-prefix", "--get", "--quoting-style"],
+};
+const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude", "--whitespace",
+  "--build-fake-ancestor"] };
+
+// git's global options that take the next word as their value.
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
+  "--config-env", "--super-prefix"]);
+
+// Variables -- the folders every rule is measured against, set per payload.
+// Each holds the path as given and its real path, when a symlink differs.
+let ROOTS = [];
+let HOMES = [];
+// The protected paths find could walk to, listed once per run.
+let ENTRIES = null;
+
+// Paths
+
+/** The real path of the deepest folder that exists, with the rest put back. */
+function canonical(abs) {
+  const rest = [];
+  let head = abs;
+  for (;;) {
+    try { return join(realpathSync(head), ...rest); } catch { /* not there yet */ }
+    const up = dirname(head);
+    if (up === head) return abs;
+    rest.unshift(basename(head));
+    head = up;
+  }
+}
+
+/** Both spellings of a folder, deduped. */
+function spellings(dir) {
+  const abs = resolve(dir);
+  const real = canonical(abs);
+  return real === abs ? [abs] : [abs, real];
+}
+
+/** A path as the command would reach it from `dir`. */
+function resolveIn(dir, raw) {
+  return isAbsolute(raw) ? resolve(raw) : resolve(dir, raw);
 }
 
 /** Project-relative POSIX path, or null when the path escapes the project. */
-function projectRelative(abs, projectDir) {
-  const rel = relative(resolve(projectDir), abs);
-  if (rel.startsWith("..") || isAbsolute(rel)) return null;
-  return rel.split(sep).join("/");
+function projectRelative(abs) {
+  for (const root of ROOTS) {
+    const rel = relative(root, abs);
+    const escapes = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+    if (!escapes) return rel.split(sep).join("/");
+  }
+  return null;
 }
 
-/** The protected-rule description for this path, or null when it is ordinary. */
-function protectedBy(rawPath, projectDir) {
-  if (!rawPath) return null;
-  const abs = isAbsolute(rawPath) ? resolve(rawPath) : resolve(projectDir, rawPath);
-  if (isGlobalSettings(abs)) return "your machine-wide Claude settings";
-  const rel = projectRelative(abs, projectDir);
+/** True when `abs` is `dir` or any folder above it. */
+function holds(abs, dir) {
+  return abs === dir || dir.startsWith(abs.endsWith(sep) ? abs : abs + sep);
+}
+
+/**
+ * Text of a regular file, or null when it can't be read. Devices, FIFOs
+ * and huge files are never read: `git apply /dev/zero` would hang the
+ * guard past its timeout, and a timed-out guard lets the line through.
+ */
+function readText(abs) {
+  try {
+    const st = statSync(abs);
+    return st.isFile() && st.size <= READ_CAP ? readFileSync(abs, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+// Rules
+
+/** The file itself is protected (the check every version of this guard made). */
+function fileRule(abs) {
+  for (const home of HOMES) {
+    if (abs === join(home, ".claude", "settings.json") ||
+      abs === join(home, ".claude", "settings.local.json")) return "your machine-wide Claude settings";
+  }
+  const rel = projectRelative(abs);
   if (rel === null) return null; // outside the project -- not this guard's business
   for (const p of PROTECTED) if (p.re.test(rel)) return p.what;
   return null;
 }
 
-// Commands that change every path operand they are given.
-const WRITES_ALL = new Set([
-  "tee", "mv", "rm", "rmdir", "unlink", "truncate", "chmod", "chown", "chgrp",
-  "touch", "mkdir", "shred",
-]);
-// Commands that only READ their sources and write the last operand (or -t).
-const WRITES_DEST = new Set(["cp", "install", "ln", "rsync"]);
+/** The path names a protected FOLDER: writing into it, replacing it or removing it (#265). */
+function dirRule(abs) {
+  for (const home of HOMES) {
+    if (abs === join(home, ".claude")) return "your machine-wide Claude settings";
+  }
+  const rel = projectRelative(abs);
+  if (!rel) return null;
+  if (rel === "hooks") return "the hook directory";
+  const name = rel.split("/").pop();
+  if (name === ".claude") return "a Claude settings directory";
+  if (name === ".claude-plugin") return "the plugin manifest";
+  return null;
+}
+
+/** Removing the project, or any folder above it, removes everything in it (#265). */
+function holderRule(abs) {
+  if (ROOTS.some((root) => holds(abs, root))) {
+    return "the folder holding the hook directory and settings";
+  }
+  if (HOMES.some((home) => holds(abs, home))) {
+    return "the folder holding your machine-wide Claude settings";
+  }
+  return null;
+}
+
+/** One glob component as a regex; a stand-in matches any name. */
+function compRe(comp) {
+  let re = /^[*?[]/.test(comp) ? "(?!\\.)" : ""; // a leading wildcard skips dotfiles
+  for (let i = 0; i < comp.length; i++) {
+    const c = comp[i];
+    const close = c === "[" ? comp.indexOf("]", i + 2) : -1;
+    if (STANDINS.includes(c)) re += ".*";
+    else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else if (close > 0) {
+      re += `[${comp.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      i = close;
+    } else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** Could this glob component expand to `name`? A bare stand-in counts only when `anyOk`. */
+function could(comp, name, anyOk = true) {
+  if (STANDINS.includes(comp)) return anyOk;
+  try { return compRe(comp).test(name); } catch { return true; }
+}
 
 /**
- * How this guard reads a command line (shell-words.mjs): redirect targets
- * and heredocs are modelled; ( ), backticks, # comments and quoted $(...)
- * are word text, so a write hidden in a substitution is not seen.
+ * The rule a wildcard path could hit once the shell expands it: `*` at the
+ * project root can name hooks/, `.claude/*.json` a settings file, `rm -rf
+ * ../*` the project itself. An unknown name (ANY) can be a settings file
+ * inside .claude/, but names a whole protected folder only when removing.
  */
-const READ = { redirects: true };
+function globRule(abs, mode) {
+  const remove = mode === "remove";
+  const rel = projectRelative(abs);
+  if (rel !== null) {
+    const c = rel ? rel.split("/") : [];
+    if (c.length && could(c[0], "hooks")) return "the hook directory";
+    if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
+    for (let i = 0; i < c.length; i++) {
+      for (const [dir, names, what] of [[".claude", SETTINGS_NAMES, "a settings file"],
+        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"]]) {
+        // the folder itself, or a settings / manifest file directly inside it
+        if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
+        const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
+        if (named && could(c[i], dir)) return what;
+      }
+    }
+  }
+  const p = abs.split(sep).filter(Boolean);
+  const under = (dir) => {
+    const d = dir.split(sep).filter(Boolean);
+    return p.length >= d.length && d.every((x, j) => could(p[j], x));
+  };
+  for (const home of HOMES) {
+    const n = home.split(sep).filter(Boolean).length;
+    if (!under(home) || !could(p[n] ?? "", ".claude")) continue;
+    if ((p.length === n + 1 && could(p[n], ".claude", remove)) ||
+      (p.length === n + 2 && SETTINGS_NAMES.some((s) => could(p[n + 1], s)))) {
+      return "your machine-wide Claude settings";
+    }
+  }
+  if (remove) {
+    for (const dir of [...ROOTS, ...HOMES]) {
+      const d = dir.split(sep).filter(Boolean);
+      if (p.length <= d.length && p.every((x, j) => could(x, d[j]))) return holderRule(dir);
+    }
+  }
+  return null;
+}
 
-/** The paths one segment would write to. Generous inside a write command;
- *  silent for a command that only reads. */
-function writeTargets(seg, depth = 0) {
-  const targets = seg.redirects.filter((r) => !/^\/dev\/(null|stdout|stderr|fd\/\d+)$/.test(r));
-  const { words: w, writes } = unwrap(seg.words, READ);
-  targets.push(...writes);
-  if (!w.length) return targets;
+/**
+ * Which protected thing a path would change, or null. `mode` is what the
+ * command does to it: write (the file, or into the folder it names),
+ * create (mkdir/touch -- an empty folder changes nothing), or remove.
+ * Both the path as written and its real path are checked, so a symlinked
+ * project folder can't hide either spelling.
+ */
+function judge(abs, mode, literal = false) {
+  for (const p of spellings(abs)) {
+    const what = fileRule(p) ??
+      (mode !== "create" ? dirRule(p) : null) ??
+      (mode === "remove" ? holderRule(p) : null) ??
+      (!literal && HAS_STANDIN.test(p) ? globRule(p, mode) : null);
+    if (what) return what;
+  }
+  return null;
+}
+
+// Reading commands
+
+/**
+ * Splits a command's arguments into options and operands, GNU style:
+ * clusters (`-sSLo f`) give the rest of the word, or the next word, to the
+ * first value-taking letter; `--name value` takes the next word only for a
+ * listed long option; `--` ends the options.
+ */
+function parseOpts(args, spec = {}) {
+  const short = spec.short ?? "";
+  const long = spec.long ?? [];
+  const opts = [];
+  const operands = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") { operands.push(...args.slice(i + 1)); break; }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      let value = eq < 0 ? null : a.slice(eq + 1);
+      if (value === null && long.includes(name) && i + 1 < args.length) value = args[++i];
+      opts.push({ name, value });
+      continue;
+    }
+    if (a.startsWith("-") && a.length > 1) {
+      for (let k = 1; k < a.length; k++) {
+        if (!short.includes(a[k])) { opts.push({ name: `-${a[k]}`, value: null }); continue; }
+        const value = k + 1 < a.length ? a.slice(k + 1) : (i + 1 < args.length ? args[++i] : null);
+        opts.push({ name: `-${a[k]}`, value });
+        break;
+      }
+      continue;
+    }
+    operands.push(a);
+  }
+  return { opts, operands };
+}
+
+/** The last value given for any of these option names. */
+function optValue(opts, ...names) {
+  let v;
+  for (const o of opts) if (names.includes(o.name) && o.value !== null) v = o.value;
+  return v;
+}
+
+/** True when any of these option names was given. */
+function hasOpt(opts, ...names) {
+  return opts.some((o) => names.includes(o.name));
+}
+
+/** Plain operands: every word that isn't a flag, and everything after `--`. */
+function plain(args) {
+  const k = args.indexOf("--");
+  const head = (k < 0 ? args : args.slice(0, k)).filter((a) => !a.startsWith("-"));
+  return k < 0 ? head : head.concat(args.slice(k + 1));
+}
+
+/** The file name curl -O / wget would save a URL as. */
+function urlName(url) {
+  const path = String(url).replace(/[?#].*$/, "").replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, "");
+  return path.slice(path.lastIndexOf("/") + 1) || null;
+}
+
+/**
+ * Every path a patch names: `diff --git` pairs, ---/+++ (and context-diff
+ * ***) header pairs, rename/copy lines, and Index: lines.
+ */
+function patchPaths(text) {
+  const clean = (s) => s.replace(/\t.*$/, "").trim().replace(/^"(.*)"$/, "$1");
+  const lines = text.split(/\r?\n/);
+  const paths = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    let m;
+    if ((m = /^diff --git (.+)$/.exec(l))) {
+      paths.push(...(m[1].match(/"(?:[^"\\]|\\.)*"|\S+/g) ?? []).map(clean));
+    } else if ((m = /^(?:rename|copy) (?:from|to) (.+)$/.exec(l)) || (m = /^Index: (.+)$/.exec(l))) {
+      paths.push(clean(m[1]));
+    } else if ((m = /^(?:---|\*\*\*) (.+)$/.exec(l)) && /^(?:\+\+\+|---) /.test(lines[i + 1] ?? "")) {
+      paths.push(clean(m[1]), clean(lines[i + 1].slice(4)));
+      i++;
+    }
+  }
+  return paths.filter((p) => p && p !== "/dev/null");
+}
+
+/**
+ * A patch path after stripping `n` leading components (-pN). With no -p,
+ * GNU patch keeps only the base name and BSD patch may keep the whole
+ * path, so both are checked.
+ */
+function stripped(path, n) {
+  if (n === null || !Number.isFinite(n)) return [path, basename(path)];
+  let s = path;
+  for (let k = 0; k < n; k++) {
+    const j = s.indexOf("/");
+    if (j < 0) return [];
+    s = s.slice(j + 1).replace(/^\/+/, "");
+  }
+  return [s];
+}
+
+/**
+ * What a command reads on stdin, or null when it can't be read: its own
+ * heredocs, here-strings and `< file`, else the files a `cat` piping into
+ * it names (`cat fix.diff | patch -p1`, #258).
+ */
+function stdinText(seg, dir, up = []) {
+  const parts = [...seg.heredocs.map((h) => h.body), ...(seg.herestrings ?? [])];
+  const files = [...(seg.inputs ?? [])];
+  const feeder = up.length ? unwrap(up[up.length - 1].words, READ).words : [];
+  if (!parts.length && !files.length && basename(feeder[0] ?? "") === "cat") {
+    const last = up[up.length - 1];
+    parts.push(...last.heredocs.map((h) => h.body), ...(last.herestrings ?? []));
+    files.push(...plain(feeder.slice(1)), ...(last.inputs ?? []));
+  }
+  for (const f of files) {
+    const t = readText(resolveIn(dir, f));
+    if (t !== null) parts.push(t);
+  }
+  return parts.length ? parts.join("\n") : null;
+}
+
+/** The nearest folder at or above `dir` holding a .git, else `dir`. */
+function gitRoot(dir) {
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return d;
+    if (dirname(d) === d) return dir;
+  }
+}
+
+// Streams: what find walks and what xargs reads (#258)
+
+/**
+ * find's start paths, name tests, and what it does to each path it walks:
+ * -delete, -exec/-execdir/-ok/-okdir (with `{}` as WALK), -fprint files.
+ */
+function parseFind(args) {
+  let i = 0;
+  // global options (-H -L -P -O3 -D opts) come before the start paths
+  while (i < args.length && (/^-(H|L|P|O\d*)$/.test(args[i]) || args[i] === "-D")) {
+    i += args[i] === "-D" ? 2 : 1;
+  }
+  const starts = [];
+  while (i < args.length && !/^[-(!]/.test(args[i])) starts.push(args[i++]);
+  const spec = {
+    starts: starts.length ? starts : ["."], tests: [], negated: false, remove: false, execs: [], files: [],
+  };
+  for (; i < args.length; i++) {
+    const a = args[i];
+    if (a === "!" || a === "-not") spec.negated = true;
+    else if (FIND_TESTS.has(a)) {
+      spec.tests.push({ kind: a.replace(/^-i?/, ""), ci: a.startsWith("-i"), pat: args[++i] ?? "" });
+    } else if (a === "-delete") spec.remove = true;
+    else if (FIND_EXEC.has(a)) {
+      // the command runs once per path (or batch, with +), {} standing for it
+      const words = [];
+      for (i++; i < args.length && args[i] !== ";" && args[i] !== "+"; i++) {
+        words.push(args[i].split("{}").join(WALK));
+      }
+      spec.execs.push(words);
+    } else if (FIND_WRITES.has(a)) {
+      spec.files.push(args[++i] ?? "");
+      if (a === "-fprintf") i++;
+    } else if (FIND_VALUE.has(a)) i++;
+  }
+  return spec;
+}
+
+/** fnmatch(3) without FNM_PATHNAME, as find's -name and -path use it. */
+function fnmatchRe(pat, ci) {
+  let re = "";
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    const close = c === "[" ? pat.indexOf("]", i + 2) : -1;
+    if (c === "\\" && i + 1 < pat.length) re += pat[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    else if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (close > 0) {
+      re += `[${pat.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      i = close;
+    } else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, ci ? "i" : "");
+}
+
+/** Does this find test select `entry` (printed by find as `shown`)? Unreadable tests select. */
+function testSelects(t, entry, shown) {
+  if (t.kind === "lname") return false; // symlink targets; the protected files are not links
+  try {
+    if (t.kind === "regex") return new RegExp(`^(?:${t.pat})$`, t.ci ? "i" : "").test(shown);
+    return fnmatchRe(t.pat, t.ci).test(t.kind === "name" ? basename(entry) : shown);
+  } catch {
+    return true;
+  }
+}
+
+/** Every protected path find could reach: the fixed surfaces, and what hooks/ holds on disk. */
+function protectedEntries() {
+  if (ENTRIES) return ENTRIES;
+  ENTRIES = [];
+  for (const root of ROOTS) {
+    ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
+      join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)),
+      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)));
+    const stack = [join(root, "hooks")];
+    while (stack.length && ENTRIES.length < 2000) {
+      const d = stack.pop();
+      let found = [];
+      try { found = readdirSync(d, { withFileTypes: true }); } catch { /* no such folder */ }
+      for (const e of found) {
+        ENTRIES.push(join(d, e.name));
+        if (e.isDirectory()) stack.push(join(d, e.name));
+      }
+    }
+  }
+  for (const home of HOMES) {
+    ENTRIES.push(join(home, ".claude"), ...SETTINGS_NAMES.map((n) => join(home, ".claude", n)));
+  }
+  return ENTRIES;
+}
+
+/**
+ * Would find, walking from `dir`, reach a protected path its tests select?
+ * A start inside hooks/ (or a protected file) is hit whatever the tests
+ * say; a start holding one is hit when a test can select it, or when
+ * nothing narrows the walk (no name test, or a negated one).
+ */
+function walkHit(spec, dir) {
+  for (const s of spec.starts) {
+    const start = resolveIn(dir, s);
+    const hooks = dirRule(start) === "the hook directory" ? "the hook directory" : null;
+    const inside = fileRule(start) ?? hooks;
+    if (inside) return { path: s, what: inside };
+    for (const entry of protectedEntries()) {
+      if (!holds(start, entry)) continue;
+      const shown = s.replace(/\/+$/, "") + entry.slice(start.length);
+      if (spec.negated || !spec.tests.length || spec.tests.some((t) => testSelects(t, entry, shown))) {
+        return { path: shown, what: judge(entry, "remove") ?? "the hook directory" };
+      }
+    }
+  }
+  return null;
+}
+
+/** xargs's command line with its stdin paths in place: at the end, or where -I's string sits. */
+function withStdin(words, xargsArgs) {
+  let rep = null;
+  for (let i = 0; i < xargsArgs.length; i++) {
+    const a = xargsArgs[i];
+    if (a === "-I") rep = xargsArgs[i + 1] ?? null;
+    else if (a.startsWith("-I")) rep = a.slice(2);
+    else if (a === "-i" || a === "--replace") rep = "{}";
+    else if (a.startsWith("--replace=")) rep = a.slice("--replace=".length);
+    else if (a.startsWith("-i")) rep = a.slice(2);
+  }
+  return rep ? words.map((x) => x.split(rep).join(STDIN)) : words.concat(STDIN);
+}
+
+/** The files xargs -a / --arg-file reads its paths from instead of stdin. */
+function argFiles(xargsArgs) {
+  const files = [];
+  for (let i = 0; i < xargsArgs.length; i++) {
+    const a = xargsArgs[i];
+    if (a === "-a" || a === "--arg-file") files.push(xargsArgs[i + 1] ?? "");
+    else if (a.startsWith("--arg-file=")) files.push(a.slice("--arg-file=".length));
+    else if (/^-a./.test(a)) files.push(a.slice(2));
+  }
+  return files.filter(Boolean);
+}
+
+/**
+ * A protected path named by what feeds a command's stdin, or null: its
+ * own heredoc, here-string, `< file` or xargs -a file, and every upstream
+ * command of the pipeline -- its words, and for find, what it walks
+ * (#258). Paths an upstream command discovers itself (git ls-files,
+ * grep -rl .) can't be seen.
+ */
+function feedHit(feed, mode) {
+  const texts = [...feed.seg.heredocs.map((h) => h.body), ...(feed.seg.herestrings ?? [])];
+  for (const f of [...(feed.seg.inputs ?? []), ...(feed.argFiles ?? [])]) {
+    const t = readText(resolveIn(feed.dir, f));
+    if (t !== null) texts.push(t);
+  }
+  const words = [];
+  for (const u of feed.up) {
+    const w = unwrap(u.words, READ).words;
+    if (basename(w[0] ?? "") === "find") {
+      const hit = walkHit(parseFind(w.slice(1)), feed.dir);
+      if (hit) return hit;
+      continue;
+    }
+    words.push(...w.slice(1));
+    texts.push(...u.heredocs.map((h) => h.body), ...(u.herestrings ?? []));
+  }
+  for (const t of texts) words.push(...t.split(/\s+/));
+  for (const x of words) {
+    if (!x || x.startsWith("-")) continue;
+    const what = judge(resolveIn(feed.dir, x), mode);
+    if (what) return { path: x, what };
+  }
+  return null;
+}
+
+// Write models, one per command family. Each calls add(raw, mode, dir).
+
+/** cp, mv, ln, install, rsync: the destination, where each source lands in it, and mv's sources. */
+function copyTargets(cmd, args, add) {
+  const { opts, operands } = parseOpts(args, COPIES.get(cmd));
+  const rsync = cmd === "rsync";
+  if (cmd === "install" && hasOpt(opts, "-d", "--directory")) {
+    for (const o of operands) add(o, "create");
+    return;
+  }
+  if (rsync) for (const o of opts) if (RSYNC_WRITES.includes(o.name) && o.value) add(o.value);
+  let dest = optValue(opts, "-t", "--target-directory");
+  let srcs = operands;
+  if (dest === undefined) {
+    if (operands.length >= 2) {
+      dest = operands[operands.length - 1];
+      srcs = operands.slice(0, -1);
+    } else if (cmd === "ln" && operands.length === 1) dest = "."; // ln -s x: a link named x, here
+    else return;
+  }
+  const remote = (p) => rsync && /^[^/]*:/.test(p);
+  if (cmd === "mv" || (rsync && hasOpt(opts, "--remove-source-files"))) {
+    for (const s of srcs) if (!remote(s)) add(s, "remove");
+  }
+  if (remote(dest)) return;
+  add(dest, rsync && opts.some((o) => o.name.startsWith("--delete")) ? "remove" : "write");
+  // Where each source lands: dest/<its name>, or an unknown name when a
+  // folder's CONTENTS are copied (rsync src/, cp src/., -T).
+  const contents = !rsync && hasOpt(opts, "-T", "--no-target-directory");
+  for (const s of srcs) {
+    const local = rsync ? s.replace(/^[^/]*:/, "") : s;
+    if (contents || local.endsWith("/.") || (rsync && local.endsWith("/"))) add(join(dest, ANY));
+    else if (hasOpt(opts, "--parents")) add(join(dest, local));
+    else if (basename(local)) add(join(dest, basename(local)));
+  }
+}
+
+/** curl: -o files, the -O download folder and names, and the other files it can write. */
+function curlTargets(args, ctx, add) {
+  const { opts, operands } = parseOpts(args, CURL);
+  const outDir = optValue(opts, "--output-dir");
+  const into = outDir === undefined ? ctx.dir : resolveIn(ctx.dir, outDir);
+  for (const o of opts) {
+    if (o.value === null || o.value === "-") continue;
+    if (o.name === "-o" || o.name === "--output") add(o.value, "write", into);
+    else if (CURL_WRITES.includes(o.name)) add(o.value);
+  }
+  if (!hasOpt(opts, ...CURL_REMOTE_NAME)) return;
+  add(outDir ?? "."); // the download lands in this folder, under a name the server picks
+  const urls = operands.concat(opts.filter((o) => o.name === "--url" && o.value).map((o) => o.value));
+  for (const u of urls) {
+    const name = urlName(u);
+    if (name) add(name, "write", into);
+  }
+}
+
+/** wget: -O, else the -P (or current) folder and each URL's name, plus its log files. */
+function wgetTargets(args, ctx, add) {
+  const { opts, operands } = parseOpts(args, WGET);
+  for (const o of opts) if (WGET_WRITES.includes(o.name) && o.value && o.value !== "-") add(o.value);
+  if (hasOpt(opts, "--spider")) return;
+  const doc = optValue(opts, "-O", "--output-document");
+  if (doc !== undefined) {
+    if (doc !== "-") add(doc);
+    return;
+  }
+  const prefix = optValue(opts, "-P", "--directory-prefix");
+  const into = prefix === undefined ? ctx.dir : resolveIn(ctx.dir, prefix);
+  add(prefix ?? ".");
+  for (const u of operands) {
+    const name = urlName(u);
+    if (name) add(name, "write", into);
+  }
+}
+
+/** tar: extraction into each -C folder (or here) and named members; -f when creating. */
+function tarTargets(args, ctx, add) {
+  let a = args.slice();
+  if (a.length && !a[0].startsWith("-")) {
+    // old-style bundle (`tar xzf a.tgz`): each value letter takes the next word
+    const bundle = a.shift();
+    const expanded = [];
+    for (const ch of bundle) {
+      expanded.push(`-${ch}`);
+      if (TAR.short.includes(ch)) expanded.push(a.shift() ?? "");
+    }
+    a = expanded.concat(a);
+  }
+  const { opts, operands } = parseOpts(a, TAR);
+  if (hasOpt(opts, "-c", "-r", "-u", "-A", "--create", "--append", "--update", "--catenate",
+    "--concatenate")) {
+    for (const o of opts) {
+      if (["-f", "--file", "--index-file"].includes(o.name) && o.value && o.value !== "-") add(o.value);
+    }
+    return;
+  }
+  if (!hasOpt(opts, "-x", "--extract", "--get")) return;
+  if (hasOpt(opts, "-O", "--to-stdout", "--to-command")) return; // nothing lands on disk
+  let dir = ctx.dir;
+  let moved = false;
+  for (const o of opts) {
+    if ((o.name === "-C" || o.name === "--directory") && o.value) {
+      add(o.value, "write", dir);
+      dir = resolveIn(dir, o.value); // a later -C is relative to the one before
+      moved = true;
+    }
+  }
+  if (!moved) add(".");
+  for (const m of operands) add(m, "write", dir);
+}
+
+/** unzip: extraction into -d (or here) and named members; listing and piping write nothing. */
+function unzipTargets(args, ctx, add) {
+  let exdir;
+  let exclude = false;
+  const operands = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-d") { exdir = args[++i]; exclude = false; continue; }
+    if (a.startsWith("-d") && a.length > 2) { exdir = a.slice(2); exclude = false; continue; }
+    if (a === "-x") { exclude = true; continue; }
+    if (a.startsWith("-") && a.length > 1) {
+      if (/[lvtzZpc]/.test(a.slice(1))) return; // list, test, comment, zipinfo, pipe
+      if (/[POI]$/.test(a)) i++; // password and charset flags take a value
+      exclude = false;
+      continue;
+    }
+    if (!exclude) operands.push(a);
+  }
+  const into = exdir === undefined ? ctx.dir : resolveIn(ctx.dir, exdir);
+  add(exdir ?? ".");
+  for (const m of operands.slice(1)) add(m, "write", into);
+}
+
+/** patch: -o, the named file, or every file the patch text names (resolved in -d, stripped by -p). */
+function patchTargets(args, seg, ctx, add) {
+  const { opts, operands } = parseOpts(args, PATCH);
+  if (hasOpt(opts, "--dry-run")) return;
+  const d = optValue(opts, "-d", "--directory");
+  const dir = d === undefined ? ctx.dir : resolveIn(ctx.dir, d);
+  const rej = optValue(opts, "-r", "--reject-file");
+  if (rej && rej !== "-") add(rej, "write", dir);
+  const output = optValue(opts, "-o", "--output");
+  if (output !== undefined) {
+    if (output !== "-") add(output, "write", dir);
+    return; // the originals are left alone
+  }
+  if (operands.length) {
+    add(operands[0], "write", dir); // `patch FILE < x.diff` writes only FILE
+    return;
+  }
+  const src = optValue(opts, "-i", "--input");
+  const text = src !== undefined && src !== "-"
+    ? readText(resolveIn(dir, src))
+    : stdinText(seg, ctx.dir, ctx.up);
+  if (text === null) {
+    add(d ?? "."); // a patch we can't read: only the folder it applies in is known,
+    add(STDIN, "write", ctx.dir, true); // and what feeds the pipe into it (#258)
+    return;
+  }
+  const p = optValue(opts, "-p", "--strip");
+  for (const path of patchPaths(text)) {
+    for (const s of stripped(path, p === undefined ? null : Number(p))) add(s, "write", dir);
+  }
+}
+
+/** git apply: every file the patch names, from the repo root, stripped by -p (default 1). */
+function applyTargets(rest, seg, ctx, add) {
+  const { opts, operands } = parseOpts(rest, GIT_APPLY);
+  if (hasOpt(opts, "--check", "--stat", "--numstat", "--summary") && !hasOpt(opts, "--apply")) return;
+  const fake = optValue(opts, "--build-fake-ancestor");
+  if (fake) add(fake);
+  const n = Number(optValue(opts, "-p") ?? 1);
+  const prefix = optValue(opts, "--directory");
+  const root = gitRoot(ctx.dir);
+  const piped = () => stdinText(seg, ctx.dir, ctx.up);
+  const texts = operands.length
+    ? operands.map((o) => (o === "-" ? piped() : readText(resolveIn(ctx.dir, o))))
+    : [piped()];
+  for (const t of texts) {
+    if (t === null) {
+      add(STDIN, "write", ctx.dir, true); // a patch we can't read: check what feeds it (#258)
+      continue;
+    }
+    for (const path of patchPaths(t)) {
+      for (const s of stripped(path, Number.isFinite(n) ? n : 1)) {
+        add(prefix ? join(prefix, s) : s, "write", root);
+      }
+    }
+  }
+}
+
+/** git: checkout/restore pathspecs, rm/mv operands, apply's patch -- from its -C folder (#258). */
+function gitTargets(args, seg, ctx, add) {
+  let k = 0;
+  let dir = ctx.dir;
+  while (k < args.length && args[k].startsWith("-")) {
+    if (args[k] === "-C" && args[k + 1]) dir = resolveIn(dir, args[k + 1]);
+    k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+  }
+  const sub = args[k];
+  const ops = plain(args.slice(k + 1));
+  if (sub === "checkout" || sub === "restore") for (const a of ops) add(a, "write", dir);
+  else if (sub === "rm") for (const a of ops) add(a, "remove", dir);
+  else if (sub === "mv" && ops.length >= 2) {
+    const dest = ops.pop();
+    add(dest, "write", dir);
+    for (const s of ops) {
+      add(s, "remove", dir);
+      add(join(dest, basename(s)), "write", dir);
+    }
+  } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
+}
+
+/**
+ * Every path one segment would change, as { raw, abs, mode }. Generous
+ * inside a write command; silent for a command that only reads.
+ */
+function writeTargets(seg, ctx) {
+  const out = [];
+  const { words: w0, writes, wrappers } = unwrap(seg.words, READ);
+  // xargs runs its command with paths read from stdin (#258)
+  const xargs = wrappers.find((x) => x.name === "xargs");
+  // What this command reads on stdin, should a path come from there. A
+  // stdin path in a nested line came from its caller's xargs, unless this
+  // command has an xargs of its own or reads a pipe itself (`pipe`).
+  const own = { seg, up: ctx.up, dir: ctx.dir, argFiles: xargs ? argFiles(xargs.args) : [] };
+  const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
+    // a nested shell's "$1" / "$@" is whatever path its caller handed it
+    const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
+    const r = mapped ? raw.replace(POSITIONAL, ctx.positional) : raw;
+    const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
+    out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
+  };
+  for (const r of seg.redirects) if (!DEVICE.test(r)) add(r);
+  for (const x of writes) add(x);
+  const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
+  if (!w.length) return out;
   const cmd = w[0].split("/").pop();
   const args = w.slice(1);
-  const operands = args.filter((a) => !a.startsWith("-"));
   // A command handed to another shell as a string is still a command: read
-  // it the same way, one level down. (The old text-match missed these too.)
-  if (depth < 3 && (SHELLS.has(cmd) || cmd === "eval")) {
-    const inner = cmd === "eval" ? args.join(" ") : shellCommandString(args);
-    if (inner) {
-      for (const s of shellSegments(inner, READ)) targets.push(...writeTargets(s, depth + 1));
+  // it the same way, one level down -- `bash -c`, `eval`, `su -c`, and a
+  // heredoc or here-string fed to a shell (or to su) reading stdin (#258).
+  if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
+    if (ctx.depth >= 3) return out;
+    const nest = (text, rest = []) => {
+      const marker = rest.join(" ").split("").find((c) => c === STDIN || c === WALK);
+      out.push(...lineTargets(text, ctx.dir, ctx.depth + 1, {
+        positional: marker,
+        argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
+        walk: ctx.walk,
+      }));
+    };
+    const str = cmd === "eval" ? args.join(" ")
+      : cmd === "su" ? suCommandString(args) : shellCommandString(args);
+    if (str) {
+      nest(str, cmd === "eval" ? [] : args.slice(args.indexOf(str) + 1));
+      return out;
     }
-    return targets;
+    if (cmd !== "eval" && (cmd === "su" || shellReadsStdin(args))) {
+      // its own heredoc, or the one piped in: `cat <<EOF | sh`
+      for (const s of [seg, ...ctx.up.slice(-1)]) {
+        for (const h of s.heredocs) nest(h.body);
+        for (const x of s.herestrings ?? []) nest(x);
+      }
+    }
+    return out;
   }
-  if (WRITES_ALL.has(cmd)) {
-    targets.push(...operands);
-  } else if (WRITES_DEST.has(cmd)) {
-    const t = args.indexOf("-t");
-    if (t >= 0 && args[t + 1]) targets.push(args[t + 1]);
-    else if (operands.length) targets.push(operands[operands.length - 1]);
-  } else if ((cmd === "sed" || cmd === "perl") &&
+  // find acts on every path it walks: -delete, and -exec's command with {} in it (#258)
+  if (cmd === "find") {
+    const spec = parseFind(args);
+    for (const f of spec.files) add(f);
+    const walk = { spec, dir: ctx.dir };
+    if (spec.remove) out.push({ raw: WALK, abs: ctx.dir, mode: "remove", walk });
+    for (const words of spec.execs) {
+      const inner = { words, redirects: [], heredocs: [], herestrings: [], inputs: [], op: null };
+      out.push(...writeTargets(inner, { ...ctx, up: [], walk }));
+    }
+    return out;
+  }
+  if (REMOVES.has(cmd)) for (const o of plain(args)) add(o, "remove");
+  else if (CREATES.has(cmd)) for (const o of plain(args)) add(o, "create");
+  else if (CHANGES.has(cmd)) for (const o of plain(args)) add(o);
+  else if (COPIES.has(cmd)) copyTargets(cmd, args, add);
+  else if ((cmd === "sed" || cmd === "perl") &&
       args.some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith("--in-place"))) {
-    targets.push(...operands);
+    for (const o of plain(args)) add(o);
   } else if (cmd === "dd") {
-    for (const a of args) if (a.startsWith("of=")) targets.push(a.slice(3));
-  } else if (cmd === "git") {
-    // skip git's own -C <dir> / -c <k=v> before the subcommand
-    const rest = args.slice();
-    while (rest.length && (rest[0] === "-C" || rest[0] === "-c")) rest.splice(0, 2);
-    const sub = rest[0];
-    if (["checkout", "restore", "rm", "mv"].includes(sub)) {
-      targets.push(...rest.slice(1).filter((a) => !a.startsWith("-")));
-    }
-  }
-  return targets;
+    for (const a of args) if (a.startsWith("of=")) add(a.slice(3));
+  } else if (cmd === "curl") curlTargets(args, ctx, add);
+  else if (cmd === "wget") wgetTargets(args, ctx, add);
+  else if (cmd === "tar" || cmd === "bsdtar" || cmd === "gtar") tarTargets(args, ctx, add);
+  else if (cmd === "unzip") unzipTargets(args, ctx, add);
+  else if (cmd === "patch") patchTargets(args, seg, ctx, add);
+  else if (cmd === "git") gitTargets(args, seg, ctx, add);
+  return out;
 }
+
+/** True when the segment's own leading assignments carry the override. */
+function exempt(words) {
+  for (const w of words) {
+    if (!ASSIGNMENT.test(w)) return false;
+    if (w === "CAIRN_HARNESS_EDIT=1") return true;
+  }
+  return false;
+}
+
+/**
+ * Where a cd, pushd or popd leaves the shell, or the same place (#258). A
+ * target the line computes ($VAR, ~, $(...)) can't be followed, so later
+ * paths keep resolving from where the shell was.
+ */
+function moveDir(seg, at) {
+  const w = unwrap(seg.words, READ).words;
+  const cmd = basename(w[0] ?? "");
+  if (cmd === "popd") {
+    if (at.stack.length) [at.prev, at.cur] = [at.cur, at.stack.pop()];
+    return;
+  }
+  if (cmd !== "cd" && cmd !== "pushd") return;
+  const ops = w.slice(1).filter((a) => a !== "--" && !/^-[LPe@]+$/.test(a));
+  let to;
+  if (!ops.length) to = cmd === "cd" ? resolve(homedir()) : at.stack[at.stack.length - 1];
+  else if (ops[0] === "-") to = at.prev;
+  else if (!/[$`~]|^[+-]\d+$/.test(ops[0])) to = resolveIn(at.cur, ops[0]);
+  if (to === undefined) return;
+  if (cmd === "pushd") at.stack.push(at.cur);
+  [at.prev, at.cur] = [at.cur, to];
+}
+
+/**
+ * Every path a command line would change, each resolved from the folder
+ * the shell is in when it runs: the starting cwd, moved by any cd before
+ * it (#258). The inline override exempts the one command it prefixes --
+ * never the rest of a chained line (#265).
+ */
+function lineTargets(command, dir, depth, extra = {}) {
+  const segs = shellSegments(command, READ);
+  const at = { cur: dir, prev: dir, stack: [] };
+  const out = [];
+  for (let k = 0; k < segs.length; k++) {
+    // the commands piping into this one, nearest last
+    const up = [];
+    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) up.unshift(segs[j]);
+    // the prefix counts on a command the human typed, not inside a quoted string
+    if (depth > 0 || !exempt(segs[k].words)) {
+      out.push(...writeTargets(segs[k], { ...extra, dir: at.cur, depth, up }));
+    }
+    moveDir(segs[k], at);
+  }
+  return out;
+}
+
+/**
+ * The protected thing one target would change, or null. A path that comes
+ * from a stream is checked against the stream: what feeds xargs or a patch
+ * tool, or what find walks.
+ */
+function judgeTarget(t) {
+  const lead = t.raw.replace(/^(\.\/)+/, "")[0];
+  if (lead === STDIN) return t.feed ? feedHit(t.feed, t.mode) : null;
+  if (lead === WALK) return t.walk ? walkHit(t.walk.spec, t.walk.dir) : null;
+  const what = judge(t.abs, t.mode);
+  return what ? { path: t.raw, what } : null;
+}
+
+// Main
 
 try {
   const payload = JSON.parse(readFileSync(0, "utf8"));
@@ -140,39 +1051,38 @@ try {
   }
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
-  const command = payload?.tool_input?.command ?? "";
+  ROOTS = spellings(projectDir);
+  HOMES = spellings(homedir());
+  // Relative paths resolve where the tool runs -- the payload's cwd -- not
+  // at the project root (#258): the shell and the file tools agree.
+  const cwd = payload?.cwd ? resolveIn(ROOTS[0], payload.cwd) : ROOTS[0];
 
-  // Two override shapes, both explicit and both the human's to set: the
-  // session-wide environment variable, and -- for Bash only -- the same
-  // prefix convention the leak guard uses.
+  // The session-wide override is the human's to set. The Bash prefix form
+  // is read per command, in lineTargets.
   if (process.env.CAIRN_HARNESS_EDIT === "1") process.exit(0);
-  if (tool === "Bash" && /^\s*CAIRN_HARNESS_EDIT=1\s/.test(command)) process.exit(0);
 
-  let hitPath = null;
-  let hitWhat = null;
+  let hit = null;
 
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
     // ordinary work and must stay frictionless (#240).
-    outer: for (const seg of shellSegments(command, READ)) {
-      for (const t of writeTargets(seg)) {
-        const what = protectedBy(t, projectDir);
-        if (what) { hitPath = t; hitWhat = what; break outer; }
-      }
+    for (const t of lineTargets(payload?.tool_input?.command ?? "", cwd, 0)) {
+      hit = judgeTarget(t);
+      if (hit) break;
     }
   } else {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-    const what = protectedBy(p, projectDir);
-    if (what) { hitPath = p; hitWhat = what; }
+    const what = p ? judge(resolveIn(cwd, p), "write", true) : null;
+    if (what) hit = { path: p, what };
   }
 
-  if (!hitWhat) process.exit(0);
+  if (!hit) process.exit(0);
 
   console.error(
-    `cairn harness guard: this would change ${hitWhat} — the configuration that decides ` +
+    `cairn harness guard: this would change ${hit.what} — the configuration that decides ` +
     "what this agent is allowed to do.",
   );
-  console.error(`  file: ${hitPath}`);
+  console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
   console.error("  if you asked for this, set CAIRN_HARNESS_EDIT=1 for the session (or prefix a");
   console.error("  shell command with it) and run it again. If you did not ask for this, something");
   console.error("  the agent read did — check where the instruction came from before allowing it.");
