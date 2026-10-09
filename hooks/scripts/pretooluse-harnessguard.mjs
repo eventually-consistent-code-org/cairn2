@@ -4,15 +4,16 @@
  * Purpose: PreToolUse harness guard (#208) -- refuses agent writes to the
  *   files that define the agent's own harness: the hook directory, the MCP
  *   server config, the settings cascade, the plugin manifest, .claude/hooks
- *   and .claude/agents, the plugin copy that runs (#267: its root when
- *   outside the project, and ~/.claude/plugins with its registry), and the
- *   ship-gate stamp and run manifests the run guard trusts (#263: under
- *   CAIRN_HOME and ~/.cairn; the run report stays writable, and the
- *   server's own writes never pass a hook). An agent that can rewrite its
- *   own hooks can switch off every other control in one edit, so this is
- *   the backstop the rule-to-control check points at. Exit 2 blocks; ANY
- *   internal error exits 0. Residual (#263): run_manifest set_status
- *   running->stopped is a legal server call and lifts the mid-run push block.
+ *   and .claude/agents (and Cursor's .cursor/hooks.json and hooks/, #269),
+ *   the plugin copy that runs (#267: its root when outside the project,
+ *   and ~/.claude/plugins with its registry), and the ship-gate stamp and
+ *   run manifests the run guard trusts (#263: under CAIRN_HOME and
+ *   ~/.cairn; the run report stays writable, and the server's own writes
+ *   never pass a hook). An agent that can rewrite its own hooks can switch
+ *   off every other control in one edit, so this is the backstop the
+ *   rule-to-control check points at. Exit 2 blocks; ANY internal error
+ *   exits 0. Residual (#263): run_manifest set_status running->stopped is
+ *   a legal server call and lifts the mid-run push block.
  *
  *   Threat model, stated plainly so nobody over-trusts it: the realistic
  *   attack is INDIRECT -- text the agent reads (an issue body, a review
@@ -62,17 +63,24 @@ const PROTECTED = [
   { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/, what: "the plugin manifest" },
   { re: /^(?:.*\/)?\.claude\/hooks\//, what: "the project's Claude hooks" },
   { re: /^(?:.*\/)?\.claude\/agents\//, what: "the project's agent definitions" },
+  { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/, what: "Cursor's hooks" },
 ];
 
-// Folders inside .claude/ whose whole contents are protected (#267).
-const CLAUDE_TREES = [["hooks", "the project's Claude hooks"], ["agents", "the project's agent definitions"]];
+// Folders whose whole contents are protected, as [parent, folder, what]
+// (#267; Cursor's, #269).
+const SUB_TREES = [
+  [".claude", "hooks", "the project's Claude hooks"],
+  [".claude", "agents", "the project's agent definitions"],
+  [".cursor", "hooks", "Cursor's hooks"],
+];
 
 // Folders whose whole contents are protected: a find started in one is a hit whatever it tests.
-const TREES = new Set(["the hook directory", ...CLAUDE_TREES.map(([, what]) => what)]);
+const TREES = new Set(["the hook directory", ...SUB_TREES.map(([, , what]) => what)]);
 
-// Names a wildcard is tested against inside .claude/ and .claude-plugin/.
+// Names a wildcard is tested against inside .claude/, .claude-plugin/ and .cursor/.
 const SETTINGS_NAMES = ["settings.json", "settings.local.json"];
 const MANIFEST_NAMES = ["plugin.json", "marketplace.json"];
+const CURSOR_NAMES = ["hooks.json"];
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -373,10 +381,11 @@ function dirRule(abs) {
   const rel = projectRelative(abs);
   if (!rel) return null;
   if (rel === "hooks") return "the hook directory";
-  for (const [sub, what] of CLAUDE_TREES) if (rel === `.claude/${sub}` || rel.endsWith(`/.claude/${sub}`)) return what;
+  for (const [up, sub, what] of SUB_TREES) if (rel === `${up}/${sub}` || rel.endsWith(`/${up}/${sub}`)) return what;
   const name = rel.split("/").pop();
   if (name === ".claude") return "a Claude settings directory";
   if (name === ".claude-plugin") return "the plugin manifest";
+  if (name === ".cursor") return "Cursor's settings directory";
   return null;
 }
 
@@ -458,15 +467,15 @@ function globRule(abs, mode) {
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
     for (let i = 0; i < c.length; i++) {
       for (const [dir, names, what] of [[".claude", SETTINGS_NAMES, "a settings file"],
-        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"]]) {
+        [".claude-plugin", MANIFEST_NAMES, "the plugin manifest"], [".cursor", CURSOR_NAMES, "Cursor's hooks"]]) {
         // the folder itself, or a settings / manifest file directly inside it
         if (i === c.length - 1 && could(c[i], dir, remove)) return dirRule(join(ROOTS[0], dir));
         const named = i === c.length - 2 && names.some((n) => could(c[i + 1], n));
         if (named && could(c[i], dir)) return what;
       }
-      // .claude/hooks/ and .claude/agents/, the folder or anything in it (#267)
-      for (const [sub, what] of CLAUDE_TREES) {
-        if (i + 1 < c.length && could(c[i], ".claude") && could(c[i + 1], sub, i + 2 < c.length || remove)) {
+      // .claude/hooks/, .claude/agents/ and .cursor/hooks/, the folder or anything in it (#267, #269)
+      for (const [up, sub, what] of SUB_TREES) {
+        if (i + 1 < c.length && could(c[i], up) && could(c[i + 1], sub, i + 2 < c.length || remove)) {
           return what;
         }
       }
@@ -747,10 +756,11 @@ function protectedEntries() {
   if (ENTRIES) return ENTRIES;
   ENTRIES = [];
   for (const root of ROOTS) {
-    const trees = CLAUDE_TREES.map(([sub]) => join(root, ".claude", sub));
+    const trees = SUB_TREES.map(([up, sub]) => join(root, up, sub));
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
       join(root, ".claude"), ...SETTINGS_NAMES.map((n) => join(root, ".claude", n)), ...trees,
-      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)));
+      join(root, ".claude-plugin"), ...MANIFEST_NAMES.map((n) => join(root, ".claude-plugin", n)),
+      join(root, ".cursor"), ...CURSOR_NAMES.map((n) => join(root, ".cursor", n)));
     const stack = [join(root, "hooks"), ...trees];
     while (stack.length && ENTRIES.length < 2000) {
       const d = stack.pop();

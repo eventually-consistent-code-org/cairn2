@@ -183,7 +183,7 @@ describe("cairn-setup", () => {
 
     const hooks = JSON.parse(readFileSync(join(proj, ".cursor", "hooks.json"), "utf8"));
     expect(hooks.version).toBe(1);
-    for (const ev of ["sessionStart", "beforeShellExecution", "afterShellExecution", "afterFileEdit", "preCompact"]) {
+    for (const ev of ["sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "afterFileEdit", "preCompact"]) {
       expect(JSON.stringify(hooks.hooks[ev])).toContain("cursor-adapter.mjs");
     }
     expect(hooks.hooks.stop).toBeUndefined(); // cost tracker is Claude-only
@@ -195,6 +195,41 @@ describe("cairn-setup", () => {
     const first = readFileSync(join(proj, ".cursor", "hooks.json"), "utf8");
     run("cursor", proj, home); // idempotent
     expect(readFileSync(join(proj, ".cursor", "hooks.json"), "utf8")).toBe(first);
+  });
+
+  // #269: Cursor's blocking preToolUse runs the run guard and the harness
+  // guard, set to fail closed, with every script they load installed beside
+  // the adapter -- and the installed copy actually refuses.
+  it("cursor: wires preToolUse, fail-closed, to the run guard and harness guard", () => {
+    const proj = fresh("cairn-setup-");
+    const home = fresh("cairn-home-");
+    execFileSync("git", ["init", "-q"], { cwd: proj });
+    run("cursor", proj, home);
+
+    const hooks = JSON.parse(readFileSync(join(proj, ".cursor", "hooks.json"), "utf8"));
+    expect(hooks.hooks.preToolUse).toHaveLength(1);
+    expect(hooks.hooks.preToolUse[0].command).toContain("cursor-adapter.mjs");
+    expect(hooks.hooks.preToolUse[0].failClosed).toBe(true);
+    for (const f of ["pretooluse-runguard.mjs", "pretooluse-harnessguard.mjs", "shell-words.mjs"]) {
+      expect(existsSync(join(proj, ".cursor", "hooks", "cairn", f)), f).toBe(true);
+    }
+
+    const adapter = join(proj, ".cursor", "hooks", "cairn", "cursor-adapter.mjs");
+    const pre = (tool: string, input: Record<string, unknown>) => JSON.parse(execFileSync(process.execPath, [adapter], {
+      cwd: proj,
+      encoding: "utf8",
+      input: JSON.stringify({
+        hook_event_name: "preToolUse", tool_name: tool, tool_input: input, cwd: proj, workspace_roots: [proj],
+      }),
+      env: { ...process.env, HOME: home },
+    }));
+    expect(pre("Write", { file_path: join(proj, ".cursor", "hooks.json") }).permission).toBe("deny");
+    expect(pre("Write", { file_path: adapter }).permission).toBe("deny");
+    expect(pre("Shell", { command: "git push --force origin main", working_directory: proj }).permission)
+      .toBe("deny");
+    expect(pre("Shell", { command: "rm -rf .cursor/hooks", working_directory: proj }).permission).toBe("deny");
+    expect(pre("Write", { file_path: join(proj, "src", "a.ts") })).toEqual({ permission: "allow" });
+    expect(pre("Shell", { command: "ls -la", working_directory: proj })).toEqual({ permission: "allow" });
   });
 
   it("cursor: merges into an existing hooks.json without clobbering foreign entries", () => {

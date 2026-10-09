@@ -1,8 +1,9 @@
 {
-  "$comment": "cairn hooks for Cursor (installed to .cursor/hooks.json by cairn-setup) -- one adapter for every event; see .cursor/hooks/cairn/cursor-adapter.mjs. stop/cost tracking is Claude Code-only.",
+  "$comment": "cairn hooks for Cursor (installed to .cursor/hooks.json by cairn-setup) -- one adapter for every event; see .cursor/hooks/cairn/cursor-adapter.mjs. preToolUse runs the run guard and the harness guard and fails closed. stop/cost tracking is Claude Code-only.",
   "version": 1,
   "hooks": {
     "sessionStart": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
+    "preToolUse": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs", "failClosed": true, "timeout": 30 }],
     "beforeShellExecution": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
     "afterShellExecution": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
     "afterFileEdit": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],

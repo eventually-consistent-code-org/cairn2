@@ -1289,6 +1289,46 @@ describe("harness guard protects the plugin copy that runs (#267)", () => {
   });
 });
 
+// #269: Cursor runs the guards from .cursor/hooks.json and the scripts
+// installed under .cursor/hooks/, so those are the hook config there.
+describe("harness guard protects Cursor's hook config (#269)", () => {
+  const filePayload = (filePath: string) =>
+    JSON.stringify({ tool_name: "Write", tool_input: { file_path: filePath }, cwd: "" });
+  const bashPayload = (command: string) =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  it("refuses writes to .cursor/hooks.json and anything under .cursor/hooks/", () => {
+    const p = freshDir("cairn-hooks-cursor-");
+    for (const file of [".cursor/hooks.json", ".cursor/hooks/cairn/cursor-adapter.mjs",
+      ".cursor/hooks/cairn/pretooluse-harnessguard.mjs"]) {
+      const r = runHookRaw(HARNESSGUARD, p, filePayload(join(p, file)));
+      expect(r.status, file).toBe(2);
+      expect(r.stderr, file).toContain("Cursor's hooks");
+    }
+    for (const c of [
+      "echo {} > .cursor/hooks.json",
+      "rm -rf .cursor/hooks",
+      "rm -rf .cursor",
+      "cp /tmp/evil.json .cursor/",
+      "rsync -a /tmp/cfg/ .cursor/",
+      "sed -i '' 's/a/b/' .cursor/*.json",
+      "find .cursor/hooks -name nothing-matches -delete",
+    ]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c)).status, c).toBe(2);
+    }
+  });
+
+  it("the rest of .cursor/ and reads pass", () => {
+    const p = freshDir("cairn-hooks-cursor-");
+    for (const file of [".cursor/rules/style.mdc", ".cursor/mcp.json", "docs/.cursor-notes.md"]) {
+      expect(runHookRaw(HARNESSGUARD, p, filePayload(join(p, file))).status, file).toBe(0);
+    }
+    for (const c of ["cat .cursor/hooks.json", "mkdir -p .cursor/rules", "echo x > .cursor/rules/a.mdc"]) {
+      expect(runHookRaw(HARNESSGUARD, p, bashPayload(c)).status, c).toBe(0);
+    }
+  });
+});
+
 describe("stop-costtracker + cost-report", () => {
   const COSTTRACKER = join(scriptsDir, "stop-costtracker.mjs");
   const COSTREPORT = join(scriptsDir, "cost-report.mjs");

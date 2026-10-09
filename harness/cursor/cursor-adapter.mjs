@@ -8,7 +8,24 @@
  *   translates exit codes back into Cursor's response contract
  *   ({permission} for before* events, {additional_context} for sessionStart).
  *   Any internal error answers safely (allow / {}) -- hooks must never
- *   break the session because THEY broke.
+ *   break the session because THEY broke -- except preToolUse, below.
+ *
+ *   preToolUse (#269) runs the two guards that only Claude Code ran before:
+ *   Shell goes to the run guard and the harness guard as a Bash call, and
+ *   the file tools go to the harness guard. That entry is set failClosed,
+ *   and anything short of a clean answer from a guard (a crash, a timeout,
+ *   a missing script) denies here too -- a guard that didn't run never
+ *   reads as allow.
+ *   Confirmed in Cursor's hooks docs: preToolUse fires for every tool;
+ *   tool_name is Shell, Read, Write, Grep, Delete, Task or MCP:<name>;
+ *   Shell's tool_input carries command and working_directory; the answer
+ *   is {permission: allow|deny, user_message, agent_message}; failClosed
+ *   blocks on a hook crash or timeout.
+ *   Assumed (the docs show no Write or Delete payload): the file path's
+ *   field name -- PATH_KEYS, tried in order -- and the tool names Edit,
+ *   StrReplace and MultiEdit, mapped in case edits arrive under them. A
+ *   file-tool call with none of those fields is denied, so a wrong guess
+ *   fails loud, not open. Delete is judged as an `rm -rf` of its path.
  * Author(s): John Reed
  */
 
@@ -16,6 +33,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Constants
+
+// Cursor tools that change a file, and the fields its path may arrive in.
+const FILE_TOOLS = new Set(["Write", "Edit", "StrReplace", "MultiEdit", "Delete"]);
+const PATH_KEYS = ["file_path", "path", "target_file", "filePath", "targetFile", "file", "target", "uri"];
 
 // Scripts live next to this adapter when installed (.cursor/hooks/cairn/),
 // or in hooks/scripts/ when running from a cairn repo clone.
@@ -41,10 +64,70 @@ function runScript(name, childPayload, projectDir) {
   });
 }
 
+// A preToolUse denial in Cursor's shape.
+function deny(userMessage, agentMessage) {
+  respond({ permission: "deny", user_message: userMessage, agent_message: agentMessage.trim() });
+}
+
+// Every file path a Cursor file-tool call names, under any of PATH_KEYS.
+function filePaths(input) {
+  const out = [];
+  for (const k of PATH_KEYS) {
+    const v = input?.[k];
+    if (typeof v !== "string" || !v) continue;
+    out.push(v.startsWith("file:") ? fileURLToPath(v) : v);
+  }
+  return [...new Set(out)];
+}
+
+// A path as one single-quoted shell word.
+function shellQuote(s) {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+// preToolUse (#269): the run guard and the harness guard, Claude-shaped.
+function preToolUse(payload, projectDir) {
+  const tool = payload?.tool_name ?? "";
+  const input = payload?.tool_input ?? {};
+  const cwd = input.working_directory || payload?.cwd || projectDir;
+  const checks = [];
+  if (tool === "Shell") {
+    const bash = { tool_name: "Bash", tool_input: { command: input.command ?? "" }, cwd };
+    checks.push(["run guard", "pretooluse-runguard.mjs", bash], ["harness guard", "pretooluse-harnessguard.mjs", bash]);
+  } else if (FILE_TOOLS.has(tool)) {
+    const paths = filePaths(input);
+    if (!paths.length) {
+      deny("cairn harness guard couldn't read which file this changes, so it was blocked.",
+        `cairn harness guard: Cursor's ${tool} call named no file path cairn knows how to read ` +
+        `(tool_input fields: ${Object.keys(input).join(", ") || "none"}), so the guard can't tell ` +
+        "whether it changes the hook config. Owner: update cairn, or run the change yourself.");
+    }
+    for (const p of paths) {
+      const child = tool === "Delete"
+        ? { tool_name: "Bash", tool_input: { command: `rm -rf -- ${shellQuote(p)}` }, cwd }
+        : { tool_name: "Write", tool_input: { file_path: p }, cwd };
+      checks.push(["harness guard", "pretooluse-harnessguard.mjs", child]);
+    }
+  }
+  for (const [name, script, child] of checks) {
+    const r = runScript(script, child, projectDir);
+    if (r.status === 2) deny(`cairn ${name} blocked this.`, r.stderr || `cairn ${name}: refused.`);
+    if (r.status !== 0) {
+      deny(`cairn ${name} failed to run, so this was blocked.`,
+        `cairn ${name} didn't give an answer (exit ${r.status ?? r.signal ?? "unknown"}), so this ` +
+        "call is blocked rather than let through unchecked.");
+    }
+  }
+  respond({ permission: "allow" });
+}
+
+let event = "";
 try {
   const payload = JSON.parse(readFileSync(0, "utf8"));
-  const event = payload?.hook_event_name ?? "";
+  event = payload?.hook_event_name ?? "";
   const projectDir = payload?.workspace_roots?.[0] ?? payload?.cwd ?? process.cwd();
+
+  if (event === "preToolUse") preToolUse(payload, projectDir);
 
   if (event === "sessionStart") {
     const r = runScript("sessionstart-continuity.mjs", payload, projectDir);
@@ -101,5 +184,7 @@ try {
   // JSONL for token usage, and Cursor's transcript format is not that.
   respond({});
 } catch {
+  // a broken adapter never lets a tool call through unchecked (#269)
+  if (event === "preToolUse") deny("cairn's Cursor adapter failed, so this was blocked.", "cairn adapter error.");
   respond({});
 }
