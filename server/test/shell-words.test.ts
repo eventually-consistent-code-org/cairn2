@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
+  WRAPPERS, braceExpand, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -193,10 +193,49 @@ describe("unwrap", () => {
     expect(unwrap(["xargs", "--replace", "echo", "{}"]).words).toEqual(["echo", "{}"]);
   });
 
+  it("macOS env -P takes its PATH, and zsh's noglob, nocorrect and repeat N are prefixes (#258)", () => {
+    for (const line of [
+      "env -P /usr/bin git reset --hard",
+      "env -iP/usr/bin git reset --hard",
+      "noglob git reset --hard",
+      "nocorrect git reset --hard",
+      "repeat 2 git reset --hard",
+      "repeat 2 do git reset --hard; done",
+      "repeat 2 { git reset --hard; }",
+      "time repeat 2 git reset --hard",
+    ]) {
+      const cmds = (shellSegments(line, { subshells: true }) as Seg[]).map((s) => unwrap(s.words).words);
+      expect(cmds, line).toContainEqual(["git", "reset", "--hard"]);
+    }
+  });
+
   it("covers the wrappers the issue names", () => {
     for (const w of ["sudo", "doas", "env", "nice", "timeout", "xargs", "stdbuf", "exec", "time", "nohup"]) {
       expect(WRAPPERS.has(w), w).toBe(true);
     }
+  });
+});
+
+describe("braceExpand (#258)", () => {
+  it("spells out comma lists and sequences the way bash does", () => {
+    expect(braceExpand("{hooks,}")).toEqual(["hooks", ""]);
+    expect(braceExpand("a/{b,c}/d")).toEqual(["a/b/d", "a/c/d"]);
+    expect(braceExpand("{a,{b,c}}x")).toEqual(["ax", "bx", "cx"]);
+    expect(braceExpand("{x,y}{1,2}")).toEqual(["x1", "x2", "y1", "y2"]);
+    expect(braceExpand("hook{r..t}")).toEqual(["hookr", "hooks", "hookt"]);
+    expect(braceExpand("f{3..1}")).toEqual(["f3", "f2", "f1"]);
+  });
+
+  it("leaves what bash leaves: a parameter, an empty brace, a single word", () => {
+    for (const w of ["${HOME}", "${a,b}", "{}", "{x}", "-I{}", "a{b", "{1..z}", "plain"]) {
+      expect(braceExpand(w), w).toEqual([w]);
+    }
+  });
+
+  it("past its cap, the rest of a brace is the stand-in the caller passes", () => {
+    expect(braceExpand("f{1..1000}", "*")).toEqual(["f*"]);
+    const many = braceExpand(`{${Array.from({ length: 70 }, (_, i) => `n${i}`).join(",")}}`, "*");
+    expect(many).toEqual(["*"]);
   });
 });
 

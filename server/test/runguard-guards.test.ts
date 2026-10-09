@@ -569,6 +569,27 @@ describe("run guard: a shell keyword or grouping word doesn't hide git (#285)", 
   });
 });
 
+describe("run guard: macOS env -P and zsh's prefix words don't hide git (#258)", () => {
+  it("each refused form exits 2 with the table's refusal; its neighbour exits 0", () => {
+    const { proj, home } = fixture();
+    const rows: Array<[refused: string, allowed: string]> = [
+      ["env -P /usr/bin git reset --hard", "env -P /usr/bin git status"],
+      ["env -i -P/usr/bin git push --force origin x", "env -i -P/usr/bin git push origin x"],
+      ["noglob git reset --hard", "noglob git status"],
+      ["nocorrect git clean -fd", "nocorrect git clean -n"],
+      ["repeat 2 git reset --hard", "repeat 2 git status"],
+      ["repeat 2 do git stash clear; done", "repeat 2 do git stash list; done"],
+      ["repeat 2 { git checkout -- .; }", "repeat 2 { git checkout -- a.txt; }"],
+    ];
+    for (const [refused, allowed] of rows) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+});
+
 describe("run guard: mid-run push needs manifest push authority (#252)", () => {
   const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
   const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };

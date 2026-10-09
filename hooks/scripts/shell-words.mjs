@@ -54,7 +54,8 @@ export const WRAPPERS = new Map([
   ["sudo", { short: "ugpChDRTUrt", long: ["--user", "--group", "--host", "--prompt",
     "--close-from", "--chdir", "--role", "--type", "--other-user", "--command-timeout"] }],
   ["doas", { short: "uC", long: [] }],
-  ["env", { short: "uCS", long: ["--unset", "--chdir", "--split-string"] }],
+  // macOS env -P names the PATH to search for the command
+  ["env", { short: "uCSP", long: ["--unset", "--chdir", "--split-string"] }],
   ["nice", { short: "n", long: ["--adjustment"] }],
   ["timeout", { short: "sk", long: ["--signal", "--kill-after"], positional: 1 }],
   // GNU and BSD (-J -R -S) flags; -e -i -l, --eof --replace --max-lines: optional values
@@ -66,6 +67,9 @@ export const WRAPPERS = new Map([
   ["nohup", { short: "", long: [] }],
   ["builtin", { short: "", long: [] }],
   ["setsid", { short: "", long: [] }],
+  // zsh precommand modifiers
+  ["noglob", { short: "", long: [] }],
+  ["nocorrect", { short: "", long: [] }],
   ["stdbuf", { short: "ioe", long: ["--input", "--output", "--error"] }],
 ]);
 
@@ -109,9 +113,9 @@ function closeTick(line, i) {
  * in front of it (#285): `if` `then` `elif` `else` `while` `until` `do` `!`
  * `{` and the closers, a `for NAME in ...` (or select) header up to its
  * `do`, `case WORD in` (each pattern ends at its `)`, a subshell break),
- * `function NAME`, and `coproc` with the name before its body. Before #285
- * the first word was the command, so `if git reset --hard; then` read as a
- * command named `if` and nothing refused it.
+ * `function NAME`, `coproc` with the name before its body, and zsh's
+ * `repeat N`. Before #285 the first word was the command, so `if git reset
+ * --hard; then` read as a command named `if` and nothing refused it.
  */
 function commandStart(words) {
   let i = 0;
@@ -122,6 +126,7 @@ function commandStart(words) {
       i += 2; // the keyword and the loop's NAME
       if (words[i] === "in") i = words.length; // its word list runs to the `;` or newline
     } else if (w === "case") i += 3;
+    else if (w === "repeat") i += 2; // zsh: repeat N cmd, repeat N do ... done
     else if (w === "function") i += words[i + 2] === "()" ? 3 : 2;
     else if (w === "coproc") i += words[i + 2] === "{" ? 2 : 1;
     else break;
@@ -340,6 +345,66 @@ export function shellSegments(command, read = {}) {
   endSeg();
   for (const body of subs) segs.push(...shellSegments(body, read));
   return segs;
+}
+
+// The most words one brace expansion is spelled out to.
+const BRACE_CAP = 64;
+
+/**
+ * The `{...}` in `word` that bash would expand, as { start, end, alts }, or
+ * null: a comma list (`{hooks,}`) or a sequence (`{1..3}`, `{a..c}`). A
+ * `${...}` is a parameter, and a brace with neither is literal (`{}`).
+ * `alts` is null for a sequence too long to spell out.
+ */
+function braceAt(word) {
+  for (let i = word.indexOf("{"); i >= 0; i = word.indexOf("{", i + 1)) {
+    if (word[i - 1] === "$") continue;
+    let depth = 0;
+    const commas = [];
+    let end = -1;
+    for (let j = i; j < word.length && end < 0; j++) {
+      if (word[j] === "{") depth++;
+      else if (word[j] === "}" && --depth === 0) end = j;
+      else if (word[j] === "," && depth === 1) commas.push(j);
+    }
+    if (end < 0) return null;
+    const body = word.slice(i + 1, end);
+    if (commas.length) {
+      const cuts = [i, ...commas, end];
+      return { start: i, end, alts: cuts.slice(1).map((c, k) => word.slice(cuts[k] + 1, c)) };
+    }
+    const m = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])$/.exec(body);
+    if (!m) continue;
+    const num = /\d/.test(m[1]);
+    if (num !== /\d/.test(m[2])) continue;
+    const [a, b] = num ? [Number(m[1]), Number(m[2])] : [m[1].charCodeAt(0), m[2].charCodeAt(0)];
+    if (Math.abs(b - a) >= BRACE_CAP) return { start: i, end, alts: null };
+    const alts = [];
+    for (let v = a; ; v += a <= b ? 1 : -1) {
+      alts.push(num ? String(v) : String.fromCharCode(v));
+      if (v === b) break;
+    }
+    return { start: i, end, alts };
+  }
+  return null;
+}
+
+/**
+ * The words one word brace-expands to, the way bash spells them out before
+ * running a command (#258): `rm -rf {hooks,}` removes hooks. Past BRACE_CAP
+ * words, or for a sequence too long to list, the rest of the brace is
+ * `wild` -- a stand-in the caller treats as any name.
+ */
+export function braceExpand(word, wild = "*") {
+  const out = [];
+  const walk = (w) => {
+    const b = braceAt(w);
+    if (!b) { out.push(w); return; }
+    const alts = b.alts && out.length + b.alts.length <= BRACE_CAP ? b.alts : [wild];
+    for (const alt of alts) walk(w.slice(0, b.start) + alt + w.slice(b.end + 1));
+  };
+  walk(word);
+  return out;
 }
 
 /** Words of a string as the shell would split them (env -S). */

@@ -22,13 +22,13 @@
  *   WRITES: redirects, and the operands of commands that change files (rm,
  *   sed -i, cp/mv/rsync into a folder, curl -o, tar -C, a patch's files,
  *   find -delete/-exec, paths piped to xargs), through wrappers, bash -c,
- *   su -c and a heredoc fed to a shell. Paths resolve from the payload cwd
- *   and any cd or env -C before them (#258); after a cd the guard can't
- *   follow, a relative write is refused. Removing a protected folder, or
- *   one holding it, counts. Other heredocs are data; a path only READ
- *   passes (#240). Not seen: a write inside an interpreter (python -c) or
- *   $(...), an archive's members, piped paths an upstream command finds
- *   itself (git ls-files | xargs rm).
+ *   su -c and a heredoc fed to a shell. A relative path is judged from the
+ *   payload cwd and every folder a cd, env -C or git -C on the line can
+ *   reach, in any order (#258); after a cd the guard can't follow, it is
+ *   refused. Removing a protected folder, or one holding it, counts. Other
+ *   heredocs are data; a path only READ passes (#240). Not seen: a write
+ *   inside an interpreter (python -c) or $(...), an archive's members,
+ *   piped paths an upstream command finds itself (git ls-files | xargs rm).
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
@@ -39,7 +39,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  SHELLS, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
+  SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -77,8 +77,14 @@ const POSITIONAL = /\$\{?[0-9@*]\}?/g;
 // resolved from it stay under it, so a write there is told apart and refused.
 const LOST = join(sep, "\u0004");
 
-// The most folders the shell is tracked as maybe being in before it counts as lost.
-const MAX_PLACES = 8;
+// The most folders a line is tracked as maybe being in before it counts as lost.
+const MAX_PLACES = 16;
+
+// Reserved words that open a loop, whose body may run any number of times.
+const LOOPS = new Set(["while", "until", "for", "select"]);
+
+// A function's name before its `()` -- what a lone word ending at `(` is.
+const FUNC_NAME = /^[A-Za-z_][\w.:-]*$/;
 
 // Operators that feed one command's output to the next one's input.
 const PIPE = new Set(["|", "|&"]);
@@ -233,9 +239,9 @@ function resolveIn(dir, raw) {
   return isLost(dir) && !isLost(abs) ? LOST : abs;
 }
 
-/** Candidate folder lists merged; past MAX_PLACES the shell counts as lost. */
+/** Candidate folder lists merged, every lost one as LOST; past MAX_PLACES the line counts as lost. */
 function union(...lists) {
-  const all = [...new Set(lists.flat())];
+  const all = [...new Set(lists.flat().map((p) => (isLost(p) ? LOST : p)))];
   return all.length > MAX_PLACES ? [LOST] : all;
 }
 
@@ -933,7 +939,10 @@ function writeTargets(seg, ctx) {
   const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
-    const r = mapped ? raw.replace(POSITIONAL, ctx.positional) : raw;
+    // the shell spells out $PWD, $HOME and ~ before the command sees them (#258)
+    const r = (mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir)
+      .replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
     out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
   };
@@ -941,7 +950,7 @@ function writeTargets(seg, ctx) {
     for (const x of writes) add(x);
   } else {
     // the shell opens the redirects where it is, whatever the command does
-    for (const r of seg.redirects) if (!DEVICE.test(r)) add(r);
+    for (const r of seg.redirects) if (!DEVICE.test(r)) for (const x of braceExpand(r, ANY)) add(x);
     if (dirs.length) {
       // env -C / sudo -D run the command in another folder (#258): read it
       // there, in each folder the target can name. A wrapper's own -o file
@@ -949,7 +958,7 @@ function writeTargets(seg, ctx) {
       let land = [ctx.dir];
       for (const d of dirs) {
         for (const at of land) for (const x of writes) add(x, "write", at);
-        land = union(...land.map((at) => dirTarget(d, at, { pwd: ctx.dir, prev: ctx.prev ?? [LOST] })));
+        land = union(...land.map((at) => dirTarget(d, at, ctx.dir)));
       }
       const inner = { ...seg, redirects: [] };
       for (const at of land) out.push(...writeTargets(inner, { ...ctx, dir: at, shellDir: ctx.dir, chdir: true }));
@@ -960,7 +969,7 @@ function writeTargets(seg, ctx) {
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
   const cmd = w[0].split("/").pop();
-  const args = w.slice(1);
+  let args = w.slice(1);
   // A command handed to another shell as a string is still a command: read
   // it the same way, one level down -- `bash -c`, `eval`, `su -c`, and a
   // heredoc or here-string fed to a shell (or to su) reading stdin (#258).
@@ -989,6 +998,8 @@ function writeTargets(seg, ctx) {
     }
     return out;
   }
+  // `rm -rf {hooks,}` is `rm -rf hooks`: spell braces out first, as bash does (#258)
+  args = args.flatMap((a) => braceExpand(a, ANY));
   // find acts on every path it walks: -delete, and -exec's command with {} in it (#258)
   if (cmd === "find") {
     const spec = parseFind(args);
@@ -1056,77 +1067,141 @@ function expandGlob(base, pattern) {
 }
 
 /**
- * The folders a cd or env -C target can name from `from` (#258). $PWD,
- * $HOME, $OLDPWD and ~ (~+ ~-) expand to what the guard tracks -- `at.pwd`
- * is the shell's own folder when it isn't `from` (env -C), `at.prev` its
- * $OLDPWD -- and a wildcard to its one match. LOST when the guard can't
- * tell: any other variable, a substitution, ~user, a {a,b} list, or a
- * wildcard matching more than one entry.
+ * The folders a cd, env -C or git -C target can name from `from` (#258).
+ * $PWD and ~+ expand to the shell's folder (`pwd`, when it isn't `from`:
+ * env -C), $HOME and ~ to the home folder, and a wildcard to its one
+ * match. LOST when the guard can't tell: $OLDPWD, ~- (any cd before may
+ * have failed, leaving whatever the shell had), any other variable, a
+ * substitution, ~user, a {a,b} list, or a wildcard with several matches.
  */
-function dirTarget(raw, from, at) {
-  let bases = [from];
+function dirTarget(raw, from, pwd = from) {
+  let base = from;
   let rest = raw;
   const m = /^(?:\$(PWD|HOME|OLDPWD)|\$\{(PWD|HOME|OLDPWD)\}|~([+-]?))(?=\/|$)/.exec(raw);
   if (m) {
     const name = m[1] ?? m[2] ?? { "": "HOME", "+": "PWD", "-": "OLDPWD" }[m[3]];
-    bases = name === "HOME" ? [resolve(homedir())] : name === "PWD" ? [at.pwd ?? from] : at.prev;
+    if (name === "OLDPWD") return [LOST];
+    base = name === "HOME" ? resolve(homedir()) : pwd;
     rest = raw.slice(m[0].length).replace(/^\/+/, "");
   }
   if (/[$`]|^~|\{[^}]*(?:,|\.\.)[^}]*\}/.test(rest)) return [LOST];
-  return union(...bases.map((base) => {
-    if (!/[*?[]/.test(rest)) return [resolveIn(base, rest || ".")];
-    const found = expandGlob(base, rest);
-    if (found === null || found.length > 1) return [LOST];
-    return [found[0] ?? resolveIn(base, rest)]; // no match: the shell passes the pattern as is
-  }));
+  if (!/[*?[]/.test(rest)) return [resolveIn(base, rest || ".")];
+  const found = expandGlob(base, rest);
+  if (found === null || found.length > 1) return [LOST];
+  return [found[0] ?? resolveIn(base, rest)]; // no match: the shell passes the pattern as is
 }
 
 /**
- * Where a cd, pushd or popd can leave the shell (#258). `at` holds every
- * folder the shell may be in: `cur`, `prev` ($OLDPWD, unknown until a cd
- * sets it) and each pushd stack entry. A target the guard can't follow
- * ($VAR, $(...), a wildcard with several matches) is LOST, and a cd
- * behind a keyword may never run (`if false; then cd /tmp; fi`), so the
- * shell may also still be where it was (#285).
+ * The folder changes one segment can make (#258), each { raw, cd, again }
+ * or { lost, again }: a cd or pushd target (`cd` alone is ~), and every
+ * env -C, sudo -D and git -C folder. `cd -`, `pushd +N` and a target a
+ * substitution computes (`cd $(...)`, cd `...`: a subshell break ends the
+ * segment mid-target) are lost. popd and a bare pushd only revisit
+ * folders already counted.
  */
-function moveDir(seg, at) {
-  const w = unwrap(seg.words, READ).words;
+function segMoves(seg, again) {
+  const { words: w, dirs } = unwrap(seg.words, READ);
   const cmd = basename(w[0] ?? "");
-  if (cmd !== "cd" && cmd !== "pushd" && cmd !== "popd") return;
-  const next = { cur: at.cur, prev: at.prev, stack: at.stack.slice() };
-  if (cmd === "popd") {
-    if (!next.stack.length) return;
-    [next.prev, next.cur] = [at.cur, next.stack.pop()];
-  } else {
+  const moves = dirs.map((raw) => ({ raw, again }));
+  if (cmd === "cd" || cmd === "pushd") {
     const ops = w.slice(1).filter((a) => a !== "--" && !/^-[LPe@]+$/.test(a));
-    let to;
-    // `cd $(...)`, cd `...`: a subshell break ends the segment mid-target
-    if (seg.op === "(" || seg.op === "`") to = [LOST];
-    else if (!ops.length) to = cmd === "cd" ? [resolve(homedir())] : at.stack[at.stack.length - 1];
-    else if (ops[0] === "-") to = at.prev;
-    else if (/^[+-]\d+$/.test(ops[0])) to = [LOST];
-    else to = union(...at.cur.map((d) => dirTarget(ops[0], d, at)));
-    if (to === undefined) return;
-    if (cmd === "pushd") next.stack.push(at.cur);
-    [next.prev, next.cur] = [at.cur, to];
+    if (seg.op === "(" || seg.op === "`" || ops[0] === "-" || /^[+-]\d+$/.test(ops[0] ?? "")) {
+      moves.push({ lost: true, again });
+    } else if (ops.length) moves.push({ raw: ops[0], cd: true, again });
+    else if (cmd === "cd") moves.push({ raw: "~", again });
+  } else if (cmd === "git") {
+    for (let k = 1; k < w.length && w[k].startsWith("-"); k += GIT_VALUE_OPTS.has(w[k]) ? 2 : 1) {
+      if (w[k] === "-C" && w[k + 1]) moves.push({ raw: w[k + 1], again });
+    }
   }
-  if (seg.reserved?.length) {
-    next.cur = union(at.cur, next.cur);
-    next.prev = union(at.prev, next.prev);
-    if (cmd !== "cd") next.stack = next.stack.map((s) => union(s, [LOST]));
+  return moves;
+}
+
+/**
+ * Every folder the shell may be in anywhere on a command line (#258): the
+ * starting cwd, and every cd, pushd, env -C, sudo -D and git -C target in
+ * it resolved from every folder found before it. A cd can fail, be
+ * skipped, run in a subshell, a pipe or the background, or run later (a
+ * function body, a loop), so none ever takes a folder away, and every
+ * write on the line is judged from all of them, wherever it sits. A target
+ * in a loop or function body may run again at any later point, so those
+ * keep applying until nothing new turns up. A CDPATH, set on the line or
+ * inherited, adds each place a bare cd target can land under it. A target
+ * the guard can't resolve adds LOST.
+ */
+function linePlaces(segs, dir) {
+  const cdpaths = process.env.CDPATH ? [process.env.CDPATH] : [];
+  const moves = [];
+  const frames = []; // open bodies: { close: "done" | "}", again }
+  let fn = false; // the next `{` opens a function body
+  for (const seg of segs) {
+    const r = seg.reserved ?? [];
+    let again = false;
+    for (let i = 0; i < r.length; i++) {
+      const w = r[i];
+      if (LOOPS.has(w)) {
+        frames.push({ close: "done", again: true });
+        again = true;
+        if (w === "for" || w === "select") break; // the rest is the loop's word list
+      } else if (w === "repeat") {
+        const body = r[i + 2];
+        if (body === "do" || body === "{") frames.push({ close: body === "do" ? "done" : "}", again: true });
+        again = true;
+        i += body === "{" ? 2 : 1;
+      } else if (w === "done" || w === "}") {
+        while (frames.length && frames.pop().close !== w) { /* unclosed inner bodies */ }
+      } else if (w === "{") {
+        frames.push({ close: "}", again: fn });
+        fn = false;
+      } else if (w === "function") {
+        fn = true;
+        i += r[i + 2] === "()" ? 2 : 1;
+      } else if (w === "case") i += 2;
+      else if (w === "coproc" && r[i + 2] === "{") i++;
+    }
+    if (seg.words.length === 1 && seg.op === "(" && FUNC_NAME.test(seg.words[0])) fn = true; // NAME () {
+    moves.push(...segMoves(seg, again || frames.some((f) => f.again)));
+    const { words: w, assigns } = unwrap(seg.words, READ);
+    const declared = /^(export|declare|typeset|readonly|local)$/.test(w[0] ?? "") ? w.slice(1) : [];
+    for (const a of [...assigns, ...declared]) if (a.startsWith("CDPATH=")) cdpaths.push(a.slice(7));
   }
-  Object.assign(at, next);
+
+  const lostPath = cdpaths.some((v) => /[$`]/.test(v));
+  const step = (places, m) => {
+    if (m.lost) return union(places, [LOST]);
+    const more = places.flatMap((d) => dirTarget(m.raw, d));
+    // CDPATH: a target not starting /, . or .. may land under any of its entries
+    if (m.cd && cdpaths.length && !/^(?:\/|\.\.?(?:\/|$)|~|\$)/.test(m.raw)) {
+      if (lostPath) more.push(LOST);
+      for (const e of lostPath ? [] : cdpaths.flatMap((v) => v.split(":"))) {
+        more.push(...places.flatMap((d) => dirTarget(join(e || ".", m.raw), d)));
+      }
+    }
+    return union(places, more);
+  };
+  let places = [dir];
+  const active = [];
+  for (const m of moves) {
+    places = step(places, m);
+    if (m.again) active.push(m);
+    for (let round = 0; active.length && round <= MAX_PLACES; round++) {
+      const before = places.length;
+      for (const a of active) places = step(places, a);
+      if (places.length === before) break;
+    }
+  }
+  return places;
 }
 
 /**
  * Every path a command line would change, each resolved from every folder
- * the shell may be in when it runs: the starting cwd, moved by any cd
- * before it (#258). The inline override exempts the one command it
- * prefixes -- never the rest of a chained line (#265).
+ * the shell may be in on that line (#258, linePlaces). The inline override
+ * exempts the one command it prefixes -- never the rest of a chained line
+ * (#265).
  */
 function lineTargets(command, dir, depth, extra = {}) {
   const segs = shellSegments(command, READ);
-  const at = { cur: [dir], prev: [LOST], stack: [] };
+  const places = linePlaces(segs, dir);
   const out = [];
   for (let k = 0; k < segs.length; k++) {
     // the commands piping into this one, nearest last
@@ -1134,9 +1209,8 @@ function lineTargets(command, dir, depth, extra = {}) {
     for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) up.unshift(segs[j]);
     // the prefix counts on a command the human typed, not inside a quoted string
     if (depth > 0 || !exempt(segs[k].words)) {
-      for (const d of at.cur) out.push(...writeTargets(segs[k], { ...extra, dir: d, prev: at.prev, depth, up }));
+      for (const d of places) out.push(...writeTargets(segs[k], { ...extra, dir: d, depth, up }));
     }
-    moveDir(segs[k], at);
   }
   return out;
 }
@@ -1206,7 +1280,7 @@ try {
   if (hit.lost) {
     // #258: a directory change it couldn't follow -- fail closed, and say so
     console.error(
-      "cairn harness guard: a directory change earlier in this line (cd, pushd, env -C) goes " +
+      "cairn harness guard: a directory change in this line (cd, pushd, env -C) goes " +
       "somewhere the guard couldn't tell, so this relative write may land in the hook directory " +
       "or a settings file.",
     );
