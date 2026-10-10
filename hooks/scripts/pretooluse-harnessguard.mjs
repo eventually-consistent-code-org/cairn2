@@ -1212,8 +1212,9 @@ function gitTargets(args, seg, ctx, add) {
 function writeTargets(seg, ctx) {
   const out = [];
   const { words: w0, writes, wrappers, dirs } = unwrap(seg.words, READ);
-  // xargs runs its command with paths read from stdin (#258)
-  const xargs = wrappers.find((x) => x.name === "xargs");
+  // xargs runs its command with paths read from stdin (#258). Its name is
+  // folded like any command's: macOS runs `XARGS` as xargs (#300).
+  const xargs = wrappers.find((x) => cmdName(x.name) === "xargs");
   // What this command reads on stdin, should a path come from there. A
   // stdin path in a nested line came from its caller's xargs, unless this
   // command has an xargs of its own or reads a pipe itself (`pipe`).
