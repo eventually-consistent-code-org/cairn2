@@ -1643,6 +1643,114 @@ describe("harness guard protects the other MCP server configs (#298)", () => {
   });
 });
 
+// #303: `claude mcp add` and its kin write ~/.claude.json (local scope, the
+// default, and user scope) or .mcp.json (project scope) from a process of
+// their own, which the guard didn't model -- so a server registered that way
+// started next session outside every hook. Each writing form is refused now,
+// with the owner-approval wording and no override prefix; list, get and
+// serve still pass, and each refused form sits next to one of them.
+describe("harness guard refuses Claude Code's MCP server command (#303)", () => {
+  /** A project and a home holding ~/.claude.json, the way Claude Code leaves them. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-claudemcp-proj-");
+    const home = freshDir("cairn-hooks-claudemcp-home-");
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash command, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("every writing subcommand is refused in every scope, next to a read that passes", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["claude mcp add evil -- node /tmp/evil.js", "claude mcp list"],
+      ["claude mcp add -s local evil -- node /tmp/evil.js", "claude mcp get evil"],
+      ["claude mcp add --scope user evil -- node /tmp/evil.js", "claude mcp get cairn"],
+      ["claude mcp add --scope=user --transport http evil https://example.com/mcp", "claude mcp list"],
+      ["claude mcp add -s project evil -- node /tmp/evil.js", "claude mcp get evil"],
+      ["claude mcp add-json evil '{\"command\":\"node\",\"args\":[\"/tmp/evil.js\"]}'", "claude mcp get evil"],
+      ["claude mcp add-json -s user evil '{\"command\":\"node\"}'", "claude mcp list"],
+      ["claude mcp add-from-claude-desktop", "claude mcp serve"],
+      ["claude mcp add-from-claude-desktop -suser", "claude mcp serve --debug"],
+      ["claude mcp remove cairn", "claude mcp get cairn"],
+      ["claude mcp remove -s user cairn", "claude mcp get cairn"],
+      ["claude mcp remove --scope project cairn", "claude mcp list"],
+      ["claude mcp reset-project-choices", "claude mcp list"],
+    ];
+    for (const [write, read] of pairs) {
+      const r = run(p, home, write);
+      expect(r.status, write).toBe(2);
+      expect(r.stderr, write).toContain("MCP server config");
+      expect(r.stderr, write).toContain("owner's go-ahead");
+      expect(r.stderr, write).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+
+  it("names the file each scope writes: ~/.claude.json for local and user, .mcp.json for project", () => {
+    const { p, home } = fixture();
+    for (const c of ["claude mcp add evil -- node x", "claude mcp add -s local evil -- node x",
+      "claude mcp add -s user evil -- node x", "claude mcp remove cairn"]) {
+      const r = run(p, home, c);
+      expect(r.stderr, c).toContain("your machine-wide MCP server config");
+      expect(r.stderr, c).toContain(join(home, ".claude.json"));
+    }
+    for (const c of ["claude mcp add -s project evil -- node x", "claude mcp remove -s project cairn"]) {
+      const r = run(p, home, c);
+      expect(r.stderr, c).toContain("this would change the MCP server config");
+      expect(r.stderr, c).toContain(".mcp.json");
+    }
+    // a `-s project` after `--` belongs to the server's own command line
+    expect(run(p, home, "claude mcp add evil -- node x -s project").stderr).toContain("machine-wide");
+  });
+
+  it("the command is seen in any letter case, through wrappers, nested shells, options and streams", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["CLAUDE mcp add evil -- node x", "CLAUDE mcp list"],
+      ["/opt/homebrew/bin/Claude mcp remove cairn", "/opt/homebrew/bin/Claude mcp get cairn"],
+      ["sudo -u root claude mcp add -s user evil -- node x", "sudo -u root claude mcp list"],
+      ["env FOO=1 claude mcp add evil -- node x", "env FOO=1 claude mcp list"],
+      ["bash -c 'claude mcp add evil -- node x'", "bash -c 'claude mcp list'"],
+      ["claude --model opus mcp add evil -- node x", "claude --model opus mcp list"],
+      ["claude mcp --model opus add evil -- node x", "claude mcp --model opus get cairn"],
+      ["claude mcp {add,} evil -- node x", "claude mcp {list,}"],
+      ["echo evil | xargs -I{} claude mcp add {} -- node x", "echo evil | xargs -I{} echo claude mcp add {}"],
+      ["echo 'mcp add evil node x' | xargs claude", "echo 'mcp add evil node x' | xargs echo claude"],
+      ["find . -name x -exec claude mcp add {} -- node x \\;", "find . -name x -exec cat {} \\;"],
+      ["cd src && claude mcp add -s project evil -- node x", "cd src && claude mcp list"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(run(p, home, write).status, write).toBe(2);
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+
+  it("a prompt that only mentions the command, and reading the config, pass", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "claude -p 'explain claude mcp add'",
+      "claude -p \"why does mcp remove need a scope\"",
+      "claude --version",
+      "claude mcp --help",
+      "claude mcp list > /tmp/servers.txt",
+      "claude mcp get cairn | grep command",
+      "cat ~/.claude.json | jq .mcpServers",
+    ]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing
