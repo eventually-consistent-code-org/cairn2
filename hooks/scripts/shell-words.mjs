@@ -26,7 +26,7 @@
 
 // Constants
 
-// Shells whose -c string is a command line of its own.
+// Shells whose -c string is a command line of its own (look names up by commandName).
 export const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 
 // Shell options that take the next word as their value (-o pipefail).
@@ -72,6 +72,17 @@ export const WRAPPERS = new Map([
   ["nocorrect", { short: "", long: [] }],
   ["stdbuf", { short: "ioe", long: ["--input", "--output", "--error"] }],
 ]);
+
+/**
+ * A command word's name the way a Mac finds the program (#300): the path
+ * dropped and the letter case folded, since a case-insensitive volume runs
+ * `SUDO`, `/usr/bin/GIT` and `Env` as sudo, git and env. Upper then lower
+ * also folds the long s and the Kelvin sign, which APFS reads as s and k --
+ * `ſudo` is sudo too. Look a name up in WRAPPERS or SHELLS through here.
+ */
+export function commandName(word) {
+  return String(word ?? "").split("/").pop().toUpperCase().toLowerCase();
+}
 
 /**
  * Index of the `)` closing a `$(` whose body starts at `i` -- nesting-aware,
@@ -420,7 +431,9 @@ function splitWords(str, read) {
  * FILE`), each wrapper peeled with the option words it took (#258:
  * xargs's -I string says where its stdin lands), and the folders a wrapper
  * moves the command into, in order (`env -C DIR`, `sudo -D DIR`, #258). An
- * env -S string is split the way `read` reads words.
+ * env -S string is split the way `read` reads words. A wrapper is known by
+ * its commandName, in any letter case (`SUDO`, `/usr/bin/Env`, #300), and
+ * reported under it; the words left over keep the spelling they were typed in.
  */
 export function unwrap(words, read = {}) {
   let w = words.slice();
@@ -431,7 +444,7 @@ export function unwrap(words, read = {}) {
   for (;;) {
     while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
     if (!w.length) break;
-    const name = w[0].split("/").pop();
+    const name = commandName(w[0]);
     const spec = WRAPPERS.get(name);
     if (!spec) break;
     w.shift();

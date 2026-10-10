@@ -9,7 +9,8 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, braceExpand, shellSegments, unwrap, shellCommandString, shellReadsStdin, suCommandString,
+  WRAPPERS, SHELLS, braceExpand, commandName, shellSegments, unwrap, shellCommandString, shellReadsStdin,
+  suCommandString,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -213,6 +214,56 @@ describe("unwrap", () => {
     for (const w of ["sudo", "doas", "env", "nice", "timeout", "xargs", "stdbuf", "exec", "time", "nohup"]) {
       expect(WRAPPERS.has(w), w).toBe(true);
     }
+  });
+});
+
+describe("unwrap: a wrapper in any letter case (#300)", () => {
+  /** The command words of a line once the wrappers are peeled. */
+  const peeled = (line: string): string[] => unwrap((shellSegments(line) as Seg[])[0].words).words;
+
+  it("commandName drops the path and folds the case the way a Mac finds the program", () => {
+    expect(commandName("GIT")).toBe("git");
+    expect(commandName("/usr/bin/Git")).toBe("git");
+    expect(commandName("SUDO")).toBe("sudo");
+    expect(commandName("ſudo")).toBe("sudo"); // APFS reads the long s as s
+    expect(commandName("git")).toBe("git");
+    expect(commandName(undefined)).toBe("");
+    expect(SHELLS.has(commandName("/bin/BASH"))).toBe(true);
+  });
+
+  it("each capitalised wrapper is peeled like its lowercase form", () => {
+    // Each row: [capitalised, lowercase] -- the same command underneath
+    const rows: Array<[upper: string, lower: string]> = [
+      ["SUDO git reset --hard", "sudo git reset --hard"],
+      ["/usr/bin/SUDO -u root git reset --hard", "/usr/bin/sudo -u root git reset --hard"],
+      ["Sudo -u root GIT reset --hard", "sudo -u root GIT reset --hard"],
+      ["ENV -i git reset --hard", "env -i git reset --hard"],
+      ["Env -u FOO git reset --hard", "env -u FOO git reset --hard"],
+      ["XARGS -n 1 git reset --hard", "xargs -n 1 git reset --hard"],
+      ["TIMEOUT -s KILL 5 git reset --hard", "timeout -s KILL 5 git reset --hard"],
+      ["NICE -n 5 git reset --hard", "nice -n 5 git reset --hard"],
+      ["NOHUP DOAS -u root STDBUF -o0 git reset --hard", "nohup doas -u root stdbuf -o0 git reset --hard"],
+      ["ENV -S 'git reset --hard'", "env -S 'git reset --hard'"],
+      ["ſudo git reset --hard", "sudo git reset --hard"],
+    ];
+    for (const [upper, lower] of rows) {
+      expect(peeled(upper), upper).toEqual(peeled(lower));
+      expect(peeled(upper)[0].toLowerCase(), upper).toBe("git");
+    }
+  });
+
+  it("a capitalised wrapper of a harmless command peels the same way", () => {
+    expect(peeled("SUDO GIT status")).toEqual(["GIT", "status"]);
+    expect(peeled("ENV -i git status")).toEqual(["git", "status"]);
+    expect(peeled("XARGS echo")).toEqual(["echo"]);
+  });
+
+  it("reports wrappers and what they write under the folded name", () => {
+    const r = unwrap(["SUDO", "-u", "root", "XARGS", "-I{}", "rm", "{}"]);
+    expect(r.wrappers).toEqual([{ name: "sudo", args: ["-u", "root"] }, { name: "xargs", args: ["-I{}"] }]);
+    expect(unwrap(["TIME", "-o", "log", "cmd"]).writes).toEqual(["log"]);
+    expect(unwrap(["ENV", "-C", "hooks", "rm", "x"]).dirs).toEqual(["hooks"]);
+    expect(unwrap(["SUDO", "-D", "/srv", "rm", "x"]).dirs).toEqual(["/srv"]);
   });
 });
 

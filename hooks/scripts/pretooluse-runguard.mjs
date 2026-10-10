@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -16,9 +16,10 @@
  *   (honoured, never taught: refusals name only the owner's ways, #262).
  *
  *   Always: an agent push landing on the default branch (main, master, the
- *   remote's HEAD branch; a glob, `:` or push-everything push may, #297) is
- *   refused unless the last plan_drift left a clean ship-gate stamp for the
- *   exact commit pushed (#251; open issues stay prose). Other branches are
+ *   remote's HEAD branch; a glob, `:` or push-everything push may, #297, as
+ *   may a short name or the push settings git follows, #302) is refused
+ *   unless the last plan_drift left a clean ship-gate stamp for the exact
+ *   commit pushed (#251; open issues stay prose). Other branches are
  *   untouched; a missing or unreadable stamp refuses (#299). Escape:
  *   CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
@@ -46,7 +47,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
+import { SHELLS, commandName, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -58,8 +59,17 @@ function pathHash(projectDir) {
 
 // Constants
 
-// git global options that eat the following word as their value.
-const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
+/**
+ * git's top-level options that eat the following word as their value, from
+ * git(1) and git.c (#301): `git --attr-source HEAD reset --hard` resets.
+ * Their `--opt=value` forms are one word, skipped like any switch, and so is
+ * --exec-path, which only ever takes its value after `=`. git spells these
+ * in full -- it shortens no top-level option. --super-prefix is gone from
+ * newer git and --list-cmds only takes `=`; both stay, since git refuses a
+ * line that misuses them, and an older git reads them this way.
+ */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+  "--attr-source", "--shallow-file", "--super-prefix", "--list-cmds"]);
 
 /**
  * How this guard reads a command line (shell-words.mjs): ( ), backticks and
@@ -94,9 +104,10 @@ function gitInvocations(line, depth = 0) {
   const found = [];
   for (const seg of shellSegments(line, READ)) {
     // Assignments and wrappers come off the front, flag values and all, so
-    // `/usr/bin/sudo -u root git reset --hard` is still git (#270)
+    // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
+    // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
     const { words, assigns } = unwrap(seg.words, READ);
-    const cmd = basename(words[0] ?? "");
+    const cmd = commandName(words[0]);
 
     // sh -c / bash -lc: the script is one quoted word -- parse it too,
     // found the same way the harness guard finds it (#270)
@@ -294,33 +305,198 @@ function gitOut(dir, args) {
 }
 
 /**
- * True when a command line can change push.default for its own push (#297)
- * -- a `git config` naming it, or a GIT_CONFIG_* assignment or export
- * anywhere in the line (`git config push.default matching && git push`).
- * Nothing in the line has run when the guard reads the repo's config.
+ * True when a command line can change the settings its own push follows
+ * (#297, #302) -- push.default, a remote's push refspecs, a branch's
+ * upstream, an include: a `git config` naming a push, remote, branch or
+ * include setting or section, `git remote add` or `rename`, a `git branch`
+ * setting an upstream, or an assignment or export anywhere in the line of
+ * GIT_CONFIG_*, or of HOME or XDG_CONFIG_HOME, which move the user config
+ * git reads (`git config push.default matching && git push`). Nothing in
+ * the line has run when the guard reads the repo's config.
  */
 function linePushConfig(command, invs) {
-  const namesIt = (i) => [...i.args, ...i.paths].some((a) => /^push\.default$/i.test(a));
-  return invs.some((i) => i.sub === "config" && namesIt(i))
-    || shellSegments(command, READ).some((s) => s.words.some((w) => /GIT_CONFIG\w*=/.test(w)));
+  const setting = /^(push|remote|branch|include|includeif)(\.|$)/i;
+  const changes = (i) => {
+    if (i.sub === "config") return [...i.args, ...i.paths].some((a) => setting.test(a));
+    if (i.sub === "remote") return i.args[0] === "add" || i.args[0] === "rename";
+    if (i.sub !== "branch") return false;
+    const { flags } = readArgs(i.args, { short: "u", alias: { u: "--set-upstream-to", t: "--track" },
+      longs: ["--set-upstream-to", "--track"], valued: ["--set-upstream-to"] });
+    return flags.has("--set-upstream-to") || flags.has("--track");
+  };
+  return invs.some(changes) || shellSegments(command, READ)
+    .some((s) => s.words.some((w) => /GIT_CONFIG\w*=/.test(w) || /^(?:HOME|XDG_CONFIG_HOME)=/.test(w)));
 }
 
 /** True when `rev` names a commit here. */
 const resolves = (dir, rev) => gitOut(dir, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null;
 
+/** A config key the way git compares them: section and name in any case, the subsection exact. */
+function configKey(key) {
+  const i = key.indexOf(".");
+  const j = key.lastIndexOf(".");
+  return i < 0 ? key.toLowerCase()
+    : key.slice(0, i).toLowerCase() + key.slice(i, j) + key.slice(j).toLowerCase();
+}
+
 /**
- * True when a push with no refspec could push every matching branch
- * (#297): push.default=matching -- this command's own `-c` first, then
- * the repo's config -- or config the guard can't read, which counts: a
- * --config-env for push.default, or a line that sets git config before it
- * pushes (see linePushConfig), after the guard has read the config.
+ * This command's own config as [key, value] pairs (#302): each `-c` (a bare
+ * `-c x.y` is true), then each --config-env, whose value sits in an
+ * environment variable the guard can't see -- undefined.
  */
-function pushesMatching(inv, dir) {
-  if (inv.lineConfig) return true;
-  if (inv.configEnvs.some((c) => /^push\.default=/i.test(c))) return true;
-  const set = inv.configs.map((c) => /^push\.default=(.*)$/is.exec(c)?.[1]).filter((v) => v !== undefined);
-  const mode = set.length ? set[set.length - 1] : gitOut(dir, ["config", "--get", "push.default"]);
-  return /^\s*matching\s*$/i.test(mode ?? "");
+function ownConfig(inv) {
+  const pairs = inv.configs.map((c) => {
+    const eq = c.indexOf("=");
+    return eq < 0 ? [configKey(c), "true"] : [configKey(c.slice(0, eq)), c.slice(eq + 1)];
+  });
+  for (const c of inv.configEnvs) {
+    const eq = c.lastIndexOf("=");
+    pairs.push([configKey(eq < 0 ? c : c.slice(0, eq)), undefined]);
+  }
+  return pairs;
+}
+
+// The settings that decide where a push lands, and to which remote (#297, #302).
+const PUSH_SETTING = /^(push\.default|remote\.pushdefault|remote\..+\.push|branch\..+\.(merge|remote|pushremote))$/;
+
+/**
+ * True when the guard can't read the settings a push follows (#297, #302):
+ * the line changes them before it pushes (see linePushConfig), the command
+ * pulls in an include (`-c include.path=F` can set anything), or a
+ * --config-env sets one from an environment variable the guard can't see.
+ * The guard never hands a command's own `-c` values to git -- they are
+ * read here, so nothing the agent typed runs before the guard says yes.
+ */
+function configUnknown(inv) {
+  return inv.lineConfig || ownConfig(inv).some(([k, v]) =>
+    /^include(if)?\./.test(k) || (v === undefined && PUSH_SETTING.test(k)));
+}
+
+/**
+ * Every value a push's git sees for `key` (#302): the repo's config, its
+ * includes followed, then this command's own `-c` ones after them -- the
+ * last wins for a single-valued key. Ask configUnknown first.
+ */
+function configValues(inv, dir, key) {
+  const want = configKey(key);
+  const repo = gitOut(dir, ["config", "--get-all", key]);
+  return [...(repo ? repo.split("\n") : []),
+    ...ownConfig(inv).filter(([k]) => k === want).map(([, v]) => v)];
+}
+
+/**
+ * The push refspecs configured for `remote` (#302): git pushes these
+ * instead when a push names no refspec, and sends a branch typed on its own
+ * where they map it. Ask configUnknown first.
+ */
+function remotePushSpecs(inv, dir, remote) {
+  const out = [];
+  const keep = (key, value) => {
+    const m = /^remote\.(.+)\.push$/.exec(key);
+    if (m && value !== undefined && m[1] === remote) out.push(value);
+  };
+  for (const line of (gitOut(dir, ["config", "--get-regexp", "^remote\\..*\\.push$"]) ?? "").split("\n")) {
+    const sp = line.indexOf(" ");
+    if (sp > 0) keep(line.slice(0, sp), line.slice(sp + 1));
+  }
+  for (const [k, v] of ownConfig(inv)) keep(k, v);
+  return out;
+}
+
+/** The last value a push's git sees for `key`, or null when it is unset (#302). */
+function configValue(inv, dir, key) {
+  const set = configValues(inv, dir, key);
+  return set.length ? set[set.length - 1] : null;
+}
+
+/** push.default as this push's git reads it, lowercased -- `simple` when unset (#302). */
+function pushMode(inv, dir) {
+  return (configValue(inv, dir, "push.default") ?? "simple").trim().toLowerCase();
+}
+
+/** The value of the last `--repo` a push gives, shortened as git allows, or undefined (#302). */
+function repoOption(inv) {
+  let repo;
+  for (let k = 0; k < inv.args.length; k++) {
+    const a = inv.args[k];
+    const eq = a.indexOf("=");
+    const name = eq < 0 ? a : a.slice(0, eq);
+    if (!name.startsWith("--") || !longNames(name, PUSH_READ.longs).includes("--repo")) continue;
+    repo = eq < 0 ? inv.args[++k] : a.slice(eq + 1);
+  }
+  return repo;
+}
+
+/**
+ * The remote a push goes to (#302): the one it names, else its --repo, else
+ * the one git picks for a bare push from `current` -- the branch's
+ * pushRemote, remote.pushDefault, the branch's remote, then origin. Settings
+ * the guard can't read leave origin, the same guess the default-branch
+ * names start from; the callers that need more ask configUnknown first.
+ */
+function pushRemote(inv, dir, positional, current) {
+  const named = positional[0] ?? repoOption(inv);
+  if (named !== undefined) return named;
+  if (configUnknown(inv)) return "origin";
+  const keys = current ? [`branch.${current}.pushRemote`, "remote.pushDefault", `branch.${current}.remote`]
+    : ["remote.pushDefault"];
+  for (const key of keys) {
+    const v = configValue(inv, dir, key);
+    if (v) return v;
+  }
+  return "origin";
+}
+
+/**
+ * The branch a push destination lands on, the way git reads one (#302):
+ * `refs/heads/x` and the short `heads/x` are branch x -- git matches a short
+ * name against the remote's refs/heads/... -- and a bare name is the branch
+ * of that name. `HEAD` counts as the current branch, generously: git lands
+ * `x:HEAD` on a branch named HEAD.
+ */
+function branchNames(dst, current) {
+  if (dst === "HEAD") return current ? [current] : [];
+  const m = /^(?:refs\/)?heads\/(.+)$/.exec(dst);
+  return [m ? m[1] : dst];
+}
+
+/**
+ * The full local ref names a refspec's source can be (#302), the way git
+ * finds the ref a push of it names: `main`, `heads/main` and
+ * `refs/heads/main` alike, HEAD and `@` the current branch, and a symbolic
+ * branch the one it points at -- git lands `git push origin alias` on main
+ * when alias points there.
+ */
+function localRefs(src, dir, current) {
+  const refs = new Set();
+  if (src === "HEAD" || src === "@") {
+    if (current) refs.add(`refs/heads/${current}`);
+  } else {
+    refs.add(src.startsWith("refs/") ? src : `refs/heads/${src.replace(/^heads\//, "")}`);
+  }
+  // a configured refspec could start with `-`: never hand git one as an option
+  const full = src.startsWith("-") ? null
+    : gitOut(dir, ["rev-parse", "--symbolic-full-name", src])?.split("\n")[0];
+  if (full?.startsWith("refs/")) refs.add(full);
+  return [...refs];
+}
+
+/**
+ * Where a remote push refspec sends the local ref `full`, as branch names
+ * (#302) -- an exact source or a glob, the way git maps a branch typed on
+ * its own through `remote.<name>.push`. A spec with no destination keeps
+ * the name, and so maps nowhere new.
+ */
+function mapThrough(full, spec) {
+  const plain = spec.replace(/^\+/, "");
+  const colon = plain.indexOf(":");
+  if (colon < 0) return [];
+  const [src, dst] = [plain.slice(0, colon), plain.slice(colon + 1)];
+  const star = src.indexOf("*");
+  if (star < 0) return src === full ? branchNames(dst, null) : [];
+  const [pre, suf] = [src.slice(0, star), src.slice(star + 1)];
+  if (full.length < pre.length + suf.length || !full.startsWith(pre) || !full.endsWith(suf)) return [];
+  return branchNames(dst.replace("*", () => full.slice(pre.length, full.length - suf.length)), null);
 }
 
 /**
@@ -328,8 +504,9 @@ function pushesMatching(inv, dir) {
  * maps the src pattern onto the dst pattern through their one `*`, so the
  * branch landing on refs/heads/<name> is the src with the dst's match put
  * back in -- `refs/heads/x*:refs/heads/mai*` lands branch `xn` on main.
- * The dst is tried against the full ref and the bare name both, and only
- * a source that exists is one. git refuses a glob on one side only.
+ * The dst is tried against the full ref, the short heads/ name (#302) and
+ * the bare name, and only a source that exists is one. git refuses a glob
+ * on one side only.
  */
 function globSources(src, dst, defaults, dir) {
   if (!src.includes("*")) return [];
@@ -337,7 +514,7 @@ function globSources(src, dst, defaults, dir) {
   const [pre, suf] = [dst.slice(0, star), dst.slice(star + 1)];
   const found = [];
   for (const b of defaults) {
-    for (const name of [`refs/heads/${b}`, b]) {
+    for (const name of [`refs/heads/${b}`, `heads/${b}`, b]) {
       if (name.length < pre.length + suf.length || !name.startsWith(pre) || !name.endsWith(suf)) continue;
       const from = src.replace("*", () => name.slice(pre.length, name.length - suf.length));
       if (resolves(dir, from)) found.push(from);
@@ -346,28 +523,45 @@ function globSources(src, dst, defaults, dir) {
   return found;
 }
 
+// A source standing for "can't tell": the push follows settings the guard
+// can't read, so what it lands is unknown (#302) -- see configUnknown.
+const UNKNOWN = Symbol("unknown source");
+
 /**
  * What `git push <args>` would land on the default branch, as the source
- * revs being pushed there (null for a deletion). Empty when the push never
- * touches the default branch -- feature branches, tags, other refs. A push
- * of every branch counts (#297): --all, --branches and --mirror, the `:`
- * matching refspec, a bare push under push.default=matching, and a glob
- * whose destination can name the default branch.
+ * revs being pushed there (null for a deletion, UNKNOWN when the settings
+ * that decide it can't be read). Empty when the push never touches the
+ * default branch -- feature branches, tags, other refs. Read once per
+ * invocation.
  */
-function defaultBranchSources(inv, dir) {
+const defaultBranchSources = (inv, dir) => (inv.sources ??= branchSources(inv, dir));
+
+/**
+ * defaultBranchSources, worked out the way git resolves a push. A push of
+ * every branch counts (#297): --all, --branches and --mirror, the `:`
+ * matching refspec, a bare push under push.default=matching, and a glob
+ * whose destination can name the default branch. So does every spelling
+ * git lands there (#302): `heads/main` and `refs/heads/main` on either
+ * side of the `:`, a symbolic branch pointing at main, a bare push or a
+ * branch typed on its own that push.default=upstream (or tracking) sends to
+ * its upstream, and a remote's own push refspecs (`remote.<name>.push`),
+ * which a bare push pushes and a typed branch is mapped through.
+ */
+function branchSources(inv, dir) {
   const { flags, words: positional } = pushArgs(inv);
   const all = flags.has("--all") || flags.has("--mirror") || flags.has("--branches");
   const del = flags.has("--delete");
   const tags = flags.has("--tags");
 
   // Default branch names: main, master, and the remote's HEAD when known
-  const remote = positional[0] ?? "origin";
+  const current = gitOut(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const remote = pushRemote(inv, dir, positional, current);
   const defaults = new Set(DEFAULT_BRANCHES);
   if (/^[\w.-]+$/.test(remote)) {
     const head = gitOut(dir, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
     if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
   }
-  const current = gitOut(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const lands = (names) => names.some((n) => defaults.has(n));
 
   // Every local default branch, as the full ref -- a tag spelled the same
   // can't stand in for the branch that actually lands
@@ -376,31 +570,59 @@ function defaultBranchSources(inv, dir) {
   // --all / --mirror push every local branch, the default one included
   if (all) return everyBranch();
 
-  const refspecs = positional.slice(1);
-  if (!refspecs.length) {
-    // bare `git push` / `git push origin`: the current branch, unless --tags
-    // only -- or every matching branch under push.default=matching
-    if (tags) return [];
-    if (pushesMatching(inv, dir)) return everyBranch();
-    return current && defaults.has(current) ? ["HEAD"] : [];
-  }
-
-  const sources = [];
-  for (const spec of refspecs) {
+  // What one refspec lands there. `typed`: it came from the command line,
+  // so git may send a branch named on its own on through the settings
+  const landing = (spec, typed) => {
     const plain = spec.replace(/^\+/, "");
     // `:` pushes every branch both sides have, the default one included
-    if (plain === ":") { sources.push(...everyBranch()); continue; }
+    if (plain === ":") return everyBranch();
     const colon = plain.indexOf(":");
-    let src = colon < 0 ? plain : plain.slice(0, colon);
-    let dst = colon < 0 ? plain : plain.slice(colon + 1);
-    if (dst.includes("*")) { sources.push(...globSources(src, dst, defaults, dir)); continue; }
-    if (dst === "HEAD") dst = current ?? "";
-    dst = dst.replace(/^refs\/heads\//, "");
-    if (!defaults.has(dst)) continue;
-    if (del || src === "") src = null;
-    sources.push(src);
-  }
-  return sources;
+    const src = colon < 0 ? plain : plain.slice(0, colon);
+    const dst = colon < 0 ? plain : plain.slice(colon + 1);
+    if (dst.includes("*")) return globSources(src, dst, defaults, dir);
+    let names;
+    if (colon >= 0 || del) {
+      names = branchNames(dst, current);
+    } else {
+      // a branch on its own lands under git's full name for it
+      const refs = localRefs(src, dir, current);
+      names = refs.filter((r) => r.startsWith("refs/heads/")).map((r) => r.slice(11));
+      // ...unless the settings send it elsewhere -- git maps a ref it finds
+      // by name, never HEAD
+      if (typed && src !== "HEAD" && src !== "@") {
+        if (configUnknown(inv)) return [UNKNOWN];
+        const specs = remotePushSpecs(inv, dir, remote);
+        const upstream = /^(upstream|tracking)$/.test(pushMode(inv, dir));
+        for (const r of refs) {
+          for (const s of specs) names.push(...mapThrough(r, s));
+          if (!upstream || !r.startsWith("refs/heads/")) continue;
+          for (const m of configValues(inv, dir, `branch.${r.slice(11)}.merge`)) {
+            names.push(...branchNames(m, null));
+          }
+        }
+      }
+    }
+    if (!lands(names)) return [];
+    return [del || src === "" ? null : src];
+  };
+
+  const refspecs = positional.slice(1);
+  if (refspecs.length) return refspecs.flatMap((s) => landing(s, true));
+
+  // bare `git push` / `git push origin`: nothing but tags under --tags
+  if (tags) return [];
+  if (configUnknown(inv)) return [UNKNOWN];
+  // a remote's own push refspecs are what git pushes, when it has any
+  const configured = remotePushSpecs(inv, dir, remote);
+  if (configured.length) return configured.flatMap((s) => landing(s, false));
+  // otherwise push.default: every matching branch; the current branch to
+  // its upstream (tracking is upstream's old name); or to itself
+  const mode = pushMode(inv, dir);
+  if (mode === "matching") return everyBranch();
+  if (mode === "nothing" || !current) return [];
+  const to = mode === "upstream" || mode === "tracking"
+    ? configValues(inv, dir, `branch.${current}.merge`).flatMap((m) => branchNames(m, null)) : [current];
+  return lands(to) ? ["HEAD"] : [];
 }
 
 /**
@@ -574,15 +796,23 @@ function destructive(inv, dir) {
 
 /**
  * Why this push may not land on the default branch yet, as [why, what to
- * do instead?] -- or null when the ship gate is satisfied or doesn't apply
- * (#251). The stamp is plan_drift's record of its last run: { head, clean,
- * at }. A missing stamp is a refusal, and so is one that exists but can't
- * be read (#299): a gate that can't see its stamp refuses, never skips.
+ * do instead?, how sure the guard is?] -- or null when the ship gate is
+ * satisfied or doesn't apply (#251). The stamp is plan_drift's record of
+ * its last run: { head, clean, at }. A missing stamp is a refusal, and so
+ * is one that exists but can't be read (#299): a gate that can't see its
+ * stamp refuses, never skips. So is a push whose settings can't be read
+ * (#302) -- the guard can't say what it lands, so no stamp covers it.
  */
 function shipGateRefusal(inv, dir, projectDir, baseDir) {
   try {
     const sources = defaultBranchSources(inv, dir);
     if (!sources.length) return null;
+    if (sources.includes(UNKNOWN)) {
+      return ["git's push settings decide where, and the guard can't read them first -- the line " +
+        "changes them before it pushes, or takes them from --config-env or an include",
+      "  run the config change as a command of its own, then push -- or run /cairn:ship.",
+      "this push may land on the default branch"];
+    }
 
     const { base, hash } = pathHash(projectDir);
     const path = join(baseDir, "ship-gate", `${base}-${hash}.json`);
@@ -649,7 +879,7 @@ try {
       const why = shipGateRefusal(inv, dir, projectDir, baseDir);
       if (why) {
         refuse([
-          `cairn run guard: this push lands on the default branch, but ${why[0]}.`,
+          `cairn run guard: ${why[2] ?? "this push lands on the default branch"}, but ${why[0]}.`,
           why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
         ], UNSHIPPED_ENV);
       }
