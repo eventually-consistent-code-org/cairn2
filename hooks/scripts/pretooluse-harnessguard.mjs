@@ -29,8 +29,9 @@
  *   -C on the line can reach (#258); after a cd it can't follow, refused.
  *   Removing a protected folder or one holding it counts, and so does
  *   changing its mode, owner, flags or ACL (chmod, chown, chflags, setfacl,
- *   xattr -w, #299). A path only READ passes (#240). Not seen: a write in
- *   an interpreter (python -c) or $(...), an archive's members, paths an
+ *   xattr -w, #299), or `claude mcp add` / `remove` writing an MCP server
+ *   config itself (#303). A path only READ passes (#240). Not seen: a write
+ *   in an interpreter (python -c) or $(...), an archive's members, paths an
  *   upstream command finds itself, modes copied by cp -p, rsync or tar.
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
@@ -231,6 +232,10 @@ const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude",
 // git's global options that take the next word as their value.
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--config-env", "--super-prefix"]);
+
+// The `claude mcp` subcommands that write a server config (#303); list,
+// get, serve, login and logout leave every config as it is.
+const CLAUDE_MCP_WRITES = ["add", "add-json", "add-from-claude-desktop", "remove", "reset-project-choices"];
 
 // The most entries listed under one protected folder outside the project
 // before the rest counts as unlisted -- and so as reachable (see walkHit).
@@ -1206,14 +1211,46 @@ function gitTargets(args, seg, ctx, add) {
 }
 
 /**
+ * claude mcp (#303): add, add-json, add-from-claude-desktop and remove
+ * write ~/.claude.json in user and local scope -- local is the default --
+ * and the .mcp.json where claude runs in project scope; reset-project-choices
+ * rewrites the approvals in ~/.claude.json and the local settings. A server
+ * added there starts next session, outside every hook. The subcommand is
+ * any word after `mcp`, since a top-level option's value can sit between
+ * them, and a word from a stream (xargs, find -exec) may be the whole `mcp
+ * add ...`. ~/.claude.json is named whatever the scope says, so no
+ * misreading of the options lets a write by.
+ */
+function claudeTargets(args, ctx, add) {
+  // a nested shell's "$1" is whatever its caller's xargs or find handed it
+  const words = ctx.positional ? args.map((a) => a.replace(POSITIONAL, ctx.positional)) : args;
+  const streamed = words.some((a) => STANDINS.some((m) => a.includes(m)));
+  const at = words.findIndex((a) => could(a, "mcp"));
+  const rest = at < 0 ? [] : words.slice(at + 1);
+  if (!streamed && !CLAUDE_MCP_WRITES.some((s) => rest.some((a) => could(a, s)))) return;
+  // the scope options sit before `--`; what follows it is the server's own command line
+  const end = words.includes("--") ? words.indexOf("--") : words.length;
+  let project = false;
+  for (let i = 0; i < end; i++) {
+    const a = words[i];
+    const scope = a === "-s" || a === "--scope" ? words[++i]
+      : a.startsWith("--scope=") ? a.slice(8) : /^-s./.test(a) ? a.slice(2) : null;
+    if (scope === "project") project = true;
+  }
+  if (project) add(".mcp.json");
+  add("~/.claude.json");
+}
+
+/**
  * Every path one segment would change, as { raw, abs, mode }. Generous
  * inside a write command; silent for a command that only reads.
  */
 function writeTargets(seg, ctx) {
   const out = [];
   const { words: w0, writes, wrappers, dirs } = unwrap(seg.words, READ);
-  // xargs runs its command with paths read from stdin (#258)
-  const xargs = wrappers.find((x) => x.name === "xargs");
+  // xargs runs its command with paths read from stdin (#258). Its name is
+  // folded like any command's: macOS runs `XARGS` as xargs (#300).
+  const xargs = wrappers.find((x) => cmdName(x.name) === "xargs");
   // What this command reads on stdin, should a path come from there. A
   // stdin path in a nested line came from its caller's xargs, unless this
   // command has an xargs of its own or reads a pipe itself (`pipe`).
@@ -1312,6 +1349,7 @@ function writeTargets(seg, ctx) {
   else if (cmd === "unzip") unzipTargets(args, ctx, add);
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
   else if (cmd === "git") gitTargets(args, seg, ctx, add);
+  else if (cmd === "claude") claudeTargets(args, ctx, add);
   return out;
 }
 

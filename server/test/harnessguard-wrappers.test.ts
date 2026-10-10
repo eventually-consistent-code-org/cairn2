@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -530,6 +530,97 @@ describe("harness guard sees su, find, xargs, cwd and heredoc writes (#258)", ()
       "git commit -F - <<'EOF'\nfix: rm hooks/hooks.json wording\nEOF",
     ]) {
       expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
+// #300: macOS runs `RM` and `/BIN/RM` as rm, so the command a find -exec
+// (-execdir, -ok, -okdir) or an xargs runs is matched in any letter case,
+// and so is xargs's own name. Each capitalised form sits next to its
+// lowercase one and next to a capitalised command that only reads.
+describe("harness guard folds the names find -exec and xargs run (#300)", () => {
+  /** A project holding the hook directory, so find has something to walk. */
+  function hooked(): string {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+
+  it("a capitalised command under find -exec, -execdir, -ok or -okdir is the same write", () => {
+    const p = hooked();
+    const rows: Array<[lower: string, upper: string, read: string]> = [
+      ["find hooks -exec rm {} \\;", "find hooks -exec RM {} \\;", "find hooks -exec CAT {} \\;"],
+      ["find hooks -execdir rm {} +", "find hooks -execdir Rm {} +", "find hooks -execdir WC -l {} +"],
+      ["find hooks -ok tee {} \\;", "find hooks -ok TEE {} \\;", "find hooks -ok GREP x {} \\;"],
+      ["find hooks -okdir sed -i 's/a/b/' {} \\;", "find hooks -okdir SED -i 's/a/b/' {} \\;",
+        "find hooks -okdir SED -n 1p {} \\;"],
+      ["find hooks -exec /bin/rm {} +", "find hooks -exec /BIN/RM {} +", "find hooks -exec /BIN/CAT {} +"],
+      ["find hooks -exec cp /tmp/evil {} \\;", "find hooks -exec CP /tmp/evil {} \\;",
+        "find hooks -exec CP {} /tmp/backup/ \\;"],
+      ["find hooks -exec chmod 000 {} +", "find hooks -exec CHMOD 000 {} +", "find hooks -exec STAT {} +"],
+      ["find hooks -exec sh -c 'rm \"$1\"' _ {} \\;", "find hooks -exec SH -c 'rm \"$1\"' _ {} \\;",
+        "find hooks -exec SH -c 'cat \"$1\"' _ {} \\;"],
+      ["find . -exec find hooks -delete \\;", "find . -exec FIND hooks -delete \\;",
+        "find . -exec FIND hooks -name '*.json' \\;"],
+    ];
+    for (const [lower, upper, read] of rows) {
+      expect(guard(p, lower), lower).toBe(2);
+      expect(guard(p, upper), upper).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a capitalised command xargs runs on piped paths is the same write", () => {
+    const p = hooked();
+    const rows: Array<[lower: string, upper: string, read: string]> = [
+      ["echo hooks/a | xargs rm", "echo hooks/a | xargs RM", "echo hooks/a | xargs CAT"],
+      ["echo .claude/settings.json | xargs -I{} cp /tmp/evil {}",
+        "echo .claude/settings.json | xargs -I{} CP /tmp/evil {}",
+        "echo .claude/settings.json | xargs -I{} CP {} /tmp/copy.json"],
+      ["echo hooks/a | xargs sh -c 'rm \"$@\"' _", "echo hooks/a | xargs SH -c 'rm \"$@\"' _",
+        "echo hooks/a | xargs SH -c 'cat \"$@\"' _"],
+      ["find hooks -type f | xargs rm", "FIND hooks -type f | xargs RM", "FIND hooks -type f | xargs WC -l"],
+    ];
+    for (const [lower, upper, read] of rows) {
+      expect(guard(p, lower), lower).toBe(2);
+      expect(guard(p, upper), upper).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("xargs's own name is folded, however the shared reader spells the wrapper it peeled", () => {
+    // The shared reader peels wrappers (the other half of #300). This copy of
+    // it peels one in any letter case but hands its name back as typed --
+    // `XARGS` -- so the guard's own xargs check is what has to fold it. Once
+    // the shared reader folds wrapper names itself, the copy runs it as is.
+    const plugin = proj();
+    const scripts = join(plugin, "hooks", "scripts");
+    mkdirSync(scripts, { recursive: true });
+    const reader = readFileSync(join(dirname(HARNESSGUARD), "shell-words.mjs"), "utf8");
+    writeFileSync(join(scripts, "shell-words.mjs"),
+      reader.replace("WRAPPERS.get(name)", "WRAPPERS.get(name.toLowerCase())"));
+    copyFileSync(HARNESSGUARD, join(scripts, "pretooluse-harnessguard.mjs"));
+    const run = (projectDir: string, command: string): number | null => {
+      const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+      for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+      return spawnSync(process.execPath, [join(scripts, "pretooluse-harnessguard.mjs")], {
+        cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+        input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+      }).status;
+    };
+    const p = hooked();
+    const rows: Array<[lower: string, upper: string, read: string]> = [
+      ["echo hooks/a | xargs rm", "echo hooks/a | XARGS rm", "echo hooks/a | XARGS cat"],
+      ["echo hooks/a | xargs -n1 rm -f", "echo hooks/a | Xargs -n1 rm -f", "echo src/a | Xargs -n1 rm -f"],
+      ["echo .claude/settings.json | xargs -I{} cp /tmp/evil {}",
+        "echo .claude/settings.json | /usr/bin/XARGS -I{} cp /tmp/evil {}",
+        "echo src/a.ts | /usr/bin/XARGS -I{} cp /tmp/evil {}"],
+    ];
+    for (const [lower, upper, read] of rows) {
+      expect(run(p, lower), lower).toBe(2);
+      expect(run(p, upper), upper).toBe(2);
+      expect(run(p, read), read).toBe(0);
     }
   });
 });
