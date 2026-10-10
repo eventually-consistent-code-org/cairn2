@@ -1108,6 +1108,218 @@ describe("run guard: glob, matching and push-everything pushes meet the ship gat
   });
 });
 
+describe("run guard: short destinations and the push settings meet the ship gate (#302)", () => {
+  /**
+   * Unstamped repo checked out on `feature`, one commit ahead of main, with
+   * `origin` and `backup` remotes that exist only as config -- nothing here
+   * pushes. Each row was confirmed by a dry-run push to a throwaway remote.
+   */
+  function onFeature(): { proj: string; home: string } {
+    const f = fixture(undefined, false);
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    writeFileSync(join(f.proj, "f.txt"), "f\n");
+    git(f.proj, "add", "f.txt");
+    git(f.proj, "commit", "-q", "-m", "feature", "--no-gpg-sign");
+    git(f.proj, "remote", "add", "origin", join(f.proj, "no-such-remote.git"));
+    git(f.proj, "remote", "add", "backup", join(f.proj, "no-such-backup.git"));
+    return f;
+  }
+
+  /** feature tracks origin/main, the way `git checkout -b feature origin/main` leaves it. */
+  function tracksMain(proj: string): void {
+    git(proj, "config", "branch.feature.remote", "origin");
+    git(proj, "config", "branch.feature.merge", "refs/heads/main");
+  }
+
+  // The host's own push settings must not decide these
+  const push = (proj: string, home: string, command: string) =>
+    guard(proj, home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" });
+
+  /** Each command exits 2 at the ship gate. */
+  function expectGated(proj: string, home: string, commands: string[]): void {
+    for (const c of commands) {
+      const r = push(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("/cairn:ship");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    }
+  }
+
+  /** Each command exits 0. */
+  function expectPasses(proj: string, home: string, commands: string[]): void {
+    for (const c of commands) expect(push(proj, home, c).status, c).toBe(0);
+  }
+
+  it("each short spelling of the default branch is refused; its feature-branch neighbour passes", () => {
+    const { proj, home } = onFeature();
+    // Each row: [lands main with no drift check, the same spelling landing a feature branch].
+    // Before #302 only `main` and `refs/heads/main` were read as main.
+    const rows: Array<[lands: string, feature: string]> = [
+      ["git push origin feature:heads/main", "git push origin feature:heads/feature"],
+      ["git push origin HEAD:heads/main", "git push origin HEAD:heads/feature"],
+      ["git push origin heads/main", "git push origin heads/feature"],
+      ["git push origin refs/heads/main", "git push origin refs/heads/feature"],
+      ["git push origin feature:heads/master", "git push origin feature:heads/mainline"],
+      ["git push origin -- heads/main", "git push origin -- heads/feature"],
+      ["git push origin 'refs/heads/*:heads/*'", "git push origin 'refs/heads/feat*:heads/feat*'"],
+      ["SUDO GIT push origin feature:heads/main", "SUDO GIT push origin feature:heads/feature"],
+    ];
+    for (const [lands, feature] of rows) {
+      expectGated(proj, home, [lands]);
+      expectPasses(proj, home, [feature]);
+    }
+  });
+
+  it("a short destination that deletes the default branch is the table's refusal", () => {
+    const { proj, home } = onFeature();
+    for (const c of ["git push origin :heads/main", "git push origin --delete heads/main"]) {
+      const r = push(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("deleting the default branch");
+    }
+    expectPasses(proj, home, ["git push origin :heads/feature", "git push origin --delete heads/feature"]);
+  });
+
+  it("a symbolic branch pointing at main lands on main, the way git resolves it", () => {
+    const { proj, home } = onFeature();
+    git(proj, "symbolic-ref", "refs/heads/alias", "refs/heads/main");
+    expectGated(proj, home, ["git push origin alias", "git push origin heads/alias"]);
+    expectPasses(proj, home, ["git push origin alias:other", "git push origin feature"]);
+  });
+
+  it("a clean stamp at main's tip lets a short spelling through; another commit is refused", () => {
+    const { proj, home } = onFeature();
+    stamp(proj, home, { head: git(proj, "rev-parse", "main") });
+    expectPasses(proj, home, ["git push origin heads/main", "git push origin main:heads/main"]);
+    const r = push(proj, home, "git push origin feature:heads/main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("not the commit being pushed");
+  });
+
+  it("push.default=upstream or tracking sends a bare push, or the branch typed alone, to its upstream", () => {
+    for (const mode of ["upstream", "tracking"]) {
+      const { proj, home } = onFeature();
+      git(proj, "config", "push.default", mode);
+      tracksMain(proj);
+      expectGated(proj, home, [
+        "git push",
+        "git push origin",
+        "git push origin feature",
+        "git push origin heads/feature",
+        "git push origin refs/heads/feature",
+        "git push -u origin feature",
+      ]);
+      // git maps a branch it finds by name, never HEAD; an explicit
+      // destination, or tags alone, aren't mapped at all
+      expectPasses(proj, home, ["git push origin HEAD", "git push origin feature:feature", "git push --tags"]);
+      // a short upstream name is main too
+      git(proj, "config", "branch.feature.merge", "main");
+      expectGated(proj, home, ["git push", "git push origin feature"]);
+      // ...and a branch tracking another branch is its own neighbour
+      git(proj, "config", "branch.feature.merge", "refs/heads/feature");
+      expectPasses(proj, home, ["git push", "git push origin", "git push origin feature"]);
+    }
+  });
+
+  it("the command's own -c counts; simple and current keep the branch's name", () => {
+    const { proj, home } = onFeature();
+    tracksMain(proj);
+    expectGated(proj, home, [
+      "git -c push.default=upstream push",
+      "git -c push.default=tracking push origin feature",
+      "git -c Push.Default=upstream push origin",
+    ]);
+    // simple refuses a branch tracking another name itself; current pushes it to its own name
+    expectPasses(proj, home, ["git push", "git push origin feature", "git -c push.default=current push"]);
+    // an upstream set on the command line is read the same way
+    git(proj, "config", "--unset", "branch.feature.merge");
+    git(proj, "config", "push.default", "upstream");
+    expectGated(proj, home, ["git -c branch.feature.merge=refs/heads/main push"]);
+    expectPasses(proj, home, ["git -c branch.feature.merge=refs/heads/other push"]);
+  });
+
+  it("a clean stamp at the pushed commit lets an upstream push through; another commit is refused", () => {
+    const { proj, home } = onFeature();
+    git(proj, "config", "push.default", "upstream");
+    tracksMain(proj);
+    stamp(proj, home, { head: git(proj, "rev-parse", "feature") });
+    expectPasses(proj, home, ["git push", "git push origin feature"]);
+    stamp(proj, home, { head: git(proj, "rev-parse", "main") });
+    const r = push(proj, home, "git push");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("not the commit being pushed");
+  });
+
+  it("a remote's own push refspecs are what a bare push pushes, and map a branch typed alone", () => {
+    const { proj, home } = onFeature();
+    git(proj, "config", "remote.origin.push", "refs/heads/feature:refs/heads/main");
+    expectGated(proj, home, [
+      "git push",
+      "git push origin",
+      "git push origin feature",
+      "git push origin heads/feature",
+      "git push --repo=origin",
+    ]);
+    // an explicit destination, tags alone, or a remote without the setting, push as typed
+    expectPasses(proj, home, ["git push origin feature:feature", "git push --tags", "git push backup",
+      "git push backup feature", "git push --repo=backup"]);
+    // the bare push follows the branch's remote: backup has the setting, origin doesn't
+    git(proj, "config", "--unset", "remote.origin.push");
+    git(proj, "config", "remote.backup.push", "refs/heads/feature:refs/heads/main");
+    expectPasses(proj, home, ["git push", "git push origin feature"]);
+    git(proj, "config", "branch.feature.pushRemote", "backup");
+    expectGated(proj, home, ["git push", "git push backup feature"]);
+    // a glob maps through its `*`: refs/heads/x* sends xn to refs/heads/mai* + "n"
+    const g = onFeature();
+    git(g.proj, "branch", "xn");
+    git(g.proj, "config", "remote.origin.push", "refs/heads/x*:refs/heads/mai*");
+    expectGated(g.proj, g.home, ["git push origin xn"]);
+    expectPasses(g.proj, g.home, ["git push origin feature"]);
+    // ...and set on the command line it is read the same way
+    const c = onFeature();
+    expectGated(c.proj, c.home, ["git -c remote.origin.push=refs/heads/feature:refs/heads/main push"]);
+    expectPasses(c.proj, c.home, ["git -c remote.origin.push=refs/heads/feature:refs/heads/feature push"]);
+  });
+
+  it("settings the line changes first, or can't show, refuse what they decide -- even under a clean stamp", () => {
+    const { proj, home } = onFeature();
+    stamp(proj, home, { head: git(proj, "rev-parse", "main") });
+    // Each row: [follows settings the guard can't read, its neighbour]
+    const rows: Array<[unknown: string, neighbour: string]> = [
+      ["git config push.default upstream && git push", "git config user.name x && git push"],
+      ["git config branch.feature.merge refs/heads/main && git push", "git config core.pager cat && git push"],
+      ["git config remote.origin.push refs/heads/feature:refs/heads/main; git push origin feature",
+        "git config user.email x; git push origin feature"],
+      ["git branch -u origin/main && git push", "git branch -v && git push"],
+      ["git branch --set-upstream-to=origin/main && git push origin feature", "git branch --list && git push origin feature"],
+      ["git remote rename backup origin && git push", "git remote -v && git push"],
+      ["git -c include.path=elsewhere.cfg push", "git -c user.name=x push"],
+      // HOME and XDG_CONFIG_HOME move the user config git reads
+      ["HOME=/tmp/elsewhere git push origin feature", "LANG=C git push origin feature"],
+      ["export XDG_CONFIG_HOME=/tmp/elsewhere; git push", "export PAGER=cat; git push"],
+      ["E=upstream git --config-env=push.default=E push origin feature", "git --config-env=core.pager=E push origin feature"],
+    ];
+    for (const [unknown, neighbour] of rows) {
+      const r = push(proj, home, unknown);
+      expect(r.status, unknown).toBe(2);
+      expect(r.stderr, unknown).toContain("may land on the default branch");
+      expect(r.stderr, unknown).toContain("command of its own");
+      expectOwnerTail(r.stderr, unknown, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(push(proj, home, neighbour).status, neighbour).toBe(0);
+    }
+    // an explicit destination doesn't follow the settings, so it is checked as typed
+    expectPasses(proj, home, ["git config push.default upstream && git push origin main:main"]);
+    expectGated(proj, home, ["git config push.default upstream && git push origin feature:main"]);
+  });
+
+  it("mid-run, an upstream push still needs the run's push authority", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = push(proj, home, "git -c push.default=upstream push origin heads/main");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+  });
+});
+
 describe("run guard: a stamp or run list that exists but can't be read refuses (#299)", () => {
   // chmod takes no read access from root, and Windows has no mode bits
   const canChmod = process.platform !== "win32" && process.getuid?.() !== 0;
