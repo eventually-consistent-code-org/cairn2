@@ -623,6 +623,15 @@ describe("harness guard folds the names find -exec and xargs run (#300)", () => 
       expect(run(p, read), read).toBe(0);
     }
   });
+
+  it("a capitalised xargs is recognised end to end, with the shared reader folding the wrapper", () => {
+    // Both halves of #300 merged: the real shared reader peels `XARGS`, and the
+    // guard's own xargs check folds it, so the plain guard refuses the write.
+    const p = hooked();
+    expect(guard(p, "echo hooks/a | XARGS rm"), "XARGS rm on a hook path").toBe(2);
+    expect(guard(p, "echo src/a | XARGS rm"), "XARGS rm elsewhere").toBe(0);
+    expect(guard(p, "echo hooks/a | XARGS cat"), "XARGS cat reads").toBe(0);
+  });
 });
 
 describe("harness guard reads the command after shell keywords and grouping words (#285)", () => {
