@@ -731,6 +731,58 @@ describe("run guard: a capitalised command name is the program a Mac runs (#300)
   });
 });
 
+describe("run guard: a git top-level option's separate value is not the subcommand (#301)", () => {
+  // Each row: [separate value, `=` form, separate value before a harmless
+  // subcommand]. Before #301 only -C, -c, --git-dir, --work-tree,
+  // --namespace and --config-env took the next word, so `HEAD` in
+  // `git --attr-source HEAD reset --hard` read as the subcommand.
+  const rows: Array<[separate: string, joined: string, harmless: string]> = [
+    ["git --attr-source HEAD reset --hard", "git --attr-source=HEAD reset --hard", "git --attr-source HEAD status"],
+    ["git --shallow-file x clean -fd", "git --shallow-file=x clean -fd", "git --shallow-file x clean -n"],
+    ["git --super-prefix sub/ stash clear", "git --super-prefix=sub/ stash clear", "git --super-prefix sub/ stash list"],
+    ["git --list-cmds main reset --hard", "git --list-cmds=main reset --hard", "git --list-cmds main status"],
+    ["git --git-dir .git checkout -- .", "git --git-dir=.git checkout -- .", "git --git-dir .git checkout -- a.txt"],
+    ["git --work-tree . restore .", "git --work-tree=. restore .", "git --work-tree . restore --staged ."],
+    ["git --namespace ns push --force origin x", "git --namespace=ns push --force origin x", "git --namespace ns push origin x"],
+    ["git --config-env core.editor=E reset --hard", "git --config-env=core.editor=E reset --hard",
+      "git --config-env core.editor=E status"],
+    ["git -C . --attr-source HEAD --no-pager reflog expire", "git -C . --attr-source=HEAD --no-pager reflog expire",
+      "git -C . --attr-source HEAD --no-pager reflog"],
+    ["SUDO GIT --attr-source HEAD reset --hard", "SUDO GIT --attr-source=HEAD reset --hard", "SUDO GIT --attr-source HEAD log"],
+  ];
+
+  it("each form is refused like the `=` form; the harmless subcommand behind the value passes", () => {
+    const { proj, home } = fixture();
+    for (const [separate, joined, harmless] of rows) {
+      const r = guard(proj, home, separate);
+      expect(r.status, separate).toBe(2);
+      expect(r.stderr, separate).toContain("refused in every session");
+      expect(guard(proj, home, joined).status, joined).toBe(2);
+      expect(guard(proj, home, harmless).status, harmless).toBe(0);
+    }
+  });
+
+  it("--exec-path takes a value only after `=`, so the word after it is the subcommand", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "git --exec-path=/x reset --hard").status).toBe(2);
+    expect(guard(proj, home, "git --exec-path reset --hard").status).toBe(2);
+    expect(guard(proj, home, "git --exec-path=/x status").status).toBe(0);
+  });
+
+  it("a value-taking option before push and checkout still meets the ship gate and the live-run rule", () => {
+    const bare = fixture(undefined, false);
+    expect(guard(bare.proj, bare.home, "git --attr-source HEAD push origin main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "git --shallow-file x push origin HEAD:main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "git --attr-source HEAD push origin main:feature").status).toBe(0);
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    for (const c of ["git --attr-source HEAD checkout main", "git --shallow-file x switch main"]) {
+      const r = guard(live.proj, live.home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+    }
+  });
+});
+
 describe("run guard: mid-run push needs manifest push authority (#252)", () => {
   const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
   const granted = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };

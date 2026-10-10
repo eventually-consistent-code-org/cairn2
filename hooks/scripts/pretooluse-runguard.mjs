@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299, #300) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#301) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -58,8 +58,17 @@ function pathHash(projectDir) {
 
 // Constants
 
-// git global options that eat the following word as their value.
-const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
+/**
+ * git's top-level options that eat the following word as their value, from
+ * git(1) and git.c (#301): `git --attr-source HEAD reset --hard` resets.
+ * Their `--opt=value` forms are one word, skipped like any switch, and so is
+ * --exec-path, which only ever takes its value after `=`. git spells these
+ * in full -- it shortens no top-level option. --super-prefix is gone from
+ * newer git and --list-cmds only takes `=`; both stay, since git refuses a
+ * line that misuses them, and an older git reads them this way.
+ */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+  "--attr-source", "--shallow-file", "--super-prefix", "--list-cmds"]);
 
 /**
  * How this guard reads a command line (shell-words.mjs): ( ), backticks and
