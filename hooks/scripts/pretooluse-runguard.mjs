@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299) --
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299, #300) --
  *   refuses git commands that rewrite a working tree or its history out
  *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
  *   ANY internal error exits 0 -- a broken guard never blocks work.
@@ -46,7 +46,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
+import { SHELLS, commandName, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -94,9 +94,10 @@ function gitInvocations(line, depth = 0) {
   const found = [];
   for (const seg of shellSegments(line, READ)) {
     // Assignments and wrappers come off the front, flag values and all, so
-    // `/usr/bin/sudo -u root git reset --hard` is still git (#270)
+    // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
+    // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
     const { words, assigns } = unwrap(seg.words, READ);
-    const cmd = basename(words[0] ?? "");
+    const cmd = commandName(words[0]);
 
     // sh -c / bash -lc: the script is one quoted word -- parse it too,
     // found the same way the harness guard finds it (#270)
