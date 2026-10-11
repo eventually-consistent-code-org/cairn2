@@ -82,7 +82,11 @@
  *   GH_PAGER, ack's -- holds a command line too, judged right after the
  *   command it rides on (`GIT_PAGER=... git log`). Quoted text never
  *   refuses, but a double-quoted $(...) still runs, so its body is checked
- *   as a command of its own (#257).
+ *   as a command of its own (#257). An unquoted $(...) or backtick is one
+ *   word of the command around it (#319): `git reset $(git rev-parse X)
+ *   --hard` is a hard reset, its --hard never cut off into a line of its
+ *   own. A command that only exists in a substitution's output (`$(cat
+ *   script)` run as a command) is still not seen.
  *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
@@ -141,10 +145,11 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
   "--attr-source", "--shallow-file", "--super-prefix", "--list-cmds"]);
 
 /**
- * How this guard reads a command line (shell-words.mjs): ( ), backticks and
- * # comments end a command, quoted $(...) bodies are commands (#257), and
- * backslash-newline joins lines. Redirects and heredocs are not modelled,
- * so a heredoc body line reads as a command of its own.
+ * How this guard reads a command line (shell-words.mjs): ( ) and #
+ * comments end a command, a $(...) or backtick is one word whose body is
+ * a command of its own (#257, #319), and backslash-newline joins lines.
+ * Redirects and heredocs are not modelled, so a heredoc body line reads
+ * as a command of its own.
  */
 const READ = {
   subshells: true, comments: true, substitutions: true,
@@ -338,15 +343,16 @@ function readLine(line) {
 /**
  * Records what one command does to the folder and the git environment the
  * rest of the line runs in (#306): a cd or pushd (lost when a subshell
- * break cuts its target short -- `cd $(...)`), an env -C or sudo -D
- * folder, a GIT_ENV value set by a bare assignment, export or declare, or
+ * break leaves it no target; a `cd $(...)` is lost once pathWord reads
+ * the target), an env -C or sudo -D folder, a GIT_ENV value set by a
+ * bare assignment, export or declare, or
  * taken away by unset (or a bare export/declare of the name), and any
  * CDPATH the line sets, even as one cd's own prefix.
  */
 function noteFolders(out, seg, words, assigns, wrapDirs) {
   for (const raw of wrapDirs) out.moves.push({ raw });
   if (words[0] === "cd" || words[0] === "pushd") {
-    out.moves.push({ cmd: words[0], args: words.slice(1), lost: seg.op === "(" || seg.op === "`" });
+    out.moves.push({ cmd: words[0], args: words.slice(1), lost: seg.op === "(" });
   }
   const declares = /^(export|declare|typeset|readonly|local|unset)$/.test(words[0] ?? "");
   const shared = [...(words.length ? [] : assigns), ...(declares ? words.slice(1) : [])];

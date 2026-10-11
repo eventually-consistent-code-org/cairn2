@@ -645,6 +645,15 @@ describe("run guard hook", () => {
       .status).toBe(2);
   });
 
+  it("a --hard after an unquoted $(...) is still the reset's flag (#319)", () => {
+    const { proj, home } = runFixture();
+    const env = { CAIRN_HOME: home };
+    const r = runHookRaw(RUNGUARD, proj, cwdPayload("git reset $(git rev-parse HEAD~1) --hard", proj), env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("git reset");
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("git diff $(git rev-parse HEAD~1)", proj), env).status).toBe(0);
+  });
+
   it("allows the same command inside the run's own worktree", () => {
     const { proj, home } = runFixture("running");
     const wt = join(freshDir("cairn-hooks-runguard-wt-"), "tree");
@@ -926,6 +935,14 @@ describe("harness guard hook", () => {
     ]) {
       expect(runHookRaw(HARNESSGUARD, p, bashPayload(c)).status, c).toBe(2);
     }
+  });
+
+  it("a literal target after an unquoted $(...) is still the command's operand (#319)", () => {
+    const p = proj();
+    const r = runHookRaw(HARNESSGUARD, p, bashPayload("cp $(echo evil.json) hooks/hooks.json"));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("hook directory");
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("cp $(ls *.txt | head -1) /tmp/")).status).toBe(0);
   });
 
   it("reading a protected file stays frictionless", () => {

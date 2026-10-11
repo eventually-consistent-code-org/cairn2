@@ -235,11 +235,19 @@ function commandStart(words) {
  *                  heredoc body is data -- skipped through its delimiter line
  *                  and kept on its segment. Off: those characters are word
  *                  text and body lines are commands.
- *   subshells      `(` `)` and an unquoted backtick end a command.
+ *   subshells      `(` and `)` end a command: `(cd x && rm y)` is a cd and
+ *                  an rm. Off: they are word text.
  *   comments       an unquoted `#` at a word start comments out its line.
- *   substitutions  `$(...)` and backticks inside double quotes are run by
- *                  the shell (#257): the word keeps the text, and each body
- *                  is split as a command line of its own and appended.
+ *   substitutions  `$(...)` and backtick bodies, quoted or not, are run by
+ *                  the shell (#257): each is split as a command line of its
+ *                  own and appended after the line's segments.
+ *
+ * Whatever `read` says, a `$(...)`, backtick, `$((...))`, `<(...)` or
+ * `>(...)` outside quotes is one word, however many words run inside it
+ * (#319): the shell replaces the whole thing before the command sees its
+ * arguments, so `cp $(echo x) hooks/hooks.json` is a cp with two operands,
+ * never three commands -- and the literal target after it is never lost.
+ * Nesting and quotes inside are honoured, and `foo$(x)bar` stays one word.
  *   continuation   backslash-newline joins lines, and a lone trailing
  *                  backslash is dropped. Off: the backslash is word text.
  *   posixEscapes   inside double quotes a backslash escapes only " \ $ and
@@ -250,7 +258,7 @@ function commandStart(words) {
  */
 export function shellSegments(command, read = {}) {
   const segs = [];
-  const subs = []; // bodies of quoted command substitutions, split at the end
+  const subs = []; // bodies of command substitutions, split at the end
   const pending = []; // heredocs whose bodies start on the next line
   let words = [];
   let redirects = [];
@@ -289,7 +297,13 @@ export function shellSegments(command, read = {}) {
     inputs = [];
   };
   const blank = read.anyWhitespace ? (c) => /\s/.test(c) : (c) => c === " " || c === "\t";
-  const breaks = read.subshells ? ";&|()`" : ";&|";
+  const breaks = read.subshells ? ";&|()" : ";&|";
+  // A substitution's text joins the word being read; its body is read as a command line after the line.
+  const substitute = (end, body) => {
+    if (body !== null && read.substitutions) subs.push(body);
+    cur = (cur ?? "") + command.slice(i, end + 1);
+    i = end + 1;
+  };
 
   let i = 0;
   while (i < command.length) {
@@ -338,6 +352,21 @@ export function shellSegments(command, read = {}) {
       }
       cur = (cur ?? "") + s;
       i++;
+      continue;
+    }
+
+    // $( ... ), $(( ... )), <( ... ) and >( ... ) outside quotes -- one word
+    // to the matching paren (#319). Arithmetic has no command inside it.
+    if ((c === "$" || c === "<" || c === ">") && n === "(") {
+      const end = closeParen(command, i + 2);
+      substitute(end, c === "$" && command[i + 2] !== "(" ? command.slice(i + 2, end) : null);
+      continue;
+    }
+
+    // ` ... ` outside quotes -- one word to the closing backtick (#319)
+    if (c === "`") {
+      const end = closeTick(command, i + 1);
+      substitute(end, command.slice(i + 1, end).replace(/\\([`\\$])/g, "$1"));
       continue;
     }
 
