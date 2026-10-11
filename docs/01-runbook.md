@@ -1874,14 +1874,21 @@ every git command the agent runs through Bash the way a shell would:
 through wrappers and their flag values (`sudo -u root`, `timeout 5`,
 `env`, `nice -n 5`), program runners that start another command
 (`xcrun`, `arch -arm64`, `caffeinate`, `script -q /dev/null`, `flock`,
-`watch`, and the g-prefixed GNU tools Homebrew installs), a `sh -c`
-string (and the line `script -c` or `flock -c` hands a shell), shell
-keywords and grouping (`if`, `for`, `{ }`, `( )`), and a `$(…)` inside
-double quotes, which still runs. An MCP tool's command line is read the
-same way (see *Which tools the guards see*, below). Quoted text that
-only mentions git never trips it — a commit message saying "never `git
-reset --hard`" passes. A guard that breaks lets the command through
-rather than blocking work. It enforces three rules.
+`watch`, `strace`, `runuser`, and the g-prefixed GNU tools Homebrew
+installs), a `sh -c` string (and the line `script -c`, `flock -c` or
+`runuser -c` hands a shell), shell keywords and grouping (`if`, `for`,
+`{ }`, `( )`), and a `$(…)` inside double quotes, which still runs. A
+runner the table doesn't name is backstopped: when an unknown program's
+later words form a command — `op run -- git push`, `bundle exec git
+reset --hard`, `uv run`, a `-c` string, `tmux new-session -d '…'`,
+`osascript -e 'do shell script "…"'` — that inner line is judged too, so
+the table needn't grow one runner at a time. A program that only prints
+or searches its arguments (`echo`, `grep`, `gh`, `jq`, …) runs none of
+them. An MCP tool's command line is read the same way (see *Which tools
+the guards see*, below). Quoted text that only mentions git never trips
+it — a commit message saying "never `git reset --hard`" passes. A guard
+that breaks lets the command through rather than blocking work. It
+enforces three rules.
 
 **Always, in every session: no git command that throws work away with
 no undo.** Each refused form has an everyday neighbour that stays
@@ -1985,8 +1992,10 @@ the files the patch touches; `git checkout`, `restore`, `rm` and `mv` on
 those paths; `find -delete` or `-exec` over them; paths piped into
 `xargs`; the file a wrapper writes itself (`time -o`, `script`'s
 typescript); and all of these inside wrappers and the same program
-runners the run guard reads through, `bash -c`, `su -c`, a heredoc fed
-to a shell, or shell keywords and grouping. Removing a protected
+runners the run guard reads through — including the off-table backstop,
+so a write behind `op run --`, `bundle exec`, `pnpm exec`, `uv run` or
+`tmux new-session -d` is seen — `bash -c`, `su -c`, a heredoc fed to a
+shell, or shell keywords and grouping. Removing a protected
 folder, or a folder that holds one (the project itself, your home),
 counts too. So does Claude Code writing that configuration itself:
 `claude mcp add` and `remove`; `claude plugin install`, `uninstall`,
@@ -2037,10 +2046,13 @@ An MCP tool is judged by the shapes these guards know, not by what its
 server can do:
 
 - **A command line in its input** — a `command`, `cmd` or
-  `shell_command` field — is read like a Bash line, by both guards. The
-  harness guard also reads an `args` list after the command, each entry
-  of a `commands` list, and `code` whose `language` is a shell, from the
-  `cwd` the input names.
+  `shell_command` field — is read like a Bash line. Both guards read it
+  through one shared reader, so they see the same shapes: that field as a
+  string, as an exec-style array of strings, or with an `args` /
+  `arguments` list beside it; each entry of a `commands` list; a `script`
+  unless a language field names a non-shell; and `code` whose language is
+  a shell (a `/bin/bash` path counts) — from the folder the input names
+  in `cwd`, `workdir`, `working_directory` or `workingDirectory`.
 - **A path a writing tool names.** When the tool's own name says it
   writes, edits, creates, deletes, moves, copies or saves
   (`write_file`, `edit_block`, `move_file`, `create_directory`,

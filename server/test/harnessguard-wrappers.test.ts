@@ -243,6 +243,67 @@ describe("harness guard sees Claude Code launched by a package runner (#308)", (
   });
 });
 
+// #311: the run guard and the harness guard disagreed on which program
+// runners they saw -- `pnpm exec`, `uv run`, `bundle exec`, `op run --`,
+// `runuser --` and `tmux new-session -d` running `rm -rf hooks` slipped past
+// the harness guard. Each clean runner joined the shared table; the long tail
+// is backed up by runnerCommands, so the harness guard reads the write their
+// later words form, and a read of the same path still passes.
+describe("harness guard sees through more program runners (#311)", () => {
+  it("a protected write behind an off-table runner is refused; the same runner around a read passes", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["pnpm exec rm -rf hooks", "pnpm exec ls hooks"],
+      ["yarn exec rm -rf hooks", "yarn exec cat hooks/hooks.json"],
+      ["npm exec -- rm -rf hooks", "npm exec -- cat hooks/hooks.json"],
+      ["npm exec -c 'rm -rf hooks'", "npm exec -c 'cat hooks/hooks.json'"],
+      ["npx -c 'rm -rf hooks'", "npx -c 'ls hooks'"],
+      ["uv run rm -rf hooks", "uv run cat hooks/hooks.json"],
+      ["poetry run rm -rf hooks", "poetry run cat hooks/hooks.json"],
+      ["bundle exec rm -rf hooks", "bundle exec cat hooks/hooks.json"],
+      ["op run -- rm -rf hooks", "op run -- cat hooks/hooks.json"],
+      ["op run --env-file .env -- tee .mcp.json", "op run --env-file .env -- cat .mcp.json"],
+      ["runuser -u me -- rm -rf hooks", "runuser -u me -- cat hooks/hooks.json"],
+      ["runuser -u me -c 'rm -rf hooks'", "runuser -u me -c 'cat hooks/hooks.json'"],
+      ["strace rm -rf hooks", "strace ls hooks"],
+      ["strace -f -o /tmp/t.log rm -rf hooks", "strace -f -o /tmp/t.log cat hooks/hooks.json"],
+      ["ltrace rm -rf hooks", "ltrace cat hooks/hooks.json"],
+      ["busybox rm -rf hooks", "busybox cat hooks/hooks.json"],
+      ["toybox rm -rf hooks", "toybox cat hooks/hooks.json"],
+      ["firejail --private rm -rf hooks", "firejail --private cat hooks/hooks.json"],
+      ["unshare -r rm -rf hooks", "unshare -r cat hooks/hooks.json"],
+      ["nsenter -t 1 -- rm -rf hooks", "nsenter -t 1 -- cat hooks/hooks.json"],
+      ["pkexec rm -rf hooks", "pkexec cat hooks/hooks.json"],
+      ["sg staff -c 'rm -rf hooks'", "sg staff -c 'cat hooks/hooks.json'"],
+      ["systemd-run --user rm -rf hooks", "systemd-run --user cat hooks/hooks.json"],
+      ["mise exec -- rm -rf hooks", "mise exec -- cat hooks/hooks.json"],
+      ["tmux new-session -d 'rm -rf hooks'", "tmux new-session -d 'ls hooks'"],
+      ["screen -dm rm -rf hooks", "screen -dm cat hooks/hooks.json"],
+      ["parallel ::: 'rm -rf hooks'", "parallel ::: 'cat hooks/hooks.json'"],
+      ["hyperfine --runs 1 'rm -rf hooks'", "hyperfine --runs 1 'cat hooks/hooks.json'"],
+      ["osascript -e 'do shell script \"rm -rf hooks\"'", "osascript -e 'do shell script \"cat hooks/hooks.json\"'"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a program that only prints or searches its arguments passes, even naming a protected path", () => {
+    const p = proj();
+    for (const c of ["echo rm -rf hooks", 'grep -rn "rm -rf hooks" docs', "gh issue view 1 --json title",
+      "uv run pytest", "pnpm exec tsc", "npm exec -- tsc --noEmit", "bundle exec rake test"]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+
+  it("an off-table runner reaches the harness guard through an MCP command field too (#310)", () => {
+    const p = proj();
+    expect(call(p, "mcp__shell__run", { command: "op run -- rm -rf hooks" })).toBe(2);
+    expect(call(p, "mcp__shell__run", { command: "op run -- cat hooks/hooks.json" })).toBe(0);
+  });
+});
+
 /** Writes a patch touching `target` into the fixture; returns its name. */
 function patchFile(projectDir: string, name: string, target: string): string {
   writeFileSync(join(projectDir, name), [

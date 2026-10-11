@@ -9,8 +9,8 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, SHELLS, braceExpand, commandName, shellSegments, unwrap, shellCommandString, shellReadsStdin,
-  suCommandString, toolCommands,
+  WRAPPERS, SHELLS, ARG_SAFE, braceExpand, commandName, shellSegments, unwrap, shellCommandString,
+  shellReadsStdin, suCommandString, runnerCommands, toolCommandLines,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -413,28 +413,101 @@ describe("shellReadsStdin (#258)", () => {
   });
 });
 
-describe("toolCommands (#310)", () => {
+describe("toolCommandLines (#310, #311)", () => {
+  /** Just the lines of the shared MCP-field reader, for the cases that don't check the folder. */
+  const lines = (input: Record<string, unknown>): string[] => toolCommandLines(input).lines;
+
   it("finds the command lines an MCP tool's input hands a shell, and the folder it names", () => {
-    expect(toolCommands({ command: "rm -rf hooks", timeout_ms: 5 })).toEqual([{ line: "rm -rf hooks", cwd: null }]);
-    expect(toolCommands({ cmd: "ls", cwd: "src" })).toEqual([{ line: "ls", cwd: "src" }]);
-    expect(toolCommands({ shell_command: "git status" })).toEqual([{ line: "git status", cwd: null }]);
-    expect(toolCommands({ commands: ["a", { label: "x", command: "b" }, { cmd: "c" }, 7] }).map((c: { line: string }) => c.line))
-      .toEqual(["a", "b", "c"]);
-    expect(toolCommands({ language: "Shell", code: "echo x > y" })).toEqual([{ line: "echo x > y", cwd: null }]);
+    expect(toolCommandLines({ command: "rm -rf hooks", timeout_ms: 5 }))
+      .toEqual({ lines: ["rm -rf hooks"], dir: null, concurrent: false });
+    expect(toolCommandLines({ cmd: "ls", cwd: "src" })).toEqual({ lines: ["ls"], dir: "src", concurrent: false });
+    expect(lines({ shell_command: "git status" })).toEqual(["git status"]);
+    expect(lines({ commands: ["a", { label: "x", command: "b" }, { cmd: "c" }, 7] })).toEqual(["a", "b", "c"]);
+    expect(lines({ language: "Shell", code: "echo x > y" })).toEqual(["echo x > y"]);
+  });
+
+  it("reads at the run guard's breadth: array command, arguments, script, code /bin/bash, every folder field (#311)", () => {
+    expect(lines({ command: ["git", "reset", "--hard"] })).toEqual(["git reset --hard"]);
+    expect(lines({ command: "rm", arguments: ["-rf", "hooks"] })).toEqual(["rm -rf hooks"]);
+    expect(lines({ script: "rm -rf hooks" })).toEqual(["rm -rf hooks"]);
+    expect(lines({ script: "rm -rf hooks", language: "javascript" })).toEqual([]);
+    expect(lines({ lang: "bash", code: "rm -rf hooks" })).toEqual(["rm -rf hooks"]);
+    expect(lines({ language: "/bin/bash", code: "rm -rf hooks" })).toEqual(["rm -rf hooks"]);
+    for (const f of ["cwd", "workdir", "working_directory", "workingDirectory"]) {
+      expect(toolCommandLines({ command: "ls", [f]: "d" }).dir, f).toBe("d");
+    }
+    expect(toolCommandLines({ commands: ["a", "b"], concurrency: 4 }).concurrent).toBe(true);
   });
 
   it("an args list follows its command word for word, quoted so each stays one word", () => {
-    const [{ line }] = toolCommands({ command: "rm", args: ["-rf", "my hooks", "it's"] });
+    const [line] = lines({ command: "rm", args: ["-rf", "my hooks", "it's"] });
     expect(line).toBe("rm -rf 'my hooks' 'it'\\''s'");
     expect((shellSegments(line) as Seg[])[0].words).toEqual(["rm", "-rf", "my hooks", "it's"]);
   });
 
   it("code in another language, keystrokes, and inputs with no command field are not command lines", () => {
-    expect(toolCommands({ language: "python", code: "import os" })).toEqual([]);
-    expect(toolCommands({ pid: 1, input: "rm -rf hooks" })).toEqual([]);
-    expect(toolCommands({ path: "hooks/hooks.json" })).toEqual([]);
-    expect(toolCommands(null)).toEqual([]);
-    expect(toolCommands({ command: 5 })).toEqual([]);
+    expect(lines({ language: "python", code: "import os" })).toEqual([]);
+    expect(lines({ pid: 1, input: "rm -rf hooks" })).toEqual([]);
+    expect(lines({ path: "hooks/hooks.json" })).toEqual([]);
+    expect(toolCommandLines(null as unknown as Record<string, unknown>)).toEqual({ lines: [], dir: null, concurrent: false });
+    expect(lines({ command: 5 })).toEqual([]);
+  });
+});
+
+describe("runnerCommands (#311)", () => {
+  it("hands back the inner command an off-table runner's later words form", () => {
+    const rows: Array<[words: string[], inner: string]> = [
+      [["op", "run", "--", "git", "push", "origin", "feature:main"], "git push origin feature:main"],
+      [["bundle", "exec", "rm", "-rf", "hooks"], "exec rm -rf hooks"],
+      [["uv", "run", "pytest"], "run pytest"],
+      [["bunx", "git", "reset", "--hard"], "git reset --hard"],
+      [["tmux", "new-session", "-d", "git reset --hard"], "git reset --hard"],
+      [["parallel", ":::", "git reset --hard"], "git reset --hard"],
+      [["sg", "staff", "-c", "git reset --hard"], "git reset --hard"],
+      [["osascript", "-e", 'do shell script "git reset --hard"'], "git reset --hard"],
+      [["gdb", "-batch", "-ex", "run", "--args", "git", "reset", "--hard"], "git reset --hard"],
+      [["lldb", "-b", "-o", "run", "--", "git", "reset", "--hard"], "git reset --hard"],
+    ];
+    for (const [words, inner] of rows) {
+      expect(runnerCommands(words), words.join(" ")).toContain(inner);
+    }
+  });
+
+  it("a program that only prints or searches its arguments runs none of them", () => {
+    for (const safe of [["echo", "git reset --hard"], ["grep", "-rn", "git reset --hard", "docs"],
+      ["gh", "issue", "create", "--title", "git reset --hard is refused"], ["cat", "git reset --hard"],
+      ["printf", "git reset --hard"]]) {
+      expect(runnerCommands(safe), safe.join(" ")).toEqual([]);
+    }
+    expect(ARG_SAFE.has("gh")).toBe(true);
+    expect(ARG_SAFE.has("sh")).toBe(false); // a shell runs its args -- never arg-safe
+    expect(runnerCommands(["strace"])).toEqual([]); // nothing after it
+  });
+});
+
+describe("unwrap: more program runners (#311)", () => {
+  const peeled = (line: string): string[][] =>
+    (shellSegments(line) as Seg[]).map((s) => unwrap(s.words).words);
+
+  it("each clean prefix runner peels to the command it runs, its harmless twin too", () => {
+    for (const runner of ["strace -f", "strace -o /tmp/t.log", "ltrace -e malloc", "valgrind --leak-check=full",
+      "firejail --private", "unshare -r", "nsenter -t 1 -m --", "pkexec --user root", "runuser -u me --"]) {
+      expect(peeled(`${runner} git reset --hard`), runner).toEqual([["git", "reset", "--hard"]]);
+      expect(peeled(`${runner} git status`), runner).toEqual([["git", "status"]]);
+    }
+  });
+
+  it("runuser -c and sg -c hand a shell the command line, which both guards read", () => {
+    expect(peeled("runuser -u me -c 'git reset --hard'")).toEqual([["sh", "-c", "git reset --hard"]]);
+    expect(peeled("sg staff -c 'git reset --hard'")).toEqual([["sh", "-c", "git reset --hard"]]);
+    expect(peeled("strace -o hooks/log ls")[0]).toEqual(["ls"]);
+    expect(unwrap(["strace", "-o", "hooks/log", "ls"]).writes).toEqual(["hooks/log"]);
+  });
+
+  it("covers the clean runners #311 adds to the table", () => {
+    for (const w of ["strace", "ltrace", "valgrind", "firejail", "unshare", "nsenter", "pkexec", "runuser", "sg"]) {
+      expect(WRAPPERS.has(w), w).toBe(true);
+    }
   });
 });
 

@@ -2,7 +2,7 @@
 
 /**
  * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
- *   #305, #306, #310) -- refuses git commands that rewrite a working tree or its history
+ *   #305, #306, #310, #311) -- refuses git commands that rewrite a working tree or its history
  *   out from under whoever is in it, or push past the ship gate. Exit 2
  *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
  *   The rules are spelled out in the block below.
@@ -65,8 +65,16 @@
  *
  *   Commands are read by shell-words.mjs, shared with the harness guard
  *   (#270), so rules see through wrappers and their flag values (sudo -u
- *   root, timeout 5). Quoted text never refuses, but a double-quoted $(...)
- *   still runs, so its body is checked as a command of its own (#257).
+ *   root, timeout 5) and the program runners in its table (xcrun, script -c,
+ *   strace, runuser, #307, #311). A runner the table doesn't name is backed
+ *   up by runnerCommands (#311): when an unknown program's later words form
+ *   a command -- `op run -- git push`, `bundle exec git reset --hard`, a
+ *   `-c` string, `tmux new-session -d '...'` -- that inner line is judged
+ *   too, so the table needn't grow one runner at a time. A program that only
+ *   prints or searches its arguments (echo, grep, gh, ...) runs none of
+ *   them, so a line that merely mentions git stays clear. Quoted text never
+ *   refuses, but a double-quoted $(...) still runs, so its body is checked
+ *   as a command of its own (#257).
  *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
@@ -97,7 +105,8 @@ import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, commandName, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
+import { SHELLS, commandName, runnerCommands, shellCommandString, shellSegments, toolCommandLines, unwrap }
+  from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -252,6 +261,14 @@ function readLine(line) {
         continue;
       }
       if (cmd !== "git") {
+        // #311 -- a program runner off the table (op run, bundle exec, tmux
+        // new-session, uv run ...) may run a later word as the real command;
+        // judge those inner lines too, so the wrapper table stops growing.
+        // HARMLESS commands (and ARG_SAFE ones, via runnerCommands) read, not
+        // run, their arguments, so a line that only mentions git stays clear.
+        if (!HARMLESS.has(cmd) && depth < 3) {
+          for (const inner of runnerCommands(words)) walk(inner, depth + 1, env);
+        }
         out.steps.push(!HARMLESS.has(cmd) || writesFile(words));
         continue;
       }
@@ -1261,57 +1278,17 @@ function shipGateRefusal(inv, at, ctx) {
   }
 }
 
-// The fields a tool's input carries a command line in, and the ones that name its language or folder (#310).
-const COMMAND_FIELDS = ["command", "cmd", "shell_command"];
-const LANGUAGE_FIELDS = ["language", "lang", "shell", "interpreter", "runtime"];
-const FOLDER_FIELDS = ["cwd", "workdir", "working_directory", "workingDirectory"];
-
-/** A word quoted so the shell reader reads it back as exactly that one word. */
-const quoted = (word) => `'${word.replaceAll("'", "'\\''")}'`;
-
-/** True for an array of strings and nothing else. */
-const strings = (v) => Array.isArray(v) && v.length > 0 && v.every((w) => typeof w === "string");
-
-/**
- * The command line one command field stands for (#310): a string as it
- * is, with an `args` / `arguments` string array beside it appended word
- * for word; an exec-style array of strings, each one word; else null.
- */
-function fieldLine(value, args) {
-  if (typeof value === "string") return strings(args) ? [value, ...args.map(quoted)].join(" ") : value;
-  return strings(value) ? value.map(quoted).join(" ") : null;
-}
-
 /**
  * The command lines a tool call runs, as { lines, dir, concurrent } (#310):
- * the Bash tool's command, or what any other tool -- an MCP server's
- * shell tool -- carries in the fields the header lists. `dir` is the folder
- * the tool names for them, if it names one; `concurrent`, a batch that
- * runs them at once.
+ * the Bash tool's command, or -- for any other tool, an MCP server's shell
+ * tool -- what toolCommandLines reads from its input, the one MCP-field
+ * reader both guards share (#311). `dir` is the folder the tool names for
+ * them, if it names one; `concurrent`, a batch that runs them at once.
  */
 function toolLines(payload) {
   const input = payload?.tool_input;
   if (payload?.tool_name === "Bash") return { lines: [String(input?.command ?? "")], concurrent: false };
-  if (!input || typeof input !== "object") return { lines: [], concurrent: false };
-  const language = LANGUAGE_FIELDS.map((f) => input[f]).find((v) => typeof v === "string");
-  const shell = language === undefined ? null
-    : SHELLS.has(commandName(language.trim())) || /^\s*(shell|posix)\s*$/i.test(language);
-  const lines = [];
-  const take = (obj) => {
-    for (const f of COMMAND_FIELDS) {
-      const line = fieldLine(obj[f], obj.args ?? obj.arguments);
-      if (line !== null) lines.push(line);
-    }
-  };
-  take(input);
-  if (typeof input.script === "string" && shell !== false) lines.push(input.script);
-  if (typeof input.code === "string" && shell === true) lines.push(input.code);
-  for (const c of Array.isArray(input.commands) ? input.commands : []) {
-    if (typeof c === "string") lines.push(c);
-    else if (c && typeof c === "object") take(c);
-  }
-  const dir = FOLDER_FIELDS.map((f) => input[f]).find((v) => typeof v === "string" && v !== "");
-  return { lines, dir, concurrent: Number(input.concurrency) > 1 };
+  return toolCommandLines(input);
 }
 
 /**
@@ -1461,7 +1438,7 @@ try {
   // settings any of them changes
   const lines = tool.lines.map((command) => ({ command, ...readLine(command) }));
   const moves = lines.map((l) => l.steps.some(Boolean));
-  const start = tool.dir === undefined ? cwd : pathWord(tool.dir, cwd);
+  const start = tool.dir == null ? cwd : pathWord(tool.dir, cwd);
   const where = lines.length === 1 ? lines[0] : {
     moves: lines.flatMap((l) => l.moves),
     repeats: lines.some((l) => l.repeats),
