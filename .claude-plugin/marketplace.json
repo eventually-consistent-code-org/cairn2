@@ -10,7 +10,7 @@
       "source": {
         "source": "github",
         "repo": "eventually-consistent-code/cairn2",
-        "ref": "v2.8.1"
+        "ref": "v2.8.2"
       },
       "description": "cairn 2.0 — converged work management: tracker-truth planning, provenance-checked memory, and a per-verb /cairn:<verb> surface, backed by a typed MCP server."
     }

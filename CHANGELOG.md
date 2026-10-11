@@ -1,5 +1,87 @@
 # Changelog
 
+## v2.8.2 — the hardening (2026-10-11)
+
+The second sweep, taken on v2.8.1, filed twenty findings against the
+two PreToolUse guards. This release closes them and then keeps going:
+after each fix wave the security surface was re-audited, every
+important finding was put to two independent votes, and the survivors
+became the next wave. Ten passes later the re-audit came back with no
+important finding left. Forty-eight issues closed in thirteen waves,
+three of them regressions this release introduced and caught itself.
+
+The guards now share one shell reader, and most of what changed is in
+how that reader sees a command line: wrappers, runners, substitutions,
+heredocs, folders reached by `cd` or `git -C`, and the fields an MCP
+tool carries a command or a path in. What the guards still don't see
+is written in their headers and in the runbook, finding by finding.
+
+Tool count holds at 87. Suite 1735 → 2120.
+
+### guards
+
+- One shell reader (`hooks/scripts/shell-words.mjs`) serves both
+  guards. It reads shell keywords and grouping, case-folded command
+  names, wrapper flags, program runners (`xcrun`, `arch`, `strace`,
+  `runuser`, `pkexec` and their kin), and a backstop for runners it
+  doesn't know: a leading program the guards haven't met has its later
+  words judged as the command, with print-only programs exempt. `man`,
+  `gh`, `rg`, `sort` and the pager variables have their one
+  program-running option modelled rather than a blanket pass.
+- Substitutions are one word. An unquoted `$(…)`, backtick, `$((…))`
+  or process substitution no longer splits a line, so the literal
+  target after it is seen; each body is read as a command line of its
+  own, including inside an unquoted heredoc body, which is otherwise
+  data. Nesting is capped at eight levels and anything deeper is
+  refused unread. A deeply nested line that used to run the guard for
+  seconds now takes about 90 ms.
+- The run guard judges the repo a git command acts on, following `cd`,
+  `git -C` (with `~`, `$HOME` and `$PWD` expanded), `--git-dir`,
+  `--work-tree` and `GIT_DIR`. A gated push must stand alone on its
+  line: a commit or ref move earlier on the same line, which the stamp
+  can't have covered, is refused. Shortened git options, separate
+  option values, glob and matching refspecs, short destinations and
+  push settings all meet the ship gate.
+- The harness guard protects its trust anchors: the live plugin copy,
+  the ship-gate stamps and run manifests, the `.claude` and `.cursor`
+  hook folders, the skill, agent and command folders at home and in
+  the project, every MCP config, the scripts those settings and MCP
+  configs launch (hook commands, the status line, server entry points
+  outside the project, including the `uv --directory` quickstart
+  shape), and `~/.claude/hooks`. It refuses `claude mcp add`, `claude
+  plugin install|enable|disable|init`, `claude import` and the same run
+  through `npx`. Tree-creating commands (`git clone`, `worktree add`,
+  `submodule add`, `git init`, `gh repo clone`, `npx degit`, `npm
+  create`) judge their destination like a `mkdir`. Writes through
+  `find -exec`, `xargs`, `su -c`, archives, patches and downloads are
+  seen; paths match in any letter case; a `cd` the guard can't follow
+  fails closed.
+- MCP tools meet both guards. The hook matchers widen to `mcp__.*`;
+  a command field (`command`, `cmd`, `shell_command`, an exec array,
+  `script`, shell `code`, a `commands` list, with its folder field)
+  goes through the run guard, and a path field on a tool whose name
+  says it writes goes through the harness guard. Tools that run code
+  in another language, and text sent to a running process, are out of
+  scope and documented as such. Cursor's `preToolUse` adapter forwards
+  MCP calls to both guards and fails closed.
+- Refusals stop coaching the override: the owner-only variables are
+  named, never given as a paste-ready prefix. An unreadable ship-gate
+  stamp refuses rather than skips.
+
+### the sweep
+
+- A sweep manifest reads `unchecked` for a leg it didn't re-run, and
+  refuses findings it can't attribute. Phase numbers resolve by
+  milestone title, not id. README, CHANGELOG and LICENSE edits no
+  longer stale a security audit. `peer_run` enforces `execCapable` and
+  leak-scans outgoing input. `verify` requires every phase issue closed.
+
+### docs
+
+- The runbook's guard sections, the server reference and the guard
+  headers describe what each guard reads and, in a "not seen" list,
+  what it doesn't. The harness matrix marks Cursor as guarded.
+
 ## v2.8.1 — the fixes (2026-10-03)
 
 The first real sweep, taken on v2.8.0, filed eleven findings against
