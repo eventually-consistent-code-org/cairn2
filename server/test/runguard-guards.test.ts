@@ -2225,8 +2225,17 @@ describe("run guard: a line nested deeper than the reader reads is refused unrea
       'cd "$(git rev-parse --show-toplevel)" && git status',
       "echo x > $(pwd)/notes.txt",
       "git -C $(git rev-parse --show-toplevel) log --oneline",
+      // the harness guard's computed-folder writes: no git command in them, nothing to say
+      "cd hooks && echo x > $(pwd)/hooks.json",
+      `cd .. && rm -rf $(pwd)/${basename(proj)}/hooks`,
+      "cd /tmp && echo x > $(pwd)/notes.txt",
+      "cd server && cp a $(git rev-parse --show-toplevel)/.mcp.json",
+      "cd $(mktemp -d) && echo x > $(pwd)/x",
     ]) {
       expect(guard(proj, home, c).status, c).toBe(0);
     }
+    // a cd the guard can't follow still loses the push after it, and a destructive git is refused anywhere
+    expect(guard(proj, home, "cd $(mktemp -d) && git push origin main").status).toBe(2);
+    expect(guard(proj, home, "cd $(pwd)/sub && git reset --hard").status).toBe(2);
   });
 });

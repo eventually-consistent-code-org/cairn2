@@ -19,7 +19,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Constants
@@ -1382,6 +1382,36 @@ describe("harness guard: a computed folder it knows is judged there, and nesting
     mkdirSync(join(p, "server"), { recursive: true });
     expect(guard(p, "echo x > $(git rev-parse --show-toplevel)/hooks/hooks.json", "server")).toBe(2);
     expect(guard(p, "echo x > $(pwd)/hooks/hooks.json", "server")).toBe(0); // server/hooks is not the hook dir
+  });
+
+  it("the computed folders follow the cd candidates, as $PWD does, never the hook's cwd alone", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "server"), { recursive: true });
+    mkdirSync(join(p, ".git"), { recursive: true });
+    writeFileSync(join(p, ".mcp.json"), "{}");
+    for (const [c, what] of [
+      ["cd hooks && echo x > $(pwd)/hooks.json", "hook directory"],
+      [`cd .. && rm -rf $(pwd)/${basename(p)}/hooks`, "hook directory"],
+      ["pushd hooks && echo x > $(pwd)/hooks.json", "hook directory"],
+      ["env -C hooks sh -c 'echo x > $(pwd)/hooks.json'", "hook directory"],
+      ["cd server && cp a $(git rev-parse --show-toplevel)/.mcp.json", ".mcp.json"],
+      ["cd server && echo x > `git rev-parse --show-toplevel`/hooks/hooks.json", "hook directory"],
+      // a cd the guard can't follow: the pwd after it is unknown, and so is the write
+      ["cd $(mktemp -d) && echo x > $(pwd)/x", "goes somewhere the guard couldn't tell"],
+      // outside any repo, git would fail and the expansion is empty: unknown too
+      ["cd /tmp && echo x > $(git rev-parse --show-toplevel)/notes.txt", "goes somewhere the guard couldn't tell"],
+    ] as const) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain(what);
+    }
+    for (const c of [
+      "cd /tmp && echo x > $(pwd)/notes.txt",
+      "cd server && echo x > $(pwd)/notes.txt",
+      "cd server && cp a $(git rev-parse --show-toplevel)/notes.txt",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
   });
 
   it("any other substitution in front of a path is still a folder it can't tell", () => {

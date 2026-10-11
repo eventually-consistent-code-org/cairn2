@@ -989,6 +989,10 @@ describe("harness guard hook", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("hook directory");
     expect(runHookRaw(HARNESSGUARD, p, bashPayload("echo x > $(somecmd)/notes.txt")).status).toBe(2);
+    // the pwd follows a cd before it, as $PWD does
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("cd hooks && echo x > $(pwd)/hooks.json")).status).toBe(2);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("cd /tmp && echo x > $(pwd)/notes.txt")).status).toBe(0);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("cd $(mktemp -d) && echo x > $(pwd)/x")).status).toBe(2);
   });
 
   it("a line nested deeper than the reader reads is refused unread, and fast (#321)", () => {
