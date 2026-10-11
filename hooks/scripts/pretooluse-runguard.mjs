@@ -89,7 +89,12 @@
  *   inside arithmetic -- or the whole `$((...))`, when a shell can't parse
  *   it as arithmetic and runs it as a subshell -- so `diff <(git reset
  *   --hard) x`, `$(( $(git reset --hard) ))` and `$((git reset --hard))`
- *   are read as the reset they are (#320). A command
+ *   are read as the reset they are (#320). A heredoc body is data (#322):
+ *   its lines are never commands, so a README written through `cat
+ *   <<'EOF'` may say never to hard reset -- but the $(...) or backtick an
+ *   unquoted body runs is read as a line of its own, and a heredoc fed to
+ *   a shell reading stdin (`sh <<EOF`, `cat <<EOF | sh`) is that shell's
+ *   script. A command
  *   that only exists in a substitution's output (`$(cat script)` run as a
  *   command) is still not seen.
  *
@@ -124,7 +129,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
   SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
-  shellSegments, toolCommandLines, unwrap,
+  shellReadsStdin, shellSegments, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
@@ -155,11 +160,13 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
  * a command of its own (#257, #319) -- a <(...), >(...) or $((...)) too
  * (#320) -- and backslash-newline joins lines. Bodies nest
  * SUBSTITUTION_DEPTH levels; a line nested deeper is refused unread (#321).
- * Redirects and heredocs are not modelled, so a heredoc body line reads
- * as a command of its own.
+ * A heredoc body is data, never command lines (#322): only the
+ * substitutions an unquoted body runs are read, each as a line of its
+ * own, so a README written through `cat <<'EOF'` can mention a hard
+ * reset. Redirects are not modelled: `>` and `< file` are word text.
  */
 const READ = {
-  subshells: true, comments: true, substitutions: true,
+  subshells: true, comments: true, substitutions: true, heredocs: true,
   continuation: true, posixEscapes: true, anyWhitespace: true,
 };
 
@@ -257,11 +264,16 @@ function readLine(line) {
     // never ahead of a push beside it
     const pagers = [];
     const flush = () => { for (const [line, env] of pagers.splice(0)) walk(line, depth + 1, env); };
+    // the command piping into this one, so a heredoc it carries can be the
+    // script of the shell reading it: `cat <<EOF | sh` (#322)
+    let upstream = null;
     for (const seg of shellSegments(text, READ)) {
       // #321 -- substitutions nested deeper than the reader reads: the
       // line is refused as a whole (judgeLine), so stop reading it here
       if (seg.deep) { out.deep = true; return; }
       flush();
+      const piped = upstream;
+      upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
       const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
       if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
@@ -289,8 +301,13 @@ function readLine(line) {
       // found the same way the harness guard finds it (#270)
       if (SHELLS.has(cmd) && depth < 2) {
         const script = shellCommandString(words.slice(1));
+        // #322 -- a shell reading stdin runs the heredoc fed to it, its own
+        // or the one piped in (`cat <<EOF | sh`), as the harness guard reads it
+        const docs = !script && shellReadsStdin(words.slice(1))
+          ? [seg, ...(piped ? [piped] : [])].flatMap((s) => s.heredocs) : [];
         if (script) walk(script, depth + 1, env);
-        else out.steps.push(true); // a script file: anything at all
+        else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
+        else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
         continue;
       }
       if (cmd !== "git") {

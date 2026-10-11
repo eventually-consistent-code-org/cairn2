@@ -1452,3 +1452,82 @@ describe("harness guard: a computed folder it knows is judged there, and nesting
     }
   });
 });
+
+// #322: the reader kept an unquoted heredoc body as data and never looked
+// inside it, and the guard read a body only when a shell was reading
+// stdin -- so `cat <<EOF` / `$(rm -rf hooks)` / `EOF` passed, though the
+// shell expands the body, and runs the rm, before cat ever sees it. A
+// heredoc is how the agent writes files, and "file content" carrying a
+// $(...) is a shape it pastes as given. The body is still data; each
+// substitution an unquoted body runs is read as a line of its own.
+describe("harness guard sees the substitutions an unquoted heredoc body runs (#322)", () => {
+  /** The guard's refusal text for one Bash command string. */
+  function stderrOf(projectDir: string, command: string): string {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+    delete env.CAIRN_HARNESS_EDIT;
+    delete env.CDPATH;
+    return spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    }).stderr ?? "";
+  }
+
+  it("each shape from the issue is refused, and the read of the same shape passes", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    const pairs: Array<[write: string, read: string]> = [
+      ["cat <<EOF\n$(rm -rf hooks)\nEOF", "cat <<EOF\n$(ls hooks)\nEOF"],
+      ["cat > notes.md <<EOF\ntitle $(rm -rf hooks)\nEOF", "cat > notes.md <<EOF\ntitle $(ls hooks)\nEOF"],
+      ["cat <<EOF\n$(echo x > hooks/hooks.json)\nEOF", "cat <<EOF\n$(cat hooks/hooks.json)\nEOF"],
+      ["cat <<EOF\n$(cp evil.json .mcp.json)\nEOF", "cat <<EOF\n$(cp .mcp.json /tmp/x.json)\nEOF"],
+      ["cat <<EOF\n$(echo x > .claude/settings.json)\nEOF", "cat <<EOF\n$(grep x .claude/settings.json)\nEOF"],
+      ["tee notes.md <<EOF\n$(rm -rf hooks)\nEOF", "tee notes.md <<EOF\n$(ls hooks)\nEOF"],
+      ["python3 - <<EOF\nprint('$(rm -rf hooks)')\nEOF", "python3 - <<EOF\nprint('$(ls hooks)')\nEOF"],
+      ["cat <<EOF\n`rm -rf hooks`\nEOF", "cat <<EOF\n`ls hooks`\nEOF"],
+      ["cat <<-EOF\n\t$(rm -rf hooks)\n\tEOF", "cat <<-EOF\n\t$(ls hooks)\n\tEOF"],
+      ["cat <<EOF | wc -l\n$(rm -rf hooks)\nEOF", "cat <<EOF | wc -l\n$(ls hooks)\nEOF"],
+      // a substitution nested in one, and a body whose $(...) holds a heredoc of its own
+      ["cat <<EOF\n$(echo $(rm -rf hooks))\nEOF", "cat <<EOF\n$(echo $(ls hooks))\nEOF"],
+      ["cat <<EOF\n$(cat <<X\n$(rm -rf hooks)\nX\n)\nEOF", "cat <<EOF\n$(cat <<X\n$(ls hooks)\nX\n)\nEOF"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(stderrOf(p, write), write).toContain("configuration that decides");
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a quoted delimiter keeps the body literal, and body text is never a command", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const c of [
+      "cat <<'EOF'\n$(rm -rf hooks)\nEOF",
+      'cat <<"EOF"\n$(rm -rf hooks)\nEOF',
+      "cat <<\\EOF\n$(rm -rf hooks)\nEOF",
+      "cat > notes.md <<'EOF'\n`rm -rf hooks`\nEOF",
+      "cat > README.md <<'EOF'\nNever run rm -rf hooks here.\nEOF",
+      "cat > README.md <<EOF\nNever run rm -rf hooks here.\nEOF",
+      "cat <<EOF\n\\$(rm -rf hooks)\nEOF", // an escaped `$` never expands
+      "cat <<EOF\n$(cat <<X\nrm -rf hooks\nX\n)\nEOF", // the inner heredoc's text is data too
+      "bash -c 'ls' <<EOF\nrm -rf hooks\nEOF", // a shell with a -c string ignores its stdin
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+
+  it("the shapes around a heredoc are unchanged: a shell fed one, a here-string, a $(...) on the line", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const [write, read] of [
+      ["sh <<EOF\nrm -rf hooks\nEOF", "sh <<EOF\nls hooks\nEOF"],
+      ["sh <<'EOF'\nrm -rf hooks\nEOF", "sh <<'EOF'\nls hooks\nEOF"],
+      ["cat <<'EOF' | sh\nrm -rf hooks\nEOF", "cat <<'EOF' | sh\nls hooks\nEOF"],
+      ['cat <<< "$(rm -rf hooks)"', 'cat <<< "$(ls hooks)"'],
+      ["echo $(rm -rf hooks)", "echo $(ls hooks)"],
+      ["cat <<'EOF' > hooks/hooks.json\n{}\nEOF", "cat <<'EOF' > notes.md\n{}\nEOF"],
+    ]) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+});

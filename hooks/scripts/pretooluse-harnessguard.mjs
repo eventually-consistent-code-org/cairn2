@@ -49,7 +49,10 @@
  *   WRITES -- redirects and the operands of commands that change files,
  *   through wrappers and program runners (xcrun, script, flock, #307;
  *   strace, runuser, #311), bash -c, su -c, find -exec, xargs and a heredoc
- *   fed to a shell. A program runner the table doesn't name is backed up by
+ *   fed to a shell. Any other heredoc body is data, but the $(...) or
+ *   backtick an unquoted body (`<<EOF`) runs is read as a line of its own
+ *   (#322); a quoted delimiter (`<<'EOF'`) keeps the body literal. A
+ *   program runner the table doesn't name is backed up by
  *   runnerCommands (#311): the write its later words form -- `op run -- rm
  *   -rf hooks`, `bundle exec`, a `-c` string, `tmux new-session -d '...'` --
  *   is read too, and `npm`/`pnpm`/`yarn exec` the same, so the table needn't
@@ -240,7 +243,9 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * and heredocs are modelled, and ( ) end a command, so `(cd hooks && rm
  * x)` is a cd and an rm (#258). A $(...) or backtick is one word, quoted
  * or not, so the literal target after one is still seen (#319), and its
- * body is read as a command line of its own. # comments are word text.
+ * body is read as a command line of its own -- inside an unquoted
+ * heredoc body too, whose text is otherwise data (#322). # comments are
+ * word text.
  */
 const READ = { redirects: true, subshells: true, substitutions: true };
 
