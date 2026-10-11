@@ -28,13 +28,14 @@
  *   wrappers and program runners (xcrun, script, flock, #307), bash -c,
  *   su -c, find -exec, xargs and a heredoc fed to a shell. A relative
  *   path is judged from every folder a cd, env -C or git -C on the line
- *   can reach (#258); after a cd it can't follow, refused.
- *   Removing a protected folder or one holding it counts, and so does
- *   changing its mode, owner, flags or ACL (chmod, chown, chflags, setfacl,
- *   xattr -w, #299), or `claude mcp add` / `remove` writing an MCP server
- *   config itself (#303). A path only READ passes (#240). Not seen: a write
- *   in an interpreter (python -c) or $(...), an archive's members, paths an
- *   upstream command finds itself, modes copied by cp -p, rsync or tar.
+ *   can reach (#258); after a cd it can't follow, refused. Removing a
+ *   protected folder or one holding it counts, and so does changing its
+ *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
+ *   #299), or claude writing its config itself: `claude mcp add` (#303),
+ *   `claude plugin install|enable|disable|init`, `claude import`, and the
+ *   same run by npx or node (#308). A path only READ passes (#240). Not
+ *   seen: a write in an interpreter (python -c) or $(...), an archive's
+ *   members, paths an upstream command finds, modes cp -p, rsync, tar copy.
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
@@ -242,6 +243,31 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
 // The `claude mcp` subcommands that write a server config (#303); list,
 // get, serve, login and logout leave every config as it is.
 const CLAUDE_MCP_WRITES = ["add", "add-json", "add-from-claude-desktop", "remove", "reset-project-choices"];
+
+// The `claude plugin` subcommands that change which plugins load (#308),
+// aliases too: what each writes is in claudeTargets. list, details,
+// validate, eval, tag, test and help change nothing.
+const CLAUDE_PLUGIN_INSTALLS = ["install", "i", "uninstall", "remove", "update", "prune", "autoremove"];
+const CLAUDE_PLUGIN_TOGGLES = ["enable", "disable"];
+const CLAUDE_PLUGIN_INITS = ["init", "new"];
+const CLAUDE_MARKET_WRITES = ["add", "remove", "rm", "update"];
+
+// The words that name a claude subcommand; a help flag right after a run
+// of only these is help, never a value some option swallowed (#308).
+const CLAUDE_COMMAND_WORDS = ["mcp", "plugin", "plugins", "marketplace", "import", "configure",
+  ...CLAUDE_MCP_WRITES, ...CLAUDE_PLUGIN_INSTALLS, ...CLAUDE_PLUGIN_TOGGLES, ...CLAUDE_PLUGIN_INITS,
+  ...CLAUDE_MARKET_WRITES];
+
+// The settings file each `--scope` writes.
+const SCOPE_SETTINGS = { user: "~/.claude/settings.json", project: ".claude/settings.json",
+  local: ".claude/settings.local.json" };
+
+// Programs that launch another package's program, or node running a
+// script: how Claude Code runs without its `claude` name (#308).
+const RUNNERS = new Set(["npx", "pnpx", "bunx", "npm", "pnpm", "yarn", "bun", "node", "deno"]);
+
+// A word naming Claude Code's package -- any version, or a path into it.
+const CLAUDE_PKG = /@anthropic-ai\/claude-code(?![\w-])/i;
 
 // The most entries listed under one protected folder outside the project
 // before the rest counts as unlisted -- and so as reachable (see walkHit).
@@ -1238,25 +1264,96 @@ function gitTargets(args, seg, ctx, add) {
  * them, and a word from a stream (xargs, find -exec) may be the whole `mcp
  * add ...`. ~/.claude.json is named whatever the scope says, so no
  * misreading of the options lets a write by.
+ *
+ * claude plugin and claude import (#308), found the same way: install,
+ * uninstall, update and prune change the installed plugins and the
+ * settings that enable them; enable and disable flip those settings --
+ * `claude plugin disable cairn` turns off every cairn guard next session;
+ * init scaffolds a plugin in ~/.claude/skills; configure --values-stdin
+ * saves a plugin's options; marketplace add, remove and update change the
+ * marketplaces plugins install from; import brings another agent's config
+ * in. A dry run (prune, import) and help pass -- help only right after
+ * the subcommand words, where no option can have swallowed it as a value.
  */
 function claudeTargets(args, ctx, add) {
   // a nested shell's "$1" is whatever its caller's xargs or find handed it
   const words = ctx.positional ? args.map((a) => a.replace(POSITIONAL, ctx.positional)) : args;
   const streamed = words.some((a) => STANDINS.some((m) => a.includes(m)));
-  const at = words.findIndex((a) => could(a, "mcp"));
-  const rest = at < 0 ? [] : words.slice(at + 1);
-  if (!streamed && !CLAUDE_MCP_WRITES.some((s) => rest.some((a) => could(a, s)))) return;
-  // the scope options sit before `--`; what follows it is the server's own command line
+  // the scope options sit before `--`; what follows it is a server's own command line
   const end = words.includes("--") ? words.indexOf("--") : words.length;
-  let project = false;
-  for (let i = 0; i < end; i++) {
-    const a = words[i];
-    const scope = a === "-s" || a === "--scope" ? words[++i]
+  const head = words.slice(0, end);
+  // -h, --help, or the help subcommand of a command group (`claude plugin help install`)
+  const help = head.findIndex((a, i) => a === "-h" || a === "--help" ||
+    (a === "help" && ["plugin", "plugins", "marketplace", "mcp"].some((c) => same(head[i - 1] ?? "", c))));
+  if (!streamed && help >= 0 && head.slice(0, help).every((a) => CLAUDE_COMMAND_WORDS.some((c) => same(a, c)))) return;
+  // the words after the first one naming a subcommand, or null
+  const after = (list, ...names) => {
+    const at = list.findIndex((a) => names.some((n) => could(a, n)));
+    return at < 0 ? null : list.slice(at + 1);
+  };
+  const has = (list, names) => list !== null && names.some((n) => list.some((a) => could(a, n)));
+  // a flag that keeps it a dry run, unless an option before it took it as a value
+  const dry = (list) => list.some((a, i) => a === "--dry-run" && !(list[i - 1] ?? "").startsWith("-"));
+  let scope = null;
+  for (let i = 0; i < head.length; i++) {
+    const a = head[i];
+    const s = a === "-s" || a === "--scope" ? head[++i]
       : a.startsWith("--scope=") ? a.slice(8) : /^-s./.test(a) ? a.slice(2) : null;
-    if (scope === "project") project = true;
+    if (s !== null && s !== undefined) scope = s;
   }
-  if (project) add(".mcp.json");
-  add("~/.claude.json");
+  // the settings file the scope names, else each the default can mean
+  const settings = (...dflt) => {
+    for (const s of SCOPE_SETTINGS[scope] ? [scope] : dflt) add(SCOPE_SETTINGS[s]);
+  };
+  const registry = (name) => add(`~/.claude/plugins/${name}`);
+
+  if (streamed || has(after(words, "mcp"), CLAUDE_MCP_WRITES)) {
+    if (scope === "project") add(".mcp.json");
+    add("~/.claude.json");
+  }
+  const plugin = after(words, "plugin", "plugins");
+  // both readings, so a plugin named `marketplace` can't hide `disable cairn`
+  const market = plugin && after(plugin, "marketplace");
+  if (has(market, CLAUDE_MARKET_WRITES)) {
+    registry("known_marketplaces.json");
+    if (has(market, ["add"])) settings("user");
+    if (has(market, ["remove", "rm"])) settings("user", "project", "local");
+  }
+  if (plugin) {
+    const installs = after(plugin, ...CLAUDE_PLUGIN_INSTALLS);
+    if (installs && !(has(plugin, ["prune", "autoremove"]) && dry(installs))) {
+      registry("installed_plugins.json");
+      if (has(plugin, ["update"])) settings("user", "project", "local");
+      else settings("user");
+    }
+    if (has(plugin, CLAUDE_PLUGIN_TOGGLES)) settings("user", "project", "local");
+    if (has(plugin, CLAUDE_PLUGIN_INITS)) add(`~/.claude/skills/${ANY}`);
+    if (has(after(plugin, "configure"), ["--values-stdin"])) settings("user");
+  }
+  const imported = after(words, "import");
+  if (imported && !dry(imported)) {
+    settings("user");
+    add("~/.claude.json");
+  }
+}
+
+/**
+ * npx, bunx, pnpm dlx, yarn dlx, node <cli> and kin (#308): Claude Code
+ * launched without its `claude` name -- its package (`npx -y
+ * @anthropic-ai/claude-code mcp add ...`, `npx -p @anthropic-ai/claude-code
+ * claude ...`), a program named claude, or a path into the package. The
+ * words after it are claude's. A `-c` / `--call` / `--shell-mode` string is
+ * a command line the runner hands a shell, read like `bash -c`.
+ */
+function runnerTargets(args, ctx, add, out) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const line = ["-c", "--call", "--shell-mode"].includes(a) ? args[i + 1]
+      : a.startsWith("--call=") ? a.slice(7) : undefined;
+    if (line !== undefined && ctx.depth < 3) out.push(...lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+  }
+  const at = args.findIndex((a) => CLAUDE_PKG.test(a) || /^claude(?:\.[cm]?js)?$/.test(cmdName(a)));
+  if (at >= 0) claudeTargets(args.slice(at + 1), ctx, add);
 }
 
 /**
@@ -1368,6 +1465,7 @@ function writeTargets(seg, ctx) {
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
   else if (cmd === "git") gitTargets(args, seg, ctx, add);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
+  else if (RUNNERS.has(cmd)) runnerTargets(args, ctx, add, out);
   return out;
 }
 

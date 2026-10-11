@@ -201,6 +201,48 @@ describe("harness guard sees through program runners (#307)", () => {
   });
 });
 
+// #308: Claude Code launched without its `claude` name -- by a package
+// runner or by node running its CLI -- wrote its MCP and plugin config past
+// #303's protection. Each launch is read as claude now, and a runner's own
+// command line (-c / --call) is read like bash -c.
+describe("harness guard sees Claude Code launched by a package runner (#308)", () => {
+  it("each launch of a writing subcommand is refused; the same launch of a read passes", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["npx @anthropic-ai/claude-code mcp add evil -- node x", "npx @anthropic-ai/claude-code mcp list"],
+      ["npx -y @anthropic-ai/claude-code mcp add evil -- node x", "npx -y @anthropic-ai/claude-code --version"],
+      ["npx --yes @anthropic-ai/claude-code@latest plugin disable cairn",
+        "npx --yes @anthropic-ai/claude-code@latest plugin list"],
+      ["bunx @anthropic-ai/claude-code mcp add evil -- node x", "bunx @anthropic-ai/claude-code mcp get evil"],
+      ["pnpm dlx @anthropic-ai/claude-code plugin install evil", "pnpm dlx @anthropic-ai/claude-code plugin list"],
+      ["yarn dlx @anthropic-ai/claude-code import cursor --yes", "yarn dlx @anthropic-ai/claude-code import --help"],
+      ["npm exec -- @anthropic-ai/claude-code plugin enable evil", "npm exec -- @anthropic-ai/claude-code plugin list"],
+      ["npx -p @anthropic-ai/claude-code claude mcp add evil -- node x", "npx -p @anthropic-ai/claude-code claude mcp list"],
+      ["npx --package=@anthropic-ai/claude-code -c 'claude plugin disable cairn'",
+        "npx --package=@anthropic-ai/claude-code -c 'claude plugin list'"],
+      ["node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js mcp add evil -- node x",
+        "node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js mcp list"],
+      ["node node_modules/.bin/claude plugin disable cairn", "node node_modules/.bin/claude plugin list"],
+      ["NPX @Anthropic-AI/Claude-Code mcp add evil -- node x", "NPX @Anthropic-AI/Claude-Code mcp list"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a runner's -c line is read like bash -c; other package commands pass", () => {
+    const p = proj();
+    expect(guard(p, "npx -c 'rm -rf hooks'")).toBe(2);
+    expect(guard(p, "npm exec --call='echo x > .mcp.json'")).toBe(2);
+    expect(guard(p, "npx -c 'ls hooks'")).toBe(0);
+    for (const c of ["npm install -g @anthropic-ai/claude-code", "npx eslint src", "npx @anthropic-ai/claude-code-router start",
+      "npm run test -- -t 'claude plugin install'", "node scripts/check-surface.mjs", "yarn dlx create-vite app"]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
 /** Writes a patch touching `target` into the fixture; returns its name. */
 function patchFile(projectDir: string, name: string, target: string): string {
   writeFileSync(join(projectDir, name), [

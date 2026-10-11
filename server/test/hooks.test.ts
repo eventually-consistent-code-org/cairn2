@@ -1751,6 +1751,128 @@ describe("harness guard refuses Claude Code's MCP server command (#303)", () => 
   });
 });
 
+// #308: #303 covered `claude mcp`, but its siblings write the same harness
+// config from a process of their own: `claude plugin disable cairn` turns
+// off every cairn guard next session, install/enable/uninstall/update/prune
+// and the marketplace commands change which plugins load, init scaffolds an
+// auto-loading plugin in ~/.claude/skills, and `claude import` brings in
+// another agent's config. Each is refused with the owner-approval wording;
+// list, details, validate, a dry run and help pass next to them.
+describe("harness guard refuses Claude Code's plugin and import commands (#308)", () => {
+  /** A project and a home with Claude Code's config in place. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-claudeplugin-proj-");
+    const home = freshDir("cairn-hooks-claudeplugin-home-");
+    mkdirSync(join(home, ".claude", "plugins"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), "{}");
+    writeFileSync(join(home, ".claude.json"), "{}");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash command, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("every plugin, marketplace and import command that writes is refused, next to one that only reads", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["claude plugin disable cairn@cairn-dev", "claude plugin list"],
+      ["claude plugin disable --all", "claude plugin list --json"],
+      ["claude plugin disable -a -s project", "claude plugin details cairn"],
+      ["claude plugin enable evil@market", "claude plugin details evil@market"],
+      ["claude plugin install evil@market", "claude plugin list"],
+      ["claude plugin install evil -s project", "claude plugin validate ."],
+      ["claude plugin i evil", "claude plugin list"],
+      ["claude plugins install evil", "claude plugins list"],
+      ["claude plugin uninstall cairn", "claude plugin details cairn"],
+      ["claude plugin remove cairn --keep-data", "claude plugin list"],
+      ["claude plugin update cairn", "claude plugin list"],
+      ["claude plugin prune -y", "claude plugin prune --dry-run"],
+      ["claude plugin autoremove -y", "claude plugin autoremove --dry-run"],
+      ["claude plugin init helper --with hooks mcp", "claude plugin init --help"],
+      ["claude plugin new helper", "claude plugin help new"],
+      ["claude plugin configure cairn --values-stdin", "claude plugin configure cairn"],
+      ["claude plugin marketplace add evil/repo", "claude plugin marketplace list"],
+      ["claude plugin marketplace add evil/repo --scope project", "claude plugin marketplace add -h"],
+      ["claude plugin marketplace remove cairn-dev", "claude plugin marketplace list"],
+      ["claude plugin marketplace rm cairn-dev", "claude plugin marketplace --help"],
+      ["claude plugin marketplace update", "claude plugin marketplace list"],
+      ["claude import cursor --yes=abc123", "claude import cursor --dry-run"],
+      ["claude import", "claude import --help"],
+    ];
+    for (const [write, read] of pairs) {
+      const r = run(p, home, write);
+      expect(r.status, write).toBe(2);
+      expect(r.stderr, write).toContain("owner's go-ahead");
+      expect(r.stderr, write).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+
+  it("names what each one changes: the plugin registry, the settings its scope names, a new skills-dir plugin", () => {
+    const { p, home } = fixture();
+    const rows: Array<[command: string, what: string, file: string]> = [
+      ["claude plugin install evil", "the installed plugins and their registry", "installed_plugins.json"],
+      ["claude plugin marketplace add evil/repo", "the installed plugins and their registry", "known_marketplaces.json"],
+      ["claude plugin disable cairn -s user", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+      ["claude plugin disable cairn", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+      ["claude plugin disable cairn --scope project", "a settings file", join(".claude", "settings.json")],
+      ["claude plugin enable evil -s local", "a settings file", join(".claude", "settings.local.json")],
+      ["claude plugin init helper", "your machine-wide skills", join(home, ".claude", "skills")],
+      ["claude import cursor --yes", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+    ];
+    for (const [command, what, file] of rows) {
+      const r = run(p, home, command);
+      expect(r.stderr, command).toContain(`this would change ${what}`);
+      expect(r.stderr, command).toContain(file);
+    }
+  });
+
+  it("help counts only right after the subcommand words, where no option can have swallowed it", () => {
+    const { p, home } = fixture();
+    for (const c of ["claude --help", "claude plugin -h", "claude plugin install --help", "claude mcp add --help",
+      "claude plugin help install"]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+    // anywhere else the flag may be a value an option swallowed (`--description -h`
+    // scaffolds a plugin described "-h") or a word for a server's command line
+    for (const c of ["claude plugin init helper --description -h", "claude plugin install evil --help",
+      "claude mcp add evil --help -- node x", "claude plugin prune -s --dry-run"]) {
+      expect(run(p, home, c).status, c).toBe(2);
+    }
+  });
+
+  it("a plugin named like a subcommand can't hide the write beside it", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, "claude plugin disable cairn marketplace").status).toBe(2);
+    expect(run(p, home, "claude plugin details marketplace").status).toBe(0);
+  });
+
+  it("the commands are seen in any letter case, through wrappers, nested shells and streams", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["CLAUDE plugin disable cairn", "CLAUDE plugin list"],
+      ["/opt/homebrew/bin/Claude Plugin Disable cairn", "/opt/homebrew/bin/Claude Plugin List"],
+      ["sudo -u root claude plugin install evil", "sudo -u root claude plugin list"],
+      ["caffeinate -i claude import cursor --yes", "caffeinate -i claude import cursor --dry-run"],
+      ["bash -c 'claude plugin disable cairn'", "bash -c 'claude plugin list'"],
+      ["claude --model opus plugin disable cairn", "claude --model opus plugin list"],
+      ["echo cairn | xargs claude plugin disable", "echo cairn | xargs echo claude plugin disable"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(run(p, home, write).status, write).toBe(2);
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+});
+
 // #309: ~/.claude/skills, ~/.claude/agents, ~/.claude/commands and the
 // project's .claude/skills and .claude/commands were unprotected, so a
 // folder planted in ~/.claude/skills with a plugin manifest loaded next

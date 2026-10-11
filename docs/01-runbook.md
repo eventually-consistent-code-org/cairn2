@@ -1970,7 +1970,13 @@ typescript); and all of these inside wrappers and the same program
 runners the run guard reads through, `bash -c`, `su -c`, a heredoc fed
 to a shell, or shell keywords and grouping. Removing a protected
 folder, or a folder that holds one (the project itself, your home),
-counts too. A relative path is judged from the tool's working folder and
+counts too. So does Claude Code writing that configuration itself:
+`claude mcp add` and `remove`; `claude plugin install`, `uninstall`,
+`update`, `prune`, `enable`, `disable` (which would switch these guards
+off next session), `init` and `configure --values-stdin`; the `claude
+plugin marketplace` writes; and `claude import` — run as `claude` or
+through `npx`, `bunx`, `pnpm dlx`, `yarn dlx` or `node` and its CLI.
+Listing, a dry run and `--help` pass. A relative path is judged from the tool's working folder and
 from every folder a `cd`, `pushd`, `env -C` or `git -C` on the line
 could have moved to, in any order, because a `cd` can fail or run later.
 After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
