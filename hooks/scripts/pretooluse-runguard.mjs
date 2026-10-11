@@ -2,7 +2,7 @@
 
 /**
  * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
- *   #305, #306, #310, #311) -- refuses git commands that rewrite a working tree or its history
+ *   #305, #306, #310, #311, #315) -- refuses git commands that rewrite a working tree or its history
  *   out from under whoever is in it, or push past the ship gate. Exit 2
  *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
  *   The rules are spelled out in the block below.
@@ -72,7 +72,15 @@
  *   `-c` string, `tmux new-session -d '...'` -- that inner line is judged
  *   too, so the table needn't grow one runner at a time. A program that only
  *   prints or searches its arguments (echo, grep, gh, ...) runs none of
- *   them, so a line that merely mentions git stays clear. Quoted text never
+ *   them, so a line that merely mentions git stays clear -- except the one
+ *   option that runs a program (#315): man -P / --pager, gh alias set
+ *   --shell (or a !expansion), gh config set pager|editor|browser, rg --pre,
+ *   ag / ack --pager, sort --compress-program, whose value is read as a
+ *   command line; and a gh extension or alias (`gh extension exec X`, a word
+ *   that isn't a gh command) is an unknown program, read like any runner.
+ *   A pager variable set on the line -- PAGER, MANPAGER, GIT_PAGER,
+ *   GH_PAGER, ack's -- holds a command line too, judged right after the
+ *   command it rides on (`GIT_PAGER=... git log`). Quoted text never
  *   refuses, but a double-quoted $(...) still runs, so its body is checked
  *   as a command of its own (#257).
  *
@@ -105,8 +113,10 @@ import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { SHELLS, commandName, runnerCommands, shellCommandString, shellSegments, toolCommandLines, unwrap }
-  from "./shell-words.mjs";
+import {
+  SHELLS, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString, shellSegments,
+  toolCommandLines, unwrap,
+} from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -229,7 +239,13 @@ function readLine(line) {
     // the last command ended in `>&` or `<&`, so the `&` was a redirect's,
     // and this one starts with its descriptor -- `2>&1` reads as `2>`, `1`
     let descriptor = false;
+    // #315 -- a pager variable's value (PAGER=, GIT_PAGER= ...) runs once the
+    // command it rides on is going, so it's judged right after that command,
+    // never ahead of a push beside it
+    const pagers = [];
+    const flush = () => { for (const [line, env] of pagers.splice(0)) walk(line, depth + 1, env); };
     for (const seg of shellSegments(text, READ)) {
+      flush();
       const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
       if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
@@ -251,6 +267,7 @@ function readLine(line) {
         assigns: [...inherit.assigns, ...assigns.filter((a) => GIT_ENV.some((k) => a.startsWith(`${k}=`)))],
         cleared: inherit.cleared || wrappers.some(clearsEnv),
       };
+      if (depth < 3) for (const line of pagerCommands(assigns, words)) pagers.push([line, env]);
 
       // sh -c / bash -lc: the script is one quoted word -- parse it too,
       // found the same way the harness guard finds it (#270)
@@ -265,9 +282,12 @@ function readLine(line) {
         // new-session, uv run ...) may run a later word as the real command;
         // judge those inner lines too, so the wrapper table stops growing.
         // HARMLESS commands (and ARG_SAFE ones, via runnerCommands) read, not
-        // run, their arguments, so a line that only mentions git stays clear.
-        if (!HARMLESS.has(cmd) && depth < 3) {
-          for (const inner of runnerCommands(words)) walk(inner, depth + 1, env);
+        // run, their arguments, so a line that only mentions git stays clear
+        // -- all but the one option that runs a program (rg --pre, man -P,
+        // gh alias set --shell, #315), whose value is read either way.
+        if (depth < 3) {
+          const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
+          for (const line of inner) walk(line, depth + 1, env);
         }
         out.steps.push(!HARMLESS.has(cmd) || writesFile(words));
         continue;
@@ -309,6 +329,7 @@ function readLine(line) {
       out.steps.push(movesRefs(inv) || writesFile(words));
       out.invs.push(inv);
     }
+    flush();
   };
   walk(line, 0, { assigns: [], cleared: false });
   return out;

@@ -51,7 +51,10 @@
  *   -rf hooks`, `bundle exec`, a `-c` string, `tmux new-session -d '...'` --
  *   is read too, and `npm`/`pnpm`/`yarn exec` the same, so the table needn't
  *   grow one runner at a time. A command that only reads its arguments
- *   (echo, grep, cat ...) runs none of them. A
+ *   (echo, grep, cat ...) runs none of them, but the one option that runs a
+ *   program is read as a command line (#315: man -P, rg --pre, gh alias set
+ *   --shell, a gh extension ...), and so is a pager variable set on the
+ *   line (PAGER=, MANPAGER=, GIT_PAGER= ...). A
  *   relative path is judged from every folder a cd, env -C or git -C on the
  *   line can reach (#258); after a cd it can't follow, refused. Removing a
  *   protected folder or one holding it counts, and so does changing its
@@ -89,8 +92,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, braceExpand, quoteWord, runnerCommands, shellCommandString, shellReadsStdin, shellSegments,
-  suCommandString, toolCommandLines, unwrap,
+  SHELLS, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString, shellReadsStdin,
+  shellSegments, suCommandString, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -1659,7 +1662,7 @@ function runnerTargets(args, ctx, add, out) {
  */
 function writeTargets(seg, ctx) {
   const out = [];
-  const { words: w0, writes, wrappers, dirs } = unwrap(seg.words, READ);
+  const { words: w0, writes, wrappers, dirs, assigns } = unwrap(seg.words, READ);
   // xargs runs its command with paths read from stdin (#258). Its name is
   // folded like any command's: macOS runs `XARGS` as xargs (#300).
   const xargs = wrappers.find((x) => cmdName(x.name) === "xargs");
@@ -1697,6 +1700,13 @@ function writeTargets(seg, ctx) {
       return out;
     }
     for (const x of writes) add(x);
+  }
+  // #315 -- a pager variable set here (PAGER=, MANPAGER=, GIT_PAGER= ...)
+  // names a program man, git or gh runs: its value is a command line too
+  if (ctx.depth < 3) {
+    for (const inner of pagerCommands(assigns, w0)) {
+      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    }
   }
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
@@ -1767,7 +1777,9 @@ function writeTargets(seg, ctx) {
   // new-session, uv run ...) may run a later word as the real command; read
   // those inner lines too. A program that only prints or searches its
   // arguments (ARG_SAFE, inside runnerCommands) runs none of them, so an
-  // ordinary line that merely names a protected path passes.
+  // ordinary line that merely names a protected path passes -- all but the
+  // one option that runs a program (man -P, rg --pre, gh alias set --shell,
+  // #315), which runnerCommands hands back as a line of its own.
   else if (ctx.depth < 3) {
     for (const inner of runnerCommands(w)) {
       out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));

@@ -304,6 +304,59 @@ describe("harness guard sees through more program runners (#311)", () => {
   });
 });
 
+// #315: a reading program's one program-running option -- man -P, gh alias
+// set --shell, gh extension exec, rg --pre -- and a pager variable set on
+// the line hold a command line; the rest of the program's words stay data.
+describe("harness guard reads the one option an ARG_SAFE program runs (#315)", () => {
+  it("a protected write inside the option is refused; the same program reading or naming the path passes", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["man -P 'rm -rf hooks' ls", "man -P 'less hooks/hooks.json' ls"],
+      ["man -P'rm -rf hooks' ls", "man git-reset"],
+      ["man --pager='tee hooks/hooks.json' ls", "man --pager=less ls"],
+      ["man --pager 'rm -rf hooks' ls", "man -k hooks"],
+      ["MANPAGER='rm -rf hooks' man ls", "MANPAGER='less -R' man ls"],
+      ["PAGER='rm -rf hooks' man ls", "PAGER=less man ls"],
+      ["GIT_PAGER='rm -rf hooks' git log", "GIT_PAGER=cat git log"],
+      ["PAGER='cp /tmp/evil .mcp.json' git log", "PAGER=cat git log -- .mcp.json"],
+      ["export GIT_PAGER='rm -rf hooks'; git log", "export GIT_PAGER=cat; git log"],
+      ["gh alias set --shell r 'rm -rf hooks'", "gh alias set co 'pr checkout'"],
+      ["gh alias set -s r 'rm -rf hooks'", "gh alias set rs 'rm -rf hooks'"],
+      ["gh alias set r '!rm -rf hooks'", "gh alias list"],
+      ["gh config set pager 'rm -rf hooks'", "gh config get pager"],
+      ["gh extension exec evil -- rm -rf hooks", "gh extension exec evil -- cat hooks/hooks.json"],
+      ["gh ext exec evil rm -rf hooks", "gh extension list"],
+      ["gh evil -- rm -rf hooks", 'gh pr create --body "never rm -rf hooks"'],
+      ["rg --pre 'rm -rf hooks' foo", "rg --pre-glob '*.gz' foo"],
+      ["rg --pre='tee hooks/hooks.json' foo", 'rg -n "rm -rf hooks" docs'],
+      ["ag --pager 'rm -rf hooks' foo", "ag 'rm -rf hooks' docs"],
+      ["sort --compress-program='rm -rf hooks' x", "sort -k 2 x"],
+      ["sudo man -P 'rm -rf hooks' ls", "sudo man -P less ls"], // through a wrapper
+      ["bash -c \"man -P 'rm -rf hooks' ls\"", "bash -c \"man -P less ls\""], // and a nested shell
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("the option's value is judged from the shell's folder, after a cd on the line", () => {
+    const p = proj();
+    mkdirSync(join(p, "sub"));
+    expect(guard(p, "cd sub && man -P 'rm -rf ../hooks' ls")).toBe(2);
+    expect(guard(p, "cd sub && man -P 'rm -rf hooks' ls")).toBe(2); // a cd can fail: judged from both folders
+    expect(guard(p, "man -P 'rm -rf hooks' ls", "sub")).toBe(0); // the payload's cwd: sub/hooks isn't protected
+  });
+
+  it("reaches the harness guard through an MCP command field too (#310)", () => {
+    const p = proj();
+    expect(call(p, "mcp__shell__run", { command: "man -P 'rm -rf hooks' ls" })).toBe(2);
+    expect(call(p, "mcp__shell__run", { command: "gh alias set --shell r 'rm -rf hooks'" })).toBe(2);
+    expect(call(p, "mcp__shell__run", { command: "man git-reset" })).toBe(0);
+    expect(call(p, "mcp__shell__run", { command: 'gh pr create --body "rm -rf hooks"' })).toBe(0);
+  });
+});
+
 /** Writes a patch touching `target` into the fixture; returns its name. */
 function patchFile(projectDir: string, name: string, target: string): string {
   writeFileSync(join(projectDir, name), [

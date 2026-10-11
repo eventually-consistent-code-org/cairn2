@@ -8,7 +8,9 @@
  *   xcrun, arch -arm64 or script -q /dev/null, #307; strace, runuser and kin,
  *   #311) that run a later word as the real command. For a runner outside
  *   that table, runnerCommands (#311) still hands back the inner command its
- *   later words form, so the table stops growing one runner at a time. One
+ *   later words form, so the table stops growing one runner at a time, and
+ *   argCommands and pagerCommands (#315) hand back the program a reading
+ *   command's option or a pager variable runs (man -P, GIT_PAGER=). One
  *   MCP-input reader, toolCommandLines, finds the command lines a non-Bash
  *   tool hands a shell (#310, #311). The run guard and the harness guard
  *   both read commands through here, so a parsing fix reaches both; two
@@ -594,13 +596,155 @@ export function unwrap(words, read = {}) {
  * Commands that only print, search or document their arguments, never run
  * one (#311): the words after one are data, so a guard never re-reads them
  * as a command. A command that can execute an argument (sh, eval, xargs,
- * find, tee, dd ...) must stay off this list.
+ * find, tee, dd ...) must stay off this list -- unless it's one option
+ * that runs a program (man -P, gh alias set --shell, rg --pre, #315), which
+ * argCommands names, reading its value as a command line.
  */
 export const ARG_SAFE = new Set(["echo", "printf", "print", "cat", "head", "tail", "wc", "ls",
   "stat", "file", "du", "df", "basename", "dirname", "realpath", "readlink", "pwd", "date",
   "sort", "uniq", "cut", "tr", "cmp", "diff", "grep", "egrep", "fgrep", "rg", "ag", "ack",
   "ack-grep", "man", "which", "type", "whatis", "apropos", "whereis", "gh", "jq", "true",
   "false", ":"]);
+
+// The variables naming the pager a program hands its output to (#315): man,
+// git, gh and ack run the value as a command line.
+const PAGER_VARS = new Set(["PAGER", "MANPAGER", "GIT_PAGER", "GH_PAGER", "ACK_PAGER", "ACK_PAGER_COLOR"]);
+
+// man's short options that take a value (man-db's and BSD man's), so a P
+// inside one's value is never read as -P.
+const MAN_VALUE = "CELMPRSemprs";
+
+// gh's own commands and their aliases (gh 2.10x). Any other first word runs
+// an extension (gh-NAME) or an alias, a program the guards can't see (#315).
+const GH_COMMANDS = new Set(["a11y", "accessibility", "actions", "agent", "agent-task", "agent-tasks", "agents",
+  "alias", "api", "at", "attestation", "auth", "browse", "cache", "co", "codespace", "completion", "config",
+  "copilot", "credits", "cs", "discussion", "environment", "exit-codes", "ext", "extension", "extensions",
+  "formatting", "gist", "gpg-key", "help", "issue", "label", "licenses", "mintty", "org", "pr", "preview",
+  "project", "reference", "release", "repo", "rs", "ruleset", "run", "search", "secret", "skill", "skills",
+  "ssh-key", "status", "telemetry", "variable", "version", "workflow"]);
+
+// The gh config keys naming a program gh runs (#315).
+const GH_PROGRAMS = new Set(["pager", "editor", "browser"]);
+
+/**
+ * Every value `args` give one option (#315): `--long=V` or `--long V`, the
+ * long name shortened as getopt allows down to `min` characters, and its
+ * short letter -- `-P V`, `-PV`, or ending a cluster (`-aP V`). `short`
+ * holds each of the program's letters that take a value, so a letter in
+ * another option's value is never read as this one. An `optional` value is
+ * only ever joined to its option (`-Hfirefox`, `--html=firefox`).
+ */
+function optionValues(args, { long, min = long.length, letter = "", short = "", optional = false }) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") break;
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      if (name.length < min || !long.startsWith(name)) continue;
+      if (eq >= 0) out.push(a.slice(eq + 1));
+      else if (!optional && i + 1 < args.length) out.push(args[++i]);
+      continue;
+    }
+    if (!/^-[^-]/.test(a)) continue;
+    for (let k = 1; k < a.length; k++) {
+      const mine = a[k] === letter;
+      if (!mine && !short.includes(a[k])) continue; // a plain switch
+      const joined = a.slice(k + 1);
+      const v = joined || (mine && optional) ? joined : (args[++i] ?? "");
+      if (mine && v) out.push(v);
+      break;
+    }
+  }
+  return out;
+}
+
+/** What gh runs from its arguments (#315) -- see argCommands. */
+function ghCommands(rest) {
+  const [sub, ...more] = rest;
+  if (!sub || sub.startsWith("-")) return [];
+  // an extension or an alias: an unknown program, its later words judged like any runner's
+  if (!GH_COMMANDS.has(sub)) return runnerCommands([`gh-${sub}`, ...more]);
+  const at = more.findIndex((a) => !a.startsWith("-"));
+  if (at < 0) return [];
+  const action = more[at];
+  const after = more.slice(at + 1);
+  if (/^ext(?:ensions?)?$/.test(sub) && action === "exec" && after.length) {
+    return runnerCommands([`gh-${after[0]}`, ...after.slice(1)]);
+  }
+  if (action !== "set" || (sub !== "alias" && sub !== "config")) return [];
+  const bare = [];
+  let shell = false;
+  for (let i = 0; i < after.length; i++) {
+    const a = after[i];
+    if (a === "--") { bare.push(...after.slice(i + 1)); break; }
+    if (sub === "config" && (a === "-h" || a === "--host")) { i++; continue; }
+    if (a === "-s" || /^--shell(?:=true)?$/.test(a)) shell = true;
+    else if (!a.startsWith("-")) bare.push(a);
+  }
+  const [key, value] = bare;
+  if (typeof value !== "string") return [];
+  if (sub === "alias") return shell || value.startsWith("!") ? [value.replace(/^!/, "")] : [];
+  return GH_PROGRAMS.has(key) ? [value] : [];
+}
+
+/**
+ * The command lines a program on ARG_SAFE still runs from its arguments
+ * (#315), one option at a time; every other word it's given stays data:
+ *   man       -P / --pager, and -H / --html=BROWSER
+ *   gh        `alias set` with --shell, or an expansion starting with !;
+ *             `config set pager|editor|browser`; and an extension --
+ *             `extension exec NAME`, or a first word that isn't one of gh's
+ *             commands -- an unknown program, its later words read through
+ *             runnerCommands
+ *   rg        --pre, alone and as rg runs it: on each path operand, or here
+ *   ag, ack   --pager
+ *   sort      --compress-program
+ * Empty for every other program, and for these without such an option.
+ */
+export function argCommands(words) {
+  if (!Array.isArray(words) || words.length < 2) return [];
+  const name = commandName(words[0]);
+  const rest = words.slice(1);
+  const out = [];
+  const push = (line) => { if (typeof line === "string" && line.trim() && !out.includes(line)) out.push(line); };
+  if (name === "man") {
+    for (const v of optionValues(rest, { long: "--pager", min: 5, letter: "P", short: MAN_VALUE })) push(v);
+    for (const v of optionValues(rest, { long: "--html", min: 4, letter: "H", short: MAN_VALUE, optional: true })) push(v);
+  } else if (name === "gh") {
+    for (const line of ghCommands(rest)) push(line);
+  } else if (name === "rg") {
+    const operands = rest.filter((a, i) => !a.startsWith("-") && rest[i - 1] !== "--pre");
+    for (const v of optionValues(rest, { long: "--pre" })) {
+      push(v);
+      push([v, ...operands.map(quoteWord), "."].join(" "));
+    }
+  } else if (name === "ag" || name === "ack" || name === "ack-grep") {
+    for (const v of optionValues(rest, { long: "--pager", min: 5 })) push(v);
+  } else if (name === "sort") {
+    for (const v of optionValues(rest, { long: "--compress-program", min: 4, short: "kSoTt" })) push(v);
+  }
+  return out;
+}
+
+/**
+ * The command lines the pager variables set on one command hold (#315):
+ * `MANPAGER=CMD man ls`, `GIT_PAGER=CMD git log`, PAGER, GH_PAGER and
+ * ack's -- in front of any command, alone on the line, or by export,
+ * declare, typeset, readonly or local, since a later man, git or gh runs
+ * it. `assigns` and `words` are unwrap's.
+ */
+export function pagerCommands(assigns, words) {
+  const declared = /^(export|declare|typeset|readonly|local)$/.test(words?.[0] ?? "") ? words.slice(1) : [];
+  const out = [];
+  for (const a of [...(assigns ?? []), ...declared]) {
+    const eq = a.indexOf("=");
+    const v = a.slice(eq + 1);
+    if (eq > 0 && PAGER_VARS.has(a.slice(0, eq)) && v.trim() && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
 
 // An option whose value is a command line a runner hands a shell (strace has
 // none; op/sg/runuser and the npm family use these), and the separators past
@@ -618,15 +762,16 @@ const RUNNER_SEPS = new Set(["--", "--args", ":::"]);
  * a -c / --call string, whatever follows a `--` / `:::` / `--args`
  * separator, the run of words from the first bare one, each quoted string
  * argument that is itself a command, and osascript's `do shell script
- * "..."`. Empty for a program that only reads its arguments (ARG_SAFE), or
- * with nothing command-shaped after it. The caller decides which inner line
- * is dangerous; this only finds the candidates. Words are requoted so a
+ * "..."`. For a program that only reads its arguments (ARG_SAFE), only the
+ * option that runs one (argCommands, #315); empty with nothing
+ * command-shaped after it. The caller decides which inner line is
+ * dangerous; this only finds the candidates. Words are requoted so a
  * re-read splits them the same way.
  */
 export function runnerCommands(words) {
   if (!Array.isArray(words) || words.length < 2) return [];
   const name = commandName(words[0]);
-  if (ARG_SAFE.has(name)) return [];
+  if (ARG_SAFE.has(name)) return argCommands(words);
   const rest = words.slice(1);
   const out = [];
   const push = (line) => { if (typeof line === "string" && line && !out.includes(line)) out.push(line); };

@@ -825,6 +825,116 @@ describe("run guard: a program runner off the table doesn't hide git (#311)", ()
   });
 });
 
+// #315: ARG_SAFE exempted man and gh whole, but `man -P '<cmd>'` runs its
+// pager, `gh alias set --shell` and `gh extension exec` run programs, and a
+// PAGER= / GIT_PAGER= assignment runs on the next git or man. Each is read
+// per option now; dropping gh would bring back the `gh pr create --body`
+// over-refusal.
+describe("run guard: a reading program's one program-running option is read as a command (#315)", () => {
+  const R = "git reset --hard";
+  const refused = [
+    `man -P '${R}' ls`,
+    `man -P'${R}' ls`,
+    `man --pager='${R}' ls`,
+    `man --pager '${R}' ls`,
+    `man -aP '${R}' ls`,
+    `MANPAGER='${R}' man ls`,
+    `PAGER='${R}' man ls`,
+    `GIT_PAGER='${R}' git log`,
+    `PAGER='${R}' git log`,
+    `export GIT_PAGER='${R}'; git log`,
+    `GIT_PAGER='${R}' git -C /tmp log`,
+    `gh alias set --shell r '${R}'`,
+    `gh alias set -s r '${R}'`,
+    `gh alias set r --shell '${R}'`,
+    `gh alias set r '!${R}'`,
+    `gh config set pager '${R}'`,
+    `gh config set editor '${R}'`,
+    `gh extension exec evil -- ${R}`,
+    `gh ext exec evil ${R}`,
+    `gh evil -- ${R}`,
+    `rg --pre '${R}' foo`,
+    `rg --pre='${R}' foo`,
+    `ag --pager '${R}' foo`,
+    `sort --compress-program='${R}' x`,
+    `sudo man -P '${R}' ls`, // through a wrapper
+    `bash -c "man -P '${R}' ls"`, // and a nested shell
+  ];
+  const allowed = [
+    "man git-reset",
+    "man -k reset",
+    "man -P less git",
+    "man -M /opt/man ls",
+    `man -S 1:P ls`,
+    "PAGER=less man git",
+    "GIT_PAGER=cat git log",
+    "MANPAGER='less -R' man git-reset",
+    "GIT_PAGER=cat git log --oneline -5",
+    `gh pr create --body "never run ${R}"`,
+    `gh issue create --title "${R} is refused"`,
+    "gh alias set co 'pr checkout'",
+    `gh alias set rs '${R}'`, // no --shell: gh runs it as a gh command, which has no reset
+    "gh alias list",
+    "gh config get pager",
+    `gh config set git_protocol '${R}'`,
+    "gh extension list",
+    "gh extension install owner/gh-x",
+    "gh pr checkout 5",
+    "rg --pre-glob '*.gz' foo",
+    `rg -n "${R}" docs`,
+    "rg --pre unzip x",
+    "sort -k 2 x",
+    `echo -P '${R}'`,
+  ];
+
+  it("each program-running option carrying a destructive git is refused", () => {
+    const { proj, home } = fixture();
+    for (const c of refused) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("refused in every session");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("the same programs reading, printing or searching stay allowed", () => {
+    const { proj, home } = fixture();
+    for (const c of allowed) expect(guard(proj, home, c).status, c).toBe(0);
+  });
+
+  it("a pager that pushes meets the ship gate, and one before a push on the line isn't an earlier step (#305)", () => {
+    const bare = fixture(undefined, false);
+    expect(guard(bare.proj, bare.home, "GIT_PAGER='git push origin feature:main' git log").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "gh alias set --shell p 'git push origin HEAD:main'").status).toBe(2);
+    const { proj, home } = fixture();
+    // a harmless pager rides the git log before a stamped push: not a commit or ref move ahead of it
+    expect(guard(proj, home, "GIT_PAGER=cat git log -1 && git push origin main").status).toBe(0);
+    expect(guard(proj, home, "GIT_PAGER='git commit --allow-empty -m x' git log && git push origin main").status).toBe(2);
+    // rg --pre runs its program on every file: an unknown script there is an
+    // earlier step that can commit, like `./x.sh && git push` is; a reader isn't
+    const pre = guard(proj, home, "rg --pre ./x.sh foo seed.txt && git push origin main");
+    expect(pre.status).toBe(2);
+    expect(pre.stderr).toContain("push as its own step");
+    expect(guard(proj, home, "rg --pre cat foo seed.txt && git push origin main").status).toBe(0);
+  });
+
+  it("reaches the guard through an MCP tool's command line too (#310)", () => {
+    const { proj, home } = fixture();
+    const START = "mcp__plugin_desktop-commander_desktop-commander__start_process";
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home };
+    delete env.CAIRN_ALLOW_DESTRUCTIVE_GIT;
+    delete env.CAIRN_ALLOW_UNSHIPPED_PUSH;
+    const run = (command: string) => spawnSync(process.execPath, [RUNGUARD], {
+      cwd: proj, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: START, tool_input: { command }, cwd: proj }),
+    });
+    expect(run(`man -P '${R}' ls`).status).toBe(2);
+    expect(run(`gh alias set --shell r '${R}'`).status).toBe(2);
+    expect(run("man git-reset").status).toBe(0);
+    expect(run(`gh pr create --body "${R}"`).status).toBe(0);
+  });
+});
+
 describe("run guard: a capitalised command name is the program a Mac runs (#300)", () => {
   // Each row: [capitalised, lowercase, capitalised harmless]. A Mac's
   // case-insensitive volume runs `GIT` as git and `SUDO` as sudo, so before

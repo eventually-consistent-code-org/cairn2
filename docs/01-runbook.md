@@ -1884,7 +1884,16 @@ reset --hard`, `uv run`, a `-c` string, `tmux new-session -d '…'`,
 `osascript -e 'do shell script "…"'` — that inner line is judged too, so
 the table needn't grow one runner at a time. A program that only prints
 or searches its arguments (`echo`, `grep`, `gh`, `jq`, …) runs none of
-them. An MCP tool's command line is read the same way (see *Which tools
+them — except the one option that does run a program, which is read as
+a command line of its own: `man -P` / `--pager`, `gh alias set --shell`
+(or a `!` expansion), `gh config set pager|editor|browser`, `rg --pre`,
+`ag`/`ack --pager`, `sort --compress-program`; a `gh extension exec` or
+a word that isn't a `gh` command is an extension or alias, an unknown
+program judged like any runner; and a pager variable set on the line
+(`PAGER=`, `MANPAGER=`, `GIT_PAGER=`, `GH_PAGER=`) runs on the `man`,
+`git` or `gh` it rides on. `man git-reset`, `gh pr create --body "…"`,
+`GIT_PAGER=cat git log` and `rg --pre-glob` stay allowed. An MCP tool's
+command line is read the same way (see *Which tools
 the guards see*, below). Quoted text that only mentions git never trips
 it — a commit message saying "never `git reset --hard`" passes. A guard
 that breaks lets the command through rather than blocking work. It
