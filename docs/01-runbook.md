@@ -2052,7 +2052,13 @@ The protected set also covers cairn's own trust anchors:
   project's), the project's `.mcp.json`, and Cursor's `.cursor/mcp.json`
   and `~/.cursor/mcp.json` — read off each server's `command` and `args`
   the same way (`node ~/repos/…/dist/index.js`, `$HOME/bin/server`, a
-  symlink and the file it points to). A swapped server script runs when
+  symlink and the file it points to), and the folder a config names for
+  its server to run in, protected whole — `uv --directory ~/weather run
+  weather.py`, the MCP quickstart's Python shape, where the script has
+  no slash and the folder is an option value; a server entry's `cwd`,
+  which its `./dist/index.js` resolves from; and `node ~/srv/dirmain`,
+  which runs that folder's `index.js`. That folder only, never its
+  parents: a file beside it stays ordinary work. A swapped server script runs when
   the next session starts that server, with whatever tokens its config
   hands it, so it gets the same refusals a hook script does. A script
   inside the project stays writable on purpose: cairn's own `.mcp.json`
