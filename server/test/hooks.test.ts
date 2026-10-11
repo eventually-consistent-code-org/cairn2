@@ -1348,8 +1348,8 @@ describe("harness guard protects the plugin copy that runs (#267)", () => {
     for (const c of ["cat .claude/agents/a.md", "ls .claude/hooks"]) {
       expect(run(p, bashPayload(c)).status, c).toBe(0);
     }
-    // the rest of .claude/ is ordinary work
-    expect(run(p, filePayload(join(p, ".claude", "skills", "x", "SKILL.md"))).status).toBe(0);
+    // the rest of .claude/ is ordinary work (skills and commands joined the set in #309)
+    expect(run(p, filePayload(join(p, ".claude", "worktrees", "wt", "src", "a.ts"))).status).toBe(0);
   });
 });
 
@@ -1511,7 +1511,7 @@ describe("harness guard matches protected paths in any letter case (#295)", () =
   it("look-alikes in any case stay ordinary work", () => {
     const p = freshDir("cairn-hooks-case-");
     for (const file of ["docs/HOOKS.md", "Hooksy/a.json", "server/Hooks/helper.ts", "SETTINGS.json",
-      "my.MCP.json", ".Claude/Skills/x/SKILL.md", ".Cursor/rules/a.mdc", ".claude/SETTINGS.md"]) {
+      "my.MCP.json", ".Claude/Skillset/x/SKILL.md", ".Cursor/rules/a.mdc", ".claude/SETTINGS.md"]) {
       expect(run(p, write(join(p, file))).status, file).toBe(0);
     }
   });
@@ -1765,6 +1765,364 @@ describe("harness guard refuses Claude Code's MCP server command (#303)", () => 
       "cat ~/.claude.json | jq .mcpServers",
     ]) {
       expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+});
+
+// #308: #303 covered `claude mcp`, but its siblings write the same harness
+// config from a process of their own: `claude plugin disable cairn` turns
+// off every cairn guard next session, install/enable/uninstall/update/prune
+// and the marketplace commands change which plugins load, init scaffolds an
+// auto-loading plugin in ~/.claude/skills, and `claude import` brings in
+// another agent's config. Each is refused with the owner-approval wording;
+// list, details, validate, a dry run and help pass next to them.
+describe("harness guard refuses Claude Code's plugin and import commands (#308)", () => {
+  /** A project and a home with Claude Code's config in place. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-claudeplugin-proj-");
+    const home = freshDir("cairn-hooks-claudeplugin-home-");
+    mkdirSync(join(home, ".claude", "plugins"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), "{}");
+    writeFileSync(join(home, ".claude.json"), "{}");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash command, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("every plugin, marketplace and import command that writes is refused, next to one that only reads", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["claude plugin disable cairn@cairn-dev", "claude plugin list"],
+      ["claude plugin disable --all", "claude plugin list --json"],
+      ["claude plugin disable -a -s project", "claude plugin details cairn"],
+      ["claude plugin enable evil@market", "claude plugin details evil@market"],
+      ["claude plugin install evil@market", "claude plugin list"],
+      ["claude plugin install evil -s project", "claude plugin validate ."],
+      ["claude plugin i evil", "claude plugin list"],
+      ["claude plugins install evil", "claude plugins list"],
+      ["claude plugin uninstall cairn", "claude plugin details cairn"],
+      ["claude plugin remove cairn --keep-data", "claude plugin list"],
+      ["claude plugin update cairn", "claude plugin list"],
+      ["claude plugin prune -y", "claude plugin prune --dry-run"],
+      ["claude plugin autoremove -y", "claude plugin autoremove --dry-run"],
+      ["claude plugin init helper --with hooks mcp", "claude plugin init --help"],
+      ["claude plugin new helper", "claude plugin help new"],
+      ["claude plugin configure cairn --values-stdin", "claude plugin configure cairn"],
+      ["claude plugin marketplace add evil/repo", "claude plugin marketplace list"],
+      ["claude plugin marketplace add evil/repo --scope project", "claude plugin marketplace add -h"],
+      ["claude plugin marketplace remove cairn-dev", "claude plugin marketplace list"],
+      ["claude plugin marketplace rm cairn-dev", "claude plugin marketplace --help"],
+      ["claude plugin marketplace update", "claude plugin marketplace list"],
+      ["claude import cursor --yes=abc123", "claude import cursor --dry-run"],
+      ["claude import", "claude import --help"],
+    ];
+    for (const [write, read] of pairs) {
+      const r = run(p, home, write);
+      expect(r.status, write).toBe(2);
+      expect(r.stderr, write).toContain("owner's go-ahead");
+      expect(r.stderr, write).not.toContain("CAIRN_HARNESS_EDIT=1");
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+
+  it("names what each one changes: the plugin registry, the settings its scope names, a new skills-dir plugin", () => {
+    const { p, home } = fixture();
+    const rows: Array<[command: string, what: string, file: string]> = [
+      ["claude plugin install evil", "the installed plugins and their registry", "installed_plugins.json"],
+      ["claude plugin marketplace add evil/repo", "the installed plugins and their registry", "known_marketplaces.json"],
+      ["claude plugin disable cairn -s user", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+      ["claude plugin disable cairn", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+      ["claude plugin disable cairn --scope project", "a settings file", join(".claude", "settings.json")],
+      ["claude plugin enable evil -s local", "a settings file", join(".claude", "settings.local.json")],
+      ["claude plugin init helper", "your machine-wide skills", join(home, ".claude", "skills")],
+      ["claude import cursor --yes", "your machine-wide Claude settings", join(home, ".claude", "settings.json")],
+    ];
+    for (const [command, what, file] of rows) {
+      const r = run(p, home, command);
+      expect(r.stderr, command).toContain(`this would change ${what}`);
+      expect(r.stderr, command).toContain(file);
+    }
+  });
+
+  it("help counts only right after the subcommand words, ending them, where no option can have swallowed it", () => {
+    const { p, home } = fixture();
+    for (const c of ["claude --help", "claude plugin -h", "claude plugin install --help", "claude mcp add --help",
+      "claude plugin help install"]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+    // anywhere else the flag may be a value an option swallowed (`--description -h`
+    // scaffolds a plugin described "-h") or a word for a server's command line
+    for (const c of ["claude plugin init helper --description -h", "claude plugin install evil --help",
+      "claude mcp add evil --help -- node x", "claude plugin prune -s --dry-run", "claude plugin --help disable cairn"]) {
+      expect(run(p, home, c).status, c).toBe(2);
+    }
+  });
+
+  it("a plugin named like a subcommand can't hide the write beside it", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, "claude plugin disable cairn marketplace").status).toBe(2);
+    expect(run(p, home, "claude plugin details marketplace").status).toBe(0);
+  });
+
+  it("the commands are seen in any letter case, through wrappers, nested shells and streams", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["CLAUDE plugin disable cairn", "CLAUDE plugin list"],
+      ["/opt/homebrew/bin/Claude Plugin Disable cairn", "/opt/homebrew/bin/Claude Plugin List"],
+      ["sudo -u root claude plugin install evil", "sudo -u root claude plugin list"],
+      ["caffeinate -i claude import cursor --yes", "caffeinate -i claude import cursor --dry-run"],
+      ["bash -c 'claude plugin disable cairn'", "bash -c 'claude plugin list'"],
+      ["claude --model opus plugin disable cairn", "claude --model opus plugin list"],
+      ["echo cairn | xargs claude plugin disable", "echo cairn | xargs echo claude plugin disable"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(run(p, home, write).status, write).toBe(2);
+      expect(run(p, home, read).status, read).toBe(0);
+    }
+  });
+});
+
+// #309: ~/.claude/skills, ~/.claude/agents, ~/.claude/commands and the
+// project's .claude/skills and .claude/commands were unprotected, so a
+// folder planted in ~/.claude/skills with a plugin manifest loaded next
+// session as a plugin with its own hooks and MCP servers -- the escalation
+// the guard refuses for ~/.claude/plugins. Each folder is refused for every
+// write shape now, in any letter case; reading them stays ordinary work.
+describe("harness guard protects skill, agent and command folders (#309)", () => {
+  /** A project and a home holding each folder, the way Claude Code leaves them. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-skills-proj-");
+    const home = freshDir("cairn-hooks-skills-home-");
+    for (const d of [join(home, ".claude", "skills", "helper"), join(home, ".claude", "agents"),
+      join(home, ".claude", "commands"), join(p, ".claude", "skills", "x"), join(p, ".claude", "commands")]) {
+      mkdirSync(d, { recursive: true });
+    }
+    writeFileSync(join(home, ".claude", "skills", "helper", "SKILL.md"), "# helper\n");
+    writeFileSync(join(p, ".claude", "skills", "x", "SKILL.md"), "# x\n");
+    writeFileSync(join(p, ".claude", "commands", "x.md"), "x\n");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one tool call, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, tool: string, input: Record<string, string>) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: "" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("refuses Write and Edit into each folder, in any letter case, naming it", () => {
+    const { p, home } = fixture();
+    const cases: Array<[string, string]> = [
+      [join(home, ".claude", "skills", "helper", ".claude-plugin", "plugin.json"), "your machine-wide skills"],
+      [join(home, ".claude", "skills", "helper", "hooks", "hooks.json"), "your machine-wide skills"],
+      ["~/.claude/skills/helper/.mcp.json", "your machine-wide skills"],
+      [join(home, ".CLAUDE", "Skills", "helper", "SKILL.md"), "your machine-wide skills"],
+      [join(home, ".claude", "agents", "x.md"), "your machine-wide agent definitions"],
+      ["~/.claude/AGENTS/x.md", "your machine-wide agent definitions"],
+      [join(home, ".claude", "commands", "x.md"), "your machine-wide slash commands"],
+      [join(p, ".claude", "skills", "x", "SKILL.md"), "the project's skills"],
+      [join(p, ".Claude", "SKILLS", "y", "SKILL.md"), "the project's skills"],
+      [join(p, "packages", "web", ".claude", "skills", "x", "SKILL.md"), "the project's skills"],
+      [join(p, ".claude", "commands", "x.md"), "the project's slash commands"],
+      [join(p, ".claude", "Commands", "deploy.md"), "the project's slash commands"],
+    ];
+    for (const [file, phrase] of cases) {
+      for (const tool of ["Write", "Edit"]) {
+        const r = run(p, home, tool, { file_path: file });
+        expect(r.status, `${tool} ${file}`).toBe(2);
+        expect(r.stderr, `${tool} ${file}`).toContain(phrase);
+        expect(r.stderr, `${tool} ${file}`).toContain("owner's go-ahead");
+      }
+    }
+  });
+
+  it("refuses the shell writes an agent would use, and passes their reads", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: string, read: string]> = [
+      ["echo '{}' > ~/.claude/skills/helper/.claude-plugin/plugin.json", "cat ~/.claude/skills/helper/SKILL.md"],
+      ["mkdir -p ~/.claude/skills/helper/hooks", "ls ~/.claude/skills"],
+      ["cp -r /tmp/plugin ~/.claude/skills/helper", "cp -r ~/.claude/skills/helper /tmp/backup"],
+      ["tee ~/.claude/agents/x.md < /tmp/a.md", "tee /tmp/a.md < ~/.claude/agents/x.md"],
+      ["echo x > $HOME/.claude/commands/x.md", "grep -r x $HOME/.claude/commands"],
+      ["rm -rf ~/.claude/skills", "ls -la ~/.claude/skills"],
+      ["mv /tmp/evil ~/.claude/agents", "stat ~/.claude/agents"],
+      ["rm -rf ~/.claude/s*", "ls -d ~/.claude/s*"],
+      ["find ~/.claude/skills -name '*.md' -delete", "find ~/.claude/skills -name '*.md'"],
+      ["echo x > .claude/skills/x/SKILL.md", "cat .claude/skills/x/SKILL.md"],
+      ["cp /tmp/c.md .claude/commands/", "cp .claude/commands/x.md /tmp/c.md"],
+      ["rm -rf .claude/skills", "ls .claude/skills"],
+      ["sed -i '' 's/a/b/' .claude/commands/*.md", "grep -n a .claude/commands/*.md"],
+      ["cd .claude/skills && echo x > x/SKILL.md", "cd .claude/skills && cat x/SKILL.md"],
+    ];
+    for (const [w, read] of pairs) {
+      expect(run(p, home, "Bash", { command: w }).status, w).toBe(2);
+      expect(run(p, home, "Bash", { command: read }).status, read).toBe(0);
+    }
+  });
+
+  it("their neighbours stay ordinary work: the plugin's own skills/ and commands/, other ~/.claude folders", () => {
+    const { p, home } = fixture();
+    for (const file of [join(p, "skills", "x", "SKILL.md"), join(p, "commands", "x.md"),
+      join(p, ".claude", "skills.md"), join(home, ".claude", "skills.bak", "x.md"),
+      join(home, ".claude", "projects", "x", "memory", "MEMORY.md"), join(home, "skills", "x.md")]) {
+      expect(run(p, home, "Write", { file_path: file }).status, file).toBe(0);
+    }
+    for (const c of ["echo x > skills/x/SKILL.md", "rm -rf commands/old.md", "mkdir -p ~/.claude/projects/x"]) {
+      expect(run(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+});
+
+// #310: both guards were scoped to Bash/Edit/Write by their matchers, so an
+// MCP server's write_file onto hooks/hooks.json or its shell tool running
+// `rm -rf hooks` reached the same harm unchecked. The owner's call: cover
+// the known shapes and document the rest. hooks.json now sends every MCP
+// tool here; a writing tool's path fields and any tool's command line are
+// judged, and read tools, other-language code and unknown shapes pass.
+describe("harness guard reads MCP tools' writes and command lines (#310)", () => {
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const CTX = "mcp__plugin_context-mode_context-mode__";
+
+  /** A project holding the hook directory and a settings folder, and a home. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-mcptools-proj-");
+    const home = freshDir("cairn-hooks-mcptools-home-");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, ".claude"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one tool call, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, tool: string, input: Record<string, unknown>, env: Record<string, string> = {}) {
+    const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home, ...env };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in env)) delete e[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env: e, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  type Call = [tool: string, input: Record<string, unknown>];
+
+  it("an MCP write onto a protected file is refused; the same write elsewhere passes", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: Call, elsewhere: Call]> = [
+      [[`${DC}write_file`, { path: "hooks/hooks.json", content: "{}" }], [`${DC}write_file`, { path: "src/x.ts", content: "x" }]],
+      [["mcp__filesystem__write_file", { path: join(p, "hooks", "hooks.json") }], ["mcp__filesystem__write_file", { path: join(p, "src", "x.ts") }]],
+      [[`${DC}edit_block`, { file_path: ".mcp.json", old_string: "a", new_string: "b" }], [`${DC}edit_block`, { file_path: "src/a.ts" }]],
+      [["mcp__fs__writeFile", { filePath: "~/.claude/settings.json" }], ["mcp__fs__writeFile", { filePath: "~/notes.md" }]],
+      [["mcp__fs__write_file", { path: "~/.claude/skills/helper/hooks/hooks.json" }], ["mcp__fs__write_file", { path: "~/skills/x.md" }]],
+      [[`${DC}create_directory`, { path: "hooks/new" }], [`${DC}create_directory`, { path: "src/new" }]],
+      [["mcp__filesystem__delete_file", { path: "hooks/hooks.json" }], ["mcp__filesystem__delete_file", { path: "src/old.ts" }]],
+      [["mcp__filesystem__delete_directory", { path: "." }], ["mcp__filesystem__delete_directory", { path: "build" }]],
+      [["mcp__fs__chmod", { path: "hooks", mode: "000" }], ["mcp__fs__chmod", { path: "src", mode: "755" }]],
+      [["mcp__chrome-devtools__take_screenshot", { filePath: "hooks/hooks.json" }],
+        ["mcp__chrome-devtools__take_screenshot", { filePath: "/tmp/shot.png" }]],
+      [["mcp__fs__write_files", { paths: ["src/a.ts", ".claude/settings.json"] }], ["mcp__fs__write_files", { paths: ["src/a.ts"] }]],
+    ];
+    for (const [[wt, wi], [et, ei]] of pairs) {
+      const r = run(p, home, wt, wi);
+      expect(r.status, `${wt} ${JSON.stringify(wi)}`).toBe(2);
+      expect(r.stderr, wt).toContain("owner's go-ahead");
+      expect(run(p, home, et, ei).status, `${et} ${JSON.stringify(ei)}`).toBe(0);
+    }
+  });
+
+  it("a move into or out of a protected place is refused; a move between ordinary files passes", () => {
+    const { p, home } = fixture();
+    for (const input of [
+      { source: "/tmp/evil.json", destination: ".claude/settings.json" },
+      { source: "/tmp/settings.json", destination: ".claude" },
+      { source: "/tmp/settings.local.json", destination: ".claude/" },
+      { source: "/tmp/x.sh", destination: ".claude/hooks/x.sh" },
+      { source: "hooks", destination: "/tmp/old-hooks" },
+    ]) {
+      expect(run(p, home, `${DC}move_file`, input).status, JSON.stringify(input)).toBe(2);
+    }
+    expect(run(p, home, "mcp__fs__rename_file", { path: "hooks/hooks.json", new_path: "hooks/old.json" }).status).toBe(2);
+    expect(run(p, home, `${DC}move_file`, { source: "src/a.ts", destination: "src/b.ts" }).status).toBe(0);
+    expect(run(p, home, "mcp__fs__copy_file", { source: "/tmp/evil.json", destination: ".mcp.json" }).status).toBe(2);
+    expect(run(p, home, "mcp__fs__copy_file", { source: ".mcp.json", destination: "/tmp/mcp-backup.json" }).status).toBe(0);
+  });
+
+  it("a read tool passes whatever it names, and so does an MCP tool with no path or command", () => {
+    const { p, home } = fixture();
+    const calls: Call[] = [
+      [`${DC}read_file`, { path: "hooks/hooks.json" }],
+      [`${DC}list_directory`, { path: "hooks" }],
+      [`${DC}get_file_info`, { path: ".mcp.json" }],
+      [`${DC}start_search`, { path: ".claude", pattern: "x" }],
+      ["mcp__plugin_cairn_cairn__run_manifest", { action: "get" }],
+      ["mcp__plugin_cairn_cairn__issue_attach", { issue: "1", path: "hooks/hooks.json" }],
+      ["mcp__chrome-devtools__take_screenshot", {}],
+    ];
+    for (const [tool, input] of calls) {
+      expect(run(p, home, tool, input).status, `${tool} ${JSON.stringify(input)}`).toBe(0);
+    }
+  });
+
+  it("a command line in an MCP tool is read like Bash, from the folder the input names", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: Call, read: Call]> = [
+      [[`${DC}start_process`, { command: "rm -rf hooks", timeout_ms: 1000 }],
+        [`${DC}start_process`, { command: "cat hooks/hooks.json", timeout_ms: 1000 }]],
+      [[`${CTX}ctx_execute`, { language: "shell", code: "echo x > .mcp.json" }],
+        [`${CTX}ctx_execute`, { language: "shell", code: "cat .mcp.json" }]],
+      [[`${CTX}ctx_batch_execute`, { commands: [{ label: "a", command: "ls" }, { label: "b", command: "tee hooks/x < /dev/null" }], queries: ["x"] }],
+        [`${CTX}ctx_batch_execute`, { commands: [{ label: "a", command: "ls" }, { label: "b", command: "cat hooks/x" }], queries: ["x"] }]],
+      [["mcp__shell__run_command", { command: "rm", args: ["-rf", "hooks"] }],
+        ["mcp__shell__run_command", { command: "ls", args: ["-la", "hooks"] }]],
+      [["mcp__shell__exec", { cmd: "sudo -u root tee .claude/settings.json" }], ["mcp__shell__exec", { cmd: "sudo -u root cat .claude/settings.json" }]],
+      [["mcp__shell__exec", { shell_command: "claude plugin disable cairn" }], ["mcp__shell__exec", { shell_command: "claude plugin list" }]],
+      [[`${CTX}ctx_execute`, { language: "shell", code: "echo x > settings.json", cwd: ".claude" }],
+        [`${CTX}ctx_execute`, { language: "shell", code: "echo x > settings.json", cwd: "src" }]],
+    ];
+    for (const [[wt, wi], [rt, ri]] of pairs) {
+      expect(run(p, home, wt, wi).status, `${wt} ${JSON.stringify(wi)}`).toBe(2);
+      expect(run(p, home, rt, ri).status, `${rt} ${JSON.stringify(ri)}`).toBe(0);
+    }
+  });
+
+  it("code in another language is out of scope, as the runbook says: the harness's permission rules gate it", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, `${CTX}ctx_execute`, { language: "python", code: "open('.mcp.json', 'w').write('{}')" }).status).toBe(0);
+    expect(run(p, home, `${DC}interact_with_process`, { pid: 1, input: "rm -rf hooks" }).status).toBe(0);
+  });
+
+  it("the session override still lets the owner through", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, `${DC}write_file`, { path: "hooks/hooks.json" }, { CAIRN_HARNESS_EDIT: "1" }).status).toBe(0);
+  });
+
+  it("hooks.json sends every MCP tool to the run and harness guards, and keeps the leak guard on Bash", () => {
+    const manifest = JSON.parse(readFileSync(join(SCRIPTS, "..", "hooks.json"), "utf8")) as {
+      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+    };
+    const matcherOf = (script: string): string[] => manifest.hooks.PreToolUse
+      .filter((g) => g.hooks.some((h) => h.command.includes(script))).map((g) => g.matcher);
+    expect(matcherOf("pretooluse-runguard.mjs")).toEqual(["Bash|mcp__.*"]);
+    expect(matcherOf("pretooluse-harnessguard.mjs")).toEqual(["Edit|Write|NotebookEdit|Bash|mcp__.*"]);
+    expect(matcherOf("pretooluse-leakguard.mjs")).toEqual(["Bash"]);
+    for (const m of [...matcherOf("pretooluse-runguard.mjs"), ...matcherOf("pretooluse-harnessguard.mjs")]) {
+      const re = new RegExp(`^(?:${m})$`);
+      for (const tool of ["Bash", `${DC}write_file`, `${CTX}ctx_execute`]) expect(re.test(tool), `${m} ${tool}`).toBe(true);
+      expect(re.test("Read"), m).toBe(false);
     }
   });
 });

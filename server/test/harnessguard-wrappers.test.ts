@@ -154,6 +154,95 @@ describe("harness guard sees through wrapper flags (#254)", () => {
   });
 });
 
+// #307: program runners outside the shared wrapper table read as the command
+// itself, so `arch -arm64 rm -rf hooks` or `xcrun tee hooks/hooks.json`
+// wrote nothing the guard could see. Each is peeled now; the same runner
+// around a read of the same path still passes.
+describe("harness guard sees through program runners (#307)", () => {
+  it("a write behind a runner is refused, and the same runner around a read passes", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["arch -arm64 rm -rf hooks", "arch -arm64 ls hooks"],
+      ["echo x | caffeinate tee .mcp.json", "caffeinate cat .mcp.json"],
+      ["xcrun tee hooks/hooks.json", "xcrun grep x hooks/hooks.json"],
+      ["xcrun -sdk macosx rm hooks/a", "xcrun -sdk macosx cat hooks/a"],
+      ["arch -arch x86_64 -e A=1 rm hooks/a", "arch -arch x86_64 -e A=1 cat hooks/a"],
+      ["caffeinate -t 60 rm hooks/a", "caffeinate -t 60 cat hooks/a"],
+      ["script -q /dev/null rm hooks/a", "script -q /dev/null cat hooks/a"],
+      ["script -q -c 'echo x > hooks/a' /dev/null", "script -q -c 'cat hooks/a' /dev/null"],
+      ["gtimeout 10 rm hooks/a", "gtimeout 10 cat hooks/a"],
+      ["flock /tmp/l rm hooks/a", "flock /tmp/l cat hooks/a"],
+      ["flock -w 5 /tmp/l -c 'rm hooks/a'", "flock -w 5 /tmp/l -c 'cat hooks/a'"],
+      ["taskpolicy -c utility rm hooks/a", "taskpolicy -c utility cat hooks/a"],
+      ["sandbox-exec -f prof.sb rm hooks/a", "sandbox-exec -f prof.sb cat hooks/a"],
+      ["chroot -u me / rm hooks/a", "chroot -u me / cat hooks/a"],
+      ["unbuffer -p tee hooks/a", "unbuffer -p grep x hooks/a"],
+      ["ionice -c 3 rm hooks/a", "ionice -c 3 cat hooks/a"],
+      ["chrt -f 10 rm hooks/a", "chrt -f 10 cat hooks/a"],
+      ["taskset -c 0-3 rm hooks/a", "taskset -c 0-3 cat hooks/a"],
+      ["watch -n 1 'rm hooks/a'", "watch -n 1 'cat hooks/a'"],
+      ["genv -i rm hooks/a", "genv -i cat hooks/a"],
+      ["echo hooks/a | gxargs rm", "echo hooks/a | gxargs cat"],
+      ["gtime -o hooks/a ls", "gtime -o /tmp/t.txt cat hooks/a"],
+      ["CAFFEINATE -i /BIN/RM hooks/a", "CAFFEINATE -i /BIN/CAT hooks/a"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("script's typescript is a file it writes; playing one back only reads it", () => {
+    const p = proj();
+    expect(guard(p, "script -q hooks/a ls")).toBe(2);
+    expect(guard(p, "script -q -O .claude/settings.json -c ls")).toBe(2);
+    expect(guard(p, "script -q /tmp/t.log cat hooks/a")).toBe(0);
+    expect(guard(p, "script -p hooks/a")).toBe(0);
+  });
+});
+
+// #308: Claude Code launched without its `claude` name -- by a package
+// runner or by node running its CLI -- wrote its MCP and plugin config past
+// #303's protection. Each launch is read as claude now, and a runner's own
+// command line (-c / --call) is read like bash -c.
+describe("harness guard sees Claude Code launched by a package runner (#308)", () => {
+  it("each launch of a writing subcommand is refused; the same launch of a read passes", () => {
+    const p = proj();
+    const pairs: Array<[write: string, read: string]> = [
+      ["npx @anthropic-ai/claude-code mcp add evil -- node x", "npx @anthropic-ai/claude-code mcp list"],
+      ["npx -y @anthropic-ai/claude-code mcp add evil -- node x", "npx -y @anthropic-ai/claude-code --version"],
+      ["npx --yes @anthropic-ai/claude-code@latest plugin disable cairn",
+        "npx --yes @anthropic-ai/claude-code@latest plugin list"],
+      ["bunx @anthropic-ai/claude-code mcp add evil -- node x", "bunx @anthropic-ai/claude-code mcp get evil"],
+      ["pnpm dlx @anthropic-ai/claude-code plugin install evil", "pnpm dlx @anthropic-ai/claude-code plugin list"],
+      ["yarn dlx @anthropic-ai/claude-code import cursor --yes", "yarn dlx @anthropic-ai/claude-code import --help"],
+      ["npm exec -- @anthropic-ai/claude-code plugin enable evil", "npm exec -- @anthropic-ai/claude-code plugin list"],
+      ["npx -p @anthropic-ai/claude-code claude mcp add evil -- node x", "npx -p @anthropic-ai/claude-code claude mcp list"],
+      ["npx --package=@anthropic-ai/claude-code -c 'claude plugin disable cairn'",
+        "npx --package=@anthropic-ai/claude-code -c 'claude plugin list'"],
+      ["node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js mcp add evil -- node x",
+        "node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js mcp list"],
+      ["node node_modules/.bin/claude plugin disable cairn", "node node_modules/.bin/claude plugin list"],
+      ["NPX @Anthropic-AI/Claude-Code mcp add evil -- node x", "NPX @Anthropic-AI/Claude-Code mcp list"],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("a runner's -c line is read like bash -c; other package commands pass", () => {
+    const p = proj();
+    expect(guard(p, "npx -c 'rm -rf hooks'")).toBe(2);
+    expect(guard(p, "npm exec --call='echo x > .mcp.json'")).toBe(2);
+    expect(guard(p, "npx -c 'ls hooks'")).toBe(0);
+    for (const c of ["npm install -g @anthropic-ai/claude-code", "npx eslint src", "npx @anthropic-ai/claude-code-router start",
+      "npm run test -- -t 'claude plugin install'", "node scripts/check-surface.mjs", "yarn dlx create-vite app"]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
 /** Writes a patch touching `target` into the fixture; returns its name. */
 function patchFile(projectDir: string, name: string, target: string): string {
   writeFileSync(join(projectDir, name), [

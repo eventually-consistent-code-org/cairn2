@@ -9,7 +9,12 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pretooluse-leakguard.mjs\"",
             "timeout": 3000
-          },
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|mcp__.*",
+        "hooks": [
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pretooluse-runguard.mjs\"",
@@ -18,7 +23,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "matcher": "Edit|Write|NotebookEdit|Bash|mcp__.*",
         "hooks": [
           {
             "type": "command",

@@ -4,7 +4,8 @@
  * Purpose: the one shell reader the PreToolUse guards share (#270) -- splits
  *   a Bash command line into simple commands the way a shell would, closely
  *   enough to find the command words and what a command writes, and peels
- *   the wrappers (sudo -u root, env -i, timeout 5 ...) that run a later word
+ *   the wrappers (sudo -u root, env -i, timeout 5, and program runners like
+ *   xcrun, arch -arm64 or script -q /dev/null, #307) that run a later word
  *   as the real command. The run guard and the harness guard both read
  *   commands through here, so a parsing fix reaches both; two hand-rolled
  *   readers drifted until #254's wrapper fix reached only one of them.
@@ -49,20 +50,41 @@ const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "wh
  * `opt` letters take an optional value, only ever the rest of their cluster
  * (`-i{}`), and a long flag with an optional value takes it only after `=`
  * (`--replace=R`) -- never the next word, which is the command (#285).
+ *
+ * The rest say what a flag's value does, by option name (`-o`, `--output`):
+ *   long      may hold one-dash names too (`xcrun -sdk X`, `arch -arch X`),
+ *             read whole, never as a cluster of letters.
+ *   num       letters whose value is the next word only when it is a number
+ *             (macOS script -t 30; util-linux spells its file -tFILE).
+ *   writes    the value is a file the wrapper itself writes (time -o).
+ *   dir       the value is the folder the command runs in (env -C, sudo -D).
+ *   split     the value is split into more words (env -S).
+ *   assign    the value is a NAME=value the command runs with (arch -e).
+ *   cmd       the value is a command line run by a shell (script -c, flock
+ *             -c), and so is the word after the positionals (`flock F -c X`).
+ *   record    the positional word is a file the wrapper writes (script's
+ *             typescript), unless a `reads` flag plays one back (script -p).
+ *   joins     the rest is joined into one line for a shell (watch).
+ *   as        the name it goes by: Homebrew installs GNU tools g-prefixed.
+ * Program runners joined the table in #307 (xcrun, arch, caffeinate,
+ * script, flock and kin): absent from it, `xcrun git reset --hard` read as
+ * a command named xcrun, and both guards let it through.
  */
 export const WRAPPERS = new Map([
   ["sudo", { short: "ugpChDRTUrt", long: ["--user", "--group", "--host", "--prompt",
-    "--close-from", "--chdir", "--role", "--type", "--other-user", "--command-timeout"] }],
+    "--close-from", "--chdir", "--role", "--type", "--other-user", "--command-timeout"],
+  dir: ["-D", "--chdir"] }],
   ["doas", { short: "uC", long: [] }],
   // macOS env -P names the PATH to search for the command
-  ["env", { short: "uCSP", long: ["--unset", "--chdir", "--split-string"] }],
+  ["env", { short: "uCSP", long: ["--unset", "--chdir", "--split-string"], dir: ["-C", "--chdir"],
+    split: ["-S", "--split-string"] }],
   ["nice", { short: "n", long: ["--adjustment"] }],
   ["timeout", { short: "sk", long: ["--signal", "--kill-after"], positional: 1 }],
   // GNU and BSD (-J -R -S) flags; -e -i -l, --eof --replace --max-lines: optional values
   ["xargs", { short: "ILnPsdEaJRS", opt: "eil", long: ["--max-args", "--max-procs",
     "--max-chars", "--delimiter", "--arg-file", "--process-slot-var"] }],
   ["exec", { short: "a", long: [] }],
-  ["time", { short: "fo", long: ["--format", "--output"] }],
+  ["time", { short: "fo", long: ["--format", "--output"], writes: ["-o", "--output"] }],
   ["command", { short: "", long: [] }],
   ["nohup", { short: "", long: [] }],
   ["builtin", { short: "", long: [] }],
@@ -71,7 +93,31 @@ export const WRAPPERS = new Map([
   ["noglob", { short: "", long: [] }],
   ["nocorrect", { short: "", long: [] }],
   ["stdbuf", { short: "ioe", long: ["--input", "--output", "--error"] }],
+  // macOS program runners (#307): an Xcode tool, a chosen architecture, kept awake, throttled, sandboxed
+  ["xcrun", { short: "", long: ["--sdk", "-sdk", "--toolchain", "-toolchain"] }],
+  ["arch", { short: "", long: ["-arch", "-d", "-e"], assign: ["-e"] }],
+  ["caffeinate", { short: "tw", long: [] }],
+  ["taskpolicy", { short: "dgcpmjPStl", long: [] }],
+  ["sandbox-exec", { short: "fnpD", long: [] }],
+  // script: macOS/BSD `script [-aq] [-t time] file command...`, util-linux `script -c 'cmd' file`
+  ["script", { short: "cIOBTEmot", num: "t", positional: 1, record: true, reads: ["-p"],
+    long: ["--command", "--log-in", "--log-out", "--log-io", "--log-timing", "--echo",
+      "--logging-format", "--output-limit"], cmd: ["-c", "--command"],
+    writes: ["-I", "-O", "-B", "-T", "-t", "--log-in", "--log-out", "--log-io", "--log-timing", "--timing"] }],
+  // flock LOCK command..., flock LOCK -c 'cmd'
+  ["flock", { short: "wEc", long: ["--wait", "--timeout", "--conflict-exit-code", "--command"],
+    positional: 1, cmd: ["-c", "--command"] }],
+  ["chroot", { short: "Ggu", long: ["--userspec", "--groups"], positional: 1 }],
+  ["unbuffer", { short: "", long: [] }],
+  ["ionice", { short: "cnpPu", long: ["--class", "--classdata", "--pid", "--pgid", "--uid"] }],
+  ["chrt", { short: "TPD", long: ["--sched-runtime", "--sched-period", "--sched-deadline"], positional: 1 }],
+  ["taskset", { short: "", long: [], positional: 1 }],
+  // watch runs its words as one shell line, over and over
+  ["watch", { short: "nqs", opt: "d", long: ["--interval", "--equexit", "--shotsdir"], joins: true }],
 ]);
+for (const name of ["env", "nice", "nohup", "stdbuf", "timeout", "xargs", "time", "chroot"]) {
+  WRAPPERS.set(`g${name}`, { ...WRAPPERS.get(name), as: name });
+}
 
 /**
  * A command word's name the way a Mac finds the program (#300): the path
@@ -433,7 +479,10 @@ function splitWords(str, read) {
  * moves the command into, in order (`env -C DIR`, `sudo -D DIR`, #258). An
  * env -S string is split the way `read` reads words. A wrapper is known by
  * its commandName, in any letter case (`SUDO`, `/usr/bin/Env`, #300), and
- * reported under it; the words left over keep the spelling they were typed in.
+ * reported under it -- a g-prefixed GNU tool under its plain name (#307);
+ * the words left over keep the spelling they were typed in. A wrapper that
+ * runs a command line through a shell (script -c, flock -c, watch, #307)
+ * leaves `sh -c LINE` as the command, which both guards already read.
  */
 export function unwrap(words, read = {}) {
   let w = words.slice();
@@ -444,49 +493,75 @@ export function unwrap(words, read = {}) {
   for (;;) {
     while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
     if (!w.length) break;
-    const name = commandName(w[0]);
-    const spec = WRAPPERS.get(name);
+    const spec = WRAPPERS.get(commandName(w[0]));
     if (!spec) break;
+    const name = spec.as ?? commandName(w[0]);
     w.shift();
     const args = [];
     const take = () => { const x = w.shift(); args.push(x); return x; };
     wrappers.push({ name, args });
     let positional = spec.positional ?? 0;
+    let line = null; // a command line the wrapper hands a shell
+    let reading = false; // a flag that makes the positional a file read, not written
+    // What one option's value does, by the option's name (see WRAPPERS).
+    const act = (flag, val) => {
+      if (val === null) return;
+      // script -t 30 is a flush interval; only util-linux's -tFILE names a file
+      const numeric = flag.length === 2 && spec.num?.includes(flag[1]) && /^\d+$/.test(val);
+      if (spec.split?.includes(flag)) w = splitWords(val, read).concat(w);
+      if (spec.writes?.includes(flag) && !numeric) writes.push(val);
+      if (spec.dir?.includes(flag)) dirs.push(val);
+      if (spec.assign?.includes(flag)) assigns.push(val);
+      if (spec.cmd?.includes(flag)) line = val;
+    };
     // Read the wrapper's own options, stopping at its first bare word.
     while (w.length) {
       const a = w[0];
       if (a === "--") { take(); break; }
       if (a === "-") { take(); continue; } // `env -` is `env -i`
-      if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const flag = eq < 0 ? a : a.slice(0, eq);
+      if (a.startsWith("--") || (a.startsWith("-") && spec.long.includes(flag))) {
         take();
-        const eq = a.indexOf("=");
-        const flag = eq < 0 ? a : a.slice(0, eq);
         let val = eq < 0 ? null : a.slice(eq + 1);
         if (eq < 0 && spec.long.includes(flag) && w.length) val = take();
-        if (val !== null && name === "env" && flag === "--split-string") w = splitWords(val, read).concat(w);
-        if (val !== null && name === "time" && flag === "--output") writes.push(val);
-        if (val !== null && flag === "--chdir" && (name === "env" || name === "sudo")) dirs.push(val);
+        if (spec.reads?.includes(flag)) reading = true;
+        act(flag, val);
         continue;
       }
       if (a.startsWith("-") && a.length > 1) {
         take();
         // A short cluster: the first value-taking letter eats the rest of
         // the cluster, or the next word when it ends the cluster -- unless
-        // its value is optional, when the next word is never it.
+        // its value is optional, when the next word is never it, or must be
+        // a number and the next word isn't one.
         for (let k = 1; k < a.length; k++) {
+          if (spec.reads?.includes(`-${a[k]}`)) reading = true;
           if (spec.opt?.includes(a[k])) break;
           if (!spec.short.includes(a[k])) continue;
-          const val = k + 1 < a.length ? a.slice(k + 1) : (w.length ? take() : null);
-          if (val !== null && name === "env" && a[k] === "S") w = splitWords(val, read).concat(w);
-          if (val !== null && name === "time" && a[k] === "o") writes.push(val);
-          if (val !== null && a[k] === (name === "env" ? "C" : name === "sudo" ? "D" : "")) dirs.push(val);
+          const next = spec.num?.includes(a[k]) && !/^\d/.test(w[0] ?? "") ? null : w[0];
+          const val = k + 1 < a.length ? a.slice(k + 1) : (next !== undefined && next !== null ? take() : null);
+          act(`-${a[k]}`, val);
           break;
         }
         continue;
       }
       break;
     }
-    while (positional-- > 0 && w.length) take();
+    while (positional-- > 0 && w.length) {
+      const x = take();
+      if (spec.record && !reading) writes.push(x);
+    }
+    // flock LOCK -c 'cmd': the command line comes after the lock file
+    if (spec.cmd && w.length) {
+      const eq = w[0].indexOf("=");
+      if (spec.cmd.includes(w[0])) {
+        take();
+        if (w.length) line = take();
+      } else if (eq > 0 && spec.cmd.includes(w[0].slice(0, eq))) line = take().slice(eq + 1);
+    }
+    if (line !== null) w = ["sh", "-c", line, ...w];
+    else if (spec.joins && w.length) w = ["sh", "-c", w.join(" ")];
     // `time` is a keyword too: `time { git reset --hard; }` times the group (#285)
     if (name === "time") w = w.slice(commandStart(w));
   }
@@ -534,6 +609,49 @@ export function shellReadsStdin(args) {
     return false; // a script path
   }
   return true;
+}
+
+// The fields a tool's input names a shell command in (#310), and the code
+// languages that are a shell.
+const COMMAND_FIELDS = ["command", "cmd", "shell_command"];
+const SHELL_LANGS = new Set(["shell", "bash", "sh", "zsh"]);
+
+/** A word quoted so shellSegments reads it back as that one word. */
+function quoteWord(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * The command lines a non-Bash tool's input hands a shell (#310), each as
+ * { line, cwd }: a `command`, `cmd` or `shell_command` string (with an
+ * `args` list after it, quoted word by word), each one in a `commands`
+ * list (strings, or objects carrying one of those fields), and `code`
+ * whose `language` is a shell. `cwd` is the folder the input names for
+ * them, or null. Code in any other language, or keystrokes sent to a
+ * running process, is not a command line this reader can see.
+ */
+export function toolCommands(input) {
+  if (!input || typeof input !== "object") return [];
+  const cwd = typeof input.cwd === "string" ? input.cwd : null;
+  const lines = [];
+  const take = (o) => {
+    for (const f of COMMAND_FIELDS) {
+      if (typeof o?.[f] !== "string") continue;
+      const args = Array.isArray(o.args) ? o.args.filter((a) => typeof a === "string") : [];
+      lines.push([o[f], ...args.map(quoteWord)].join(" "));
+    }
+  };
+  take(input);
+  if (Array.isArray(input.commands)) {
+    for (const c of input.commands) {
+      if (typeof c === "string") lines.push(c);
+      else take(c);
+    }
+  }
+  if (typeof input.code === "string" && SHELL_LANGS.has(String(input.language ?? "").toLowerCase())) {
+    lines.push(input.code);
+  }
+  return lines.map((line) => ({ line, cwd }));
 }
 
 // su options that take the next word as their value.
