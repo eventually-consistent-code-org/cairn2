@@ -1907,12 +1907,28 @@ An agent push that would land on the default branch — `main`, `master`,
 or the remote's HEAD branch, whether named, swept up by `--all` /
 `--mirror`, or a bare `git push` from that branch — is refused unless
 the last `plan_drift` left a clean stamp for the exact commit being
-pushed. No stamp refuses, and so does a stamp for another commit, one
-that flagged drift, or a corrupt one; a stamp folder the guard can't
-read at all skips the check rather than blocking. Other branches and tags are
-untouched. The refusal points at `/cairn:ship`, which runs the drift
-check and then pushes — this is the hook half of ship's "never push with
-flagged drift".
+pushed. Each of these refuses:
+- no stamp;
+- a stamp for another commit, one that flagged drift, or a corrupt one;
+- a stamp, or a stamp folder, that exists but can't be read. The push is
+  refused rather than the check skipped.
+
+Two more rules close the ways around the gate:
+- **The gated push must be its own step.** If anything earlier on the
+  same line can make a commit or move a ref (a commit, merge, rebase,
+  reset, `branch -f`, a fetch, or any program that isn't known to be
+  read-only), the commit being pushed isn't the one the stamp saw yet.
+  The push is refused, with a line saying to push on its own after the
+  drift check.
+- **The gate checks the repository git will actually push.** The guard
+  follows `cd` and `pushd` (every folder the line could end up in),
+  `-C`, `--git-dir` / `--work-tree` and `GIT_DIR` / `GIT_WORK_TREE`.
+  Another clone or worktree needs its own stamp, and a folder the guard
+  can't work out refuses the push.
+
+Other branches and tags are untouched. The refusal points at
+`/cairn:ship`, which runs the drift check and then pushes. This is the
+hook half of ship's "never push with flagged drift".
 
 **While a batch run is live** — a run manifest for this project reads
 `running` — two more rules apply. A batch run works inside its own
