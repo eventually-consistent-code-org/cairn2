@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -1423,5 +1423,424 @@ describe("run guard: a stamp or run list that exists but can't be read refuses (
     writeFileSync(join(home, "runs", `${projKey(proj)}-broken.json`), "{ nope");
     expect(guard(proj, home, "git push origin feature").status).toBe(0);
     expect(guard(proj, home, "git checkout main").status).toBe(0);
+  });
+});
+
+describe("run guard: a commit or ref move earlier in the line can't slip past the ship gate (#305)", () => {
+  /**
+   * Repo on main with a `feature` branch one commit ahead, and a clean
+   * stamp at main's tip -- so a push of main on its own passes, and only
+   * what runs ahead of it on the line can change what lands.
+   */
+  function stampedMain(): { proj: string; home: string } {
+    const f = fixture(undefined, false);
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    writeFileSync(join(f.proj, "f.txt"), "f\n");
+    git(f.proj, "add", "f.txt");
+    git(f.proj, "commit", "-q", "-m", "feature", "--no-gpg-sign");
+    git(f.proj, "checkout", "-q", "main");
+    stamp(f.proj, f.home, { head: git(f.proj, "rev-parse", "main") });
+    return f;
+  }
+
+  // The host's own push settings must not decide these
+  const push = (proj: string, home: string, command: string, env: Record<string, string> = {}) =>
+    guard(proj, home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", ...env });
+
+  // Each row: [a commit or ref move runs first, then the push -- the push on its own].
+  // Before #305 the guard resolved the pushed commit before the line ran, so
+  // each one passed under the clean stamp and landed an unchecked commit.
+  const rows: Array<[moved: string, alone: string]> = [
+    ["git commit --allow-empty -m x && git push origin HEAD:main", "git push origin HEAD:main"],
+    ["git commit -am fix && git push", "git push"],
+    ["git merge feature && git push origin main", "git push origin main"],
+    ["git branch -f main feature && git push origin main", "git push origin main"],
+    ["git reset --soft HEAD~1; git push origin main", "git push origin main"],
+    ["git cherry-pick feature && git push origin main", "git push origin main"],
+    ["git rebase feature && git push origin main", "git push origin main"],
+    ["git revert --no-edit HEAD && git push origin main", "git push origin main"],
+    ["git pull && git push origin main", "git push origin main"],
+    ["git fetch origin && git push origin FETCH_HEAD:main", "git push origin main"],
+    ["git am fix.patch && git push origin main", "git push origin main"],
+    ["git update-ref refs/heads/main feature && git push origin main", "git push origin main"],
+    ["git checkout feature && git push origin HEAD:main", "git push origin HEAD:main"],
+    ["git checkout -B main feature && git push origin main", "git push origin main"],
+    ["git switch -C main feature && git push origin main", "git push origin main"],
+    ["git stash pop && git push origin main", "git push origin main"],
+    ["git tag -f v1 feature && git push origin v1:main", "git push origin main"],
+    ["git tag v2 feature && git push origin v2:main", "git push origin main"],
+    ["git push origin feature && git push origin origin/feature:main", "git push origin main"],
+    // an alias, a wrapper, a nested shell, another program, a write into the ref store
+    ["git ci -m x && git push origin main", "git push origin main"],
+    ["sudo -u me git commit -am x && git push origin main", "git push origin main"],
+    ["bash -c 'git commit -am x' && git push origin main", "git push origin main"],
+    ["npm version patch && git push origin main", "git push origin main"],
+    ["echo abc > .git/refs/heads/main && git push origin main", "git push origin main"],
+    // order the guard can't trust: a substitution, a loop, a function, the background
+    ['echo "$(git commit -am x)" && git push origin main', "git push origin main"],
+    ["for i in 1 2; do git push origin main; git commit --allow-empty -m x; done", "git push origin main"],
+    ["f() { git push origin main; }; git commit --allow-empty -m x; f", "git push origin main"],
+    ["git push origin main & git commit --allow-empty -m x", "git push origin main"],
+  ];
+
+  it("each is refused even under a clean stamp, saying push alone; the push on its own passes", () => {
+    const { proj, home } = stampedMain();
+    for (const [moved, alone] of rows) {
+      const r = push(proj, home, moved);
+      expect(r.status, moved).toBe(2);
+      expect(r.stderr, moved).toContain("earlier command on this line");
+      expect(r.stderr, moved).toContain("push as its own step");
+      expectOwnerTail(r.stderr, moved, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(push(proj, home, alone).status, alone).toBe(0);
+    }
+  });
+
+  it("read-only commands before the push, and anything after it, keep today's answer", () => {
+    const { proj, home } = stampedMain();
+    for (const c of [
+      "git status && git push origin main",
+      "git log --oneline -3; git push origin main",
+      "git diff --stat 2>&1 && git push origin main",
+      "git rev-parse HEAD >/dev/null; git push origin main",
+      "git add -A && git push origin main",
+      "git branch -a && git branch --list 'f*' && git tag -l && git push origin main",
+      "git remote -v && git stash list && git push origin main",
+      "git config user.name x && git push origin main",
+      "cd . && echo pushing && git push origin main",
+      "git push origin main && git commit --allow-empty -m next",
+      "git push origin main; git checkout -b next",
+      "git push origin main && git tag v3",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a push the gate never checks keeps today's answer, and its override still lifts it", () => {
+    const { proj, home } = stampedMain();
+    for (const c of [
+      "git commit --allow-empty -m x && git push origin feature",
+      "git merge main && git push -u origin feature",
+      "git tag v1 && git push origin v1",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+    const moved = "git commit --allow-empty -m x && git push origin main";
+    expect(push(proj, home, moved, { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+    expect(push(proj, home, `git commit --allow-empty -m x && CAIRN_ALLOW_UNSHIPPED_PUSH=1 ${moved.split("&& ")[1]}`)
+      .status).toBe(0);
+    // ...and with no stamp at all it is still refused, by whichever reason comes first
+    rmSync(join(home, "ship-gate"), { recursive: true });
+    expect(push(proj, home, moved).status).toBe(2);
+  });
+
+  it("mid-run, a push with a commit ahead of it is refused even with authority; on its own it passes", () => {
+    const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
+    const pushAuth = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };
+    const { proj, home } = fixture({ status: "running", phases, pushAuth, currentPhase: 3 });
+    for (const c of [
+      "git commit -am x && git push origin runbranch",
+      "git rebase main; git push -u origin runbranch",
+      "make release && git push origin runbranch",
+    ]) {
+      const r = push(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+      expect(r.stderr, c).toContain("push as its own step");
+      expectOwnerTail(r.stderr, c);
+    }
+    for (const c of [
+      "git push origin runbranch",
+      "git status && git push origin runbranch",
+      "git push origin runbranch && git commit --allow-empty -m next",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+  });
+});
+
+describe("run guard: each git command is judged in the repository it acts on (#306)", () => {
+  /**
+   * Side-by-side folders under one root: the project on main with a clean
+   * stamp at its tip and a `sub` folder, `other` -- a clone one commit
+   * ahead -- and two linked worktrees of the project: `wt` on runbranch,
+   * one commit ahead, and `wt2` on side, at main's tip.
+   */
+  function repos(manifest?: Record<string, unknown>) {
+    const root = freshDir("cairn-runguard-repos-");
+    const proj = join(root, "proj");
+    const other = join(root, "other");
+    const wt = join(root, "wt");
+    const wt2 = join(root, "wt2");
+    execFileSync("git", ["init", "-q", "-b", "main", proj]);
+    git(proj, "config", "user.email", "t@t");
+    git(proj, "config", "user.name", "t");
+    writeFileSync(join(proj, "seed.txt"), "seed\n");
+    git(proj, "add", "seed.txt");
+    git(proj, "commit", "-q", "-m", "init", "--no-gpg-sign");
+    mkdirSync(join(proj, "sub"));
+    execFileSync("git", ["clone", "-q", proj, other]);
+    git(other, "commit", "-q", "--allow-empty", "-m", "other", "--no-gpg-sign", "--author", "t <t@t>");
+    git(proj, "worktree", "add", "-q", "-b", "runbranch", wt);
+    git(wt, "commit", "-q", "--allow-empty", "-m", "wt", "--no-gpg-sign");
+    git(proj, "worktree", "add", "-q", "-b", "side", wt2);
+    const home = freshDir("cairn-runguard-home-");
+    if (manifest) {
+      mkdirSync(join(home, "runs"), { recursive: true });
+      writeFileSync(join(home, "runs", `${projKey(proj)}-run-x.json`),
+        JSON.stringify({ version: 1, runId: "run-x", ...manifest }));
+    }
+    stamp(proj, home);
+    return { root, proj, other, wt, wt2, home };
+  }
+
+  // The host's own push settings, and any GIT_DIR the host runs under, must not decide these
+  const at = (r: { proj: string; home: string }, command: string, cwd = r.proj, env: Record<string, string> = {}) =>
+    guard(r.proj, r.home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", ...env }, cwd);
+
+  it("a push leaving another repository needs that repository's own stamp; each shape is refused like its -C pair", () => {
+    const r = repos();
+    const P = "git push origin main";
+    // Each row: [where the line sends git, the -C form refused since before #306].
+    // Before #306 only -C moved the guard, so each left form read the
+    // project's main -- the stamped commit -- while git pushed other's.
+    const rows: Array<[form: string, pair: string]> = [
+      [`cd ${r.other} && ${P}`, `git -C ${r.other} push origin main`],
+      [`cd ../other && ${P}`, "git -C ../other push origin main"],
+      [`pushd ../other; ${P}`, "git -C ../other push origin main"],
+      [`CDPATH=${r.root} cd other && ${P}`, "git -C ../other push origin main"],
+      [`env -C ${r.other} ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=${r.other}/.git ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=../other/.git ${P}`, "git -C ../other push origin main"],
+      [`git --git-dir=${r.other}/.git push origin main`, `git -C ${r.other} push origin main`],
+      ["git --git-dir ../other/.git push origin main", "git -C ../other push origin main"],
+      [`export GIT_DIR=${r.other}/.git; ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=${r.other}/.git bash -c '${P}'`, `bash -c 'git -C ${r.other} push origin main'`],
+    ];
+    for (const [form, pair] of rows) {
+      for (const c of [form, pair]) {
+        const res = at(r, c);
+        expect(res.status, c).toBe(2);
+        expect(res.stderr, c).toContain("another repository");
+        expectOwnerTail(res.stderr, c, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      }
+    }
+    // ...and with its own clean stamp, that repository's push passes
+    mkdirSync(join(r.home, "ship-gate"), { recursive: true });
+    const real = realpathSync(r.other);
+    writeFileSync(join(r.home, "ship-gate", `${projKey(real)}.json`), JSON.stringify({
+      head: git(r.other, "rev-parse", "main"), clean: true, at: "2026-10-02T00:00:00Z" }));
+    expect(at(r, `cd ${r.other} && ${P}`).status).toBe(0);
+    expect(at(r, `GIT_DIR=${r.other}/.git ${P}`).status).toBe(0);
+  });
+
+  it("a linked worktree is the project's repository, with its own HEAD checked against the project's stamp", () => {
+    const r = repos();
+    for (const c of [`cd ${r.wt} && git push origin HEAD:main`, `git -C ${r.wt} push origin HEAD:main`,
+      "cd ../wt && git push origin HEAD:main"]) {
+      const res = at(r, c);
+      expect(res.status, c).toBe(2);
+      expect(res.stderr, c).toContain("not the commit being pushed");
+    }
+    // wt2 sits at main's tip -- the commit the stamp saw
+    for (const c of [`cd ${r.wt2} && git push origin HEAD:main`, `git -C ${r.wt2} push origin HEAD:main`]) {
+      expect(at(r, c).status, c).toBe(0);
+    }
+  });
+
+  it("the project's own push passes however the line names it", () => {
+    const r = repos();
+    for (const c of [
+      "git push origin main",
+      "cd sub && git push origin main",
+      `cd ${r.proj} && git push origin main`,
+      `GIT_DIR=${r.proj}/.git git push origin main`,
+      "git --git-dir=.git push origin main",
+      "cd /nonexistent-cairn-dir; git push origin main",
+      `cd ${r.other} && git push origin feature`,
+    ]) {
+      expect(at(r, c).status, c).toBe(0);
+    }
+  });
+
+  it("a folder or git setting only the shell can work out refuses any push; named plainly it passes", () => {
+    const r = repos();
+    // Each row: [where the guard can't follow, the same push with the folder named plainly]
+    const rows: Array<[lost: string, plain: string]> = [
+      ['cd "$X" && git push origin feature', "cd sub && git push origin feature"],
+      ["cd - && git push origin main", "git push origin main"],
+      ['cd "$(git rev-parse --show-toplevel)" && git push origin main', `cd ${r.proj} && git push origin main`],
+      ['git -C "$D" push origin feature', "git -C sub push origin feature"],
+      ["GIT_DIR=$G git push origin main", `GIT_DIR=${r.proj}/.git git push origin main`],
+      ["git --git-dir=~someone/.git push origin main", "git --git-dir=.git push origin main"],
+      ["for d in a b; do cd sub; done; git push origin main", "for d in a b; do cd /; done; git push origin main"],
+    ];
+    for (const [lost, plain] of rows) {
+      const res = at(r, lost);
+      expect(res.status, lost).toBe(2);
+      expect(res.stderr, lost).toContain("can't tell which repository");
+      expectOwnerTail(res.stderr, lost, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(at(r, plain).status, plain).toBe(0);
+    }
+    expect(at(r, 'cd "$X" && git push origin feature', r.proj, { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+  });
+
+  it("mid-run, a checkout reaching the owner's checkout by cd, --git-dir/--work-tree or GIT_DIR is refused like its -C form", () => {
+    const r = repos({ status: "running", phases: [], pushAuth: { granted: false } });
+    // From the run's own worktree. Each row: [the form, its -C pair]
+    const rows: Array<[form: string, pair: string]> = [
+      [`cd ${r.proj} && git checkout runbranch`, `git -C ${r.proj} checkout runbranch`],
+      ["cd ../proj && git switch side", "git -C ../proj switch side"],
+      [`git --git-dir=${r.proj}/.git --work-tree=${r.proj} checkout side`, `git -C ${r.proj} checkout side`],
+      [`GIT_DIR=${r.proj}/.git GIT_WORK_TREE=${r.proj} git switch side`, `git -C ${r.proj} switch side`],
+      [`git --work-tree=${r.proj} checkout runbranch`, `git -C ${r.proj} checkout runbranch`],
+      [`git -c core.worktree=${r.proj} checkout side`, `git -C ${r.proj} checkout side`],
+      [`CAIRN_ALLOW_DESTRUCTIVE_GIT=1 GIT_WORK_TREE=${r.proj} git reset --hard`,
+        `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git -C ${r.proj} reset --hard`],
+    ];
+    for (const [form, pair] of rows) {
+      for (const c of [form, pair]) {
+        const res = at(r, c, r.wt);
+        expect(res.status, c).toBe(2);
+        expect(res.stderr, c).toContain("run-x");
+        expect(res.stderr, c).toContain("the checkout you work in");
+      }
+    }
+    // ...the run's own worktrees stay its own, however they are reached
+    for (const c of ["git checkout -b mine", `cd ${r.wt} && git switch -c y`, `git -C ${r.wt2} checkout -b z`,
+      `GIT_DIR=${r.proj}/.git/worktrees/wt git checkout -b w`]) {
+      expect(at(r, c, r.wt).status, c).toBe(0);
+    }
+  });
+
+  it("mid-run, a folder only the shell can work out refuses checkout and switch; CAIRN_RUN_OK still lifts it", () => {
+    const r = repos({ status: "running", phases: [], pushAuth: { granted: false } });
+    for (const c of ['cd "$OWNER" && git checkout side', 'git -C "$D" switch side', "GIT_DIR=$G git checkout side"]) {
+      const res = at(r, c, r.wt);
+      expect(res.status, c).toBe(2);
+      expect(res.stderr, c).toContain("goes somewhere the guard can't tell");
+      expectOwnerTail(res.stderr, c);
+    }
+    expect(at(r, 'cd "$OWNER" && CAIRN_RUN_OK=1 git checkout side', r.wt).status).toBe(0);
+    expect(at(r, "cd sub && git status", r.proj).status).toBe(0);
+  });
+});
+
+describe("run guard: an MCP tool's command line is judged like a Bash line (#310)", () => {
+  const START = "mcp__plugin_desktop-commander_desktop-commander__start_process";
+  const EXECUTE = "mcp__plugin_context-mode_context-mode__ctx_execute";
+  const BATCH = "mcp__plugin_context-mode_context-mode__ctx_batch_execute";
+
+  /** The hook fed a non-Bash tool call, with the same clean override env as guard(). */
+  function tool(proj: string, home: string, tool_name: string, tool_input: Record<string, unknown>,
+    cwd: string = proj): { status: number | null; stderr: string } {
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home,
+      GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1",
+    };
+    delete env.CAIRN_ALLOW_DESTRUCTIVE_GIT;
+    delete env.CAIRN_ALLOW_UNSHIPPED_PUSH;
+    const r = spawnSync(process.execPath, [RUNGUARD], {
+      cwd: proj, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name, tool_input, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("start_process running `git reset --hard` is refused; running `git status` passes", () => {
+    const { proj, home } = fixture();
+    const reset = tool(proj, home, START, { command: "git reset --hard", timeout_ms: 5000 });
+    expect(reset.status).toBe(2);
+    expect(reset.stderr).toContain("git reset --hard");
+    expectOwnerTail(reset.stderr, "start_process", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    expect(tool(proj, home, START, { command: "git status", timeout_ms: 5000 }).status).toBe(0);
+  });
+
+  it("every field shape the header lists is read; its harmless neighbour passes", () => {
+    const { proj, home } = fixture();
+    // Each row: [a tool input carrying `git reset --hard`, the same shape carrying `git status`]
+    const rows: Array<[name: string, refused: Record<string, unknown>, allowed: Record<string, unknown>]> = [
+      ["mcp__x__run", { cmd: "git reset --hard" }, { cmd: "git status" }],
+      ["mcp__x__run", { shell_command: "git reset --hard" }, { shell_command: "git status" }],
+      ["mcp__x__exec", { command: ["git", "reset", "--hard"] }, { command: ["git", "status"] }],
+      ["mcp__x__exec", { command: "git", args: ["reset", "--hard"] }, { command: "git", args: ["status"] }],
+      ["mcp__x__exec", { cmd: "git", arguments: ["reset", "--hard"] }, { cmd: "git", arguments: ["status"] }],
+      ["mcp__x__script", { script: "git reset --hard" }, { script: "git status" }],
+      ["mcp__x__script", { script: "git reset --hard", interpreter: "/bin/bash" }, { script: "git status", interpreter: "/bin/bash" }],
+      [EXECUTE, { language: "shell", code: "git reset --hard" }, { language: "shell", code: "git status" }],
+      [START, { command: "git reset --hard", shell: "zsh", timeout_ms: 1 }, { command: "git status", shell: "zsh", timeout_ms: 1 }],
+      [BATCH, { commands: [{ label: "a", command: "git status" }, { label: "b", command: "git reset --hard" }], queries: ["x"] },
+        { commands: [{ label: "a", command: "git status" }], queries: ["x"] }],
+      ["mcp__x__batch", { commands: ["git log -1", "git reset --hard"] }, { commands: ["git log -1"] }],
+    ];
+    for (const [name, refused, allowed] of rows) {
+      const label = JSON.stringify(refused);
+      const r = tool(proj, home, name, refused);
+      expect(r.status, label).toBe(2);
+      expect(r.stderr, label).toContain("git reset --hard");
+      expect(tool(proj, home, name, allowed).status, JSON.stringify(allowed)).toBe(0);
+    }
+  });
+
+  it("what the header puts out of scope, and words that only mention git, pass", () => {
+    const { proj, home } = fixture();
+    for (const [name, input] of [
+      [EXECUTE, { language: "python", code: "git reset --hard" }],
+      ["mcp__x__script", { script: "git reset --hard", language: "javascript" }],
+      ["mcp__plugin_desktop-commander_desktop-commander__interact_with_process", { pid: 1, input: "git reset --hard" }],
+      ["mcp__x__exec", { command: ["echo", "git reset --hard"] }],
+      ["mcp__x__exec", { command: "echo", args: ["git reset --hard"] }],
+      ["mcp__x__exec", { command: "echo", args: ["it's git reset --hard"] }],
+      ["mcp__x__write_file", { path: "notes.md", content: "git reset --hard" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      expect(tool(proj, home, name, input).status, JSON.stringify(input)).toBe(0);
+    }
+  });
+
+  it("the overrides keep their two shapes: the session env, or the one command's leading assignment", () => {
+    const { proj, home } = fixture();
+    expect(tool(proj, home, START, { command: "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard" }).status).toBe(0);
+    expect(tool(proj, home, START, { command: "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true && git reset --hard" }).status).toBe(2);
+    expect(tool(proj, home, START, { command: "git commit -m 'CAIRN_ALLOW_DESTRUCTIVE_GIT=1' && git reset --hard" }).status)
+      .toBe(2);
+  });
+
+  it("an MCP push meets the ship gate, from the folder the tool names, and a batch's earlier commit counts (#305)", () => {
+    const { proj, home } = fixture();
+    const other = freshDir("cairn-runguard-other-");
+    execFileSync("git", ["clone", "-q", proj, other]);
+    const push = { label: "p", command: "git push origin main" };
+    const commit = { label: "c", command: "git commit --allow-empty -m x" };
+    expect(tool(proj, home, START, { command: "git push origin main" }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"] }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push, commit], queries: ["x"] }).status).toBe(0);
+    const moved: Array<Record<string, unknown>> = [
+      { commands: [commit, push], queries: ["x"] },
+      { commands: [push, commit], queries: ["x"], concurrency: 4 },
+      { command: "git commit --allow-empty -m x && git push origin main" },
+    ];
+    for (const input of moved) {
+      const r = tool(proj, home, input.command ? START : BATCH, input);
+      expect(r.status, JSON.stringify(input)).toBe(2);
+      expect(r.stderr, JSON.stringify(input)).toContain("push as its own step");
+    }
+    // the folder the tool names is where the line starts (#306)
+    const there = tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: other });
+    expect(there.status).toBe(2);
+    expect(there.stderr).toContain("another repository");
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: proj }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: "$WHERE" }).status).toBe(2);
+    // ...and a cd in one of a batch's commands may carry into the next, if they share a shell
+    const moved2 = tool(proj, home, BATCH, { commands: [{ label: "d", command: `cd ${other}` }, push], queries: ["x"] });
+    expect(moved2.status).toBe(2);
+    expect(moved2.stderr).toContain("another repository");
+  });
+
+  it("mid-run, an MCP checkout of the owner's checkout is refused like the Bash one", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = tool(proj, home, START, { command: "git checkout main" });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(guard(proj, home, "git checkout main").status).toBe(2);
+    expect(tool(proj, home, START, { command: "git log --oneline" }).status).toBe(0);
   });
 });

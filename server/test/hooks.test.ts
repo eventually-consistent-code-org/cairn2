@@ -688,6 +688,24 @@ describe("run guard hook", () => {
     expect(r.status).toBe(2);
   });
 
+  it("follows a cd, --git-dir/--work-tree or GIT_DIR into the owner's checkout the way it follows -C (#306)", () => {
+    const { proj, home } = runFixture("running");
+    const elsewhere = freshDir("cairn-hooks-runguard-cwd-");
+    for (const c of [
+      `cd ${proj} && git checkout main`,
+      `git --git-dir=${proj}/.git --work-tree=${proj} checkout main`,
+      `GIT_DIR=${proj}/.git GIT_WORK_TREE=${proj} git switch main`,
+      'cd "$OWNER" && git checkout main',
+    ]) {
+      const r = runHookRaw(RUNGUARD, proj, cwdPayload(c, elsewhere), { CAIRN_HOME: home });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-abc123");
+    }
+    // a folder that holds no repository is nobody's checkout
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("cd . && git checkout main", elsewhere),
+      { CAIRN_HOME: home }).status).toBe(0);
+  });
+
   it("a corrupt manifest is not evidence of a live run", () => {
     const { proj, home } = runFixture();
     const { base, hash } = hashAndBaseForEnvDir(proj);
