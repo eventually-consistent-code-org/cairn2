@@ -2038,6 +2038,18 @@ The protected set also covers cairn's own trust anchors:
   around it and a rename that drops a new one in its place. The
   settings are read fresh on every call; one that won't parse is
   skipped, and the folder rule still stands;
+- every script a protected MCP config launches from outside the
+  project — the stdio servers in `~/.claude.json` (its own and each
+  project's), the project's `.mcp.json`, and Cursor's `.cursor/mcp.json`
+  and `~/.cursor/mcp.json` — read off each server's `command` and `args`
+  the same way (`node ~/repos/…/dist/index.js`, `$HOME/bin/server`, a
+  symlink and the file it points to). A swapped server script runs when
+  the next session starts that server, with whatever tokens its config
+  hands it, so it gets the same refusals a hook script does. A script
+  inside the project stays writable on purpose: cairn's own `.mcp.json`
+  launches its `server/dist` build, and a build has to rewrite it. A
+  program found on `PATH` by name isn't looked up, and a config that
+  won't parse is skipped;
 - the project's `.claude/hooks/`, `.claude/agents/`, `.claude/skills/`
   and `.claude/commands/`;
 - Cursor's `.cursor/hooks.json` and `.cursor/hooks/`, plus removing or
