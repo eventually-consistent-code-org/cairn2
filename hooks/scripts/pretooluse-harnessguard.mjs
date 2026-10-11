@@ -91,9 +91,11 @@
  *   running process, settings a server keeps.
  *
  *   Not seen: a write in an interpreter (python -c, an MCP tool running
- *   python or javascript) or $(...), an archive's members, paths an
- *   upstream command finds, modes cp -p, rsync or tar copy, the program a
- *   hook or an MCP server starts by name off PATH. An MCP server
+ *   python or javascript), a write that only exists in a substitution's
+ *   output (`$(cat script)` run as a command -- the body of a $(...) and
+ *   the literal target after one are read, #319), an archive's members,
+ *   paths an upstream command finds, modes cp -p, rsync or tar copy, the
+ *   program a hook or an MCP server starts by name off PATH. An MCP server
  *   that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
  */
@@ -228,11 +230,12 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * How this guard reads a command line (shell-words.mjs): redirect targets
- * and heredocs are modelled, and ( ) and backticks end a command, so
- * `(cd hooks && rm x)` is a cd and an rm (#258). # comments and quoted
- * $(...) are word text, so a write hidden in a substitution is not seen.
+ * and heredocs are modelled, and ( ) end a command, so `(cd hooks && rm
+ * x)` is a cd and an rm (#258). A $(...) or backtick is one word, quoted
+ * or not, so the literal target after one is still seen (#319), and its
+ * body is read as a command line of its own. # comments are word text.
  */
-const READ = { redirects: true, subshells: true };
+const READ = { redirects: true, subshells: true, substitutions: true };
 
 // find: name tests, the primaries that take a value, and the ones that act.
 const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
@@ -1911,7 +1914,12 @@ function writeTargets(seg, ctx) {
     const r = expandVars((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
       .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir));
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
-    out.push({ raw: r, abs: resolveIn(dir, r), mode, feed, walk: ctx.walk });
+    // a path with nothing in front of a substitution to anchor it
+    // (`$(pwd)/hooks`, `\`pwd\`/x`) lands where the guard can't follow, like
+    // a cd it can't (#319); a computed name under a folder it knows
+    // (`/tmp/$(date +%s).bak`) is judged there, as a $NAME is
+    const abs = /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
+    out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
   };
   if (ctx.chdir) {
     for (const x of writes) add(x);
@@ -2087,10 +2095,10 @@ function dirTarget(raw, from, pwd = from) {
 /**
  * The folder changes one segment can make (#258), each { raw, cd, again }
  * or { lost, again }: a cd or pushd target (`cd` alone is ~), and every
- * env -C, sudo -D and git -C folder. `cd -`, `pushd +N` and a target a
- * substitution computes (`cd $(...)`, cd `...`: a subshell break ends the
- * segment mid-target) are lost. popd and a bare pushd only revisit
- * folders already counted.
+ * env -C, sudo -D and git -C folder. `cd -` and `pushd +N` are lost, and
+ * so is a target a substitution computes (`cd $(...)`, cd `...`), once
+ * dirTarget reads it. popd and a bare pushd only revisit folders already
+ * counted.
  */
 function segMoves(seg, again) {
   const { words: w, dirs } = unwrap(seg.words, READ);
@@ -2098,7 +2106,7 @@ function segMoves(seg, again) {
   const moves = dirs.map((raw) => ({ raw, again }));
   if (cmd === "cd" || cmd === "pushd") {
     const ops = w.slice(1).filter((a) => a !== "--" && !/^-[LPe@]+$/.test(a));
-    if (seg.op === "(" || seg.op === "`" || ops[0] === "-" || /^[+-]\d+$/.test(ops[0] ?? "")) {
+    if (seg.op === "(" || ops[0] === "-" || /^[+-]\d+$/.test(ops[0] ?? "")) {
       moves.push({ lost: true, again });
     } else if (ops.length) moves.push({ raw: ops[0], cd: true, again });
     else if (cmd === "cd") moves.push({ raw: "~", again });
@@ -2354,11 +2362,12 @@ try {
   if (!hit) process.exit(0);
 
   if (hit.lost) {
-    // #258: a directory change it couldn't follow -- fail closed, and say so (a git -C too, #318)
+    // #258: a directory change it couldn't follow -- fail closed, and say so
+    // (a git -C too, #318; a folder a substitution computes, #319)
     console.error(
-      "cairn harness guard: a directory change in this line (cd, pushd, env -C, git -C) goes " +
-      "somewhere the guard couldn't tell, so this relative write may land in the hook directory " +
-      "or a settings file.",
+      "cairn harness guard: a directory change in this line (cd, pushd, env -C, git -C), or a " +
+      "folder a $(...) computes, goes somewhere the guard couldn't tell, so this write may land " +
+      "in the hook directory or a settings file.",
     );
     console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
     console.error("  name the folder plainly, or write to an absolute path, and the guard can judge it.");

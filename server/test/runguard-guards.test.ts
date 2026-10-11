@@ -2101,3 +2101,43 @@ describe("run guard: an MCP tool's command line is judged like a Bash line (#310
     expect(tool(proj, home, START, { command: "git log --oneline" }).status).toBe(0);
   });
 });
+
+// #319: the shared reader ended a segment at an unquoted `(`, `)` or
+// backtick, so `git reset $(git rev-parse HEAD~1) --hard` read its --hard
+// as a command of its own and the reset looked soft. A substitution is one
+// word of its command now.
+describe("run guard: an unquoted substitution never cuts a destructive flag off its command (#319)", () => {
+  it("the flag after a $(...) or backtick is the command's, and refused", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git reset $(git rev-parse HEAD~1) --hard",
+      "git reset `git rev-parse HEAD~1` --hard",
+      "git checkout $(git rev-parse HEAD~1) -f",
+      "git clean $(true) -fdx",
+      "git push origin $(git rev-parse HEAD):main -f", // the stamp is clean; the -f alone refuses
+      "echo $(git reset --hard)", // the body still runs, quoted or not (#257)
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("the everyday substitutions pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "echo $(date)",
+      "export V=$(git rev-parse HEAD)",
+      'git commit -m "$(cat msg)"',
+      "cd $(git rev-parse --show-toplevel) && npm test",
+      "git log $(git merge-base HEAD main)..HEAD",
+      "git diff $(git rev-parse HEAD~1)",
+      "(cd server && npm test)",
+      "echo $((1+2))",
+      "diff <(sort a) <(sort b)",
+      "git commit -m '$(git reset --hard)'",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});

@@ -1186,3 +1186,86 @@ describe("harness guard sees case-variant paths through every write shape (#295)
     expect(call(p, "Write", { file_path: "notes.md" }, "DOCS")).toBe(0);
   });
 });
+
+// #319: the shared reader ended a segment at an unquoted `(`, `)` or
+// backtick, so `cp $(echo evil.json) hooks/hooks.json` read as `cp $` |
+// `echo evil.json` | `hooks/hooks.json` and the literal target was never a
+// cp operand. A substitution is one word now; the target after it is seen.
+describe("harness guard sees the literal target after an unquoted substitution (#319)", () => {
+  /** The guard's refusal text for one Bash command string. */
+  function stderrOf(projectDir: string, command: string): string {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+    delete env.CAIRN_HARNESS_EDIT;
+    delete env.CDPATH;
+    return spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    }).stderr ?? "";
+  }
+
+  it("each reported form is refused; its quoted and plain spellings already were", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    for (const c of [
+      "git checkout $(git rev-parse HEAD~1) -- hooks/hooks.json",
+      "git restore --source=$(git rev-parse HEAD~1) hooks/hooks.json",
+      "cp $(echo evil.json) hooks/hooks.json",
+      "cp $(echo evil.json) .claude/settings.json",
+      "cp $(echo evil.json) .mcp.json",
+      "cp `echo evil.json` hooks/hooks.json",
+      "install -m 644 $(echo evil.json) hooks/hooks.json",
+      "ln -sf $(pwd)/evil.json hooks/hooks.json",
+      "curl -fsSL $(cat url.txt) -o hooks/hooks.json",
+      "rm -rf $(true) hooks",
+      "sed -i s/a/b/ $(true) hooks/hooks.json",
+      "git -C $(pwd) checkout HEAD~1 -- hooks/hooks.json", // the -C is lost; refused either way
+      "cd $(pwd) && echo x > hooks/hooks.json", // a cd it can't follow; the write is judged from here too
+      "bash -c 'cp $(echo e) hooks/hooks.json'",
+      // the body runs too, quoted or not
+      "echo $(cp evil.json hooks/hooks.json)",
+      'echo "$(cp evil.json hooks/hooks.json)"',
+      // the controls
+      'cp "$(echo evil.json)" hooks/hooks.json',
+      "cp evil.json hooks/hooks.json",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+    }
+  });
+
+  it("a path with nothing in front of its substitution lands where the guard can't tell", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const c of [
+      "rm -rf $(pwd)/hooks",
+      "echo x > $(pwd)/hooks/hooks.json",
+      "cp evil.json $(pwd)/hooks/",
+      "cp evil.json `pwd`/hooks/hooks.json",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain("goes somewhere the guard couldn't tell");
+    }
+  });
+
+  it("a substitution that only reads, or names a file under a folder the guard knows, passes", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const c of [
+      "echo $(date)",
+      "export V=$(git rev-parse HEAD)",
+      'git commit -m "$(cat msg)"',
+      "cd $(git rev-parse --show-toplevel) && npm test",
+      "cp $(ls *.txt | head -1) /tmp/",
+      "git log $(git merge-base HEAD main)..HEAD",
+      "git diff $(git rev-parse HEAD~1)",
+      "(cd server && npm test)",
+      "echo $((1+2))",
+      "diff <(sort a) <(sort b)",
+      "echo x > $(mktemp)",
+      "cp a /tmp/$(date +%s).bak",
+      "git rm -r $(echo hooks)", // an opaque name under a known folder: judged like $NAME, not refused
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});

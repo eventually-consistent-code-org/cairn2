@@ -30,7 +30,7 @@ describe("shellSegments", () => {
 
   it("each read option turns on exactly the feature it names", () => {
     expect(words("(a) `b` c", {})).toEqual([["(a)", "`b`", "c"]]);
-    expect(words("(a) `b` c", { subshells: true })).toEqual([["a"], ["b"], ["c"]]);
+    expect(words("(a) `b` c", { subshells: true })).toEqual([["a"], ["`b`", "c"]]);
     expect(words("a # b", {})).toEqual([["a", "#", "b"]]);
     expect(words("a # b\nc", { comments: true })).toEqual([["a"], ["c"]]);
     expect(words('echo "$(rm x)"', {})).toEqual([["echo", "$(rm x)"]]);
@@ -42,6 +42,37 @@ describe("shellSegments", () => {
     expect(words('"a\\b"', { posixEscapes: true })).toEqual([["a\\b"]]);
     expect(words("a\rb", {})).toEqual([["a\rb"]]);
     expect(words("a\rb", { anyWhitespace: true })).toEqual([["a", "b"]]);
+  });
+
+  // #319: an unquoted $(...) or backtick ended a segment, so `cp $(x)
+  // hooks/hooks.json` read as three commands and the literal target was
+  // never a cp operand. A substitution is one word now, whatever `read` says.
+  it("an unquoted substitution is one word of its command, never a segment break (#319)", () => {
+    const sub = { subshells: true, substitutions: true, redirects: true };
+    expect(words("cp $(echo evil.json) hooks/hooks.json", sub))
+      .toEqual([["cp", "$(echo evil.json)", "hooks/hooks.json"], ["echo", "evil.json"]]);
+    expect(words("git checkout $(git rev-parse HEAD~1) -- hooks/hooks.json", sub))
+      .toEqual([["git", "checkout", "$(git rev-parse HEAD~1)", "--", "hooks/hooks.json"],
+        ["git", "rev-parse", "HEAD~1"]]);
+    expect(words("git reset `git rev-parse HEAD~1` --hard", sub))
+      .toEqual([["git", "reset", "`git rev-parse HEAD~1`", "--hard"], ["git", "rev-parse", "HEAD~1"]]);
+    // nesting, inner quotes and a substitution joined to a word
+    expect(words("rm -rf $(dirname \"$(pwd)/x)y\")/hooks", sub))
+      .toEqual([["rm", "-rf", "$(dirname \"$(pwd)/x)y\")/hooks"], ["dirname", "$(pwd)/x)y"], ["pwd"]]);
+    expect(words("echo foo$(x)bar `y`z", sub)).toEqual([["echo", "foo$(x)bar", "`y`z"], ["x"], ["y"]]);
+    // arithmetic and process substitution are words with no command line inside
+    expect(words("echo $((1+2)) >(cat)", sub)).toEqual([["echo", "$((1+2))", ">(cat)"]]);
+    expect(words("diff <(sort a) <(sort b)", sub)).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
+    // a redirect past a substitution is still a redirect
+    const [seg] = shellSegments("echo x > $(pwd)/hooks/hooks.json", sub) as Seg[];
+    expect(seg.words).toEqual(["echo", "x"]);
+    expect(seg.redirects).toEqual(["$(pwd)/hooks/hooks.json"]);
+    // the body is queued only when substitutions are read; the word stays whole either way
+    expect(words("cp $(echo a) b", { subshells: true })).toEqual([["cp", "$(echo a)", "b"]]);
+    expect(words("cp $(echo a) b", {})).toEqual([["cp", "$(echo a)", "b"]]);
+    // a subshell run as a command is still a break
+    expect(words("(cd x && rm -rf hooks); echo $(date)", sub))
+      .toEqual([["cd", "x"], ["rm", "-rf", "hooks"], ["echo", "$(date)"], ["date"]]);
   });
 
   it("redirects: targets are collected, descriptors and input are not", () => {

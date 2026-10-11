@@ -1877,7 +1877,10 @@ through wrappers and their flag values (`sudo -u root`, `timeout 5`,
 `watch`, `strace`, `runuser`, and the g-prefixed GNU tools Homebrew
 installs), a `sh -c` string (and the line `script -c`, `flock -c` or
 `runuser -c` hands a shell), shell keywords and grouping (`if`, `for`,
-`{ }`, `( )`), and a `$(…)` inside double quotes, which still runs. A
+`{ }`, `( )`), and a `$(…)` or backtick, quoted or not, which still
+runs — and which is one word of the command around it, so `git reset
+$(git rev-parse HEAD~1) --hard` is a hard reset, its `--hard` never cut
+off into a line of its own. A
 runner the table doesn't name is backstopped: when an unknown program's
 later words form a command — `op run -- git push`, `bundle exec git
 reset --hard`, `uv run`, a `-c` string, `tmux new-session -d '…'`,
@@ -2029,7 +2032,14 @@ way a `cd` target is: `~/proj`, `$HOME/proj` and `"$PWD"` are spelled
 out, so `git -C ~/proj rm -r hooks` is judged where it lands.
 After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
 relative write is refused with a line saying so — name the folder
-plainly, or write to an absolute path, and it can judge it. Reading
+plainly, or write to an absolute path, and it can judge it. The same
+line refuses a write whose folder a substitution computes (`rm -rf
+$(pwd)/hooks`): nothing in front of the `$(…)` anchors it, so it could
+land anywhere. A `$(…)` elsewhere on the line is one word of its
+command, so the literal target after it is judged as itself — `cp
+$(echo x) hooks/hooks.json` is a cp onto the hooks file — and a computed
+name under a folder the guard knows (`/tmp/$(date +%s).bak`) is judged
+there, as a `$NAME` is. Reading
 these files is untouched — inspecting a hook is ordinary work — and so
 is a heredoc that is only data. The refusal names the file and then asks
 the question that matters: if you did not ask for this, something the
@@ -2136,9 +2146,11 @@ isolation is the operating system's job. Both guards read Bash through
 one shared shell reader, so a fix reaches both, but it is still a
 reading of the command text, not the shell itself. The harness guard
 doesn't see a write inside an interpreter (`python -c`, or an MCP tool
-running code) or a `$(…)`, an archive's members, paths an upstream
-command finds for itself (`git ls-files | xargs rm`), or an MCP tool
-outside the shapes above.
+running code), a write that only exists in a substitution's output
+(`$(cat script)` run as a command — the body of a `$(…)` and the
+literal target after one are read), an archive's members, paths an
+upstream command finds for itself (`git ls-files | xargs rm`), or an MCP
+tool outside the shapes above.
 
 ---
 
