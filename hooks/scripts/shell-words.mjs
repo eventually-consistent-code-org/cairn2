@@ -190,6 +190,40 @@ function closeTick(line, i) {
 }
 
 /**
+ * The bodies of the substitutions an unquoted heredoc body runs (#322):
+ * each `$(...)`, backtick and `$((...))` in it, in order, read as a
+ * $(...) on the line is. The shell expands such a body the way it does a
+ * double-quoted string -- a backslash escapes the next character, quotes
+ * are plain text, and a substitution's own quoting is honoured (closeParen)
+ * -- so `print('$(rm -rf hooks)')` holds the rm. A quoted-delimiter body
+ * is never scanned: its text is literal.
+ */
+function heredocBodies(body) {
+  const out = [];
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i];
+    const n = body[i + 1];
+    if (c === "\\") { i += 2; continue; }
+    if (c === "$" && n === "(") {
+      const end = closeParen(body, i + 2);
+      const inner = body.slice(i + 2, end);
+      out.push(body[i + 2] === "(" ? inner.replace(/^\((.*)\)$/s, "$1") : inner);
+      i = end + 1;
+      continue;
+    }
+    if (c === "`") {
+      const end = closeTick(body, i + 1);
+      out.push(body.slice(i + 1, end).replace(/\\([`\\$])/g, "$1"));
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
  * Index of a word list's command word, past the reserved words and grouping
  * in front of it (#285): `if` `then` `elif` `else` `while` `until` `do` `!`
  * `{` and the closers, a `for NAME in ...` (or select) header up to its
@@ -217,8 +251,8 @@ function commandStart(words) {
 
 /**
  * Splits a shell command line into simple-command segments, each
- * { words, reserved, redirects, heredocs: [{ delim, body }], herestrings,
- * inputs, op }. Single and double quotes and backslashes are honoured, so
+ * { words, reserved, redirects, heredocs: [{ delim, body, quoted }],
+ * herestrings, inputs, op }. Single and double quotes and backslashes are honoured, so
  * quoted text stays inside its word: `git commit -m "explain git reset
  * --hard"` is one git commit with a message, never a reset, and a `>` in a
  * quoted pattern is text. Segments break at ; & | and newlines, plus
@@ -233,8 +267,17 @@ function commandStart(words) {
  *                  a descriptor, not a file); `<` operands go to `inputs` and
  *                  `<<<` text to `herestrings` -- read, never words; a `<<`
  *                  heredoc body is data -- skipped through its delimiter line
- *                  and kept on its segment. Off: those characters are word
- *                  text and body lines are commands.
+ *                  and kept on its segment (see heredocs). Off: those
+ *                  characters are word text and body lines are commands.
+ *   heredocs       just the `<<` part of redirects: a heredoc body is data
+ *                  on its segment, never command lines, while `<`, `<<<`
+ *                  and `>` stay word text. An unquoted delimiter (`<<EOF`)
+ *                  leaves the shell expanding the body before the command
+ *                  reads it, so each `$(...)`, backtick and `$((...))` in
+ *                  the body runs: with substitutions on, each is queued
+ *                  like one on the line (#322). A quoted delimiter
+ *                  (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) keeps the body literal,
+ *                  so nothing in it is read; `quoted` says which.
  *   subshells      `(` and `)` end a command: `(cd x && rm y)` is a cd and
  *                  an rm. Off: they are word text.
  *   comments       an unquoted `#` at a word start comments out its line.
@@ -275,14 +318,16 @@ export function shellSegments(command, read = {}, depth = 0) {
   // what the next completed word is: word | redirect | skip | heredoc | herestring | input
   let next = "word";
   let strip = false; // `<<-` strips leading tabs before matching the delimiter
+  let quoted = false; // any quote or backslash in the delimiter word keeps the body literal
 
   const pushWord = () => {
     if (cur === null) return;
     if (next === "redirect") redirects.push(cur);
     else if (next === "heredoc") {
-      const doc = { delim: cur, body: "" };
+      const doc = { delim: cur, body: "", quoted };
       heredocs.push(doc);
       pending.push({ doc, strip });
+      quoted = false;
     } else if (next === "herestring") herestrings.push(cur);
     else if (next === "input") inputs.push(cur);
     else if (next === "word") words.push(cur);
@@ -315,6 +360,12 @@ export function shellSegments(command, read = {}, depth = 0) {
   while (i < command.length) {
     const c = command[i];
     const n = command[i + 1];
+
+    // a quote or backslash anywhere in a heredoc's delimiter word keeps
+    // its body literal (#322): `<<'EOF'`, `<<"EOF"`, `<<E'O'F`, `<<\EOF`
+    if (next === "heredoc" && (c === "'" || c === '"' || (c === "\\" && n !== undefined && n !== "\n"))) {
+      quoted = true;
+    }
 
     // 'single quotes' -- everything literal up to the next quote
     if (c === "'") {
@@ -398,6 +449,9 @@ export function shellSegments(command, read = {}, depth = 0) {
       endSeg("\n");
       // Heredoc bodies begin on the next line; they are data, so skip each
       // one through its delimiter line, keeping the text on its segment.
+      // The shell expands an unquoted body before the command reads it,
+      // so each substitution in one runs: queue its body like one on the
+      // line (#322). A quoted delimiter keeps the body literal.
       while (pending.length) {
         const { doc, strip: tabs } = pending.shift();
         const start = i + 1;
@@ -408,6 +462,7 @@ export function shellSegments(command, read = {}, depth = 0) {
           const done = (tabs ? line.replace(/^\t+/, "") : line) === doc.delim;
           if (done || nl < 0) {
             doc.body = command.slice(start, done ? k : command.length);
+            if (!doc.quoted && read.substitutions) subs.push(...heredocBodies(doc.body));
             i = nl < 0 ? command.length : nl;
             break;
           }
@@ -431,7 +486,9 @@ export function shellSegments(command, read = {}, depth = 0) {
       continue;
     }
 
-    if (read.redirects && c === "<") {
+    // `<` is read when redirects are; `<<` (not `<<<`) when heredocs alone are (#322)
+    if (c === "<" && (read.redirects
+      || (read.heredocs && n === "<" && command[i + 2] !== "<" && command[i - 1] !== "<"))) {
       pushWord();
       if (command.startsWith("<<<", i)) { next = "herestring"; i += 3; continue; }
       if (n === "<") {

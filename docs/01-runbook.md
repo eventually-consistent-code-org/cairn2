@@ -1898,7 +1898,11 @@ program judged like any runner; and a pager variable set on the line
 `GIT_PAGER=cat git log` and `rg --pre-glob` stay allowed. An MCP tool's
 command line is read the same way (see *Which tools
 the guards see*, below). Quoted text that only mentions git never trips
-it — a commit message saying "never `git reset --hard`" passes. A guard
+it — a commit message saying "never `git reset --hard`" passes. A
+heredoc body is data too, so a README written through `cat <<'EOF'`
+can say the same; only the `$(…)` or backtick an unquoted body
+(`<<EOF`) runs is read as a command, and a heredoc fed to a shell
+reading stdin (`sh <<EOF`, `cat <<EOF | sh`) is that shell's script. A guard
 that breaks lets the command through rather than blocking work. It
 enforces three rules.
 
@@ -2054,7 +2058,12 @@ they look like. Bodies nest eight levels deep; a line nested deeper is
 refused unread by both guards, with a line saying so — flatten it into
 steps of its own and they can judge it. Reading
 these files is untouched — inspecting a hook is ordinary work — and so
-is a heredoc that is only data. The refusal names the file and then asks
+is a heredoc that is only data: its lines are never commands, but the
+`$(…)` or backtick inside an unquoted body (`cat <<EOF`) runs before
+the command ever reads it, so each is read as a line of its own, and
+`cat <<EOF` / `$(rm -rf hooks)` / `EOF` is the removal it is, while
+the quoted-delimiter `cat <<'EOF'` keeps the same text literal and
+passes. The refusal names the file and then asks
 the question that matters: if you did not ask for this, something the
 agent read did, so find out where the instruction came from before
 allowing it. The override, `CAIRN_HARNESS_EDIT=1`, is the owner's too:

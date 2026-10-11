@@ -2864,6 +2864,49 @@ describe("harness guard reads a git -C folder like a cd target (#318)", () => {
   });
 });
 
+// #322: the shared reader kept an unquoted heredoc body as data and never
+// looked inside it, so the $(...) the shell expands there -- before cat
+// ever reads the body -- ran unseen by the harness guard; and the run
+// guard, with heredocs unmodelled, read every body line as a command, so
+// a README that merely mentioned a hard reset was refused. A body is data
+// in both guards now, and only the substitutions an unquoted body runs
+// are read, each as a line of its own.
+describe("both guards read a heredoc body as data and its substitutions as commands (#322)", () => {
+  const bash = (command: string) => JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" });
+
+  it("harness guard: the $(...) an unquoted body runs is the write it is; a quoted body is text", () => {
+    const p = freshDir("cairn-hooks-heredoc-");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    const env = { ...process.env } as Record<string, string | undefined>;
+    delete env.CAIRN_HARNESS_EDIT;
+    const run = (c: string) => spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env: { ...env, CLAUDE_PROJECT_DIR: p }, encoding: "utf8", timeout: 5000, input: bash(c),
+    });
+    const r = run("cat > notes.md <<EOF\ntitle $(rm -rf hooks)\nEOF");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("the hook directory");
+    expect(run("cat > notes.md <<'EOF'\ntitle $(rm -rf hooks)\nEOF").status).toBe(0);
+    expect(run("cat > notes.md <<EOF\nnever rm -rf hooks here\nEOF").status).toBe(0);
+  });
+
+  it("run guard: the $(...) an unquoted body runs is the reset it is; a README's prose is text", () => {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    const home = freshDir("cairn-hooks-heredoc-home-");
+    const env = { CAIRN_HOME: home } as Record<string, string>;
+    const payload = (c: string) => JSON.stringify({ tool_name: "Bash", tool_input: { command: c }, cwd: proj });
+    const r = runHookRaw(RUNGUARD, proj, payload("cat > notes.md <<EOF\ntitle $(git reset --hard)\nEOF"), env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("git reset --hard");
+    expect(runHookRaw(RUNGUARD, proj,
+      payload("cat > README.md <<'EOF'\nNever run git reset --hard here.\nEOF"), env).status).toBe(0);
+    expect(runHookRaw(RUNGUARD, proj,
+      payload("cat > README.md <<EOF\nNever run git reset --hard here.\nEOF"), env).status).toBe(0);
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing

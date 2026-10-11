@@ -2239,3 +2239,73 @@ describe("run guard: a line nested deeper than the reader reads is refused unrea
     expect(guard(proj, home, "cd $(pwd)/sub && git reset --hard").status).toBe(2);
   });
 });
+
+// #322: heredocs were not modelled here, so every body line read as a
+// command of its own -- `cat > README.md <<'EOF'` with "never run git
+// reset --hard" as prose was refused -- while the $(...) an unquoted body
+// runs was only caught by that same accident. A body is data now, in
+// both guards: only the substitutions an unquoted body runs are read,
+// and a heredoc fed to a shell reading stdin is still that shell's script.
+describe("run guard: a heredoc body is data, and the substitutions it runs are commands (#322)", () => {
+  it("the $(...) or backtick an unquoted body runs is the destructive git it is", () => {
+    const { proj, home } = fixture();
+    for (const [c, tag] of [
+      ["cat <<EOF\n$(git reset --hard)\nEOF", "git reset --hard"],
+      ["cat <<EOF\n$(git push --force origin main)\nEOF", "git push --force"],
+      ["cat > notes.md <<EOF\ntitle $(git reset --hard)\nEOF", "git reset --hard"],
+      ["tee notes.md <<EOF\n`git reset --hard`\nEOF", "git reset --hard"],
+      ["cat <<-EOF\n\t$(git reset --hard)\n\tEOF", "git reset --hard"],
+      ["cat <<EOF | wc -l\n$(git reset --hard)\nEOF", "git reset --hard"],
+      ["cat <<EOF\n$((1 + $(git reset --hard | wc -c)))\nEOF", "git reset --hard"],
+      ["cat <<EOF\n$(cat <<X\n$(git reset --hard)\nX\n)\nEOF", "git reset --hard"],
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(tag);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("body text is prose, quoted delimiter or not: a README naming a hard reset passes", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "cat > README.md <<'EOF'\nNever run git reset --hard here.\nEOF",
+      "cat > README.md <<EOF\nNever run git reset --hard here.\nEOF",
+      "cat > docs/x.md <<'EOF'\n```\ngit reset --hard\n```\nEOF",
+      "cat > docs/x.md <<'EOF'\n    git push --force\nEOF",
+      "cat <<'EOF'\n$(git reset --hard)\nEOF", // a quoted delimiter: the $(...) is text
+      "cat <<EOF\n\\$(git reset --hard)\nEOF", // an escaped `$` never expands
+      "cat <<EOF\n$(cat <<X\ngit reset --hard\nX\n)\nEOF", // the inner heredoc's text is data too
+      "bash -c 'git status' <<EOF\ngit reset --hard\nEOF", // a shell with a -c string ignores its stdin
+      "git commit -F - <<'EOF'\ndocs: say never to git reset --hard\nEOF",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a shell reading stdin runs the heredoc fed to it, its own or the one piped in", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "sh <<EOF\ngit reset --hard\nEOF",
+      "sh <<'EOF'\ngit reset --hard\nEOF",
+      "bash -s <<EOF\ngit push --force origin main\nEOF",
+      "cat <<'EOF' | sh\ngit reset --hard\nEOF",
+      "sh <<EOF\necho $(git reset --hard)\nEOF",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toMatch(/git (reset --hard|push --force)/);
+    }
+    expect(guard(proj, home, "sh <<EOF\ngit status\nEOF").status).toBe(0);
+    // ...and a heredoc that isn't a script never moves a ref ahead of a push
+    expect(guard(proj, home, "cat <<'EOF' > notes.md && git push origin feature\nhello\nEOF").status).toBe(0);
+  });
+
+  it("the shapes around a heredoc are unchanged: a $(...) on the line and a here-string", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, "echo $(git reset --hard)").status).toBe(2);
+    expect(guard(proj, home, 'cat <<< "$(git reset --hard)"').status).toBe(2);
+    expect(guard(proj, home, "echo $(git status)").status).toBe(0);
+    expect(guard(proj, home, "cat <<< 'never git reset --hard'").status).toBe(0);
+  });
+});

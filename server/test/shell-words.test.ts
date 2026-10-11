@@ -15,7 +15,7 @@ import {
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
-type Seg = { words: string[]; redirects: string[]; heredocs: Array<{ delim: string; body: string }> };
+type Seg = { words: string[]; redirects: string[]; heredocs: Array<{ delim: string; body: string; quoted: boolean }> };
 
 /** Just the words of each segment, for the cases that only split. */
 const words = (command: string, read: Record<string, boolean> = {}): string[][] =>
@@ -189,10 +189,53 @@ describe("shellSegments", () => {
     const segs = shellSegments("cat <<'EOF' > f\nrm x\nEOF\nls", { redirects: true }) as Seg[];
     expect(segs.map((s) => s.words)).toEqual([["cat"], ["ls"]]);
     expect(segs[0].redirects).toEqual(["f"]);
-    expect(segs[0].heredocs).toEqual([{ delim: "EOF", body: "rm x\n" }]);
+    expect(segs[0].heredocs).toEqual([{ delim: "EOF", body: "rm x\n", quoted: true }]);
     // <<- matches a tab-indented delimiter line
     const tabbed = shellSegments("cat <<-END\n\tbody\n\tEND\nls", { redirects: true }) as Seg[];
     expect(tabbed.map((s) => s.words)).toEqual([["cat"], ["ls"]]);
+  });
+
+  // #322: an unquoted heredoc body was data through and through, so the
+  // $(...) the shell expands in it -- before cat, tee or python ever reads
+  // the body -- ran unseen; and with heredocs unmodelled, the run guard
+  // read every body line as a command. A body is data; its substitutions run.
+  it("an unquoted heredoc body's substitutions are read as command lines; a quoted one's are not (#322)", () => {
+    const sub = { redirects: true, substitutions: true };
+    // $(...), a backtick and $((...)) in the body, each queued after the line's segments
+    expect(words("cat <<EOF\n$(rm -rf hooks)\nEOF", sub)).toEqual([["cat"], ["rm", "-rf", "hooks"]]);
+    expect(words("cat > notes.md <<EOF\ntitle $(rm -rf hooks)\nEOF\nls", sub))
+      .toEqual([["cat"], ["ls"], ["rm", "-rf", "hooks"]]);
+    expect(words("cat <<EOF\n`rm -rf hooks`\nEOF", sub)).toEqual([["cat"], ["rm", "-rf", "hooks"]]);
+    expect(words("cat <<EOF\n$((1 + $(rm x)))\nEOF", sub))
+      .toEqual([["cat"], ["1", "+", "$(rm x)"], ["rm", "x"]]);
+    // quotes in the body are text, as the shell reads them; a backslash escapes the `$`
+    expect(words("python3 - <<EOF\nprint('$(rm -rf hooks)')\nEOF", sub))
+      .toEqual([["python3", "-"], ["rm", "-rf", "hooks"]]);
+    expect(words("cat <<EOF\n\\$(rm x) $(ls)\nEOF", sub)).toEqual([["cat"], ["ls"]]);
+    // `<<-` strips the tabs on the delimiter line, never the substitution
+    expect(words("cat <<-EOF\n\t$(rm -rf hooks)\n\tEOF", sub)).toEqual([["cat"], ["rm", "-rf", "hooks"]]);
+    // a quoted delimiter, any quoting, keeps the body literal: nothing in it is read
+    for (const q of ["'EOF'", '"EOF"', "\\EOF", "E'O'F"]) {
+      const segs = shellSegments(`cat <<${q}\n$(rm -rf hooks)\nEOF`, sub) as Seg[];
+      expect(segs.map((s) => s.words), q).toEqual([["cat"]]);
+      expect(segs[0].heredocs, q).toEqual([{ delim: "EOF", body: "$(rm -rf hooks)\n", quoted: true }]);
+    }
+    expect((shellSegments("cat <<EOF\nx\nEOF", sub) as Seg[])[0].heredocs)
+      .toEqual([{ delim: "EOF", body: "x\n", quoted: false }]);
+    // the body text itself is never a command line, quoted delimiter or not
+    expect(words("cat > README.md <<EOF\nNever run rm -rf hooks here.\nEOF", sub)).toEqual([["cat"]]);
+    // nesting: a $(...) in a body holding its own, and one holding a heredoc of its own
+    expect(words("cat <<EOF\n$(a $(b))\nEOF", sub)).toEqual([["cat"], ["a", "$(b)"], ["b"]]);
+    expect(words("cat <<EOF\n$(cat <<X\n$(rm x)\nX\n)\nEOF\nls", sub))
+      .toEqual([["cat"], ["ls"], ["cat"], ["rm", "x"]]);
+    // bodies are read only when substitutions are
+    expect(words("cat <<EOF\n$(rm x)\nEOF", { redirects: true })).toEqual([["cat"]]);
+    // `heredocs` alone models just the heredoc: `<`, `<<<` and `>` stay word text
+    const only = { heredocs: true, substitutions: true };
+    expect(words("cat < in <<EOF > out\n$(rm x)\nEOF", only))
+      .toEqual([["cat", "<", "in", ">", "out"], ["rm", "x"]]);
+    expect(words('cat <<< "$(ls)"', only)).toEqual([["cat", "<<<", "$(ls)"], ["ls"]]);
+    expect(words("cat <<'EOF'\nrm x\nEOF\nls", { heredocs: true })).toEqual([["cat"], ["ls"]]);
   });
 });
 
