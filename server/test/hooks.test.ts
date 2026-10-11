@@ -2662,6 +2662,130 @@ describe("harness guard refuses tree-creating commands into protected folders (#
   });
 });
 
+// #318: gitTargets resolved a `-C` folder literally, so `git -C ~/proj rm
+// -r hooks` landed every operand under a folder named `~` and the anchored
+// hooks/ and .mcp.json rules never matched -- while the plain, `-C .`,
+// `-C /abs` and `cd ~/proj &&` spellings were refused. The -C value is
+// read like a cd target now (dirTarget): ~, ~+, $HOME, ${HOME} and $PWD
+// spelled out, a variable the guard can't read LOST, so a relative operand
+// from it is refused the way a write after an unfollowable cd is. tar's -C
+// was read the same literal way and is fixed alongside.
+describe("harness guard reads a git -C folder like a cd target (#318)", () => {
+  const URL = "https://example.invalid/o/skill.git";
+
+  /** A home with the project under it, so ~/proj, $HOME/proj and $PWD all name the project. */
+  function fixture() {
+    const home = freshDir("cairn-hooks-gitc-home-");
+    const p = join(home, "proj");
+    for (const d of [join(p, "hooks"), join(p, "src")]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}\n");
+    writeFileSync(join(p, ".mcp.json"), "{}\n");
+    writeFileSync(join(p, "src", "old.txt"), "old\n");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash line from the project, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "FOO"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const SPELLINGS = ["~/proj", "~/proj/", "$HOME/proj", "${HOME}/proj", '"${HOME}/proj"', '"$PWD"', "$PWD", "~+"];
+  const WRITES: Array<[tail: string, phrase: string]> = [
+    ["rm -r hooks", "the hook directory"],
+    ["rm .mcp.json", "the MCP server config"],
+    ["checkout HEAD~1 -- hooks/hooks.json", "the hook directory"],
+    ["restore --source HEAD~1 hooks/hooks.json", "the hook directory"],
+    ["mv src hooks", "the hook directory"],
+    [`clone ${URL} hooks/x`, "the hook directory"],
+    ["worktree add hooks/x", "the hook directory"],
+    ["init hooks/x", "the hook directory"],
+    [`submodule add ${URL} hooks/x`, "the hook directory"],
+  ];
+
+  for (const dir of SPELLINGS) {
+    it(`refuses each write through \`git -C ${dir}\`, naming the protected thing`, () => {
+      const { p, home } = fixture();
+      for (const [tail, phrase] of WRITES) {
+        const c = `git -C ${dir} ${tail}`;
+        const r = run(p, home, c);
+        expect(r.status, c).toBe(2);
+        expect(r.stderr, c).toContain(phrase);
+        expect(r.stderr, c).toContain("owner's go-ahead");
+        expect(r.stderr, c).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+      }
+    });
+  }
+
+  it("keeps refusing the plain, -C ., -C /abs, cd ~/proj, chained -C and env -C spellings", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "git rm -r hooks",
+      "git -C . rm -r hooks",
+      `git -C ${p} rm -r hooks`,
+      "cd ~/proj && git rm -r hooks",
+      "git -C ~ -C proj rm -r hooks", // a later -C is relative to the one before
+      "git -C ~/proj -C . rm -r hooks",
+      'env -C /tmp git -C "$PWD" rm -r hooks', // $PWD is the shell's folder, not env -C's
+    ]) {
+      const r = run(p, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("the hook directory");
+    }
+  });
+
+  it("refuses a relative operand from a -C folder it can't read, saying so", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      'git -C "$FOO" rm -r hooks',
+      "git -C $FOO rm -r hooks",
+      'git -C "$(pwd)" rm -r hooks',
+      "git -C ~someone/proj rm -r hooks",
+      'git -C "$FOO" checkout HEAD~1 -- hooks/hooks.json',
+    ]) {
+      const r = run(p, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("couldn't tell");
+    }
+  });
+
+  it("lets ordinary work through the same spellings pass", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "git -C ~/proj rm src/old.txt",
+      "git -C ~/proj status",
+      "git -C $HOME/proj log --oneline",
+      'git -C "${HOME}/proj" diff',
+      'git -C "$PWD" mv src/old.txt src/new.txt',
+      "git -C ~+ checkout -- src/old.txt",
+      `git -C ~/proj clone ${URL} src/skill`,
+      'git -C "$FOO" status', // nothing written, so the lost folder never matters
+    ]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("reads tar's -C the same way", () => {
+    const { p, home } = fixture();
+    for (const c of ["tar xf /tmp/a.tar -C ~/proj hooks/hooks.json", "tar -xf /tmp/a.tar -C $HOME/proj hooks/hooks.json"]) {
+      const r = run(p, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("the hook directory");
+    }
+    const lost = run(p, home, 'tar xf /tmp/a.tar -C "$FOO" hooks/hooks.json');
+    expect(lost.status).toBe(2);
+    expect(lost.stderr).toContain("couldn't tell");
+    for (const c of ["tar xf /tmp/a.tar -C ~/proj src/x.txt", "tar tf /tmp/a.tar -C ~/proj"]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing

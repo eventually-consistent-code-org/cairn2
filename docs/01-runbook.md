@@ -2024,7 +2024,9 @@ through `npx`, `bunx`, `pnpm dlx`, `yarn dlx` or `node` and its CLI.
 Listing, a dry run and `--help` pass. A relative path is judged from
 the tool's working folder and from every folder a `cd`, `pushd`, `env
 -C` or `git -C` on the line could have moved to, in any order, because a
-`cd` can fail or run later.
+`cd` can fail or run later. A `git -C` (or `tar -C`) value is read the
+way a `cd` target is: `~/proj`, `$HOME/proj` and `"$PWD"` are spelled
+out, so `git -C ~/proj rm -r hooks` is judged where it lands.
 After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
 relative write is refused with a line saying so — name the folder
 plainly, or write to an absolute path, and it can judge it. Reading
