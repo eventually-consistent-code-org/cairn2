@@ -729,6 +729,102 @@ describe("run guard: a program runner doesn't hide git (#307)", () => {
   });
 });
 
+describe("run guard: a program runner off the table doesn't hide git (#311)", () => {
+  // The runners #307 left out. Each must refuse the destructive git it runs,
+  // and let its harmless twin through. The forms are the audit's pass-3 list.
+  const refused = [
+    "strace -f git reset --hard",
+    "op run -- git reset --hard",
+    "uv run git reset --hard",
+    "poetry run git reset --hard",
+    "bundle exec git reset --hard",
+    "bunx git reset --hard",
+    "npm exec -- git reset --hard",
+    "npm exec -c 'git reset --hard'",
+    "npm x -- git reset --hard",
+    "pnpm exec git reset --hard",
+    "pnpm dlx -c 'git reset --hard'",
+    "yarn exec git reset --hard",
+    "bun exec 'git reset --hard'",
+    "direnv exec . git reset --hard",
+    "mise exec -- git reset --hard",
+    "dotenv -- git reset --hard",
+    "busybox sh -c 'git reset --hard'",
+    "toybox sh -c 'git reset --hard'",
+    "ltrace git reset --hard",
+    "valgrind git reset --hard",
+    "gdb -batch -ex run --args git reset --hard",
+    "lldb -b -o run -- git reset --hard",
+    "runuser -u me -- git reset --hard",
+    "pkexec git reset --hard",
+    "sg staff -c 'git reset --hard'",
+    "systemd-run --user git reset --hard",
+    "nsenter -t 1 git reset --hard",
+    "unshare git reset --hard",
+    "firejail git reset --hard",
+    "bwrap --bind / / git reset --hard",
+    "tmux new-session -d 'git reset --hard'",
+    "screen -dm git reset --hard",
+    "parallel ::: 'git reset --hard'",
+    "hyperfine --runs 1 'git reset --hard'",
+    "osascript -e 'do shell script \"git reset --hard\"'",
+    "npx -c 'git reset --hard'",
+  ];
+  // Over-refusal pairs: an ordinary runner line, or a line that only mentions
+  // a destructive command, stays allowed.
+  const allowed = [
+    "npx vitest run",
+    "npm exec -- tsc --noEmit",
+    "pnpm exec tsc",
+    "uv run pytest",
+    "poetry run pytest -q",
+    "bundle exec rake test",
+    "op run -- npm publish --dry-run",
+    "tmux new-session -d 'npm test'",
+    "echo git reset --hard",
+    'grep -rn "git reset --hard" docs',
+    'gh issue create --title "git reset --hard is refused"',
+    "strace -f ls",
+    "npx -c 'git status'",
+    "hyperfine 'git status'",
+  ];
+
+  it("each off-table runner of a destructive git is refused in every session", () => {
+    const { proj, home } = fixture();
+    for (const c of refused) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("refused in every session");
+    }
+  });
+
+  it("ordinary runner lines, and lines that only mention git, pass", () => {
+    const { proj, home } = fixture();
+    for (const c of allowed) expect(guard(proj, home, c).status, c).toBe(0);
+  });
+
+  it("a runner meets the ship gate too — `op run -- git push` lands on main unstamped", () => {
+    const bare = fixture(undefined, false);
+    expect(guard(bare.proj, bare.home, "op run -- git push origin feature:main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "bundle exec git push origin HEAD:main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "op run -- git push origin main:feature").status).toBe(0);
+  });
+
+  it("an off-table runner reaches the guard through an MCP tool too (#310)", () => {
+    const { proj, home } = fixture();
+    const START = "mcp__plugin_desktop-commander_desktop-commander__start_process";
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home };
+    delete env.CAIRN_ALLOW_DESTRUCTIVE_GIT;
+    delete env.CAIRN_ALLOW_UNSHIPPED_PUSH;
+    const run = (command: string) => spawnSync(process.execPath, [RUNGUARD], {
+      cwd: proj, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: START, tool_input: { command }, cwd: proj }),
+    });
+    expect(run("op run -- git reset --hard").status).toBe(2);
+    expect(run("op run -- npm publish --dry-run").status).toBe(0);
+  });
+});
+
 describe("run guard: a capitalised command name is the program a Mac runs (#300)", () => {
   // Each row: [capitalised, lowercase, capitalised harmless]. A Mac's
   // case-insensitive volume runs `GIT` as git and `SUDO` as sudo, so before

@@ -5,10 +5,14 @@
  *   a Bash command line into simple commands the way a shell would, closely
  *   enough to find the command words and what a command writes, and peels
  *   the wrappers (sudo -u root, env -i, timeout 5, and program runners like
- *   xcrun, arch -arm64 or script -q /dev/null, #307) that run a later word
- *   as the real command. The run guard and the harness guard both read
- *   commands through here, so a parsing fix reaches both; two hand-rolled
- *   readers drifted until #254's wrapper fix reached only one of them.
+ *   xcrun, arch -arm64 or script -q /dev/null, #307; strace, runuser and kin,
+ *   #311) that run a later word as the real command. For a runner outside
+ *   that table, runnerCommands (#311) still hands back the inner command its
+ *   later words form, so the table stops growing one runner at a time. One
+ *   MCP-input reader, toolCommandLines, finds the command lines a non-Bash
+ *   tool hands a shell (#310, #311). The run guard and the harness guard
+ *   both read commands through here, so a parsing fix reaches both; two
+ *   hand-rolled readers drifted until #254's wrapper fix reached only one.
  *
  *   The guards still read a little differently, and each says how through
  *   the `read` options it passes. Every option is a gap one of the pre-#270
@@ -114,6 +118,24 @@ export const WRAPPERS = new Map([
   ["taskset", { short: "", long: [], positional: 1 }],
   // watch runs its words as one shell line, over and over
   ["watch", { short: "nqs", opt: "d", long: ["--interval", "--equexit", "--shotsdir"], joins: true }],
+  // Linux tracers, sandboxers and privilege switches (#311): each starts a
+  // later word as the real command. Their value-taking options are consumed
+  // so the command isn't misread (strace/ltrace -o is a file they write);
+  // runuser's and sg's -c string is a nested command line, like script -c.
+  // The long tail of runners the issue names (op run, uv run, bundle exec,
+  // tmux new-session, osascript ...) isn't modelled here one entry at a time
+  // -- runnerCommands backstops them, so the table stops growing.
+  ["strace", { short: "oepsabEOPITux", writes: ["-o"], long: ["--output", "--trace", "--expr",
+    "--string-limit", "--columns", "--attach", "--user", "--env", "--seccomp-bpf"] }],
+  ["ltrace", { short: "oepsSuFX", writes: ["-o"], long: ["--output", "--expr", "--filter", "--config"] }],
+  ["valgrind", { short: "", long: [] }],
+  ["firejail", { short: "", long: [] }],
+  ["unshare", { short: "", long: ["--map-user", "--map-group", "--setuid", "--setgid", "--wd", "--root"] }],
+  ["nsenter", { short: "t", long: ["--target"] }],
+  ["pkexec", { short: "", long: ["--user"] }],
+  ["runuser", { short: "cugGsw", long: ["--user", "--group", "--supp-group", "--shell",
+    "--whitelist-environment", "--command"], cmd: ["-c", "--command"] }],
+  ["sg", { short: "", long: ["--command"], positional: 1, cmd: ["-c", "--command"] }],
 ]);
 for (const name of ["env", "nice", "nohup", "stdbuf", "timeout", "xargs", "time", "chroot"]) {
   WRAPPERS.set(`g${name}`, { ...WRAPPERS.get(name), as: name });
@@ -569,6 +591,81 @@ export function unwrap(words, read = {}) {
 }
 
 /**
+ * Commands that only print, search or document their arguments, never run
+ * one (#311): the words after one are data, so a guard never re-reads them
+ * as a command. A command that can execute an argument (sh, eval, xargs,
+ * find, tee, dd ...) must stay off this list.
+ */
+export const ARG_SAFE = new Set(["echo", "printf", "print", "cat", "head", "tail", "wc", "ls",
+  "stat", "file", "du", "df", "basename", "dirname", "realpath", "readlink", "pwd", "date",
+  "sort", "uniq", "cut", "tr", "cmp", "diff", "grep", "egrep", "fgrep", "rg", "ag", "ack",
+  "ack-grep", "man", "which", "type", "whatis", "apropos", "whereis", "gh", "jq", "true",
+  "false", ":"]);
+
+// An option whose value is a command line a runner hands a shell (strace has
+// none; op/sg/runuser and the npm family use these), and the separators past
+// which the rest of a runner's words are the command it runs.
+const RUNNER_CMD_OPTS = new Set(["-c", "--call", "--command", "--shell-mode", "-e"]);
+const RUNNER_SEPS = new Set(["--", "--args", ":::"]);
+
+/**
+ * The command lines an unknown program may run among its later words (#311),
+ * so neither guard has to learn every runner one table entry at a time: when
+ * a segment's first word (after unwrap's peeling) is a program the guards
+ * don't otherwise handle, its later words can still be the real command --
+ * `op run -- git push`, `bundle exec rm -rf hooks`, `tmux new-session -d
+ * 'git reset --hard'`, `uv run pytest`. Returns the inner lines to re-judge:
+ * a -c / --call string, whatever follows a `--` / `:::` / `--args`
+ * separator, the run of words from the first bare one, each quoted string
+ * argument that is itself a command, and osascript's `do shell script
+ * "..."`. Empty for a program that only reads its arguments (ARG_SAFE), or
+ * with nothing command-shaped after it. The caller decides which inner line
+ * is dangerous; this only finds the candidates. Words are requoted so a
+ * re-read splits them the same way.
+ */
+export function runnerCommands(words) {
+  if (!Array.isArray(words) || words.length < 2) return [];
+  const name = commandName(words[0]);
+  if (ARG_SAFE.has(name)) return [];
+  const rest = words.slice(1);
+  const out = [];
+  const push = (line) => { if (typeof line === "string" && line && !out.includes(line)) out.push(line); };
+
+  // osascript's AppleScript runs a shell command inside `do shell script "X"`
+  if (name === "osascript") {
+    for (const w of rest) {
+      for (const m of w.matchAll(/do\s+shell\s+script\s+(?:"([^"]*)"|'([^']*)')/gi)) push(m[1] ?? m[2]);
+    }
+    return out;
+  }
+
+  // a -c / --call / -e string, or its --opt=value form, is a command line
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (RUNNER_CMD_OPTS.has(a)) { push(rest[i + 1]); continue; }
+    const eq = a.indexOf("=");
+    if (eq > 0 && RUNNER_CMD_OPTS.has(a.slice(0, eq))) push(a.slice(eq + 1));
+  }
+  // whatever follows a `--`, `--args` or `:::` separator is the command
+  const sep = rest.findIndex((a) => RUNNER_SEPS.has(a));
+  if (sep >= 0 && sep + 1 < rest.length) push(rest.slice(sep + 1).map(quoteWord).join(" "));
+  // the inline run of words from each bare one -- the first is usually the
+  // command, but a runner can put operands ahead of it (`bwrap --bind / /
+  // git ...`), so every bare start is a candidate (capped, as a runner's own
+  // bare word only re-reads as a harmless unknown anyway)
+  let starts = 0;
+  for (let i = 0; i < rest.length && starts < 8; i++) {
+    const a = rest[i];
+    if (a.startsWith("-") || RUNNER_SEPS.has(a) || a === "::") continue;
+    push(rest.slice(i).map(quoteWord).join(" "));
+    starts++;
+  }
+  // a quoted multi-word argument that is a command line of its own
+  for (const a of rest) if (/\s/.test(a)) push(a);
+  return out;
+}
+
+/**
  * The command string a shell runs with -c, or null when there is none.
  * `args` are the words after the shell's name. Any short cluster carrying
  * `c` counts (-c, -lc, -ec); the string is the first bare word after the
@@ -611,47 +708,66 @@ export function shellReadsStdin(args) {
   return true;
 }
 
-// The fields a tool's input names a shell command in (#310), and the code
-// languages that are a shell.
+// The fields a tool's input names a shell command in (#310), the ones that
+// name its language, and the ones that name the folder it runs in (#311). The
+// code languages that are a shell include a /bin/bash path, read by basename.
 const COMMAND_FIELDS = ["command", "cmd", "shell_command"];
-const SHELL_LANGS = new Set(["shell", "bash", "sh", "zsh"]);
+const LANGUAGE_FIELDS = ["language", "lang", "shell", "interpreter", "runtime"];
+const FOLDER_FIELDS = ["cwd", "workdir", "working_directory", "workingDirectory"];
+const SHELL_LANGS = new Set(["sh", "bash", "zsh", "dash", "ksh", "shell", "posix"]);
 
 /** A word quoted so shellSegments reads it back as that one word. */
-function quoteWord(s) {
-  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+export function quoteWord(s) {
+  const str = String(s);
+  return /^[\w@%+=:,./-]+$/.test(str) ? str : `'${str.replace(/'/g, "'\\''")}'`;
+}
+
+/** True for a non-empty array of only strings. */
+const allStrings = (v) => Array.isArray(v) && v.length > 0 && v.every((w) => typeof w === "string");
+
+/**
+ * The command line one command field stands for (#310): a string as it is,
+ * with an `args` / `arguments` string array beside it appended word for
+ * word; an exec-style array of strings, each one word; else null.
+ */
+function fieldLine(value, args) {
+  if (typeof value === "string") return allStrings(args) ? [value, ...args.map(quoteWord)].join(" ") : value;
+  return allStrings(value) ? value.map(quoteWord).join(" ") : null;
 }
 
 /**
- * The command lines a non-Bash tool's input hands a shell (#310), each as
- * { line, cwd }: a `command`, `cmd` or `shell_command` string (with an
- * `args` list after it, quoted word by word), each one in a `commands`
- * list (strings, or objects carrying one of those fields), and `code`
- * whose `language` is a shell. `cwd` is the folder the input names for
- * them, or null. Code in any other language, or keystrokes sent to a
- * running process, is not a command line this reader can see.
+ * The command lines a tool call's input hands a shell (#310, #311), as
+ * { lines, dir, concurrent } -- the one reader both guards share, at the
+ * breadth the run guard read on its own: a `command` / `cmd` /
+ * `shell_command` string (an exec-style array of strings, or a string with
+ * an `args` / `arguments` array, counts too), each entry of a `commands`
+ * list (strings, or objects carrying one of those fields), a `script`
+ * (unless a language field names a non-shell), and `code` whose language is
+ * a shell (incl. a `/bin/bash` path). `dir` is the folder the input names
+ * (cwd / workdir / working_directory / workingDirectory), or null;
+ * `concurrent`, a batch run at once. Out of scope, as both guard headers
+ * say: code in another language, and keystrokes to a running process.
  */
-export function toolCommands(input) {
-  if (!input || typeof input !== "object") return [];
-  const cwd = typeof input.cwd === "string" ? input.cwd : null;
+export function toolCommandLines(input) {
+  if (!input || typeof input !== "object") return { lines: [], dir: null, concurrent: false };
+  const language = LANGUAGE_FIELDS.map((f) => input[f]).find((v) => typeof v === "string");
+  const shell = language === undefined ? null : SHELL_LANGS.has(commandName(language.trim()));
   const lines = [];
-  const take = (o) => {
+  const take = (obj) => {
     for (const f of COMMAND_FIELDS) {
-      if (typeof o?.[f] !== "string") continue;
-      const args = Array.isArray(o.args) ? o.args.filter((a) => typeof a === "string") : [];
-      lines.push([o[f], ...args.map(quoteWord)].join(" "));
+      const line = fieldLine(obj[f], obj.args ?? obj.arguments);
+      if (line !== null) lines.push(line);
     }
   };
   take(input);
-  if (Array.isArray(input.commands)) {
-    for (const c of input.commands) {
-      if (typeof c === "string") lines.push(c);
-      else take(c);
-    }
+  if (typeof input.script === "string" && shell !== false) lines.push(input.script);
+  if (typeof input.code === "string" && shell === true) lines.push(input.code);
+  for (const c of Array.isArray(input.commands) ? input.commands : []) {
+    if (typeof c === "string") lines.push(c);
+    else if (c && typeof c === "object") take(c);
   }
-  if (typeof input.code === "string" && SHELL_LANGS.has(String(input.language ?? "").toLowerCase())) {
-    lines.push(input.code);
-  }
-  return lines.map((line) => ({ line, cwd }));
+  const dir = FOLDER_FIELDS.map((f) => input[f]).find((v) => typeof v === "string" && v !== "") ?? null;
+  return { lines, dir, concurrent: Number(input.concurrency) > 1 };
 }
 
 // su options that take the next word as their value.

@@ -36,8 +36,14 @@
  *
  *   Bash: read as a shell reads it (shell-words.mjs, #270) for what it
  *   WRITES -- redirects and the operands of commands that change files,
- *   through wrappers and program runners (xcrun, script, flock, #307),
- *   bash -c, su -c, find -exec, xargs and a heredoc fed to a shell. A
+ *   through wrappers and program runners (xcrun, script, flock, #307;
+ *   strace, runuser, #311), bash -c, su -c, find -exec, xargs and a heredoc
+ *   fed to a shell. A program runner the table doesn't name is backed up by
+ *   runnerCommands (#311): the write its later words form -- `op run -- rm
+ *   -rf hooks`, `bundle exec`, a `-c` string, `tmux new-session -d '...'` --
+ *   is read too, and `npm`/`pnpm`/`yarn exec` the same, so the table needn't
+ *   grow one runner at a time. A command that only reads its arguments
+ *   (echo, grep, cat ...) runs none of them. A
  *   relative path is judged from every folder a cd, env -C or git -C on the
  *   line can reach (#258); after a cd it can't follow, refused. Removing a
  *   protected folder or one holding it counts, and so does changing its
@@ -52,9 +58,13 @@
  *   take_screenshot ...) has its path fields judged -- path, paths,
  *   file_path, filePath, target, destination, dest, new_path, and source
  *   for a move -- as written, never globbed. A command line in any MCP
- *   tool's input -- command, cmd or shell_command (with its args list),
- *   each entry of a commands list, code whose language is a shell, from
- *   the input's cwd -- is read like Bash. Anything else passes: a read
+ *   tool's input is read like Bash, through the one field reader both guards
+ *   share (toolCommandLines, #310, #311): command, cmd or shell_command (a
+ *   string, an exec-style array, or a string with an args / arguments list),
+ *   each entry of a commands list, a script unless a non-shell language is
+ *   named, and code whose language is a shell (incl. a /bin/bash path), from
+ *   the folder cwd / workdir / working_directory / workingDirectory names.
+ *   Anything else passes: a read
  *   tool, a writing tool under another name or field, keystrokes into a
  *   running process, settings a server keeps.
  *
@@ -70,8 +80,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommands,
-  unwrap,
+  SHELLS, braceExpand, runnerCommands, shellCommandString, shellReadsStdin, shellSegments, suCommandString,
+  toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -1402,6 +1412,16 @@ function runnerTargets(args, ctx, add, out) {
   }
   const at = args.findIndex((a) => CLAUDE_PKG.test(a) || /^claude(?:\.[cm]?js)?$/.test(cmdName(a)));
   if (at >= 0) claudeTargets(args.slice(at + 1), ctx, add);
+  // #311 -- `npm exec`, `pnpm exec`, `yarn exec`, `npm x`, `pnpm dlx` run the
+  // words after the subcommand (past any `--`) as a command line, read like
+  // bash. `run` scripts a package.json entry the guard can't see, so it stays out.
+  const sub = args.findIndex((a) => ["exec", "x", "dlx"].includes(cmdName(a)));
+  if (sub >= 0 && ctx.depth < 3) {
+    let rest = args.slice(sub + 1);
+    const dd = rest.indexOf("--");
+    if (dd >= 0) rest = rest.slice(dd + 1);
+    if (rest.length) out.push(...lineTargets(rest.join(" "), ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+  }
 }
 
 /**
@@ -1514,6 +1534,16 @@ function writeTargets(seg, ctx) {
   else if (cmd === "git") gitTargets(args, seg, ctx, add);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
   else if (RUNNERS.has(cmd)) runnerTargets(args, ctx, add, out);
+  // #311 -- a program runner off the shared table (op run, bundle exec, tmux
+  // new-session, uv run ...) may run a later word as the real command; read
+  // those inner lines too. A program that only prints or searches its
+  // arguments (ARG_SAFE, inside runnerCommands) runs none of them, so an
+  // ordinary line that merely names a protected path passes.
+  else if (ctx.depth < 3) {
+    for (const inner of runnerCommands(w)) {
+      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    }
+  }
   return out;
 }
 
@@ -1791,7 +1821,9 @@ try {
   const core = CORE_TOOLS.has(tool);
   const toolInput = payload?.tool_input ?? {};
   const mcpPaths = core ? [] : toolPaths(tool, toolInput);
-  const mcpLines = core ? [] : toolCommands(toolInput);
+  const { lines: mcpCommandLines, dir: mcpDir } = core
+    ? { lines: [], dir: null } : toolCommandLines(toolInput);
+  const mcpLines = mcpCommandLines.map((line) => ({ line, cwd: mcpDir }));
   if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
