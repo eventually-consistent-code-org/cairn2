@@ -59,8 +59,12 @@ function projKey(proj: string): string {
   return `${basename(abs)}-${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
 }
 
+// A fixed identity for every temp repo: a fresh clone inherits no user.* config, and a CI runner has none (#306).
+const GIT_IDENT = {
+  GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+};
 const git = (proj: string, ...args: string[]) =>
-  execFileSync("git", args, { cwd: proj, encoding: "utf8" }).trim();
+  execFileSync("git", args, { cwd: proj, encoding: "utf8", env: { ...process.env, ...GIT_IDENT } }).trim();
 
 /** Writes the ship-gate stamp plan_drift would leave (#251). */
 function stamp(proj: string, home: string, s: { head?: string; clean?: boolean } = {}): void {
