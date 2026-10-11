@@ -2185,3 +2185,48 @@ describe("run guard: a command inside a process substitution or arithmetic is se
     }
   });
 });
+
+// #321: every substitution body was re-read without limit, and the guard's
+// own re-reads of a runner's inner line multiplied that, so a line nested
+// 120 deep took six seconds. Bodies nest eight levels now; deeper is
+// refused unread, since what runs there was never seen.
+describe("run guard: a line nested deeper than the reader reads is refused unread (#321)", () => {
+  const nested = (d: number, inner: string) => "echo " + "$(a ".repeat(d) + inner + ")".repeat(d);
+
+  it("eight levels are read; nine are refused whatever is inside, naming the owner's ways", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, nested(8, "git status")).status).toBe(0);
+    const r8 = guard(proj, home, nested(8, "git reset --hard"));
+    expect(r8.status).toBe(2);
+    expect(r8.stderr).toContain("git reset --hard");
+    for (const c of [nested(9, "git status"), nested(9, "git reset --hard"),
+      "echo " + "$(a ".repeat(9) + "git status", "bash -c '" + nested(9, "ls") + "'",
+      "git log $(" + nested(9, "ls") + ")"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c.slice(0, 40)).toBe(2);
+      expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
+      expectOwnerTail(r.stderr, c.slice(0, 40));
+    }
+  });
+
+  it("a pathological nesting is refused in bounded time", () => {
+    const { proj, home } = fixture();
+    for (const c of [nested(120, "git reset --hard"), "echo " + "$(a ".repeat(120) + "git reset --hard"]) {
+      const t0 = Date.now();
+      expect(guard(proj, home, c).status).toBe(2);
+      expect(Date.now() - t0).toBeLessThan(1500); // ~6 s before the cap; a generous ceiling, not a benchmark
+    }
+  });
+
+  it("the everyday computed folders still pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "cd $(git rev-parse --show-toplevel) && npm test",
+      'cd "$(git rev-parse --show-toplevel)" && git status',
+      "echo x > $(pwd)/notes.txt",
+      "git -C $(git rev-parse --show-toplevel) log --oneline",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});

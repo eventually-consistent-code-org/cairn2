@@ -61,7 +61,12 @@
  *   relative path is judged from every folder a cd, env -C or git -C on the
  *   line can reach (#258); after a cd it can't follow, refused. A git -C or
  *   tar -C value is read like a cd target (#318): ~, $HOME and $PWD spelled
- *   out, a variable it can't read refused the same way. A command
+ *   out, a variable it can't read refused the same way. A write target a
+ *   substitution computes the folder of is judged there when the guard
+ *   knows the folder -- `$(pwd)/x` is the shell's, `$(git rev-parse
+ *   --show-toplevel)/x` the repo root's (#321) -- and refused otherwise.
+ *   Substitutions nest SUBSTITUTION_DEPTH levels deep; a line nested
+ *   deeper is refused unread (#321). A command
  *   that plants a whole tree is judged by where it lands, like a mkdir of
  *   it (#317): git clone, worktree add, submodule add and init, gh repo
  *   clone and fork --clone, npx degit, and the create-* initializers npm,
@@ -106,8 +111,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString, shellReadsStdin,
-  shellSegments, suCommandString, toolCommandLines, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString,
+  shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -700,6 +705,7 @@ function commandScripts(command, vars, base = null, depth = 0) {
   const out = [];
   const folder = (dir) => { if (base?.folders) out.push({ path: dir, folder: true }); };
   for (const seg of shellSegments(command, READ)) {
+    if (seg.deep) continue; // past what the reader reads (#321): no path to find there
     const { words } = unwrap(seg.words, READ);
     const cmd = cmdName(words[0]);
     const str = SHELLS.has(cmd) ? shellCommandString(words.slice(1)) : null;
@@ -1911,14 +1917,18 @@ function writeTargets(seg, ctx) {
   const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
-    // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command sees them (#258, #263)
-    const r = expandVars((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir));
+    // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
+    // sees them (#258, #263), and a folder it computes in front of the path
+    // when the guard knows which: $(pwd) and the repo root (#321)
+    const r = expandVars(computedDir((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
+      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
     const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
-    // a path with nothing in front of a substitution to anchor it
-    // (`$(pwd)/hooks`, `\`pwd\`/x`) lands where the guard can't follow, like
-    // a cd it can't (#319); a computed name under a folder it knows
-    // (`/tmp/$(date +%s).bak`) is judged there, as a $NAME is
+    // a path with nothing in front of any other substitution to anchor it
+    // (`$(somecmd)/notes.txt`, `\`dirname x\`/y`) lands where the guard can't
+    // follow, like a cd it can't (#319): there is no tail it could clear
+    // from there, since the folder may be a protected one itself; a
+    // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
+    // judged there, as a $NAME is
     const abs = /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
     out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
   };
@@ -2068,6 +2078,15 @@ function expandGlob(base, pattern) {
   return found.filter((f) => existsSync(f));
 }
 
+// A substitution in front of a path that names a folder the guard knows
+// (#321): the shell's own folder, as $PWD is, or the repo root above it.
+const COMPUTED_DIR = /^(?:\$\((pwd(?: -[LP])?|git rev-parse --show-toplevel)\)|`(pwd(?: -[LP])?|git rev-parse --show-toplevel)`)(?=\/|$)/;
+
+/** `raw` with a leading `$(pwd)` or `$(git rev-parse --show-toplevel)` spelled out from `shell`, the shell's folder. */
+function computedDir(raw, shell) {
+  return raw.replace(COMPUTED_DIR, (m, a, b) => ((a ?? b).startsWith("pwd") ? shell : gitRoot(shell)));
+}
+
 /**
  * The folders a cd, env -C or git -C target can name from `from` (#258).
  * $PWD and ~+ expand to the shell's folder (`pwd`, when it isn't `from`:
@@ -2203,6 +2222,9 @@ function linePlaces(segs, dir) {
  */
 function lineTargets(command, dir, depth, extra = {}) {
   const segs = shellSegments(command, READ);
+  // a line nested past what the reader reads holds commands the guard never
+  // saw (#321): refused unread, unless the human's override prefixes it
+  if (tooDeep(segs)) return depth > 0 || !exempt(segs[0]?.words ?? []) ? [{ deep: true }] : [];
   const places = linePlaces(segs, dir);
   const out = [];
   for (let k = 0; k < segs.length; k++) {
@@ -2224,6 +2246,7 @@ function lineTargets(command, dir, depth, extra = {}) {
  * track of could be anywhere, so it is a hit of its own (#258).
  */
 function judgeTarget(t) {
+  if (t.deep) return { deep: true };
   const lead = t.raw.replace(/^(\.\/)+/, "")[0];
   const lost = { path: t.raw, lost: true };
   if (lead === STDIN) {
@@ -2362,7 +2385,14 @@ try {
 
   if (!hit) process.exit(0);
 
-  if (hit.lost) {
+  if (hit.deep) {
+    // #321: substitutions nested past what the reader reads -- fail closed
+    console.error(
+      `cairn harness guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
+      "levels), so what runs inside them can't be judged.",
+    );
+    console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
+  } else if (hit.lost) {
     // #258: a directory change it couldn't follow -- fail closed, and say so
     // (a git -C too, #318; a folder a substitution computes, #319)
     console.error(

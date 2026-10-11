@@ -665,6 +665,19 @@ describe("run guard hook", () => {
     expect(runHookRaw(RUNGUARD, proj, cwdPayload("echo $((1+2))", proj), env).status).toBe(0);
   });
 
+  it("a line nested deeper than the reader reads is refused unread, and fast (#321)", () => {
+    const { proj, home } = runFixture();
+    const env = { CAIRN_HOME: home };
+    const nested = (d: number) => "echo " + "$(a ".repeat(d) + "rm -rf hooks" + ")".repeat(d);
+    const r = runHookRaw(RUNGUARD, proj, cwdPayload(nested(9), proj), env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("deeper than the guard reads");
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload(nested(8), proj), env).status).toBe(0);
+    const t0 = Date.now();
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload(nested(120), proj), env).status).toBe(2);
+    expect(Date.now() - t0).toBeLessThan(1500); // ~6 s before the cap; a generous ceiling, not a benchmark
+  });
+
   it("allows the same command inside the run's own worktree", () => {
     const { proj, home } = runFixture("running");
     const wt = join(freshDir("cairn-hooks-runguard-wt-"), "tree");
@@ -965,6 +978,28 @@ describe("harness guard hook", () => {
     expect(runHookRaw(HARNESSGUARD, p, bashPayload("echo $((1 + $(rm -rf hooks | wc -c)))")).status).toBe(2);
     expect(runHookRaw(HARNESSGUARD, p, bashPayload("diff <(sort a) <(sort b)")).status).toBe(0);
     expect(runHookRaw(HARNESSGUARD, p, bashPayload("paste <(cut -f1 a) <(cut -f2 b) > out.txt")).status).toBe(0);
+  });
+
+  it("a target under $(pwd) is judged in the shell's folder, not refused as unknown (#321)", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("echo x > $(pwd)/notes.txt")).status).toBe(0);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload('cp a.txt "$(pwd)/notes.txt"')).status).toBe(0);
+    const r = runHookRaw(HARNESSGUARD, p, bashPayload("echo x > $(pwd)/hooks/hooks.json"));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("hook directory");
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("echo x > $(somecmd)/notes.txt")).status).toBe(2);
+  });
+
+  it("a line nested deeper than the reader reads is refused unread, and fast (#321)", () => {
+    const p = proj();
+    const nested = (d: number) => "echo " + "$(a ".repeat(d) + "rm -rf hooks" + ")".repeat(d);
+    const r = runHookRaw(HARNESSGUARD, p, bashPayload(nested(9)));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("deeper than the guard reads");
+    const t0 = Date.now();
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload(nested(120))).status).toBe(2);
+    expect(Date.now() - t0).toBeLessThan(1500); // ~9 s before the cap; a generous ceiling, not a benchmark
   });
 
   it("reading a protected file stays frictionless", () => {

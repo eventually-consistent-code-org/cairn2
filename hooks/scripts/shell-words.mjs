@@ -244,6 +244,9 @@ function commandStart(words) {
  *                  bodies of `<(...)`, `>(...)` and `$((...))` (#320): a
  *                  substitution runs inside arithmetic, and a body that
  *                  isn't arithmetic is a command substitution after all.
+ *                  Bodies nest up to SUBSTITUTION_DEPTH levels; past that
+ *                  a `deep` segment stands in (#321, tooDeep) and nothing
+ *                  below it is read.
  *
  * Whatever `read` says, a `$(...)`, backtick, `$((...))`, `<(...)` or
  * `>(...)` outside quotes is one word, however many words run inside it
@@ -259,7 +262,7 @@ function commandStart(words) {
  *   anyWhitespace  every whitespace character separates words. Off: only
  *                  space and tab do.
  */
-export function shellSegments(command, read = {}) {
+export function shellSegments(command, read = {}, depth = 0) {
   const segs = [];
   const subs = []; // bodies of command substitutions, split at the end
   const pending = []; // heredocs whose bodies start on the next line
@@ -461,8 +464,33 @@ export function shellSegments(command, read = {}) {
     i++;
   }
   endSeg();
-  for (const body of subs) segs.push(...shellSegments(body, read));
+  // Each body is read once, as a line of its own, one level deeper. Past
+  // SUBSTITUTION_DEPTH levels the rest is not read at all (#321): a deep
+  // segment stands in for it, and the guards refuse the line on sight.
+  for (const body of subs) {
+    if (depth >= SUBSTITUTION_DEPTH) { segs.push(deepSegment()); break; }
+    segs.push(...shellSegments(body, read, depth + 1));
+  }
   return segs;
+}
+
+/**
+ * How many levels of substitution bodies are read: `echo $(a $(b $(c)))`
+ * is three. A line nested deeper is pathological -- each level is one more
+ * pass over the rest of the line, and the guards' own re-reads of a
+ * runner's inner line multiplied that until 120 levels held a guard for
+ * nine seconds (#321) -- so the reader stops here and marks the line, and
+ * a marked line is refused unread (tooDeep).
+ */
+export const SUBSTITUTION_DEPTH = 8;
+
+/** The segment that stands in for the bodies the reader stopped at. */
+const deepSegment = () => ({ words: [], reserved: [], redirects: [], heredocs: [], herestrings: [],
+  inputs: [], op: null, deep: true });
+
+/** True when a line's segments hold a body nested deeper than the reader reads (#321). */
+export function tooDeep(segs) {
+  return segs.some((s) => s.deep === true);
 }
 
 // The most words one brace expansion is spelled out to.

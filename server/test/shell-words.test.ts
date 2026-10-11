@@ -9,8 +9,9 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, SHELLS, ARG_SAFE, braceExpand, commandName, shellSegments, unwrap, shellCommandString,
-  shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands, toolCommandLines,
+  WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
+  shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
+  toolCommandLines, tooDeep,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -121,6 +122,52 @@ describe("shellSegments", () => {
     expect(words("paste <(cut -f1 a) <(cut -f2 b) > out.txt", sub)[0]).toEqual(["paste", "<(cut -f1 a)", "<(cut -f2 b)"]);
     // the body is queued only when substitutions are read
     expect(words("diff <(sort a) <(sort b)", { subshells: true })).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
+  });
+
+  // #321: every substitution body was re-read without limit, and the
+  // guards' own re-reads of a runner's inner line multiplied that, so a
+  // line nested 120 deep held a guard for seconds. Bodies nest a fixed
+  // number of levels now; past that a deep segment stands in, unread.
+  it("substitution bodies nest to SUBSTITUTION_DEPTH levels; deeper is marked, not read (#321)", () => {
+    const sub = { subshells: true, substitutions: true };
+    const nested = (d: number, tail = ")".repeat(d)) => "echo " + "$(a ".repeat(d) + "x" + tail;
+    expect(SUBSTITUTION_DEPTH).toBe(8);
+    // eight levels: every body read, down to the innermost `a x`
+    const full = shellSegments(nested(8), sub) as Array<Seg & { deep?: boolean }>;
+    expect(full).toHaveLength(9);
+    expect(full.at(-1)?.words).toEqual(["a", "x"]);
+    expect(tooDeep(full)).toBe(false);
+    // nine: the eighth body is read, the ninth is a deep marker and nothing below it is
+    const deep = shellSegments(nested(9), sub) as Array<Seg & { deep?: boolean }>;
+    expect(deep).toHaveLength(10);
+    expect(deep[8].words).toEqual(["a", "$(a x)"]);
+    expect(deep.at(-1)).toMatchObject({ words: [], redirects: [], deep: true });
+    expect(tooDeep(deep)).toBe(true);
+    // unterminated, backticks and quotes nest the same way
+    expect(tooDeep(shellSegments(nested(9, ""), sub))).toBe(true);
+    expect(tooDeep(shellSegments("echo `a " + "$(b ".repeat(8) + "x`", sub))).toBe(true); // 9 levels
+    expect(tooDeep(shellSegments("echo `a " + "$(b ".repeat(7) + "x`", sub))).toBe(false); // 8
+    expect(tooDeep(shellSegments("echo " + '"$(a '.repeat(9) + "x", sub))).toBe(true);
+    expect(tooDeep(shellSegments(nested(8, ""), sub))).toBe(false);
+    // the marker only comes with substitutions read; without it the word is whole either way
+    expect(tooDeep(shellSegments(nested(9), { subshells: true }))).toBe(false);
+    // wide is not deep: fifty substitutions on one line are all read
+    const wide = "echo " + "$(a x) ".repeat(50);
+    expect(shellSegments(wide, sub)).toHaveLength(51);
+    expect(tooDeep(shellSegments(wide, sub))).toBe(false);
+  });
+
+  it("a pathological nesting is read in bounded time (#321)", () => {
+    const sub = { subshells: true, substitutions: true, redirects: true };
+    const nested = (d: number) => "echo " + "$(a ".repeat(d) + "rm -rf hooks";
+    let flat = "echo";
+    while (flat.length < 2000) flat += " $(cat notes.txt | wc -l) and some words";
+    // generous ceilings: the point is that the reader stops at the cap, not a benchmark
+    for (const [line, ceiling] of [[nested(120), 500], [nested(1000), 1000], [flat, 300]] as const) {
+      const t0 = Date.now();
+      for (let i = 0; i < 5; i++) shellSegments(line, sub);
+      expect(Date.now() - t0, line.slice(0, 40)).toBeLessThan(ceiling);
+    }
   });
 
   it("redirects: targets are collected, descriptors and input are not", () => {
