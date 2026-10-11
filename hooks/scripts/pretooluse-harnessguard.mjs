@@ -10,7 +10,11 @@
  *   script those settings run as a hook or the status line, wherever it
  *   lives (#312: read fresh from the settings and hooks.json files each
  *   run, so replacing ~/.config/x/statusline is refused like adding a
- *   hook is), the plugin copy that runs (#267:
+ *   hook is), every script a protected MCP config launches from outside
+ *   the project (#314: the stdio servers in ~/.claude.json, its projects,
+ *   .mcp.json and Cursor's mcp.json, read the same way; one inside the
+ *   project -- cairn's own server/dist build -- stays writable, so a build
+ *   still can), the plugin copy that runs (#267:
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
@@ -47,7 +51,10 @@
  *   -rf hooks`, `bundle exec`, a `-c` string, `tmux new-session -d '...'` --
  *   is read too, and `npm`/`pnpm`/`yarn exec` the same, so the table needn't
  *   grow one runner at a time. A command that only reads its arguments
- *   (echo, grep, cat ...) runs none of them. A
+ *   (echo, grep, cat ...) runs none of them, but the one option that runs a
+ *   program is read as a command line (#315: man -P, rg --pre, gh alias set
+ *   --shell, a gh extension ...), and so is a pager variable set on the
+ *   line (PAGER=, MANPAGER=, GIT_PAGER= ...). A
  *   relative path is judged from every folder a cd, env -C or git -C on the
  *   line can reach (#258); after a cd it can't follow, refused. Removing a
  *   protected folder or one holding it counts, and so does changing its
@@ -74,7 +81,8 @@
  *
  *   Not seen: a write in an interpreter (python -c, an MCP tool running
  *   python or javascript) or $(...), an archive's members, paths an
- *   upstream command finds, modes cp -p, rsync or tar copy. An MCP server
+ *   upstream command finds, modes cp -p, rsync or tar copy, the program a
+ *   hook or an MCP server starts by name off PATH. An MCP server
  *   that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
  */
@@ -84,8 +92,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, braceExpand, runnerCommands, shellCommandString, shellReadsStdin, shellSegments, suCommandString,
-  toolCommandLines, unwrap,
+  SHELLS, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString, shellReadsStdin,
+  shellSegments, suCommandString, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -137,12 +145,16 @@ const HOME_FILES = [
   [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
 ];
 
-// What a refusal calls a script the settings run (#312), and a folder on the way to one.
+// What a refusal calls a script the settings run (#312), and one a
+// protected MCP config launches (#314).
 const SCRIPT_WHAT = "a script your settings run as a hook or status line";
-const SCRIPT_HOLDER = `the folder holding ${SCRIPT_WHAT}`;
+const MCP_WHAT = "a script your MCP server config launches";
 
 // A word that is a URL, never a file a hook runs.
 const URL_WORD = /^[a-z][\w+.-]*:\/\//i;
+
+// A package a runner fetches by name (`npx -y @scope/pkg`), never a file (#314).
+const PACKAGE_WORD = /^@[\w.-]+\/[^/]+$/;
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -349,7 +361,8 @@ let HOMES = [];
 // *.json files directly in it (the way the run guard reads runs/); `carve`
 // lists project folders inside dir that stay ordinary work.
 let ZONES = [];
-// The scripts the protected settings run (#312), each in every spelling.
+// The scripts the protected settings run (#312) and the protected MCP
+// configs launch (#314), each { path, what }, in every spelling.
 let SCRIPTS = [];
 // The protected paths find could walk to, listed once per run, and the
 // zones too big to list in full.
@@ -553,11 +566,12 @@ function settingsCommands(json) {
  * hook's shell would: ~, $HOME, $CLAUDE_PROJECT_DIR and $CLAUDE_PLUGIN_ROOT
  * (braced or not), else from the project root, where hooks run. Null for
  * a program found on PATH (node, bash, npx), a flag, an assignment, a URL,
- * a device, a word with any other variable, a substitution or a wildcard,
- * and a folder that's there -- `cd "$CLAUDE_PROJECT_DIR"` runs nothing.
+ * a package spec (@scope/pkg), a device, a word with any other variable, a
+ * substitution or a wildcard, and a folder that's there -- `cd
+ * "$CLAUDE_PROJECT_DIR"` runs nothing.
  */
 function scriptFile(word, vars) {
-  if (word.startsWith("-") || ASSIGNMENT.test(word) || URL_WORD.test(word)) return null;
+  if (word.startsWith("-") || ASSIGNMENT.test(word) || URL_WORD.test(word) || PACKAGE_WORD.test(word)) return null;
   let w = word.replace(/^~(?=\/|$)/, () => vars.HOME);
   const m = /^\$(?:(\w+)|\{(\w+)\})(?=\/|$)/.exec(w);
   if (m) {
@@ -622,9 +636,88 @@ function settingsScripts() {
   return [...out];
 }
 
-/** True when `abs` is a folder on the way to a script the settings run (#312). */
+// Scripts the MCP configs launch (#314)
+
+/**
+ * The command lines one MCP server entry launches: its `command` and
+ * `args`, each word quoted as the one word it is -- no shell splits them
+ * -- and a `command` holding a space read as a line too, as some clients
+ * split it. None for a server with no command: a URL server runs nothing.
+ */
+function serverLines(server) {
+  if (!server || typeof server !== "object" || typeof server.command !== "string") return [];
+  const args = Array.isArray(server.args) ? server.args.filter((a) => typeof a === "string") : [];
+  const tail = args.map(quoteWord).join(" ");
+  const lines = [`${quoteWord(server.command)} ${tail}`];
+  if (/\s/.test(server.command.trim())) lines.push(`${server.command} ${tail}`);
+  return lines;
+}
+
+/**
+ * Every script the protected MCP configs launch from outside the project
+ * (#314), each spelling that lies outside it: the paths a stdio server's
+ * `command` and `args` name, resolved the way a hook command's words are
+ * (a project's own servers from that project), in ~/.claude.json -- its
+ * own servers and each project's -- the project's .mcp.json, and Cursor's
+ * project and home mcp.json (`${userHome}`, `${workspaceFolder}`). The
+ * server starts next session with the tokens its config hands it, outside
+ * any tool call. A script inside the project stays ordinary work: cairn's
+ * own .mcp.json launches its server/dist build, and a build has to write
+ * it. A file that can't be read or parsed is skipped quietly; ~/.claude.json,
+ * which can run to megabytes, is read and parsed once a run.
+ */
+function mcpScripts() {
+  const home = resolve(homedir());
+  const project = ROOTS[0];
+  const parse = (file) => {
+    try { return JSON.parse(readText(file) ?? ""); } catch { return null; }
+  };
+  // each server, with the folder its relative paths and $CLAUDE_PROJECT_DIR mean
+  const servers = [];
+  const take = (json, dir) => {
+    const list = json?.mcpServers;
+    if (list && typeof list === "object") for (const s of Object.values(list)) servers.push([s, dir]);
+  };
+  const claude = parse(join(home, ".claude.json"));
+  take(claude, project);
+  const projects = claude?.projects;
+  if (projects && typeof projects === "object") {
+    for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
+  }
+  take(parse(join(project, ".mcp.json")), project);
+  take(parse(join(project, ".cursor", "mcp.json")), project);
+  take(parse(join(home, ".cursor", "mcp.json")), project);
+  const seen = new Set();
+  const out = new Set();
+  for (const [server, dir] of servers) {
+    const vars = { HOME: home, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: dir, userHome: home, workspaceFolder: dir };
+    for (const line of serverLines(server)) {
+      if (seen.has(`${dir}\0${line}`)) continue;
+      seen.add(`${dir}\0${line}`);
+      try {
+        for (const f of commandScripts(line, vars)) {
+          for (const s of spellings(f)) if (projectRelative(s) === null) out.add(s);
+        }
+      } catch { /* an entry the reader can't take: skip it */ }
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Every protected script, as { path, what }: what the settings run (#312),
+ * then what the MCP configs launch (#314), read fresh on every call.
+ */
+function protectedScripts() {
+  const out = new Map();
+  for (const p of settingsScripts()) out.set(p, SCRIPT_WHAT);
+  for (const p of mcpScripts()) if (!out.has(p)) out.set(p, MCP_WHAT);
+  return [...out].map(([path, what]) => ({ path, what }));
+}
+
+/** The script `abs` is a folder on the way to (#312, #314), or null. */
 function holdsScript(abs) {
-  return SCRIPTS.some((s) => holds(abs, s) && !same(abs, s));
+  return SCRIPTS.find((s) => holds(abs, s.path) && !same(abs, s.path)) ?? null;
 }
 
 // Rules
@@ -638,9 +731,10 @@ function fileRule(abs) {
   if (zone) return zone;
   const rel = projectRelative(abs);
   if (rel !== null) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
-  // a script the settings run, wherever it lives (#312); anything else
-  // outside the project is not this guard's business
-  return SCRIPTS.some((s) => same(abs, s)) ? SCRIPT_WHAT : null;
+  // a script the settings run, wherever it lives (#312), or one an MCP
+  // config launches (#314); anything else outside the project is not this
+  // guard's business
+  return SCRIPTS.find((s) => same(abs, s.path))?.what ?? null;
 }
 
 /** The path names a protected FOLDER: writing into it, replacing it or removing it (#265), letter case aside (#295). */
@@ -660,19 +754,20 @@ function dirRule(abs) {
     if (name === ".claude-plugin") return "the plugin manifest";
     if (name === ".cursor") return "Cursor's settings directory";
   }
-  // A folder on the way to a script the settings run, while it isn't there
-  // as a folder (#312): a write here -- `mv /tmp/x ~/.config/iterm2` --
+  // A folder on the way to a protected script, while it isn't there as a
+  // folder (#312, #314): a write here -- `mv /tmp/x ~/.config/iterm2` --
   // puts a new script in the old one's place. Into one that's there, a
   // write lands beside the script and is judged by its own name.
-  if (!holdsScript(abs)) return null;
-  try { return statSync(abs).isDirectory() ? null : SCRIPT_WHAT; } catch { return SCRIPT_WHAT; }
+  const script = holdsScript(abs);
+  if (!script) return null;
+  try { return statSync(abs).isDirectory() ? null : script.what; } catch { return script.what; }
 }
 
 /**
  * Removing the project, or any folder above it, removes everything in it
  * (#265); locking one with chmod, chown or an ACL locks everything in it
  * too (#299). The same goes for the home folder, each cairn home, and a
- * folder on the way to a script the settings run (#312).
+ * folder on the way to a protected script (#312, #314).
  */
 function holderRule(abs) {
   if (ROOTS.some((root) => holds(abs, root))) {
@@ -683,7 +778,8 @@ function holderRule(abs) {
   }
   const zone = ZONES.find((z) => holds(abs, z.dir));
   if (zone) return `the folder holding ${zone.what}`;
-  return holdsScript(abs) ? SCRIPT_HOLDER : null;
+  const script = holdsScript(abs);
+  return script ? `the folder holding ${script.what}` : null;
 }
 
 /** Could this name, once the shell expands it in `dir`, be a *.json file there? */
@@ -789,13 +885,13 @@ function globRule(abs, mode) {
   }
   const zone = zoneGlob(p, remove);
   if (zone) return zone;
-  // a script the settings run (#312): its own name, or a folder on the way
+  // a protected script (#312, #314): its own name, or a folder on the way
   // to it that a removal takes or a copied folder's unknown contents fill
-  for (const s of SCRIPTS) {
+  for (const { path: s, what } of SCRIPTS) {
     const d = s.split(sep).filter(Boolean);
     if (p.length > d.length || !p.every((x, j) => could(x, d[j]))) continue;
-    if (p.length === d.length || STANDINS.includes(p[p.length - 1])) return SCRIPT_WHAT;
-    if (remove || mode === "perm") return SCRIPT_HOLDER;
+    if (p.length === d.length || STANDINS.includes(p[p.length - 1])) return what;
+    if (remove || mode === "perm") return `the folder holding ${what}`;
   }
   if (remove || mode === "perm") {
     for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
@@ -1057,13 +1153,13 @@ function treeRule(abs) {
 
 /**
  * Every protected path find could reach: the fixed surfaces, what hooks/
- * holds on disk, the scripts the settings run (#312), and the protected
+ * holds on disk, the protected scripts (#312, #314), and the protected
  * places outside the project (#263) -- a zone too big to list goes in
  * UNLISTED.
  */
 function protectedEntries() {
   if (ENTRIES) return ENTRIES;
-  ENTRIES = [...SCRIPTS];
+  ENTRIES = SCRIPTS.map((s) => s.path);
   for (const root of ROOTS) {
     const trees = SUB_TREES.map(([up, sub]) => join(root, up, sub));
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
@@ -1103,12 +1199,12 @@ function protectedEntries() {
 
 /**
  * The folders from `start` down to each protected place under it -- the
- * project, the home folder, each zone, each script the settings run --
- * every one a folder holding it.
+ * project, the home folder, each zone, each protected script -- every one
+ * a folder holding it.
  */
 function holdersUnder(start) {
   const out = [];
-  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir), ...SCRIPTS]) {
+  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir), ...SCRIPTS.map((s) => s.path)]) {
     const rest = below(start, anchor);
     if (rest) for (let k = 0; k <= rest.length; k++) out.push(join(start, ...rest.slice(0, k)));
   }
@@ -1566,7 +1662,7 @@ function runnerTargets(args, ctx, add, out) {
  */
 function writeTargets(seg, ctx) {
   const out = [];
-  const { words: w0, writes, wrappers, dirs } = unwrap(seg.words, READ);
+  const { words: w0, writes, wrappers, dirs, assigns } = unwrap(seg.words, READ);
   // xargs runs its command with paths read from stdin (#258). Its name is
   // folded like any command's: macOS runs `XARGS` as xargs (#300).
   const xargs = wrappers.find((x) => cmdName(x.name) === "xargs");
@@ -1604,6 +1700,13 @@ function writeTargets(seg, ctx) {
       return out;
     }
     for (const x of writes) add(x);
+  }
+  // #315 -- a pager variable set here (PAGER=, MANPAGER=, GIT_PAGER= ...)
+  // names a program man, git or gh runs: its value is a command line too
+  if (ctx.depth < 3) {
+    for (const inner of pagerCommands(assigns, w0)) {
+      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    }
   }
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
@@ -1674,7 +1777,9 @@ function writeTargets(seg, ctx) {
   // new-session, uv run ...) may run a later word as the real command; read
   // those inner lines too. A program that only prints or searches its
   // arguments (ARG_SAFE, inside runnerCommands) runs none of them, so an
-  // ordinary line that merely names a protected path passes.
+  // ordinary line that merely names a protected path passes -- all but the
+  // one option that runs a program (man -P, rg --pre, gh alias set --shell,
+  // #315), which runnerCommands hands back as a line of its own.
   else if (ctx.depth < 3) {
     for (const inner of runnerCommands(w)) {
       out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
@@ -1974,8 +2079,8 @@ try {
   // is read per command, in lineTargets.
   if (process.env.CAIRN_HARNESS_EDIT === "1") process.exit(0);
 
-  // What the protected settings run, read fresh on every call (#312).
-  SCRIPTS = settingsScripts();
+  // What the protected settings run and the MCP configs launch, read fresh on every call (#312, #314).
+  SCRIPTS = protectedScripts();
 
   let hit = null;
 

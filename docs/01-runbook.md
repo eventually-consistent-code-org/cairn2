@@ -1884,7 +1884,16 @@ reset --hard`, `uv run`, a `-c` string, `tmux new-session -d '…'`,
 `osascript -e 'do shell script "…"'` — that inner line is judged too, so
 the table needn't grow one runner at a time. A program that only prints
 or searches its arguments (`echo`, `grep`, `gh`, `jq`, …) runs none of
-them. An MCP tool's command line is read the same way (see *Which tools
+them — except the one option that does run a program, which is read as
+a command line of its own: `man -P` / `--pager`, `gh alias set --shell`
+(or a `!` expansion), `gh config set pager|editor|browser`, `rg --pre`,
+`ag`/`ack --pager`, `sort --compress-program`; a `gh extension exec` or
+a word that isn't a `gh` command is an extension or alias, an unknown
+program judged like any runner; and a pager variable set on the line
+(`PAGER=`, `MANPAGER=`, `GIT_PAGER=`, `GH_PAGER=`) runs on the `man`,
+`git` or `gh` it rides on. `man git-reset`, `gh pr create --body "…"`,
+`GIT_PAGER=cat git log` and `rg --pre-glob` stay allowed. An MCP tool's
+command line is read the same way (see *Which tools
 the guards see*, below). Quoted text that only mentions git never trips
 it — a commit message saying "never `git reset --hard`" passes. A guard
 that breaks lets the command through rather than blocking work. It
@@ -2038,6 +2047,18 @@ The protected set also covers cairn's own trust anchors:
   around it and a rename that drops a new one in its place. The
   settings are read fresh on every call; one that won't parse is
   skipped, and the folder rule still stands;
+- every script a protected MCP config launches from outside the
+  project — the stdio servers in `~/.claude.json` (its own and each
+  project's), the project's `.mcp.json`, and Cursor's `.cursor/mcp.json`
+  and `~/.cursor/mcp.json` — read off each server's `command` and `args`
+  the same way (`node ~/repos/…/dist/index.js`, `$HOME/bin/server`, a
+  symlink and the file it points to). A swapped server script runs when
+  the next session starts that server, with whatever tokens its config
+  hands it, so it gets the same refusals a hook script does. A script
+  inside the project stays writable on purpose: cairn's own `.mcp.json`
+  launches its `server/dist` build, and a build has to rewrite it. A
+  program found on `PATH` by name isn't looked up, and a config that
+  won't parse is skipped;
 - the project's `.claude/hooks/`, `.claude/agents/`, `.claude/skills/`
   and `.claude/commands/`;
 - Cursor's `.cursor/hooks.json` and `.cursor/hooks/`, plus removing or

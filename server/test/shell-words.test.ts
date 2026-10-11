@@ -10,7 +10,7 @@
 import { describe, it, expect } from "vitest";
 import {
   WRAPPERS, SHELLS, ARG_SAFE, braceExpand, commandName, shellSegments, unwrap, shellCommandString,
-  shellReadsStdin, suCommandString, runnerCommands, toolCommandLines,
+  shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands, toolCommandLines,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -482,6 +482,80 @@ describe("runnerCommands (#311)", () => {
     expect(ARG_SAFE.has("gh")).toBe(true);
     expect(ARG_SAFE.has("sh")).toBe(false); // a shell runs its args -- never arg-safe
     expect(runnerCommands(["strace"])).toEqual([]); // nothing after it
+  });
+});
+
+// #315: man -P, gh alias set --shell and gh extension exec run an argument,
+// yet ARG_SAFE exempted all of man's and gh's words. Each is modelled per
+// option now -- the rest of the words stay data -- so gh pr create --body
+// keeps passing while the one program-running value is read as a command.
+describe("argCommands and pagerCommands (#315)", () => {
+  const R = "git reset --hard";
+
+  it("hands back the one value an ARG_SAFE program runs, in each spelling", () => {
+    const rows: Array<[words: string[], inner: string]> = [
+      [["man", "-P", R, "ls"], R],
+      [["man", `-P${R}`, "ls"], R],
+      [["man", "-aP", R, "ls"], R], // ends a cluster
+      [["man", `--pager=${R}`, "ls"], R],
+      [["man", "--pager", R, "ls"], R],
+      [["man", "--pag", R, "ls"], R], // shortened, as getopt allows
+      [["man", `-H${R}`, "ls"], R],
+      [["gh", "alias", "set", "--shell", "r", R], R],
+      [["gh", "alias", "set", "-s", "r", R], R],
+      [["gh", "alias", "set", "r", "--shell", R], R],
+      [["gh", "alias", "set", "r", `!${R}`], R],
+      [["gh", "alias", "set", "--clobber", "-s", "r", "--", R], R],
+      [["gh", "config", "set", "pager", R], R],
+      [["gh", "config", "set", "-h", "github.com", "editor", R], R],
+      [["gh", "extension", "exec", "evil", "--", "git", "reset", "--hard"], R],
+      [["gh", "ext", "exec", "evil", "git", "reset", "--hard"], R],
+      [["gh", "evil", "--", "git", "reset", "--hard"], R], // a word that isn't a gh command: an extension or alias
+      [["rg", "--pre", R, "foo"], R],
+      [["rg", `--pre=${R}`, "foo"], R],
+      [["ag", "--pager", R, "foo"], R],
+      [["ack", `--pager=${R}`, "foo"], R],
+      [["sort", `--compress-program=${R}`, "x"], R],
+    ];
+    for (const [words, inner] of rows) {
+      expect(argCommands(words), words.join(" ")).toContain(inner);
+      expect(runnerCommands(words), words.join(" ")).toContain(inner); // reached through the backstop too
+    }
+    // rg runs --pre on each path it searches: that line is a candidate as well
+    expect(argCommands(["rg", "--pre", "unzip", "x", "docs"])).toContain("unzip x docs .");
+  });
+
+  it("every other word of those programs stays data", () => {
+    for (const safe of [
+      ["man", "git-reset"], ["man", "-k", "reset"], ["man", "-M", `/P${R}`, "ls"],
+      ["man", "-S", "1:P", "ls"], ["man", "--pager-x", R], // a longer option is a different one
+      ["gh", "pr", "create", "--body", `never run ${R}`], ["gh", "alias", "set", "co", "pr checkout"],
+      ["gh", "alias", "set", "rs", R], // no --shell: a gh command, not a shell line
+      ["gh", "alias", "set", "--shell"], ["gh", "alias", "list"], ["gh", "alias", "delete", "r"],
+      ["gh", "config", "get", "pager"], ["gh", "config", "set", "git_protocol", R],
+      ["gh", "extension", "list"], ["gh", "extension", "install", "owner/gh-x"], ["gh", "extension", "exec"],
+      ["gh", "--version"], ["gh", "issue", "view", "1", "--json", "title"],
+      ["rg", "--pre-glob", "*.gz", "foo"], ["rg", "-n", R, "docs"], ["rg", "--pre"],
+      ["ag", R], ["sort", "-k", "2", "x"], ["sort", "-t", "-", "x"], ["echo", "-P", R], ["grep", "--pager", R],
+    ]) {
+      expect(argCommands(safe), safe.join(" ")).toEqual([]);
+      expect(runnerCommands(safe), safe.join(" ")).toEqual([]);
+    }
+    // a harmless pager is still handed back -- the guards find nothing in it
+    expect(argCommands(["man", "-P", "less", "git"])).toEqual(["less"]);
+  });
+
+  it("a pager variable's value is a command line, set on a command, alone, or exported", () => {
+    for (const name of ["PAGER", "MANPAGER", "GIT_PAGER", "GH_PAGER", "ACK_PAGER"]) {
+      expect(pagerCommands([`${name}=${R}`], ["man", "ls"]), name).toEqual([R]);
+      expect(pagerCommands([`${name}=${R}`], []), name).toEqual([R]);
+      expect(pagerCommands([], ["export", `${name}=${R}`]), name).toEqual([R]);
+    }
+    expect(pagerCommands(["PAGER=cat"], ["git", "log"])).toEqual(["cat"]);
+    expect(pagerCommands(["FOO=1", "PAGER="], ["man", "ls"])).toEqual([]);
+    expect(pagerCommands(["GIT_DIR=/x", "EDITOR=vim"], ["git", "log"])).toEqual([]);
+    expect(pagerCommands([], ["echo", "PAGER=x"])).toEqual([]);
+    expect(pagerCommands(undefined, undefined)).toEqual([]);
   });
 });
 
