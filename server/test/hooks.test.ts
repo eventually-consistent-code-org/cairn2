@@ -1968,6 +1968,147 @@ describe("harness guard protects skill, agent and command folders (#309)", () =>
   });
 });
 
+// #310: both guards were scoped to Bash/Edit/Write by their matchers, so an
+// MCP server's write_file onto hooks/hooks.json or its shell tool running
+// `rm -rf hooks` reached the same harm unchecked. The owner's call: cover
+// the known shapes and document the rest. hooks.json now sends every MCP
+// tool here; a writing tool's path fields and any tool's command line are
+// judged, and read tools, other-language code and unknown shapes pass.
+describe("harness guard reads MCP tools' writes and command lines (#310)", () => {
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const CTX = "mcp__plugin_context-mode_context-mode__";
+
+  /** A project holding the hook directory and a settings folder, and a home. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-mcptools-proj-");
+    const home = freshDir("cairn-hooks-mcptools-home-");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, ".claude"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one tool call, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, tool: string, input: Record<string, unknown>, env: Record<string, string> = {}) {
+    const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home, ...env };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in env)) delete e[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env: e, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  type Call = [tool: string, input: Record<string, unknown>];
+
+  it("an MCP write onto a protected file is refused; the same write elsewhere passes", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: Call, elsewhere: Call]> = [
+      [[`${DC}write_file`, { path: "hooks/hooks.json", content: "{}" }], [`${DC}write_file`, { path: "src/x.ts", content: "x" }]],
+      [["mcp__filesystem__write_file", { path: join(p, "hooks", "hooks.json") }], ["mcp__filesystem__write_file", { path: join(p, "src", "x.ts") }]],
+      [[`${DC}edit_block`, { file_path: ".mcp.json", old_string: "a", new_string: "b" }], [`${DC}edit_block`, { file_path: "src/a.ts" }]],
+      [["mcp__fs__writeFile", { filePath: "~/.claude/settings.json" }], ["mcp__fs__writeFile", { filePath: "~/notes.md" }]],
+      [["mcp__fs__write_file", { path: "~/.claude/skills/helper/hooks/hooks.json" }], ["mcp__fs__write_file", { path: "~/skills/x.md" }]],
+      [[`${DC}create_directory`, { path: "hooks/new" }], [`${DC}create_directory`, { path: "src/new" }]],
+      [["mcp__filesystem__delete_file", { path: "hooks/hooks.json" }], ["mcp__filesystem__delete_file", { path: "src/old.ts" }]],
+      [["mcp__filesystem__delete_directory", { path: "." }], ["mcp__filesystem__delete_directory", { path: "build" }]],
+      [["mcp__fs__chmod", { path: "hooks", mode: "000" }], ["mcp__fs__chmod", { path: "src", mode: "755" }]],
+      [["mcp__chrome-devtools__take_screenshot", { filePath: "hooks/hooks.json" }],
+        ["mcp__chrome-devtools__take_screenshot", { filePath: "/tmp/shot.png" }]],
+      [["mcp__fs__write_files", { paths: ["src/a.ts", ".claude/settings.json"] }], ["mcp__fs__write_files", { paths: ["src/a.ts"] }]],
+    ];
+    for (const [[wt, wi], [et, ei]] of pairs) {
+      const r = run(p, home, wt, wi);
+      expect(r.status, `${wt} ${JSON.stringify(wi)}`).toBe(2);
+      expect(r.stderr, wt).toContain("owner's go-ahead");
+      expect(run(p, home, et, ei).status, `${et} ${JSON.stringify(ei)}`).toBe(0);
+    }
+  });
+
+  it("a move into or out of a protected place is refused; a move between ordinary files passes", () => {
+    const { p, home } = fixture();
+    for (const input of [
+      { source: "/tmp/evil.json", destination: ".claude/settings.json" },
+      { source: "/tmp/settings.json", destination: ".claude" },
+      { source: "/tmp/settings.local.json", destination: ".claude/" },
+      { source: "/tmp/x.sh", destination: ".claude/hooks/x.sh" },
+      { source: "hooks", destination: "/tmp/old-hooks" },
+    ]) {
+      expect(run(p, home, `${DC}move_file`, input).status, JSON.stringify(input)).toBe(2);
+    }
+    expect(run(p, home, "mcp__fs__rename_file", { path: "hooks/hooks.json", new_path: "hooks/old.json" }).status).toBe(2);
+    expect(run(p, home, `${DC}move_file`, { source: "src/a.ts", destination: "src/b.ts" }).status).toBe(0);
+    expect(run(p, home, "mcp__fs__copy_file", { source: "/tmp/evil.json", destination: ".mcp.json" }).status).toBe(2);
+    expect(run(p, home, "mcp__fs__copy_file", { source: ".mcp.json", destination: "/tmp/mcp-backup.json" }).status).toBe(0);
+  });
+
+  it("a read tool passes whatever it names, and so does an MCP tool with no path or command", () => {
+    const { p, home } = fixture();
+    const calls: Call[] = [
+      [`${DC}read_file`, { path: "hooks/hooks.json" }],
+      [`${DC}list_directory`, { path: "hooks" }],
+      [`${DC}get_file_info`, { path: ".mcp.json" }],
+      [`${DC}start_search`, { path: ".claude", pattern: "x" }],
+      ["mcp__plugin_cairn_cairn__run_manifest", { action: "get" }],
+      ["mcp__plugin_cairn_cairn__issue_attach", { issue: "1", path: "hooks/hooks.json" }],
+      ["mcp__chrome-devtools__take_screenshot", {}],
+    ];
+    for (const [tool, input] of calls) {
+      expect(run(p, home, tool, input).status, `${tool} ${JSON.stringify(input)}`).toBe(0);
+    }
+  });
+
+  it("a command line in an MCP tool is read like Bash, from the folder the input names", () => {
+    const { p, home } = fixture();
+    const pairs: Array<[write: Call, read: Call]> = [
+      [[`${DC}start_process`, { command: "rm -rf hooks", timeout_ms: 1000 }],
+        [`${DC}start_process`, { command: "cat hooks/hooks.json", timeout_ms: 1000 }]],
+      [[`${CTX}ctx_execute`, { language: "shell", code: "echo x > .mcp.json" }],
+        [`${CTX}ctx_execute`, { language: "shell", code: "cat .mcp.json" }]],
+      [[`${CTX}ctx_batch_execute`, { commands: [{ label: "a", command: "ls" }, { label: "b", command: "tee hooks/x < /dev/null" }], queries: ["x"] }],
+        [`${CTX}ctx_batch_execute`, { commands: [{ label: "a", command: "ls" }, { label: "b", command: "cat hooks/x" }], queries: ["x"] }]],
+      [["mcp__shell__run_command", { command: "rm", args: ["-rf", "hooks"] }],
+        ["mcp__shell__run_command", { command: "ls", args: ["-la", "hooks"] }]],
+      [["mcp__shell__exec", { cmd: "sudo -u root tee .claude/settings.json" }], ["mcp__shell__exec", { cmd: "sudo -u root cat .claude/settings.json" }]],
+      [["mcp__shell__exec", { shell_command: "claude plugin disable cairn" }], ["mcp__shell__exec", { shell_command: "claude plugin list" }]],
+      [[`${CTX}ctx_execute`, { language: "shell", code: "echo x > settings.json", cwd: ".claude" }],
+        [`${CTX}ctx_execute`, { language: "shell", code: "echo x > settings.json", cwd: "src" }]],
+    ];
+    for (const [[wt, wi], [rt, ri]] of pairs) {
+      expect(run(p, home, wt, wi).status, `${wt} ${JSON.stringify(wi)}`).toBe(2);
+      expect(run(p, home, rt, ri).status, `${rt} ${JSON.stringify(ri)}`).toBe(0);
+    }
+  });
+
+  it("code in another language is out of scope, as the runbook says: the harness's permission rules gate it", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, `${CTX}ctx_execute`, { language: "python", code: "open('.mcp.json', 'w').write('{}')" }).status).toBe(0);
+    expect(run(p, home, `${DC}interact_with_process`, { pid: 1, input: "rm -rf hooks" }).status).toBe(0);
+  });
+
+  it("the session override still lets the owner through", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, `${DC}write_file`, { path: "hooks/hooks.json" }, { CAIRN_HARNESS_EDIT: "1" }).status).toBe(0);
+  });
+
+  it("hooks.json sends every MCP tool to the run and harness guards, and keeps the leak guard on Bash", () => {
+    const manifest = JSON.parse(readFileSync(join(SCRIPTS, "..", "hooks.json"), "utf8")) as {
+      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+    };
+    const matcherOf = (script: string): string[] => manifest.hooks.PreToolUse
+      .filter((g) => g.hooks.some((h) => h.command.includes(script))).map((g) => g.matcher);
+    expect(matcherOf("pretooluse-runguard.mjs")).toEqual(["Bash|mcp__.*"]);
+    expect(matcherOf("pretooluse-harnessguard.mjs")).toEqual(["Edit|Write|NotebookEdit|Bash|mcp__.*"]);
+    expect(matcherOf("pretooluse-leakguard.mjs")).toEqual(["Bash"]);
+    for (const m of [...matcherOf("pretooluse-runguard.mjs"), ...matcherOf("pretooluse-harnessguard.mjs")]) {
+      const re = new RegExp(`^(?:${m})$`);
+      for (const tool of ["Bash", `${DC}write_file`, `${CTX}ctx_execute`]) expect(re.test(tool), `${m} ${tool}`).toBe(true);
+      expect(re.test("Read"), m).toBe(false);
+    }
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing

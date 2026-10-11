@@ -611,6 +611,49 @@ export function shellReadsStdin(args) {
   return true;
 }
 
+// The fields a tool's input names a shell command in (#310), and the code
+// languages that are a shell.
+const COMMAND_FIELDS = ["command", "cmd", "shell_command"];
+const SHELL_LANGS = new Set(["shell", "bash", "sh", "zsh"]);
+
+/** A word quoted so shellSegments reads it back as that one word. */
+function quoteWord(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * The command lines a non-Bash tool's input hands a shell (#310), each as
+ * { line, cwd }: a `command`, `cmd` or `shell_command` string (with an
+ * `args` list after it, quoted word by word), each one in a `commands`
+ * list (strings, or objects carrying one of those fields), and `code`
+ * whose `language` is a shell. `cwd` is the folder the input names for
+ * them, or null. Code in any other language, or keystrokes sent to a
+ * running process, is not a command line this reader can see.
+ */
+export function toolCommands(input) {
+  if (!input || typeof input !== "object") return [];
+  const cwd = typeof input.cwd === "string" ? input.cwd : null;
+  const lines = [];
+  const take = (o) => {
+    for (const f of COMMAND_FIELDS) {
+      if (typeof o?.[f] !== "string") continue;
+      const args = Array.isArray(o.args) ? o.args.filter((a) => typeof a === "string") : [];
+      lines.push([o[f], ...args.map(quoteWord)].join(" "));
+    }
+  };
+  take(input);
+  if (Array.isArray(input.commands)) {
+    for (const c of input.commands) {
+      if (typeof c === "string") lines.push(c);
+      else take(c);
+    }
+  }
+  if (typeof input.code === "string" && SHELL_LANGS.has(String(input.language ?? "").toLowerCase())) {
+    lines.push(input.code);
+  }
+  return lines.map((line) => ({ line, cwd }));
+}
+
 // su options that take the next word as their value.
 const SU_VALUE_OPTS = "sgGw";
 

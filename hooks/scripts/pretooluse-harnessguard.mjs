@@ -22,24 +22,47 @@
  *   (an issue, a review, a fetched page) steering it into a harness edit.
  *   This turns a silent success into a refusal the human sees. NOT a
  *   sandbox: CAIRN_HARNESS_EDIT=1 is the owner's escape (inline, it exempts
- *   only its own command, #265), never taught by a refusal (#286). Bash is
- *   read as a shell reads it (shell-words.mjs, #270) for what it WRITES:
- *   redirects and the operands of commands that change files, through
- *   wrappers and program runners (xcrun, script, flock, #307), bash -c,
- *   su -c, find -exec, xargs and a heredoc fed to a shell. A relative
- *   path is judged from every folder a cd, env -C or git -C on the line
- *   can reach (#258); after a cd it can't follow, refused. Removing a
- *   protected folder or one holding it counts, and so does changing its
- *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
- *   #299), or claude writing its config itself: `claude mcp add` (#303),
- *   `claude plugin install|enable|disable|init`, `claude import`, and the
- *   same run by npx or node (#308). A path only READ passes (#240). Not
- *   seen: a write in an interpreter (python -c) or $(...), an archive's
- *   members, paths an upstream command finds, modes cp -p, rsync, tar copy.
+ *   only its own command, #265), never taught by a refusal (#286). What
+ *   each tool is read for, and what it can't see, is under Coverage below.
  *
  * removeWhen: the platform isolates agent config at the OS level, so the
  *   agent process cannot write its own hooks or settings (ADR 0016).
  * Author(s): John Reed
+ *
+ * Coverage: hooks/hooks.json sends this guard Edit, Write, NotebookEdit,
+ *   Bash and every MCP tool (mcp__*, #310).
+ *
+ *   Edit, Write, NotebookEdit: the file they name.
+ *
+ *   Bash: read as a shell reads it (shell-words.mjs, #270) for what it
+ *   WRITES -- redirects and the operands of commands that change files,
+ *   through wrappers and program runners (xcrun, script, flock, #307),
+ *   bash -c, su -c, find -exec, xargs and a heredoc fed to a shell. A
+ *   relative path is judged from every folder a cd, env -C or git -C on the
+ *   line can reach (#258); after a cd it can't follow, refused. Removing a
+ *   protected folder or one holding it counts, and so does changing its
+ *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
+ *   #299), or claude writing its config itself: `claude mcp add` (#303),
+ *   `claude plugin install|enable|disable|init`, `claude import`, and the
+ *   same run by npx or node (#308). A path only READ passes (#240).
+ *
+ *   MCP tools (#310), known shapes only: a tool whose own name says it
+ *   writes, edits, creates, deletes, moves, copies, saves or changes a mode
+ *   (write_file, edit_block, move_file, create_directory, delete_file,
+ *   take_screenshot ...) has its path fields judged -- path, paths,
+ *   file_path, filePath, target, destination, dest, new_path, and source
+ *   for a move -- as written, never globbed. A command line in any MCP
+ *   tool's input -- command, cmd or shell_command (with its args list),
+ *   each entry of a commands list, code whose language is a shell, from
+ *   the input's cwd -- is read like Bash. Anything else passes: a read
+ *   tool, a writing tool under another name or field, keystrokes into a
+ *   running process, settings a server keeps.
+ *
+ *   Not seen: a write in an interpreter (python -c, an MCP tool running
+ *   python or javascript) or $(...), an archive's members, paths an
+ *   upstream command finds, modes cp -p, rsync or tar copy. An MCP server
+ *   that runs arbitrary code is that same class: gate it with the
+ *   harness's own permission rules (ask or deny on its tools), not this.
  */
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -47,7 +70,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, unwrap,
+  SHELLS, braceExpand, shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommands,
+  unwrap,
 } from "./shell-words.mjs";
 
 // Constants
@@ -268,6 +292,28 @@ const RUNNERS = new Set(["npx", "pnpx", "bunx", "npm", "pnpm", "yarn", "bun", "n
 
 // A word naming Claude Code's package -- any version, or a path into it.
 const CLAUDE_PKG = /@anthropic-ai\/claude-code(?![\w-])/i;
+
+// The harness's own tools; every other tool name is an MCP tool (#310).
+const CORE_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash"]);
+
+// What an MCP tool does to the paths it names, read off the words of its
+// name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
+const TOOL_REMOVES = new Set(["delete", "remove", "rm", "rmdir", "unlink", "trash", "erase"]);
+const TOOL_MOVES = new Set(["move", "rename", "mv"]);
+const TOOL_COPIES = new Set(["copy", "cp", "duplicate"]);
+const TOOL_PERMS = new Set(["chmod", "chown", "chgrp"]);
+const TOOL_FOLDERS = new Set(["directory", "directories", "dir", "dirs", "folder", "folders"]);
+// Browser tools' screenshots and snapshots land on the file path they're given.
+const TOOL_WRITES = new Set(["write", "edit", "create", "make", "mkdir", "append", "save", "put", "patch",
+  "replace", "insert", "overwrite", "truncate", "touch", "update", "modify", "apply", "export",
+  "download", "extract", "unzip", "untar", "link", "symlink", "screenshot", "snapshot", "heapsnapshot"]);
+
+// The input fields an MCP tool names a path in; a move or copy reads its
+// source from SOURCE_FIELDS, and from the plain path fields when it also
+// names a destination.
+const PATH_FIELDS = ["path", "paths", "file_path", "filePath"];
+const DEST_FIELDS = ["target", "destination", "dest", "new_path"];
+const SOURCE_FIELDS = ["source"];
 
 // The most entries listed under one protected folder outside the project
 // before the rest counts as unlisted -- and so as reachable (see walkHit).
@@ -1679,14 +1725,72 @@ function judgeTarget(t) {
   return what ? { path: t.raw, what } : null;
 }
 
+// MCP tools (#310)
+
+/** The words of an MCP tool's own name, past its `mcp__server__` prefix, lowercased. */
+function toolWords(tool) {
+  const name = tool.startsWith("mcp__") ? tool.split("__").pop() : tool;
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/** Every path a set of input fields holds: a string, or the strings in a list. */
+function fieldValues(input, fields) {
+  const out = [];
+  for (const f of fields) {
+    const v = input?.[f];
+    if (typeof v === "string" && v) out.push(v);
+    else if (Array.isArray(v)) out.push(...v.filter((x) => typeof x === "string" && x));
+  }
+  return out;
+}
+
+/**
+ * The paths an MCP tool would change, as { raw, mode }, read off its name
+ * (#310): a removing tool removes every path it names; a move removes its
+ * source and writes its destination, and the source's name inside it; a
+ * copy writes only the destination side; chmod and kin change a mode;
+ * making a folder creates it; any other writing name writes. A name that
+ * says none of these -- read_file, list_directory -- changes nothing here.
+ */
+function toolPaths(tool, input) {
+  const words = new Set(toolWords(tool));
+  const any = (set) => [...words].some((w) => set.has(w));
+  const plainPaths = fieldValues(input, PATH_FIELDS);
+  const dests = fieldValues(input, DEST_FIELDS);
+  const named = [...plainPaths, ...dests];
+  const out = [];
+  if (any(TOOL_REMOVES)) {
+    for (const raw of [...named, ...fieldValues(input, SOURCE_FIELDS)]) out.push({ raw, mode: "remove" });
+  } else if (any(TOOL_MOVES) || any(TOOL_COPIES)) {
+    const srcs = [...fieldValues(input, SOURCE_FIELDS), ...(dests.length ? plainPaths : [])];
+    for (const raw of dests.length ? dests : plainPaths) {
+      out.push({ raw, mode: "write" });
+      for (const s of srcs) if (basename(s)) out.push({ raw: join(raw, basename(s)), mode: "write" });
+    }
+    if (any(TOOL_MOVES)) for (const raw of srcs) out.push({ raw, mode: "remove" });
+  } else if (any(TOOL_PERMS)) {
+    for (const raw of named) out.push({ raw, mode: "perm" });
+  } else if (words.has("mkdir") || ((words.has("create") || words.has("make")) && any(TOOL_FOLDERS))) {
+    for (const raw of named) out.push({ raw, mode: "create" });
+  } else if (any(TOOL_WRITES)) {
+    for (const raw of named) out.push({ raw, mode: "write" });
+  }
+  return out;
+}
+
 // Main
 
 try {
   const payload = JSON.parse(readFileSync(0, "utf8"));
   const tool = payload?.tool_name;
-  if (tool !== "Edit" && tool !== "Write" && tool !== "NotebookEdit" && tool !== "Bash") {
-    process.exit(0);
-  }
+  if (typeof tool !== "string" || !tool) process.exit(0);
+  // An MCP tool is read for the paths its name says it changes and the
+  // command lines its input carries (#310); one with neither passes.
+  const core = CORE_TOOLS.has(tool);
+  const toolInput = payload?.tool_input ?? {};
+  const mcpPaths = core ? [] : toolPaths(tool, toolInput);
+  const mcpLines = core ? [] : toolCommands(toolInput);
+  if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   ROOTS = spellings(projectDir);
@@ -1709,10 +1813,25 @@ try {
       hit = judgeTarget(t);
       if (hit) break;
     }
-  } else {
+  } else if (core) {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
     const what = p ? judge(resolveIn(cwd, expandHome(String(p))), "write", true) : null;
     if (what) hit = { path: p, what };
+  } else {
+    // a path field is taken as written, never globbed: no shell expands it
+    for (const { raw, mode } of mcpPaths) {
+      const what = judge(resolveIn(cwd, expandHome(raw)), mode, true);
+      if (what) { hit = { path: raw, what }; break; }
+    }
+    // a command line is read like Bash, from the folder the input names for it
+    for (const { line, cwd: at } of hit ? [] : mcpLines) {
+      const dir = at ? resolveIn(cwd, expandHome(at)) : cwd;
+      for (const t of lineTargets(line, dir, 0)) {
+        hit = judgeTarget(t);
+        if (hit) break;
+      }
+      if (hit) break;
+    }
   }
 
   if (!hit) process.exit(0);

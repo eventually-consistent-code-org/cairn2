@@ -10,7 +10,7 @@
 import { describe, it, expect } from "vitest";
 import {
   WRAPPERS, SHELLS, braceExpand, commandName, shellSegments, unwrap, shellCommandString, shellReadsStdin,
-  suCommandString,
+  suCommandString, toolCommands,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -410,6 +410,31 @@ describe("shellReadsStdin (#258)", () => {
     expect(shellReadsStdin(["-c", "x"])).toBe(false);
     expect(shellReadsStdin(["script.sh"])).toBe(false);
     expect(shellReadsStdin(["--", "script.sh"])).toBe(false);
+  });
+});
+
+describe("toolCommands (#310)", () => {
+  it("finds the command lines an MCP tool's input hands a shell, and the folder it names", () => {
+    expect(toolCommands({ command: "rm -rf hooks", timeout_ms: 5 })).toEqual([{ line: "rm -rf hooks", cwd: null }]);
+    expect(toolCommands({ cmd: "ls", cwd: "src" })).toEqual([{ line: "ls", cwd: "src" }]);
+    expect(toolCommands({ shell_command: "git status" })).toEqual([{ line: "git status", cwd: null }]);
+    expect(toolCommands({ commands: ["a", { label: "x", command: "b" }, { cmd: "c" }, 7] }).map((c: { line: string }) => c.line))
+      .toEqual(["a", "b", "c"]);
+    expect(toolCommands({ language: "Shell", code: "echo x > y" })).toEqual([{ line: "echo x > y", cwd: null }]);
+  });
+
+  it("an args list follows its command word for word, quoted so each stays one word", () => {
+    const [{ line }] = toolCommands({ command: "rm", args: ["-rf", "my hooks", "it's"] });
+    expect(line).toBe("rm -rf 'my hooks' 'it'\\''s'");
+    expect((shellSegments(line) as Seg[])[0].words).toEqual(["rm", "-rf", "my hooks", "it's"]);
+  });
+
+  it("code in another language, keystrokes, and inputs with no command field are not command lines", () => {
+    expect(toolCommands({ language: "python", code: "import os" })).toEqual([]);
+    expect(toolCommands({ pid: 1, input: "rm -rf hooks" })).toEqual([]);
+    expect(toolCommands({ path: "hooks/hooks.json" })).toEqual([]);
+    expect(toolCommands(null)).toEqual([]);
+    expect(toolCommands({ command: 5 })).toEqual([]);
   });
 });
 

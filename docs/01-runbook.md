@@ -1877,10 +1877,11 @@ through wrappers and their flag values (`sudo -u root`, `timeout 5`,
 `watch`, and the g-prefixed GNU tools Homebrew installs), a `sh -c`
 string (and the line `script -c` or `flock -c` hands a shell), shell
 keywords and grouping (`if`, `for`, `{ }`, `( )`), and a `$(…)` inside
-double quotes, which still runs. Quoted text that only mentions git never trips it — a commit
-message saying "never `git reset --hard`" passes. A guard that breaks
-lets the command through rather than blocking work. It enforces three
-rules.
+double quotes, which still runs. An MCP tool's command line is read the
+same way (see *Which tools the guards see*, below). Quoted text that
+only mentions git never trips it — a commit message saying "never `git
+reset --hard`" passes. A guard that breaks lets the command through
+rather than blocking work. It enforces three rules.
 
 **Always, in every session: no git command that throws work away with
 no undo.** Each refused form has an everyday neighbour that stays
@@ -1956,7 +1957,8 @@ the plugin manifests under `.claude-plugin/`, and your machine-wide
 Claude settings (`~/.claude/settings.json` and `settings.local.json`).
 An agent that can rewrite its own hooks can switch off every other
 control in one edit, so the Edit, Write and NotebookEdit tools are
-refused on those paths, and so is any Bash line that would write them.
+refused on those paths, and so is any Bash line or known MCP tool shape
+that would write them.
 The guard reads Bash with the same shell reader as the run guard and
 looks for what a line *writes*: redirects; the operands of commands that
 remove, create or change files (`rm`, `touch`, `tee`, `chmod`, `sed -i`,
@@ -2011,6 +2013,34 @@ moving a live run to "stopped" is a legal tool action and lifts the
 mid-run push block. Like the run guard's, these refusals name the owner's
 ways to approve and give no paste-ready prefix.
 
+**Which tools the guards see.** `hooks/hooks.json` hands the run guard
+Bash and every MCP tool (`mcp__*`), the harness guard Edit, Write,
+NotebookEdit, Bash and every MCP tool, and the leak guard Bash alone.
+An MCP tool is judged by the shapes these guards know, not by what its
+server can do:
+
+- **A command line in its input** — a `command`, `cmd` or
+  `shell_command` field — is read like a Bash line, by both guards. The
+  harness guard also reads an `args` list after the command, each entry
+  of a `commands` list, and `code` whose `language` is a shell, from the
+  `cwd` the input names.
+- **A path a writing tool names.** When the tool's own name says it
+  writes, edits, creates, deletes, moves, copies or saves
+  (`write_file`, `edit_block`, `move_file`, `create_directory`,
+  `delete_file`, `take_screenshot`…), the harness guard judges its
+  `path`, `paths`, `file_path`, `filePath`, `target`, `destination`,
+  `dest` and `new_path` fields as written, plus `source` for a move.
+  A read tool passes, whatever it names.
+
+Everything else passes: a writing tool under another name or field, and
+any MCP tool that runs arbitrary code — Python or JavaScript in a
+code-runner, keystrokes typed into a REPL it started — which is the
+same class as a `python -c` one-liner, out of reach of a command-text
+reader. For an exec-capable MCP server, use the harness's own
+permission rules: list its tools under `ask` (or `deny`) in your
+settings, as `mcp__<server>` or `mcp__<server>__<tool>`, so every call
+waits for you.
+
 One more hook worth knowing, on the advisory side rather than the
 refusing side: the **loop check** notices when the same tool is called
 with the same input three times in a row and says so, once. An agent
@@ -2028,9 +2058,10 @@ and text that can steer the agent can also ask for the override; real
 isolation is the operating system's job. Both guards read Bash through
 one shared shell reader, so a fix reaches both, but it is still a
 reading of the command text, not the shell itself. The harness guard
-doesn't see a write inside an interpreter (`python -c`) or a `$(…)`, an
-archive's members, or paths an upstream command finds for itself
-(`git ls-files | xargs rm`).
+doesn't see a write inside an interpreter (`python -c`, or an MCP tool
+running code) or a `$(…)`, an archive's members, paths an upstream
+command finds for itself (`git ls-files | xargs rm`), or an MCP tool
+outside the shapes above.
 
 ---
 
