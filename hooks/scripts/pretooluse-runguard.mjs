@@ -2,7 +2,7 @@
 
 /**
  * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
- *   #305) -- refuses git commands that rewrite a working tree or its history
+ *   #305, #306) -- refuses git commands that rewrite a working tree or its history
  *   out from under whoever is in it, or push past the ship gate. Exit 2
  *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
  *   The rules are spelled out in the block below.
@@ -34,7 +34,7 @@
  *
  *   While a batch run is live, or the run list can't be read (#299): `git checkout`,
  *   `git switch` and the hard reset (even overridden) aimed at the owner's
- *   own checkout (see isMainWorktree) are refused -- they change the
+ *   own checkout (see ownerCheckout) are refused -- they change the
  *   human's files underneath them, mid-edit. CAIRN_RUN_OK=1 as the leading
  *   assignment overrides that once. And `git push`, from any worktree, is
  *   refused unless the run manifest grants pushAuth and marks one of its
@@ -51,6 +51,18 @@
  *   a $(...) the order can't be trusted, so such a command anywhere counts.
  *   A push on its own, and whatever runs after it, are judged as before.
  *
+ *   Each git command is judged where git would run it (#306): from every
+ *   folder a cd or pushd on the line may have left the shell in (a cd can
+ *   fail, so all of them, as the harness guard counts them), then its env
+ *   -C and -C, under every GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR the
+ *   session, the line or its own --git-dir / --work-tree give it. A push
+ *   from another repository needs that repository's own stamp, and a
+ *   checkout writing the owner's work tree, or moving their HEAD, is the
+ *   owner's checkout. A folder or path only the shell can work out (cd
+ *   "$X", cd -, GIT_DIR=$(...)) refuses any push -- what it lands can't be
+ *   told -- unless the ship gate's escape is set, and mid-run, a checkout,
+ *   switch or hard reset.
+ *
  *   Commands are read by shell-words.mjs, shared with the harness guard
  *   (#270), so rules see through wrappers and their flag values (sudo -u
  *   root, timeout 5). Quoted text never refuses, but a double-quoted $(...)
@@ -58,9 +70,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { SHELLS, commandName, shellCommandString, shellSegments, unwrap } from "./shell-words.mjs";
 
@@ -107,6 +119,16 @@ const UNSHIPPED_ENV = "CAIRN_ALLOW_UNSHIPPED_PUSH";
 
 // Branch names that are always treated as the default branch.
 const DEFAULT_BRANCHES = ["main", "master"];
+
+// A folder or repository the guard can't work out (#306) -- `cd "$X"`,
+// `GIT_DIR=$(...)`. A gate that has to know where a command acts refuses.
+const LOST = Symbol("lost");
+
+// The variables that move which repository and work tree git acts on (#306).
+const GIT_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
+
+// The most folders, or targets for one git command, the guard follows before it calls the line lost.
+const MAX_TARGETS = 16;
 
 /**
  * git subcommands that never make a commit or move a ref (#305) -- they
@@ -155,15 +177,23 @@ const FUNC_NAME = /^[A-Za-z_][\w.:-]*$/;
  * assignments, the -C directories in order, the -c and --config-env
  * values, the subcommand, its args (cut at a bare `--`), the paths past
  * that `--`, which are paths, not flags -- `git checkout -- .` (#264) --
- * and `step`, its index in `steps`. `steps` holds, for every command in
- * line order, whether it can make a commit or move a ref; `unordered`
- * says that order can't be trusted -- a loop or function body, a pipe,
- * the background, or a substitution, whose body is read after the line.
+ * and `step`, its index in `steps` -- plus where it acts (#306): `opts`,
+ * its --git-dir / --work-tree, `wrapDirs`, the env -C or sudo -D folder
+ * it starts in, `envAssigns`, the GIT_ENV assignments it runs under (its
+ * own, or a `bash -c` around it), and `envCleared`, true when a wrapper may
+ * clear the environment first. `steps` holds, for every command in line
+ * order, whether it can make a commit or move a ref; `unordered` says that
+ * order can't be trusted -- a loop or function body, a pipe, the
+ * background, or a substitution, whose body is read after the line. For
+ * linePlaces: `moves`, every cd, pushd, env -C and sudo -D; `repeats`, a
+ * loop or function body that may run one again; `cdpaths` and `envSets`,
+ * the CDPATH and GIT_ENV values the line sets (undefined: unset).
  * Recurses into `sh -c '<script>'` style wrappers.
  */
 function readLine(line) {
-  const out = { invs: [], steps: [], unordered: /\$\(|`/.test(line) };
-  const walk = (text, depth) => {
+  const out = { invs: [], steps: [], unordered: /\$\(|`/.test(line), moves: [], repeats: false,
+    cdpaths: [], envSets: Object.fromEntries(GIT_ENV.map((k) => [k, []])) };
+  const walk = (text, depth, inherit) => {
     // the last command ended in `>&` or `<&`, so the `&` was a redirect's,
     // and this one starts with its descriptor -- `2>&1` reads as `2>`, `1`
     let descriptor = false;
@@ -171,20 +201,30 @@ function readLine(line) {
       const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
       if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
-      if (seg.reserved.some((w) => REPEATS.has(w))) out.unordered = true;
-      if (seg.op === "(" && seg.words.length === 1 && FUNC_NAME.test(seg.words[0])) out.unordered = true;
+      if (seg.reserved.some((w) => REPEATS.has(w))
+        || (seg.op === "(" && seg.words.length === 1 && FUNC_NAME.test(seg.words[0]))) {
+        out.unordered = true;
+        out.repeats = true;
+      }
 
       // Assignments and wrappers come off the front, flag values and all, so
       // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
       // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
-      const { words, assigns } = unwrap(segWords, READ);
+      const { words, assigns, wrappers, dirs: wrapDirs } = unwrap(segWords, READ);
       const cmd = commandName(words[0]);
+      // git's own env -C applies to it alone (see invTargets); anything
+      // else's -- a `bash -c` -- is where its commands run
+      noteFolders(out, seg, words, assigns, cmd === "git" ? [] : wrapDirs);
+      const env = {
+        assigns: [...inherit.assigns, ...assigns.filter((a) => GIT_ENV.some((k) => a.startsWith(`${k}=`)))],
+        cleared: inherit.cleared || wrappers.some(clearsEnv),
+      };
 
       // sh -c / bash -lc: the script is one quoted word -- parse it too,
       // found the same way the harness guard finds it (#270)
       if (SHELLS.has(cmd) && depth < 2) {
         const script = shellCommandString(words.slice(1));
-        if (script) walk(script, depth + 1);
+        if (script) walk(script, depth + 1, env);
         else out.steps.push(true); // a script file: anything at all
         continue;
       }
@@ -197,12 +237,18 @@ function readLine(line) {
       const dirs = [];
       const configs = [];
       const configEnvs = [];
+      const opts = {};
       while (i < words.length && words[i].startsWith("-")) {
-        if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
-        if (words[i] === "-c") configs.push(words[i + 1] ?? "");
-        if (words[i] === "--config-env") configEnvs.push(words[i + 1] ?? "");
-        if (words[i].startsWith("--config-env=")) configEnvs.push(words[i].slice(13));
-        i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
+        const w = words[i];
+        if (w === "-C") dirs.push(words[i + 1] ?? "");
+        if (w === "-c") configs.push(words[i + 1] ?? "");
+        if (w === "--config-env") configEnvs.push(words[i + 1] ?? "");
+        if (w.startsWith("--config-env=")) configEnvs.push(w.slice(13));
+        // --git-dir and --work-tree, either form; the last one wins, as in git
+        const where = /^--(git-dir|work-tree)(?:=(.*))?$/.exec(w);
+        if (where) opts[where[1] === "git-dir" ? "GIT_DIR" : "GIT_WORK_TREE"] = where[2] ?? words[i + 1] ?? "";
+        if (w === "--bare") opts.bare = true;
+        i += GIT_VALUE_OPTS.has(w) ? 2 : 1;
       }
       const rest = words.slice(i + 1);
       const dashes = rest.indexOf("--");
@@ -215,13 +261,46 @@ function readLine(line) {
         args: dashes < 0 ? rest : rest.slice(0, dashes),
         paths: dashes < 0 ? [] : rest.slice(dashes + 1),
         step: out.steps.length,
+        opts,
+        wrapDirs,
+        envAssigns: env.assigns,
+        envCleared: env.cleared,
       };
       out.steps.push(movesRefs(inv) || writesFile(words));
       out.invs.push(inv);
     }
   };
-  walk(line, 0);
+  walk(line, 0, { assigns: [], cleared: false });
   return out;
+}
+
+/**
+ * Records what one command does to the folder and the git environment the
+ * rest of the line runs in (#306): a cd or pushd (lost when a subshell
+ * break cuts its target short -- `cd $(...)`), an env -C or sudo -D
+ * folder, a GIT_ENV value set by a bare assignment, export or declare, or
+ * taken away by unset (or a bare export/declare of the name), and any
+ * CDPATH the line sets, even as one cd's own prefix.
+ */
+function noteFolders(out, seg, words, assigns, wrapDirs) {
+  for (const raw of wrapDirs) out.moves.push({ raw });
+  if (words[0] === "cd" || words[0] === "pushd") {
+    out.moves.push({ cmd: words[0], args: words.slice(1), lost: seg.op === "(" || seg.op === "`" });
+  }
+  const declares = /^(export|declare|typeset|readonly|local|unset)$/.test(words[0] ?? "");
+  const shared = [...(words.length ? [] : assigns), ...(declares ? words.slice(1) : [])];
+  for (const a of [...assigns, ...shared]) if (a.startsWith("CDPATH=")) out.cdpaths.push(a.slice(7));
+  for (const a of shared) {
+    const eq = a.indexOf("=");
+    const name = eq < 0 ? a : a.slice(0, eq);
+    if (GIT_ENV.includes(name)) out.envSets[name].push(eq < 0 || words[0] === "unset" ? undefined : a.slice(eq + 1));
+  }
+}
+
+/** True for a wrapper that may run its command without the session's environment: env -i or -u, sudo, doas. */
+function clearsEnv({ name, args }) {
+  if (name === "sudo" || name === "doas") return true;
+  return name === "env" && args.some((a) => a === "-" || /^-[^-]*[iu]|^--(?:ignore-environment|unset)/.test(a));
 }
 
 /**
@@ -272,28 +351,194 @@ function movesRefs(inv) {
   return !GIT_READS.has(sub);
 }
 
-/** `git -C <dir>` retargets the command (and stacks); honour it over the tool's cwd. */
-function targetDir(dirs, cwd) {
-  let dir = cwd;
-  for (const d of dirs) dir = isAbsolute(d) ? d : join(dir, d);
-  return dir;
+/**
+ * A path word resolved from `from` the way the shell hands it to its
+ * command (#306): ~, ~/ and $HOME are the home folder, $PWD the folder
+ * itself. LOST for any other variable, a substitution, ~user, a brace
+ * list or a wildcard, and for a relative path from a LOST folder -- the
+ * guard won't guess where they lead.
+ */
+function pathWord(raw, from) {
+  let base = from;
+  let rest = String(raw);
+  const m = /^(?:\$(HOME|PWD)|\$\{(HOME|PWD)\}|~)(?=\/|$)/.exec(rest);
+  if (m) {
+    base = (m[1] ?? m[2]) === "PWD" ? from : homedir();
+    rest = rest.slice(m[0].length).replace(/^\/+/, "");
+  }
+  if (/[$`*?[]|^~|\{[^}]*(?:,|\.\.)[^}]*\}/.test(rest)) return LOST;
+  if (isAbsolute(rest)) return resolve(rest);
+  return base === LOST ? LOST : resolve(base, rest || ".");
 }
 
 /**
- * True when `dir` is the repository's MAIN working tree (not a linked
- * worktree) -- "the owner's checkout". A worktree's git dir resolves under
- * <main>/.git/worktrees/<name>, so the run's own worktree is recognised and
- * left alone. A dir git can't read is not the owner's checkout -- false,
- * so one odd -C target never aborts the checks on the rest of the line.
+ * The folders one cd or pushd can move to from `from` (#306): its target,
+ * the home folder for a bare cd, and for a bare name the same name under
+ * each CDPATH entry. `cd -`, `pushd +N` and a target only the shell can
+ * work out are LOST. A bare pushd and popd only revisit folders already
+ * counted.
  */
-function isMainWorktree(dir) {
-  try {
-    const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"],
-      { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return !/[/\\]\.git[/\\]worktrees[/\\]/.test(gitDir);
-  } catch {
-    return false;
+function cdTargets(move, from, cdpaths) {
+  if (move.lost) return [LOST];
+  const ops = move.args.filter((a) => a !== "--" && !/^-[LPe@]+$/.test(a));
+  if (!ops.length) return move.cmd === "cd" ? [pathWord("~", from)] : [];
+  if (ops[0] === "-" || /^[+-]\d+$/.test(ops[0])) return [LOST];
+  const out = [pathWord(ops[0], from)];
+  if (!/^(?:\/|\.\.?(?:\/|$)|~|\$)/.test(ops[0])) {
+    for (const entry of cdpaths.flatMap((v) => v.split(":"))) out.push(pathWord(join(entry || ".", ops[0]), from));
   }
+  return out;
+}
+
+/**
+ * Every folder the shell may be in when a command on the line runs (#306),
+ * counted the way the harness guard counts them (#258): the starting
+ * folder, and every cd, pushd, env -C and sudo -D target resolved from
+ * every folder found before it. A cd can fail, be skipped or run later,
+ * so none ever takes a folder away, and every git command is judged from
+ * all of them. In a loop or function body a cd can run again, so the
+ * moves apply until nothing new turns up; a line still growing then, or
+ * past MAX_TARGETS, has gone somewhere the guard can't follow -- LOST.
+ */
+function linePlaces(line, start) {
+  const cdpaths = [...(process.env.CDPATH ? [process.env.CDPATH] : []), ...line.cdpaths];
+  const places = [start];
+  const add = (more) => { for (const p of more) if (!places.includes(p)) places.push(p); };
+  for (let round = 0; ; round++) {
+    const before = places.length;
+    for (const m of line.moves) {
+      add(places.flatMap((p) => (m.cmd ? cdTargets(m, p, cdpaths) : [pathWord(m.raw, p)])));
+    }
+    if (places.length > MAX_TARGETS) return [...places.slice(0, MAX_TARGETS), LOST];
+    if (!line.repeats || places.length === before) return places;
+    if (round === 3) return [...places, LOST];
+  }
+}
+
+/**
+ * The values each GIT_ENV variable may hold for this invocation (#306), in
+ * GIT_ENV order, undefined for unset: its --git-dir or --work-tree, else
+ * its own leading assignment (`GIT_DIR=x git ...`, or one a `bash -c` it
+ * sits in inherits), else any value the session or the line gives it --
+ * plus unset, when a wrapper may clear the environment (env -i or -u,
+ * sudo, doas). `--bare` may make the folder itself the git dir, and a
+ * `-c core.worktree` is one more work tree it may write.
+ */
+function envChoices(inv, lineEnv) {
+  return GIT_ENV.map((k) => {
+    let vals;
+    if (inv.opts[k] !== undefined) vals = [inv.opts[k]];
+    else {
+      const own = inv.envAssigns.filter((a) => a.startsWith(`${k}=`)).pop();
+      vals = own !== undefined ? [own.slice(k.length + 1)]
+        : inv.envCleared ? [...lineEnv[k], undefined] : lineEnv[k];
+      if (k === "GIT_DIR" && inv.opts.bare) vals = [...vals, "."];
+    }
+    if (k === "GIT_WORK_TREE") {
+      // a --config-env value sits where the guard can't see it: a `$` word, which reads as LOST
+      for (const [key, v] of ownConfig(inv)) if (key === "core.worktree") vals = [...vals, v ?? "$?"];
+    }
+    return [...new Set(vals)];
+  });
+}
+
+/**
+ * Every place this git invocation may act (#306), each a target { dir, env }
+ * -- the folder git starts in after env -C and its own -C, and the
+ * environment it runs under, with GIT_DIR, GIT_WORK_TREE and
+ * GIT_COMMON_DIR resolved from that folder the way git resolves them --
+ * or LOST where the guard can't tell. One per folder the shell may be in
+ * and per value each variable may hold.
+ */
+function invTargets(inv, places, lineEnv) {
+  const choices = envChoices(inv, lineEnv);
+  const found = new Map();
+  for (const place of places) {
+    let dir = place;
+    for (const d of [...inv.wrapDirs, ...inv.dirs]) dir = pathWord(d, dir);
+    if (dir === LOST) { found.set("lost", LOST); continue; }
+    for (const gitDir of choices[0]) {
+      for (const workTree of choices[1]) {
+        for (const common of choices[2]) {
+          const env = { ...process.env };
+          let lost = false;
+          [gitDir, workTree, common].forEach((v, k) => {
+            delete env[GIT_ENV[k]];
+            if (v === undefined) return;
+            const abs = pathWord(v, dir);
+            if (abs === LOST) lost = true;
+            else env[GIT_ENV[k]] = abs;
+          });
+          const key = lost ? "lost" : [dir, ...GIT_ENV.map((g) => env[g] ?? "")].join("\0");
+          found.set(key, lost ? LOST : { dir, env });
+        }
+      }
+    }
+  }
+  const targets = [...found.values()];
+  return targets.length > MAX_TARGETS ? [...targets.slice(0, MAX_TARGETS), LOST] : targets;
+}
+
+/** A path with its links resolved, or as given when it doesn't exist. */
+function realPath(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Where a target's refs live -- its common git dir, links resolved -- or
+ * null when git finds no repository there (#306). A linked worktree shares
+ * its main checkout's, so the two are one repository. Read once per target.
+ */
+function repoOf(at) {
+  if (at.repo === undefined) {
+    const raw = gitOut(at, ["rev-parse", "--git-common-dir"]);
+    at.repo = raw === null ? null : realPath(resolve(at.dir, raw));
+  }
+  return at.repo;
+}
+
+/**
+ * The folder whose ship-gate stamp covers a push from `at` (#306): the
+ * project's, for the project's repository -- from any of its worktrees,
+ * where the commit check still reads that worktree's own HEAD -- or that
+ * other repository's own folder (the one holding its .git, or a bare
+ * one's git dir), which has no stamp unless plan_drift ran there. Never
+ * the folder git happens to start in: under GIT_DIR that can be the
+ * project's. A project outside any repository keeps its own stamp for
+ * every push, as before.
+ */
+function stampDir(at, ctx) {
+  const mine = repoOf(ctx.project);
+  const repo = repoOf(at);
+  if (mine === null || repo === mine) return ctx.projectDir;
+  return basename(repo) === ".git" ? dirname(repo) : repo;
+}
+
+/** True for a git dir that is a repository's own, not a linked worktree's (.git/worktrees/<name>). */
+const mainGitDir = (gitDir) => !/[/\\]\.git[/\\]worktrees[/\\]/.test(gitDir);
+
+/**
+ * True when a command at `at` changes the owner's checkout (#216, #306):
+ * the HEAD it moves is a main working tree's, not a linked worktree's, or
+ * the work tree it writes is one -- a --work-tree or GIT_WORK_TREE aimed at
+ * the owner's folder from the run's own git dir. A target git can't read
+ * is not the owner's checkout -- false, so one odd -C target never aborts
+ * the checks on the rest of the line.
+ */
+function ownerCheckout(at) {
+  const gitDir = gitOut(at, ["rev-parse", "--absolute-git-dir"]);
+  if (gitDir === null) return false;
+  if (mainGitDir(gitDir)) return true;
+  const top = gitOut(at, ["rev-parse", "--show-toplevel"]);
+  if (top === null) return false;
+  const env = { ...process.env };
+  for (const k of GIT_ENV) delete env[k];
+  const own = gitOut({ dir: top, env }, ["rev-parse", "--absolute-git-dir"]);
+  return own !== null && mainGitDir(own);
 }
 
 /**
@@ -422,11 +667,15 @@ function refuseDestructive(what, why) {
   refuse([`cairn run guard: ${what} is refused in every session — ${why}`], DESTRUCTIVE_ENV);
 }
 
-/** git output in `dir`, or null when git says no -- never throws. */
-function gitOut(dir, args) {
+/**
+ * git output at the target `at` -- its folder, and the GIT_DIR, GIT_WORK_TREE
+ * and GIT_COMMON_DIR it runs under (#306) -- or null when git says no.
+ * Never throws.
+ */
+function gitOut(at, args) {
   try {
     return execFileSync("git", args,
-      { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      { cwd: at.dir, env: at.env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     return null;
   }
@@ -457,7 +706,7 @@ function linePushConfig(command, invs) {
 }
 
 /** True when `rev` names a commit here. */
-const resolves = (dir, rev) => gitOut(dir, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null;
+const resolves = (at, rev) => gitOut(at, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null;
 
 /** A config key the way git compares them: section and name in any case, the subsection exact. */
 function configKey(key) {
@@ -505,9 +754,9 @@ function configUnknown(inv) {
  * includes followed, then this command's own `-c` ones after them -- the
  * last wins for a single-valued key. Ask configUnknown first.
  */
-function configValues(inv, dir, key) {
+function configValues(inv, at, key) {
   const want = configKey(key);
-  const repo = gitOut(dir, ["config", "--get-all", key]);
+  const repo = gitOut(at, ["config", "--get-all", key]);
   return [...(repo ? repo.split("\n") : []),
     ...ownConfig(inv).filter(([k]) => k === want).map(([, v]) => v)];
 }
@@ -517,13 +766,13 @@ function configValues(inv, dir, key) {
  * instead when a push names no refspec, and sends a branch typed on its own
  * where they map it. Ask configUnknown first.
  */
-function remotePushSpecs(inv, dir, remote) {
+function remotePushSpecs(inv, at, remote) {
   const out = [];
   const keep = (key, value) => {
     const m = /^remote\.(.+)\.push$/.exec(key);
     if (m && value !== undefined && m[1] === remote) out.push(value);
   };
-  for (const line of (gitOut(dir, ["config", "--get-regexp", "^remote\\..*\\.push$"]) ?? "").split("\n")) {
+  for (const line of (gitOut(at, ["config", "--get-regexp", "^remote\\..*\\.push$"]) ?? "").split("\n")) {
     const sp = line.indexOf(" ");
     if (sp > 0) keep(line.slice(0, sp), line.slice(sp + 1));
   }
@@ -532,14 +781,14 @@ function remotePushSpecs(inv, dir, remote) {
 }
 
 /** The last value a push's git sees for `key`, or null when it is unset (#302). */
-function configValue(inv, dir, key) {
-  const set = configValues(inv, dir, key);
+function configValue(inv, at, key) {
+  const set = configValues(inv, at, key);
   return set.length ? set[set.length - 1] : null;
 }
 
 /** push.default as this push's git reads it, lowercased -- `simple` when unset (#302). */
-function pushMode(inv, dir) {
-  return (configValue(inv, dir, "push.default") ?? "simple").trim().toLowerCase();
+function pushMode(inv, at) {
+  return (configValue(inv, at, "push.default") ?? "simple").trim().toLowerCase();
 }
 
 /** The value of the last `--repo` a push gives, shortened as git allows, or undefined (#302). */
@@ -562,14 +811,14 @@ function repoOption(inv) {
  * the guard can't read leave origin, the same guess the default-branch
  * names start from; the callers that need more ask configUnknown first.
  */
-function pushRemote(inv, dir, positional, current) {
+function pushRemote(inv, at, positional, current) {
   const named = positional[0] ?? repoOption(inv);
   if (named !== undefined) return named;
   if (configUnknown(inv)) return "origin";
   const keys = current ? [`branch.${current}.pushRemote`, "remote.pushDefault", `branch.${current}.remote`]
     : ["remote.pushDefault"];
   for (const key of keys) {
-    const v = configValue(inv, dir, key);
+    const v = configValue(inv, at, key);
     if (v) return v;
   }
   return "origin";
@@ -595,7 +844,7 @@ function branchNames(dst, current) {
  * branch the one it points at -- git lands `git push origin alias` on main
  * when alias points there.
  */
-function localRefs(src, dir, current) {
+function localRefs(src, at, current) {
   const refs = new Set();
   if (src === "HEAD" || src === "@") {
     if (current) refs.add(`refs/heads/${current}`);
@@ -604,7 +853,7 @@ function localRefs(src, dir, current) {
   }
   // a configured refspec could start with `-`: never hand git one as an option
   const full = src.startsWith("-") ? null
-    : gitOut(dir, ["rev-parse", "--symbolic-full-name", src])?.split("\n")[0];
+    : gitOut(at, ["rev-parse", "--symbolic-full-name", src])?.split("\n")[0];
   if (full?.startsWith("refs/")) refs.add(full);
   return [...refs];
 }
@@ -636,7 +885,7 @@ function mapThrough(full, spec) {
  * the bare name, and only a source that exists is one. git refuses a glob
  * on one side only.
  */
-function globSources(src, dst, defaults, dir) {
+function globSources(src, dst, defaults, at) {
   if (!src.includes("*")) return [];
   const star = dst.indexOf("*");
   const [pre, suf] = [dst.slice(0, star), dst.slice(star + 1)];
@@ -645,7 +894,7 @@ function globSources(src, dst, defaults, dir) {
     for (const name of [`refs/heads/${b}`, `heads/${b}`, b]) {
       if (name.length < pre.length + suf.length || !name.startsWith(pre) || !name.endsWith(suf)) continue;
       const from = src.replace("*", () => name.slice(pre.length, name.length - suf.length));
-      if (resolves(dir, from)) found.push(from);
+      if (resolves(at, from)) found.push(from);
     }
   }
   return found;
@@ -654,6 +903,10 @@ function globSources(src, dst, defaults, dir) {
 // A source standing for "can't tell": the push follows settings the guard
 // can't read, so what it lands is unknown (#302) -- see configUnknown.
 const UNKNOWN = Symbol("unknown source");
+
+// Why a gate can't see where a command acts (#306).
+const WHERE_LOST = "a directory change or git setting on this line (cd, pushd, GIT_DIR, --git-dir, " +
+  "--work-tree) goes somewhere the guard can't tell";
 
 // Why a push with a commit or ref move ahead of it on its line can't be vouched for (#305).
 const MOVED_BEFORE = "an earlier command on this line can make a commit or move a ref first, and the " +
@@ -664,9 +917,9 @@ const MOVED_BEFORE = "an earlier command on this line can make a commit or move 
  * revs being pushed there (null for a deletion, UNKNOWN when the settings
  * that decide it can't be read). Empty when the push never touches the
  * default branch -- feature branches, tags, other refs. Read once per
- * invocation.
+ * target -- each invocation has its own (#306).
  */
-const defaultBranchSources = (inv, dir) => (inv.sources ??= branchSources(inv, dir));
+const defaultBranchSources = (inv, at) => (at.sources ??= branchSources(inv, at));
 
 /**
  * defaultBranchSources, worked out the way git resolves a push. A push of
@@ -679,25 +932,25 @@ const defaultBranchSources = (inv, dir) => (inv.sources ??= branchSources(inv, d
  * its upstream, and a remote's own push refspecs (`remote.<name>.push`),
  * which a bare push pushes and a typed branch is mapped through.
  */
-function branchSources(inv, dir) {
+function branchSources(inv, at) {
   const { flags, words: positional } = pushArgs(inv);
   const all = flags.has("--all") || flags.has("--mirror") || flags.has("--branches");
   const del = flags.has("--delete");
   const tags = flags.has("--tags");
 
   // Default branch names: main, master, and the remote's HEAD when known
-  const current = gitOut(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
-  const remote = pushRemote(inv, dir, positional, current);
+  const current = gitOut(at, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const remote = pushRemote(inv, at, positional, current);
   const defaults = new Set(DEFAULT_BRANCHES);
   if (/^[\w.-]+$/.test(remote)) {
-    const head = gitOut(dir, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
+    const head = gitOut(at, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
     if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
   }
   const lands = (names) => names.some((n) => defaults.has(n));
 
   // Every local default branch, as the full ref -- a tag spelled the same
   // can't stand in for the branch that actually lands
-  const everyBranch = () => [...defaults].map((b) => `refs/heads/${b}`).filter((r) => resolves(dir, r));
+  const everyBranch = () => [...defaults].map((b) => `refs/heads/${b}`).filter((r) => resolves(at, r));
 
   // --all / --mirror push every local branch, the default one included
   if (all) return everyBranch();
@@ -711,24 +964,24 @@ function branchSources(inv, dir) {
     const colon = plain.indexOf(":");
     const src = colon < 0 ? plain : plain.slice(0, colon);
     const dst = colon < 0 ? plain : plain.slice(colon + 1);
-    if (dst.includes("*")) return globSources(src, dst, defaults, dir);
+    if (dst.includes("*")) return globSources(src, dst, defaults, at);
     let names;
     if (colon >= 0 || del) {
       names = branchNames(dst, current);
     } else {
       // a branch on its own lands under git's full name for it
-      const refs = localRefs(src, dir, current);
+      const refs = localRefs(src, at, current);
       names = refs.filter((r) => r.startsWith("refs/heads/")).map((r) => r.slice(11));
       // ...unless the settings send it elsewhere -- git maps a ref it finds
       // by name, never HEAD
       if (typed && src !== "HEAD" && src !== "@") {
         if (configUnknown(inv)) return [UNKNOWN];
-        const specs = remotePushSpecs(inv, dir, remote);
-        const upstream = /^(upstream|tracking)$/.test(pushMode(inv, dir));
+        const specs = remotePushSpecs(inv, at, remote);
+        const upstream = /^(upstream|tracking)$/.test(pushMode(inv, at));
         for (const r of refs) {
           for (const s of specs) names.push(...mapThrough(r, s));
           if (!upstream || !r.startsWith("refs/heads/")) continue;
-          for (const m of configValues(inv, dir, `branch.${r.slice(11)}.merge`)) {
+          for (const m of configValues(inv, at, `branch.${r.slice(11)}.merge`)) {
             names.push(...branchNames(m, null));
           }
         }
@@ -745,15 +998,15 @@ function branchSources(inv, dir) {
   if (tags) return [];
   if (configUnknown(inv)) return [UNKNOWN];
   // a remote's own push refspecs are what git pushes, when it has any
-  const configured = remotePushSpecs(inv, dir, remote);
+  const configured = remotePushSpecs(inv, at, remote);
   if (configured.length) return configured.flatMap((s) => landing(s, false));
   // otherwise push.default: every matching branch; the current branch to
   // its upstream (tracking is upstream's old name); or to itself
-  const mode = pushMode(inv, dir);
+  const mode = pushMode(inv, at);
   if (mode === "matching") return everyBranch();
   if (mode === "nothing" || !current) return [];
   const to = mode === "upstream" || mode === "tracking"
-    ? configValues(inv, dir, `branch.${current}.merge`).flatMap((m) => branchNames(m, null)) : [current];
+    ? configValues(inv, at, `branch.${current}.merge`).flatMap((m) => branchNames(m, null)) : [current];
   return lands(to) ? ["HEAD"] : [];
 }
 
@@ -829,13 +1082,13 @@ const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
  * `git config remote.<r>.mirror true`), which turns a plain `git push <r>`
  * into one that force-updates and deletes every remote ref.
  */
-function isMirrorPush(inv, flags, words, dir) {
+function isMirrorPush(inv, flags, words, at) {
   if (flags.has("--mirror")) return true;
   const key = /^remote\.(.+)\.mirror(?:=(.*))?$/i;
   if (inv.configs.some((c) => { const m = key.exec(c); return m && truthy(m[2] ?? "true"); })) {
     return true;
   }
-  const set = gitOut(dir, ["config", "--get-regexp", "^remote\\..*\\.mirror$"]);
+  const set = gitOut(at, ["config", "--get-regexp", "^remote\\..*\\.mirror$"]);
   if (!set) return false;
   const remote = words[0];
   return set.split("\n").some((line) => {
@@ -853,7 +1106,7 @@ function isMirrorPush(inv, flags, words, dir) {
  * --staged .` (the index only, like a plain `git reset`), deleting a
  * feature branch, and `clean -n`.
  */
-function destructive(inv, dir) {
+function destructive(inv, at) {
   const { sub, args, paths } = inv;
   const discards = "it discards uncommitted work with no undo.";
   switch (sub) {
@@ -913,13 +1166,13 @@ function destructive(inv, dir) {
           "it overwrites remote history other people may already have pulled."];
       }
       const { flags, words } = pushArgs(inv);
-      if (isMirrorPush(inv, flags, words, dir)) {
+      if (isMirrorPush(inv, flags, words, at)) {
         return ["`git push --mirror`", "it force-updates and deletes remote refs to match this clone."];
       }
       if (flags.has("--prune")) {
         return ["`git push --prune`", "it deletes every remote branch this clone doesn't have."];
       }
-      return defaultBranchSources(inv, dir).includes(null)
+      return defaultBranchSources(inv, at).includes(null)
         ? ["a push deleting the default branch", "everyone's shared history hangs off it."] : null;
     }
   }
@@ -935,11 +1188,14 @@ function destructive(inv, dir) {
  * stamp refuses, never skips. So is a push whose settings can't be read
  * (#302) -- the guard can't say what it lands, so no stamp covers it --
  * and one with a commit or a ref move ahead of it on the line (#305): the
- * commit the guard checks now is not the one the push will send.
+ * commit the guard checks now is not the one the push will send. Everything
+ * is read at the target the push leaves from (#306), and the stamp is the
+ * one stampDir names for that repository.
  */
-function shipGateRefusal(inv, dir, projectDir, baseDir) {
+function shipGateRefusal(inv, at, ctx) {
   try {
-    const sources = defaultBranchSources(inv, dir);
+    if (repoOf(at) === null) return null; // no repository there -- git refuses the push itself
+    const sources = defaultBranchSources(inv, at);
     if (!sources.length) return null;
     if (sources.includes(UNKNOWN)) {
       return ["git's push settings decide where, and the guard can't read them first -- the line " +
@@ -950,13 +1206,17 @@ function shipGateRefusal(inv, dir, projectDir, baseDir) {
     if (inv.movedBefore) return [MOVED_BEFORE, "  push as its own step, once the drift check has seen " +
       "the commit -- or run /cairn:ship."];
 
-    const { base, hash } = pathHash(projectDir);
-    const path = join(baseDir, "ship-gate", `${base}-${hash}.json`);
+    const from = stampDir(at, ctx);
+    const { base, hash } = pathHash(from);
+    const path = join(ctx.baseDir, "ship-gate", `${base}-${hash}.json`);
     let stamp;
     try {
       stamp = JSON.parse(readFileSync(path, "utf8"));
     } catch (e) {
-      if (e?.code === "ENOENT") return ["no drift check has been recorded for this project"];
+      if (e?.code === "ENOENT") {
+        return [from === ctx.projectDir ? "no drift check has been recorded for this project"
+          : `it leaves from ${from}, another repository, and no drift check has been recorded there`];
+      }
       if (e instanceof SyntaxError) return ["the last drift check's record is unreadable"];
       return [`the last drift check's record can't be read (${e?.code ?? e})`,
         `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`];
@@ -965,7 +1225,7 @@ function shipGateRefusal(inv, dir, projectDir, baseDir) {
 
     for (const src of sources) {
       if (src === null) return ["it deletes the default branch"];
-      const sha = gitOut(dir, ["rev-parse", "--verify", "-q", `${src}^{commit}`]);
+      const sha = gitOut(at, ["rev-parse", "--verify", "-q", `${src}^{commit}`]);
       if (sha === null) return null; // git can't resolve it -- the push will fail on its own
       if (sha !== stamp.head) {
         return [`the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
@@ -993,9 +1253,14 @@ try {
   // Read the run manifests at most once, and only if a command needs them
   let runs;
   const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
+  const ctx = { projectDir, baseDir, project: { dir: projectDir } };
 
   const line = readLine(command);
   const lineConfig = linePushConfig(command, line.invs);
+  // #306 -- where each git command may run: every folder the line can cd
+  // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
+  const places = line.invs.length ? linePlaces(line, resolve(cwd)) : [];
+  const lineEnv = Object.fromEntries(GIT_ENV.map((k) => [k, [process.env[k], ...line.envSets[k]]]));
   for (const inv of line.invs) {
     inv.lineConfig = lineConfig;
     // #305 -- something before it on the line can make a commit or move a
@@ -1005,22 +1270,38 @@ try {
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
     const hardReset = isHardReset(inv);
-    const dir = targetDir(inv.dirs, cwd);
+    const targets = invTargets(inv, places, lineEnv);
+    const known = targets.filter((t) => t !== LOST);
+    const lost = known.length < targets.length;
 
-    // #249, #250, #264 -- the work-destroying table, every session
+    // #249, #250, #264 -- the work-destroying table, every session. Most
+    // rows don't depend on where; a push's mirror and deletion rows are
+    // read at every target the guard can see.
     if (!allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
-      const hit = destructive(inv, dir);
-      if (hit) refuseDestructive(...hit);
+      for (const at of known.length ? known : [{ dir: resolve(cwd) }]) {
+        const hit = destructive(inv, at);
+        if (hit) refuseDestructive(...hit);
+      }
     }
 
-    // #251 -- the default branch only takes what a clean drift check saw
+    // #251 -- the default branch only takes what a clean drift check saw,
+    // judged at every repository the push may leave from (#306)
     if (inv.sub === "push" && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
-      const why = shipGateRefusal(inv, dir, projectDir, baseDir);
-      if (why) {
+      if (lost) {
         refuse([
-          `cairn run guard: ${why[2] ?? "this push lands on the default branch"}, but ${why[0]}.`,
-          why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
+          `cairn run guard: ${WHERE_LOST}, so it can't tell which repository this push leaves from ` +
+          "or what it lands.",
+          "  name the folder plainly (cd <path>, git -C <path>) and the guard can judge it -- or run /cairn:ship.",
         ], UNSHIPPED_ENV);
+      }
+      for (const at of known) {
+        const why = shipGateRefusal(inv, at, ctx);
+        if (why) {
+          refuse([
+            `cairn run guard: ${why[2] ?? "this push lands on the default branch"}, but ${why[0]}.`,
+            why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
+          ], UNSHIPPED_ENV);
+        }
       }
     }
 
@@ -1061,7 +1342,9 @@ try {
     if (prefixed("CAIRN_RUN_OK")) continue;
     const { live, unreadable } = currentRuns();
     if (!live.length && !unreadable) continue; // no unattended run in flight -- ordinary work
-    if (!isMainWorktree(dir)) continue; // the run's own worktree
+    // #306 -- every place it may act; only the run's own worktree is left alone
+    const owner = known.some(ownerCheckout);
+    if (!lost && !owner) continue;
 
     const name = hardReset ? "git reset --hard" : `git ${inv.sub}`;
     if (unreadable) {
@@ -1069,6 +1352,13 @@ try {
         `cairn run guard: can't read the batch-run list at ${unreadable}, so this \`${name}\` of ` +
         "the checkout you work in can't be checked against a live run.",
         "  the owner should restore read access to it, or run the command inside a run's own worktree.",
+      ]);
+    }
+    if (!owner) {
+      refuse([
+        `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${WHERE_LOST}, so this ` +
+        `\`${name}\` may target the checkout you work in.`,
+        "  name the folder plainly (cd <path>, git -C <path>), or run the command inside the run's own worktree.",
       ]);
     }
     refuse([

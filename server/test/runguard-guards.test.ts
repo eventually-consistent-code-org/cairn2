@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -1555,5 +1555,172 @@ describe("run guard: a commit or ref move earlier in the line can't slip past th
     ]) {
       expect(push(proj, home, c).status, c).toBe(0);
     }
+  });
+});
+
+describe("run guard: each git command is judged in the repository it acts on (#306)", () => {
+  /**
+   * Side-by-side folders under one root: the project on main with a clean
+   * stamp at its tip and a `sub` folder, `other` -- a clone one commit
+   * ahead -- and two linked worktrees of the project: `wt` on runbranch,
+   * one commit ahead, and `wt2` on side, at main's tip.
+   */
+  function repos(manifest?: Record<string, unknown>) {
+    const root = freshDir("cairn-runguard-repos-");
+    const proj = join(root, "proj");
+    const other = join(root, "other");
+    const wt = join(root, "wt");
+    const wt2 = join(root, "wt2");
+    execFileSync("git", ["init", "-q", "-b", "main", proj]);
+    git(proj, "config", "user.email", "t@t");
+    git(proj, "config", "user.name", "t");
+    writeFileSync(join(proj, "seed.txt"), "seed\n");
+    git(proj, "add", "seed.txt");
+    git(proj, "commit", "-q", "-m", "init", "--no-gpg-sign");
+    mkdirSync(join(proj, "sub"));
+    execFileSync("git", ["clone", "-q", proj, other]);
+    git(other, "commit", "-q", "--allow-empty", "-m", "other", "--no-gpg-sign", "--author", "t <t@t>");
+    git(proj, "worktree", "add", "-q", "-b", "runbranch", wt);
+    git(wt, "commit", "-q", "--allow-empty", "-m", "wt", "--no-gpg-sign");
+    git(proj, "worktree", "add", "-q", "-b", "side", wt2);
+    const home = freshDir("cairn-runguard-home-");
+    if (manifest) {
+      mkdirSync(join(home, "runs"), { recursive: true });
+      writeFileSync(join(home, "runs", `${projKey(proj)}-run-x.json`),
+        JSON.stringify({ version: 1, runId: "run-x", ...manifest }));
+    }
+    stamp(proj, home);
+    return { root, proj, other, wt, wt2, home };
+  }
+
+  // The host's own push settings, and any GIT_DIR the host runs under, must not decide these
+  const at = (r: { proj: string; home: string }, command: string, cwd = r.proj, env: Record<string, string> = {}) =>
+    guard(r.proj, r.home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", ...env }, cwd);
+
+  it("a push leaving another repository needs that repository's own stamp; each shape is refused like its -C pair", () => {
+    const r = repos();
+    const P = "git push origin main";
+    // Each row: [where the line sends git, the -C form refused since before #306].
+    // Before #306 only -C moved the guard, so each left form read the
+    // project's main -- the stamped commit -- while git pushed other's.
+    const rows: Array<[form: string, pair: string]> = [
+      [`cd ${r.other} && ${P}`, `git -C ${r.other} push origin main`],
+      [`cd ../other && ${P}`, "git -C ../other push origin main"],
+      [`pushd ../other; ${P}`, "git -C ../other push origin main"],
+      [`CDPATH=${r.root} cd other && ${P}`, "git -C ../other push origin main"],
+      [`env -C ${r.other} ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=${r.other}/.git ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=../other/.git ${P}`, "git -C ../other push origin main"],
+      [`git --git-dir=${r.other}/.git push origin main`, `git -C ${r.other} push origin main`],
+      ["git --git-dir ../other/.git push origin main", "git -C ../other push origin main"],
+      [`export GIT_DIR=${r.other}/.git; ${P}`, `git -C ${r.other} push origin main`],
+      [`GIT_DIR=${r.other}/.git bash -c '${P}'`, `bash -c 'git -C ${r.other} push origin main'`],
+    ];
+    for (const [form, pair] of rows) {
+      for (const c of [form, pair]) {
+        const res = at(r, c);
+        expect(res.status, c).toBe(2);
+        expect(res.stderr, c).toContain("another repository");
+        expectOwnerTail(res.stderr, c, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      }
+    }
+    // ...and with its own clean stamp, that repository's push passes
+    mkdirSync(join(r.home, "ship-gate"), { recursive: true });
+    const real = realpathSync(r.other);
+    writeFileSync(join(r.home, "ship-gate", `${projKey(real)}.json`), JSON.stringify({
+      head: git(r.other, "rev-parse", "main"), clean: true, at: "2026-10-02T00:00:00Z" }));
+    expect(at(r, `cd ${r.other} && ${P}`).status).toBe(0);
+    expect(at(r, `GIT_DIR=${r.other}/.git ${P}`).status).toBe(0);
+  });
+
+  it("a linked worktree is the project's repository, with its own HEAD checked against the project's stamp", () => {
+    const r = repos();
+    for (const c of [`cd ${r.wt} && git push origin HEAD:main`, `git -C ${r.wt} push origin HEAD:main`,
+      "cd ../wt && git push origin HEAD:main"]) {
+      const res = at(r, c);
+      expect(res.status, c).toBe(2);
+      expect(res.stderr, c).toContain("not the commit being pushed");
+    }
+    // wt2 sits at main's tip -- the commit the stamp saw
+    for (const c of [`cd ${r.wt2} && git push origin HEAD:main`, `git -C ${r.wt2} push origin HEAD:main`]) {
+      expect(at(r, c).status, c).toBe(0);
+    }
+  });
+
+  it("the project's own push passes however the line names it", () => {
+    const r = repos();
+    for (const c of [
+      "git push origin main",
+      "cd sub && git push origin main",
+      `cd ${r.proj} && git push origin main`,
+      `GIT_DIR=${r.proj}/.git git push origin main`,
+      "git --git-dir=.git push origin main",
+      "cd /nonexistent-cairn-dir; git push origin main",
+      `cd ${r.other} && git push origin feature`,
+    ]) {
+      expect(at(r, c).status, c).toBe(0);
+    }
+  });
+
+  it("a folder or git setting only the shell can work out refuses any push; named plainly it passes", () => {
+    const r = repos();
+    // Each row: [where the guard can't follow, the same push with the folder named plainly]
+    const rows: Array<[lost: string, plain: string]> = [
+      ['cd "$X" && git push origin feature', "cd sub && git push origin feature"],
+      ["cd - && git push origin main", "git push origin main"],
+      ['cd "$(git rev-parse --show-toplevel)" && git push origin main', `cd ${r.proj} && git push origin main`],
+      ['git -C "$D" push origin feature', "git -C sub push origin feature"],
+      ["GIT_DIR=$G git push origin main", `GIT_DIR=${r.proj}/.git git push origin main`],
+      ["git --git-dir=~someone/.git push origin main", "git --git-dir=.git push origin main"],
+      ["for d in a b; do cd sub; done; git push origin main", "for d in a b; do cd /; done; git push origin main"],
+    ];
+    for (const [lost, plain] of rows) {
+      const res = at(r, lost);
+      expect(res.status, lost).toBe(2);
+      expect(res.stderr, lost).toContain("can't tell which repository");
+      expectOwnerTail(res.stderr, lost, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(at(r, plain).status, plain).toBe(0);
+    }
+    expect(at(r, 'cd "$X" && git push origin feature', r.proj, { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+  });
+
+  it("mid-run, a checkout reaching the owner's checkout by cd, --git-dir/--work-tree or GIT_DIR is refused like its -C form", () => {
+    const r = repos({ status: "running", phases: [], pushAuth: { granted: false } });
+    // From the run's own worktree. Each row: [the form, its -C pair]
+    const rows: Array<[form: string, pair: string]> = [
+      [`cd ${r.proj} && git checkout runbranch`, `git -C ${r.proj} checkout runbranch`],
+      ["cd ../proj && git switch side", "git -C ../proj switch side"],
+      [`git --git-dir=${r.proj}/.git --work-tree=${r.proj} checkout side`, `git -C ${r.proj} checkout side`],
+      [`GIT_DIR=${r.proj}/.git GIT_WORK_TREE=${r.proj} git switch side`, `git -C ${r.proj} switch side`],
+      [`git --work-tree=${r.proj} checkout runbranch`, `git -C ${r.proj} checkout runbranch`],
+      [`git -c core.worktree=${r.proj} checkout side`, `git -C ${r.proj} checkout side`],
+      [`CAIRN_ALLOW_DESTRUCTIVE_GIT=1 GIT_WORK_TREE=${r.proj} git reset --hard`,
+        `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git -C ${r.proj} reset --hard`],
+    ];
+    for (const [form, pair] of rows) {
+      for (const c of [form, pair]) {
+        const res = at(r, c, r.wt);
+        expect(res.status, c).toBe(2);
+        expect(res.stderr, c).toContain("run-x");
+        expect(res.stderr, c).toContain("the checkout you work in");
+      }
+    }
+    // ...the run's own worktrees stay its own, however they are reached
+    for (const c of ["git checkout -b mine", `cd ${r.wt} && git switch -c y`, `git -C ${r.wt2} checkout -b z`,
+      `GIT_DIR=${r.proj}/.git/worktrees/wt git checkout -b w`]) {
+      expect(at(r, c, r.wt).status, c).toBe(0);
+    }
+  });
+
+  it("mid-run, a folder only the shell can work out refuses checkout and switch; CAIRN_RUN_OK still lifts it", () => {
+    const r = repos({ status: "running", phases: [], pushAuth: { granted: false } });
+    for (const c of ['cd "$OWNER" && git checkout side', 'git -C "$D" switch side', "GIT_DIR=$G git checkout side"]) {
+      const res = at(r, c, r.wt);
+      expect(res.status, c).toBe(2);
+      expect(res.stderr, c).toContain("goes somewhere the guard can't tell");
+      expectOwnerTail(res.stderr, c);
+    }
+    expect(at(r, 'cd "$OWNER" && CAIRN_RUN_OK=1 git checkout side', r.wt).status).toBe(0);
+    expect(at(r, "cd sub && git status", r.proj).status).toBe(0);
   });
 });
