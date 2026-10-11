@@ -14,7 +14,10 @@
  *   the project (#314: the stdio servers in ~/.claude.json, its projects,
  *   .mcp.json and Cursor's mcp.json, read the same way; one inside the
  *   project -- cairn's own server/dist build -- stays writable, so a build
- *   still can), the plugin copy that runs (#267:
+ *   still can), every folder such a config runs a server from (#316: uv's
+ *   --directory, a server's cwd, the folder `node DIR` runs by its
+ *   index.js -- that folder, never its parents -- and a bare word naming a
+ *   file in it, `uv --directory DIR run weather.py`), the plugin copy that runs (#267:
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
@@ -56,7 +59,13 @@
  *   --shell, a gh extension ...), and so is a pager variable set on the
  *   line (PAGER=, MANPAGER=, GIT_PAGER= ...). A
  *   relative path is judged from every folder a cd, env -C or git -C on the
- *   line can reach (#258); after a cd it can't follow, refused. Removing a
+ *   line can reach (#258); after a cd it can't follow, refused. A command
+ *   that plants a whole tree is judged by where it lands, like a mkdir of
+ *   it (#317): git clone, worktree add, submodule add and init, gh repo
+ *   clone and fork --clone, npx degit, and the create-* initializers npm,
+ *   pnpm, yarn, bun and npx run -- the repo's own name, here, when no
+ *   folder is given, so a clone into .claude/skills plants a skill, or a
+ *   plugin with hooks of its own, and is refused. Removing a
  *   protected folder or one holding it counts, and so does changing its
  *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
  *   #299), or claude writing its config itself: `claude mcp add` (#303),
@@ -145,10 +154,31 @@ const HOME_FILES = [
   [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
 ];
 
-// What a refusal calls a script the settings run (#312), and one a
-// protected MCP config launches (#314).
+// What a refusal calls a script the settings run (#312), one a protected
+// MCP config launches (#314), and a folder such a config runs its server
+// from (#316).
 const SCRIPT_WHAT = "a script your settings run as a hook or status line";
 const MCP_WHAT = "a script your MCP server config launches";
+const MCP_DIR_WHAT = "a folder your MCP server config runs its server from";
+
+// Options whose value is the folder a runner works in (#316): uv's
+// --directory, npm's and pnpm's -C, bun's --cwd, as the next word or with
+// `=`. The words after one resolve from it, and the server runs inside
+// it. node's -C is --conditions, never a folder.
+const FOLDER_OPTS = ["--directory", "--cwd", "-C"];
+
+// The runtimes that run a folder by its entry file (#316): `node DIR` runs
+// DIR/index.js or the main its package.json names, `python DIR` runs
+// DIR/__main__.py. Their options whose value is the next word, so the
+// first bare word after them is the one they run; and the ones that run
+// their own value instead (-e, -p, -c, -m), after which a bare word is an
+// argument.
+const FOLDER_RUNNERS = /^(?:node|nodejs|python[\d.]*|pypy[\d.]*)$/;
+const RUNNER_VALUE_OPTS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
+  "--env-file", "--input-type", "--title", "--conditions", "-C", "--inspect-port", "--max-old-space-size",
+  "--stack-size", "-W", "-X"]);
+const RUNNER_INLINE_OPTS = new Set(["-e", "--eval", "-p", "--print", "-c", "-m"]);
+const ENTRY_FILES = ["index.js", "index.mjs", "index.cjs", "package.json", "__main__.py"];
 
 // A word that is a URL, never a file a hook runs.
 const URL_WORD = /^[a-z][\w+.-]*:\/\//i;
@@ -296,6 +326,25 @@ const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude",
 // git's global options that take the next word as their value.
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--config-env", "--super-prefix"]);
+
+// The options of git's tree-creating subcommands that take a value (#317),
+// so a destination is never mistaken for one: clone, worktree add,
+// submodule add and init.
+const GIT_CLONE = { short: "obujc", long: ["--template", "--origin", "--branch", "--upload-pack",
+  "--reference", "--reference-if-able", "--separate-git-dir", "--depth", "--shallow-since",
+  "--shallow-exclude", "--config", "--filter", "--jobs", "--server-option", "--bundle-uri"] };
+const GIT_WORKTREE_ADD = { short: "bB", long: ["--reason"] };
+const GIT_SUBMODULE_ADD = { short: "b", long: ["--branch", "--name", "--reference", "--depth"] };
+const GIT_INIT = { short: "b", long: ["--template", "--separate-git-dir", "--object-format", "--ref-format",
+  "--initial-branch"] };
+
+// An initializer package a runner scaffolds a tree with (#317): create-x,
+// @scope/create-x (its scope dropped by cmdName), create-x@latest.
+const CREATE_PKG = /^create-[\w.-]*(?:@[^@]*)?$/;
+
+// The runners whose `create <x>` / `init <x>` run an initializer, and
+// whose bare `init` writes a package.json here (#317).
+const INIT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 
 // The `claude mcp` subcommands that write a server config (#303); list,
 // get, serve, login and logout leave every config as it is.
@@ -562,15 +611,13 @@ function settingsCommands(json) {
 }
 
 /**
- * The file one word of a hook command names, spelled out the way the
- * hook's shell would: ~, $HOME, $CLAUDE_PROJECT_DIR and $CLAUDE_PLUGIN_ROOT
- * (braced or not), else from the project root, where hooks run. Null for
- * a program found on PATH (node, bash, npx), a flag, an assignment, a URL,
- * a package spec (@scope/pkg), a device, a word with any other variable, a
- * substitution or a wildcard, and a folder that's there -- `cd
- * "$CLAUDE_PROJECT_DIR"` runs nothing.
+ * One word of a hook or server command, spelled out the way its shell
+ * would: ~, $HOME, $CLAUDE_PROJECT_DIR and $CLAUDE_PLUGIN_ROOT (braced or
+ * not). Null for a flag, an assignment, a URL, a package spec
+ * (@scope/pkg), and a word with any other variable, a substitution or a
+ * wildcard.
  */
-function scriptFile(word, vars) {
+function spellWord(word, vars) {
   if (word.startsWith("-") || ASSIGNMENT.test(word) || URL_WORD.test(word) || PACKAGE_WORD.test(word)) return null;
   let w = word.replace(/^~(?=\/|$)/, () => vars.HOME);
   const m = /^\$(?:(\w+)|\{(\w+)\})(?=\/|$)/.exec(w);
@@ -579,25 +626,102 @@ function scriptFile(word, vars) {
     if (!v) return null;
     w = v + w.slice(m[0].length);
   }
-  if (!w.includes("/") || /[$`*?[]/.test(w)) return null;
-  const abs = resolve(vars.CLAUDE_PROJECT_DIR, w);
+  return /[$`*?[]/.test(w) ? null : w;
+}
+
+/**
+ * The file one word of a hook or server command names, from `at.dir` --
+ * the project root, where hooks run, unless the server's cwd or an option
+ * on the line named a folder (#316, `at.named`). Null for a program found
+ * on PATH (node, bash, npx), a word spellWord drops, a device, a folder
+ * that's there -- `cd "$CLAUDE_PROJECT_DIR"` runs nothing -- and a word
+ * with no slash, unless a named folder holds a file by that name: `uv
+ * --directory DIR run weather.py` runs DIR/weather.py (#316).
+ */
+function scriptFile(word, vars, at) {
+  const w = spellWord(word, vars);
+  if (w === null || (!w.includes("/") && !at.named)) return null;
+  const abs = resolve(at.dir, w);
   if (abs === "/dev" || abs.startsWith("/dev/")) return null;
-  try { if (statSync(abs).isDirectory()) return null; } catch { /* not there yet: one planted there runs too */ }
+  try {
+    if (statSync(abs).isDirectory()) return null;
+  } catch {
+    // not there yet: one planted there runs too -- but a bare name that
+    // isn't there is a program on PATH (`run`, `start`)
+    if (!w.includes("/")) return null;
+  }
   return abs;
 }
 
-/** The files one hook command names: every word that is a path, its `< file` inputs, and the same inside `bash -c`. */
-function commandScripts(command, vars, depth = 0) {
+/**
+ * The folder node or python runs by its entry file (#316): the first bare
+ * word after their options -- `node DIR` runs DIR/index.js or the main in
+ * its package.json, `python DIR` runs DIR/__main__.py -- when it is a
+ * folder that's there holding one. Null after -e, -p, -c or -m, which run
+ * their own value, and for any later folder: `node server.js ~/Desktop`
+ * serves the Desktop, it doesn't run it. `args` follow the runtime's name.
+ */
+function runFolder(args, vars, at) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (RUNNER_INLINE_OPTS.has(a)) return null;
+    if (a.startsWith("-") && a !== "-") {
+      if (RUNNER_VALUE_OPTS.has(a)) i++;
+      continue;
+    }
+    const w = spellWord(a, vars);
+    if (w === null) return null;
+    const abs = resolve(at.dir, w);
+    try {
+      if (statSync(abs).isDirectory() && ENTRY_FILES.some((n) => existsSync(join(abs, n)))) return abs;
+    } catch { /* not there: scriptFile keeps it as the file one planted there would be */ }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * What one hook or server command names, as { path, folder }: every word
+ * that is a file, its `< file` inputs, and the same inside `bash -c`. A
+ * folder option (#316: uv's --directory, -C, --cwd, as the next word or
+ * with `=`) moves where the words after it resolve from, and a bare word
+ * naming a file there counts (`uv --directory DIR run weather.py`), as it
+ * does from a server's cwd in `base`. With `base.folders`, each folder so
+ * named, and the one node or python runs by its entry file (`node DIR`),
+ * comes back as a folder: the server runs inside it.
+ */
+function commandScripts(command, vars, base = null, depth = 0) {
   const out = [];
+  const folder = (dir) => { if (base?.folders) out.push({ path: dir, folder: true }); };
   for (const seg of shellSegments(command, READ)) {
     const { words } = unwrap(seg.words, READ);
-    const str = SHELLS.has(cmdName(words[0])) ? shellCommandString(words.slice(1)) : null;
-    // the -c string is a command line, read as one below, not a path
-    for (const w of [...seg.words, ...(seg.inputs ?? [])]) {
-      const f = w === str ? null : scriptFile(w, vars);
-      if (f) out.push(f);
+    const cmd = cmdName(words[0]);
+    const str = SHELLS.has(cmd) ? shellCommandString(words.slice(1)) : null;
+    // where a relative word resolves from: the project, the server's cwd,
+    // or the folder an option named before it on this line
+    let at = { dir: base?.dir ?? vars.CLAUDE_PROJECT_DIR, named: Boolean(base?.named) };
+    const all = [...seg.words, ...(seg.inputs ?? [])];
+    for (let i = 0; i < all.length; i++) {
+      const w = all[i];
+      if (w === str) continue; // the -c string is a command line, read as one below, not a path
+      const eq = w.startsWith("--") ? w.indexOf("=") : -1;
+      const name = eq > 0 ? w.slice(0, eq) : w;
+      if (FOLDER_OPTS.includes(name) && !(name === "-C" && FOLDER_RUNNERS.test(cmd))) {
+        const raw = eq > 0 ? w.slice(eq + 1) : all[++i];
+        const d = raw === undefined ? null : spellWord(raw, vars);
+        if (d === null) continue;
+        at = { dir: resolve(at.dir, d), named: true };
+        folder(at.dir);
+        continue;
+      }
+      const f = scriptFile(w, vars, at);
+      if (f) out.push({ path: f, folder: false });
     }
-    if (str && depth < 3) out.push(...commandScripts(str, vars, depth + 1));
+    if (base?.folders && FOLDER_RUNNERS.test(cmd)) {
+      const d = runFolder(words.slice(1), vars, at);
+      if (d) folder(d);
+    }
+    if (str && depth < 3) out.push(...commandScripts(str, vars, base && { ...base, dir: at.dir, named: at.named }, depth + 1));
   }
   return out;
 }
@@ -629,7 +753,7 @@ function settingsScripts() {
     try {
       const vars = { HOME: home, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_ROOT: pluginRoot };
       for (const c of settingsCommands(JSON.parse(readText(file) ?? ""))) {
-        for (const f of commandScripts(c, vars)) for (const s of spellings(f)) out.add(s);
+        for (const { path } of commandScripts(c, vars)) for (const s of spellings(path)) out.add(s);
       }
     } catch { /* missing, unreadable or malformed: skip this file */ }
   }
@@ -655,16 +779,21 @@ function serverLines(server) {
 
 /**
  * Every script the protected MCP configs launch from outside the project
- * (#314), each spelling that lies outside it: the paths a stdio server's
- * `command` and `args` name, resolved the way a hook command's words are
- * (a project's own servers from that project), in ~/.claude.json -- its
- * own servers and each project's -- the project's .mcp.json, and Cursor's
- * project and home mcp.json (`${userHome}`, `${workspaceFolder}`). The
- * server starts next session with the tokens its config hands it, outside
- * any tool call. A script inside the project stays ordinary work: cairn's
- * own .mcp.json launches its server/dist build, and a build has to write
- * it. A file that can't be read or parsed is skipped quietly; ~/.claude.json,
- * which can run to megabytes, is read and parsed once a run.
+ * (#314), and every folder they run a server from (#316), as { scripts,
+ * folders }, each spelling that lies outside it: the paths a stdio
+ * server's `command` and `args` name, resolved the way a hook command's
+ * words are (a project's own servers from that project, a server with a
+ * `cwd` from there), in ~/.claude.json -- its own servers and each
+ * project's -- the project's .mcp.json, and Cursor's project and home
+ * mcp.json (`${userHome}`, `${workspaceFolder}`). The server starts next
+ * session with the tokens its config hands it, outside any tool call. A
+ * script inside the project stays ordinary work: cairn's own .mcp.json
+ * launches its server/dist build, and a build has to write it. The
+ * folders are the ones the config names -- a `cwd`, uv's --directory,
+ * the one `node DIR` runs -- never their parents, and never one holding
+ * the project or the home folder. A file that can't be read or parsed is
+ * skipped quietly; ~/.claude.json, which can run to megabytes, is read
+ * and parsed once a run.
  */
 function mcpScripts() {
   const home = resolve(homedir());
@@ -688,31 +817,46 @@ function mcpScripts() {
   take(parse(join(project, ".cursor", "mcp.json")), project);
   take(parse(join(home, ".cursor", "mcp.json")), project);
   const seen = new Set();
-  const out = new Set();
+  const scripts = new Set();
+  const folders = new Set();
+  const anchors = [...ROOTS, ...HOMES];
   for (const [server, dir] of servers) {
     const vars = { HOME: home, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: dir, userHome: home, workspaceFolder: dir };
-    for (const line of serverLines(server)) {
-      if (seen.has(`${dir}\0${line}`)) continue;
-      seen.add(`${dir}\0${line}`);
+    const keep = ({ path, folder }) => {
+      for (const s of spellings(path)) {
+        if (projectRelative(s) !== null) continue;
+        if (!folder) scripts.add(s);
+        else if (!anchors.some((a) => holds(s, a))) folders.add(s);
+      }
+    };
+    // the folder the client starts the server in (#316): its cwd, else the project
+    const cwd = typeof server?.cwd === "string" ? spellWord(server.cwd, vars) : null;
+    const base = { dir: cwd === null ? dir : resolve(dir, cwd), named: cwd !== null, folders: true };
+    const lines = serverLines(server);
+    if (cwd !== null && lines.length) keep({ path: base.dir, folder: true });
+    for (const line of lines) {
+      if (seen.has(`${base.dir}\0${line}`)) continue;
+      seen.add(`${base.dir}\0${line}`);
       try {
-        for (const f of commandScripts(line, vars)) {
-          for (const s of spellings(f)) if (projectRelative(s) === null) out.add(s);
-        }
+        for (const found of commandScripts(line, vars, base)) keep(found);
       } catch { /* an entry the reader can't take: skip it */ }
     }
   }
-  return [...out];
+  return { scripts: [...scripts], folders: [...folders] };
 }
 
 /**
- * Every protected script, as { path, what }: what the settings run (#312),
- * then what the MCP configs launch (#314), read fresh on every call.
+ * Every protected script, as { path, what } -- what the settings run
+ * (#312), then what the MCP configs launch (#314) -- and every folder an
+ * MCP config runs a server from (#316), as { scripts, folders }, read
+ * fresh on every call.
  */
 function protectedScripts() {
   const out = new Map();
   for (const p of settingsScripts()) out.set(p, SCRIPT_WHAT);
-  for (const p of mcpScripts()) if (!out.has(p)) out.set(p, MCP_WHAT);
-  return [...out].map(([path, what]) => ({ path, what }));
+  const { scripts, folders } = mcpScripts();
+  for (const p of scripts) if (!out.has(p)) out.set(p, MCP_WHAT);
+  return { scripts: [...out].map(([path, what]) => ({ path, what })), folders };
 }
 
 /** The script `abs` is a folder on the way to (#312, #314), or null. */
@@ -983,6 +1127,18 @@ function plain(args) {
 function urlName(url) {
   const path = String(url).replace(/[?#].*$/, "").replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, "");
   return path.slice(path.lastIndexOf("/") + 1) || null;
+}
+
+/**
+ * The folder git clone makes when none is given (#317): the repo's last
+ * name, from a URL, an scp-like host:path or a local path, minus .git --
+ * kept, or added, for a bare or mirror clone.
+ */
+function repoName(url, bare = false) {
+  const path = String(url).replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf(":")) + 1);
+  if (!name) return null;
+  return bare ? name.replace(/(?<!\.git)$/i, ".git") : name.replace(/\.git$/i, "") || null;
 }
 
 /**
@@ -1520,7 +1676,51 @@ function applyTargets(rest, seg, ctx, add) {
   }
 }
 
-/** git: checkout/restore pathspecs, rm/mv operands, apply's patch -- from its -C folder (#258). */
+/**
+ * The folder a tree-creating git command plants (#317), judged like a
+ * mkdir of it: `clone [opts] URL [DIR]` (DIR defaults to the repo's name,
+ * here), `worktree add [opts] DIR [branch]`, `submodule add [opts] URL
+ * [DIR]`, `init [DIR]` (here, by default). A clone into a protected
+ * folder plants a skill, or a plugin with hooks and MCP servers of its
+ * own -- the install line a README would carry.
+ */
+function gitTreeTargets(sub, rest, dir, add) {
+  if (sub === "clone") {
+    const { opts, operands } = parseOpts(rest, GIT_CLONE);
+    const [url, dest] = operands;
+    const name = url === undefined ? null : dest ?? repoName(url, hasOpt(opts, "--bare", "--mirror"));
+    if (name) add(name, "write", dir);
+  } else if (sub === "init") {
+    add(parseOpts(rest, GIT_INIT).operands[0] ?? ".", "write", dir);
+  } else {
+    // worktree and submodule: their own options may sit before `add`
+    const at = rest.findIndex((a) => !a.startsWith("-"));
+    if (at < 0 || rest[at] !== "add") return;
+    const { operands } = parseOpts(rest.slice(at + 1), sub === "worktree" ? GIT_WORKTREE_ADD : GIT_SUBMODULE_ADD);
+    const [first, second] = operands;
+    if (first === undefined) return;
+    const dest = sub === "worktree" ? first : second ?? repoName(first);
+    if (dest) add(dest, "write", dir);
+  }
+}
+
+/**
+ * The folder an initializer scaffolds (#317): every bare word it's given
+ * may be it -- `create-vite my-app --template react` names my-app, and
+ * `react` judged as a folder here is harmless -- and none means here.
+ */
+function scaffoldTargets(words, add) {
+  const bare = words.filter((a) => a !== "--" && !a.startsWith("-"));
+  for (const d of bare.length ? bare : ["."]) add(d, "write");
+}
+
+/** The folder degit fills (#317): `degit SRC [DIR]`, here when none. */
+function degitTargets(words, add) {
+  const bare = words.filter((a) => a !== "--" && !a.startsWith("-"));
+  if (bare.length) add(bare[1] ?? ".", "write");
+}
+
+/** git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree clone and kin plant (#317) -- from its -C folder (#258). */
 function gitTargets(args, seg, ctx, add) {
   let k = 0;
   let dir = ctx.dir;
@@ -1540,6 +1740,7 @@ function gitTargets(args, seg, ctx, add) {
       add(join(dest, basename(s)), "write", dir);
     }
   } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
+  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, args.slice(k + 1), dir, add);
 }
 
 /**
@@ -1634,8 +1835,30 @@ function claudeTargets(args, ctx, add) {
  * claude ...`), a program named claude, or a path into the package. The
  * words after it are claude's. A `-c` / `--call` / `--shell-mode` string is
  * a command line the runner hands a shell, read like `bash -c`.
+ *
+ * The tree an initializer plants (#317), judged like a mkdir of it: `npx
+ * degit SRC [DIR]`, `npx create-x [DIR]` and `bunx create-x [DIR]`; `npm
+ * create x [DIR]`, `npm init x [DIR]`, `pnpm create`, `yarn create` and
+ * `bun create` the same; none lands here. A bare `npm init` (pnpm's,
+ * yarn's, bun's too) writes a package.json here.
  */
-function runnerTargets(args, ctx, add, out) {
+function runnerTargets(cmd, args, ctx, add, out) {
+  // the bare words, past the values of a runner's own -p / -c
+  const bare = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") { bare.push(...args.slice(i + 1)); break; }
+    if (["-p", "--package", "-c", "--call"].includes(a)) { i++; continue; }
+    if (!a.startsWith("-")) bare.push(a);
+  }
+  const [head, ...tail] = bare;
+  if (head !== undefined && INIT_RUNNERS.has(cmd) && (head === "create" || head === "init")) {
+    if (tail.length) scaffoldTargets(tail.slice(1), add);
+    else if (head === "init") add("package.json");
+  } else if (head !== undefined && (cmd === "npx" || cmd === "pnpx" || cmd === "bunx")) {
+    if (cmdName(head) === "degit") degitTargets(tail, add);
+    else if (CREATE_PKG.test(cmdName(head))) scaffoldTargets(tail, add);
+  }
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const line = ["-c", "--call", "--shell-mode"].includes(a) ? args[i + 1]
@@ -1772,7 +1995,10 @@ function writeTargets(seg, ctx) {
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
   else if (cmd === "git") gitTargets(args, seg, ctx, add);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
-  else if (RUNNERS.has(cmd)) runnerTargets(args, ctx, add, out);
+  else if (RUNNERS.has(cmd)) runnerTargets(cmd, args, ctx, add, out);
+  // #317 -- an initializer run by name, or through `pnpm dlx` / `npm exec`
+  else if (cmd === "degit") degitTargets(args, add);
+  else if (CREATE_PKG.test(cmd)) scaffoldTargets(args, add);
   // #311 -- a program runner off the shared table (op run, bundle exec, tmux
   // new-session, uv run ...) may run a later word as the real command; read
   // those inner lines too. A program that only prints or searches its
@@ -2079,8 +2305,12 @@ try {
   // is read per command, in lineTargets.
   if (process.env.CAIRN_HARNESS_EDIT === "1") process.exit(0);
 
-  // What the protected settings run and the MCP configs launch, read fresh on every call (#312, #314).
-  SCRIPTS = protectedScripts();
+  // What the protected settings run and the MCP configs launch, read fresh
+  // on every call (#312, #314). A folder an MCP config runs a server from
+  // is a zone like the plugin root: everything in it is the harness (#316).
+  const { scripts, folders } = protectedScripts();
+  SCRIPTS = scripts;
+  for (const dir of folders) ZONES.push({ dir, what: MCP_DIR_WHAT, tree: true, carve: [] });
 
   let hit = null;
 

@@ -1998,7 +1998,16 @@ remove, create or change files (`rm`, `touch`, `tee`, `chmod`, `sed -i`,
 folder; downloads (`curl -o` / `-O`, `wget -O`); archives unpacked there
 (`tar -C`, `unzip -d`); patch tools (`git apply`, `patch`), judged by
 the files the patch touches; `git checkout`, `restore`, `rm` and `mv` on
-those paths; `find -delete` or `-exec` over them; paths piped into
+those paths; the folder a tree-creating command plants, judged like a
+`mkdir` of it — `git clone`, `git worktree add`, `git submodule add`,
+`git init`, `gh repo clone`, `gh repo fork --clone`, `npx degit` and the
+`create-*` initializers (`npx create-x`, `npm create x`, `npm init x`,
+`pnpm`/`yarn`/`bun create`, and a bare `npm init`'s `package.json`),
+with the repo's own name as the folder when none is given, so a clone
+into `.claude/skills` or `~/.claude/skills` — the install line a skill
+README carries, which can plant a plugin with hooks and MCP servers of
+its own — is refused while one into `src/`, `/tmp` or the project root
+passes; `find -delete` or `-exec` over them; paths piped into
 `xargs`; the file a wrapper writes itself (`time -o`, `script`'s
 typescript); and all of these inside wrappers and the same program
 runners the run guard reads through — including the off-table backstop,
@@ -2052,7 +2061,13 @@ The protected set also covers cairn's own trust anchors:
   project's), the project's `.mcp.json`, and Cursor's `.cursor/mcp.json`
   and `~/.cursor/mcp.json` — read off each server's `command` and `args`
   the same way (`node ~/repos/…/dist/index.js`, `$HOME/bin/server`, a
-  symlink and the file it points to). A swapped server script runs when
+  symlink and the file it points to), and the folder a config names for
+  its server to run in, protected whole — `uv --directory ~/weather run
+  weather.py`, the MCP quickstart's Python shape, where the script has
+  no slash and the folder is an option value; a server entry's `cwd`,
+  which its `./dist/index.js` resolves from; and `node ~/srv/dirmain`,
+  which runs that folder's `index.js`. That folder only, never its
+  parents: a file beside it stays ordinary work. A swapped server script runs when
   the next session starts that server, with whatever tokens its config
   hands it, so it gets the same refusals a hook script does. A script
   inside the project stays writable on purpose: cairn's own `.mcp.json`

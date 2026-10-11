@@ -660,7 +660,49 @@ function optionValues(args, { long, min = long.length, letter = "", short = "", 
   return out;
 }
 
-/** What gh runs from its arguments (#315) -- see argCommands. */
+// The `gh repo` options that take a value (#317), per action, so a
+// destination is never mistaken for one.
+const GH_REPO_VALUED = {
+  clone: ["-u", "--upstream-remote-name"],
+  fork: ["--fork-name", "--org", "--remote-name"],
+  create: ["-d", "--description", "-g", "--gitignore", "-h", "--homepage", "-l", "--license", "-p", "--template",
+    "-r", "--remote", "-s", "--source", "-t", "--team"],
+};
+
+/**
+ * The git clone a `gh repo clone REPO [DIR] [-- gitflags]`, `gh repo fork
+ * REPO --clone [--fork-name NAME]` or `gh repo create NAME --clone` runs
+ * (#317), as the command line `git clone [gitflags] REPO [DIR]`, so a
+ * guard reading it sees where the tree lands -- the repo's own name,
+ * here, when no folder is given. Nothing for a fork or create that
+ * doesn't clone, or any other repo action.
+ */
+function ghClone(action, after) {
+  const valued = GH_REPO_VALUED[action];
+  if (!valued) return [];
+  const dd = after.indexOf("--");
+  const own = dd < 0 ? after : after.slice(0, dd);
+  const gitflags = dd < 0 ? [] : after.slice(dd + 1);
+  const bare = [];
+  let clone = action === "clone";
+  let name = null;
+  for (let i = 0; i < own.length; i++) {
+    const a = own[i];
+    const eq = a.startsWith("-") ? a.indexOf("=") : -1;
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    if (valued.includes(flag)) {
+      const v = eq > 0 ? a.slice(eq + 1) : own[++i];
+      if (flag === "--fork-name" && typeof v === "string") name = v;
+    } else if (flag === "--clone") clone = eq < 0 || a.slice(eq + 1) !== "false";
+    else if (!a.startsWith("-")) bare.push(a);
+  }
+  const [repo, dir] = bare;
+  if (!clone || repo === undefined) return [];
+  const dest = action === "clone" ? dir : name;
+  return [["git", "clone", ...gitflags, repo, ...(dest === undefined || dest === null ? [] : [dest])].map(quoteWord).join(" ")];
+}
+
+/** What gh runs from its arguments (#315, #317) -- see argCommands. */
 function ghCommands(rest) {
   const [sub, ...more] = rest;
   if (!sub || sub.startsWith("-")) return [];
@@ -673,6 +715,7 @@ function ghCommands(rest) {
   if (/^ext(?:ensions?)?$/.test(sub) && action === "exec" && after.length) {
     return runnerCommands([`gh-${after[0]}`, ...after.slice(1)]);
   }
+  if (sub === "repo") return ghClone(action, after);
   if (action !== "set" || (sub !== "alias" && sub !== "config")) return [];
   const bare = [];
   let shell = false;
@@ -694,10 +737,12 @@ function ghCommands(rest) {
  * (#315), one option at a time; every other word it's given stays data:
  *   man       -P / --pager, and -H / --html=BROWSER
  *   gh        `alias set` with --shell, or an expansion starting with !;
- *             `config set pager|editor|browser`; and an extension --
+ *             `config set pager|editor|browser`; an extension --
  *             `extension exec NAME`, or a first word that isn't one of gh's
  *             commands -- an unknown program, its later words read through
- *             runnerCommands
+ *             runnerCommands; and the `git clone` a `repo clone`, `repo
+ *             fork --clone` or `repo create --clone` runs (#317), so the
+ *             folder it plants is judged like git's own
  *   rg        --pre, alone and as rg runs it: on each path operand, or here
  *   ag, ack   --pager
  *   sort      --compress-program

