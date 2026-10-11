@@ -2,7 +2,7 @@
 
 /**
  * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
- *   #305, #306) -- refuses git commands that rewrite a working tree or its history
+ *   #305, #306, #310) -- refuses git commands that rewrite a working tree or its history
  *   out from under whoever is in it, or push past the ship gate. Exit 2
  *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
  *   The rules are spelled out in the block below.
@@ -67,6 +67,29 @@
  *   (#270), so rules see through wrappers and their flag values (sudo -u
  *   root, timeout 5). Quoted text never refuses, but a double-quoted $(...)
  *   still runs, so its body is checked as a command of its own (#257).
+ *
+ *   Which tools (#310): the Bash tool's command, and the same line from any
+ *   other tool -- an MCP server's shell tool -- found by its input's fields:
+ *     command, cmd, shell_command  a command line; an exec-style array of
+ *                                  strings, or a string with an args /
+ *                                  arguments string array, is one too
+ *     script                       a command line, unless a language field
+ *                                  names something other than a shell
+ *     code                         a command line only when a language
+ *                                  field names a shell (ctx_execute's shell)
+ *     commands                     a list of command lines, or of objects
+ *                                  with a command field (ctx_batch_execute);
+ *                                  in order, or at once past concurrency 1,
+ *                                  each one's cd and GIT_DIR counting for all
+ *     cwd, workdir, working_directory, workingDirectory
+ *                                  the folder they start in
+ *   Language fields: language, lang, shell, interpreter, runtime. Out of
+ *   scope, and left to the harness's permission rules: tools that run code
+ *   in another language (a code / language pair such as ctx_execute in
+ *   python or javascript can call git any way it likes), and text sent to
+ *   a process already running (interact_with_process) -- nothing in the
+ *   call says a shell reads it. Which tools reach the guard at all is
+ *   hooks/hooks.json's matcher.
  */
 
 import { execFileSync } from "node:child_process";
@@ -1238,34 +1261,82 @@ function shipGateRefusal(inv, at, ctx) {
   }
 }
 
-// Main
+// The fields a tool's input carries a command line in, and the ones that name its language or folder (#310).
+const COMMAND_FIELDS = ["command", "cmd", "shell_command"];
+const LANGUAGE_FIELDS = ["language", "lang", "shell", "interpreter", "runtime"];
+const FOLDER_FIELDS = ["cwd", "workdir", "working_directory", "workingDirectory"];
 
-try {
-  const payload = JSON.parse(readFileSync(0, "utf8"));
-  if (payload?.tool_name !== "Bash") process.exit(0);
-  const command = payload?.tool_input?.command ?? "";
+/** A word quoted so the shell reader reads it back as exactly that one word. */
+const quoted = (word) => `'${word.replaceAll("'", "'\\''")}'`;
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
-  const baseDir = process.env.CAIRN_HOME || join(homedir(), ".cairn");
-  const cwd = payload?.cwd || projectDir;
-  const allowDestructive = process.env[DESTRUCTIVE_ENV] === "1";
+/** True for an array of strings and nothing else. */
+const strings = (v) => Array.isArray(v) && v.length > 0 && v.every((w) => typeof w === "string");
 
-  // Read the run manifests at most once, and only if a command needs them
-  let runs;
-  const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
-  const ctx = { projectDir, baseDir, project: { dir: projectDir } };
+/**
+ * The command line one command field stands for (#310): a string as it
+ * is, with an `args` / `arguments` string array beside it appended word
+ * for word; an exec-style array of strings, each one word; else null.
+ */
+function fieldLine(value, args) {
+  if (typeof value === "string") return strings(args) ? [value, ...args.map(quoted)].join(" ") : value;
+  return strings(value) ? value.map(quoted).join(" ") : null;
+}
 
-  const line = readLine(command);
-  const lineConfig = linePushConfig(command, line.invs);
+/**
+ * The command lines a tool call runs, as { lines, dir, concurrent } (#310):
+ * the Bash tool's command, or what any other tool -- an MCP server's
+ * shell tool -- carries in the fields the header lists. `dir` is the folder
+ * the tool names for them, if it names one; `concurrent`, a batch that
+ * runs them at once.
+ */
+function toolLines(payload) {
+  const input = payload?.tool_input;
+  if (payload?.tool_name === "Bash") return { lines: [String(input?.command ?? "")], concurrent: false };
+  if (!input || typeof input !== "object") return { lines: [], concurrent: false };
+  const language = LANGUAGE_FIELDS.map((f) => input[f]).find((v) => typeof v === "string");
+  const shell = language === undefined ? null
+    : SHELLS.has(commandName(language.trim())) || /^\s*(shell|posix)\s*$/i.test(language);
+  const lines = [];
+  const take = (obj) => {
+    for (const f of COMMAND_FIELDS) {
+      const line = fieldLine(obj[f], obj.args ?? obj.arguments);
+      if (line !== null) lines.push(line);
+    }
+  };
+  take(input);
+  if (typeof input.script === "string" && shell !== false) lines.push(input.script);
+  if (typeof input.code === "string" && shell === true) lines.push(input.code);
+  for (const c of Array.isArray(input.commands) ? input.commands : []) {
+    if (typeof c === "string") lines.push(c);
+    else if (c && typeof c === "object") take(c);
+  }
+  const dir = FOLDER_FIELDS.map((f) => input[f]).find((v) => typeof v === "string" && v !== "");
+  return { lines, dir, concurrent: Number(input.concurrency) > 1 };
+}
+
+/**
+ * Judges one command line (a readLine result) that starts in the folder
+ * `start`, and exits 2 on the first refusal: every git invocation in it,
+ * at every place it may act (#306), against each rule in turn. `ctx`
+ * carries the project, the cairn home, the run list, whether any line of
+ * the tool call changes the push settings, `priorMoves` -- another line
+ * of the same tool call, run before this one or alongside it, can make a
+ * commit or move a ref (#305, #310) -- and `where`, the folder moves and
+ * GIT_ENV settings of every line in the call, since a tool may run them
+ * all in one shell.
+ */
+function judgeLine(line, start, ctx) {
+  const { currentRuns, where } = ctx;
   // #306 -- where each git command may run: every folder the line can cd
   // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
-  const places = line.invs.length ? linePlaces(line, resolve(cwd)) : [];
-  const lineEnv = Object.fromEntries(GIT_ENV.map((k) => [k, [process.env[k], ...line.envSets[k]]]));
+  const places = line.invs.length ? linePlaces(where, start) : [];
+  const lineEnv = Object.fromEntries(GIT_ENV.map((k) => [k, [process.env[k], ...where.envSets[k]]]));
   for (const inv of line.invs) {
-    inv.lineConfig = lineConfig;
+    inv.lineConfig = ctx.lineConfig;
     // #305 -- something before it on the line can make a commit or move a
     // ref; in a line whose order can't be trusted, anywhere but itself
-    inv.movedBefore = line.steps.some((moves, k) => moves && (k < inv.step || (line.unordered && k !== inv.step)));
+    inv.movedBefore = ctx.priorMoves
+      || line.steps.some((moves, k) => moves && (k < inv.step || (line.unordered && k !== inv.step)));
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
@@ -1277,8 +1348,8 @@ try {
     // #249, #250, #264 -- the work-destroying table, every session. Most
     // rows don't depend on where; a push's mirror and deletion rows are
     // read at every target the guard can see.
-    if (!allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
-      for (const at of known.length ? known : [{ dir: resolve(cwd) }]) {
+    if (!ctx.allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
+      for (const at of known.length ? known : [{ dir: ctx.cwd }]) {
         const hit = destructive(inv, at);
         if (hit) refuseDestructive(...hit);
       }
@@ -1367,6 +1438,44 @@ try {
       "  run the command inside the run's own worktree, or wait for the run to finish.",
     ]);
   }
+}
+
+// Main
+
+try {
+  const payload = JSON.parse(readFileSync(0, "utf8"));
+  const tool = toolLines(payload);
+  if (!tool.lines.length) process.exit(0);
+
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  const baseDir = process.env.CAIRN_HOME || join(homedir(), ".cairn");
+  const cwd = resolve(payload?.cwd || projectDir);
+  const allowDestructive = process.env[DESTRUCTIVE_ENV] === "1";
+
+  // Read the run manifests at most once, and only if a command needs them
+  let runs;
+  const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
+
+  // #310 -- a tool call can carry several lines, run in order or at once:
+  // a commit in one moves what a later push sends, and so do the push
+  // settings any of them changes
+  const lines = tool.lines.map((command) => ({ command, ...readLine(command) }));
+  const moves = lines.map((l) => l.steps.some(Boolean));
+  const start = tool.dir === undefined ? cwd : pathWord(tool.dir, cwd);
+  const where = lines.length === 1 ? lines[0] : {
+    moves: lines.flatMap((l) => l.moves),
+    repeats: lines.some((l) => l.repeats),
+    cdpaths: lines.flatMap((l) => l.cdpaths),
+    envSets: Object.fromEntries(GIT_ENV.map((k) => [k, lines.flatMap((l) => l.envSets[k])])),
+  };
+  const ctx = {
+    projectDir, baseDir, cwd, project: { dir: projectDir }, allowDestructive, currentRuns, where,
+    lineConfig: lines.some((l) => linePushConfig(l.command, l.invs)),
+  };
+  lines.forEach((line, n) => {
+    ctx.priorMoves = moves.some((m, k) => m && (tool.concurrent ? k !== n : k < n));
+    judgeLine(line, start, ctx);
+  });
   process.exit(0);
 } catch {
   process.exit(0); // guard must never block work because IT broke

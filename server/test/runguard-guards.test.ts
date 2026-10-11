@@ -1724,3 +1724,123 @@ describe("run guard: each git command is judged in the repository it acts on (#3
     expect(at(r, "cd sub && git status", r.proj).status).toBe(0);
   });
 });
+
+describe("run guard: an MCP tool's command line is judged like a Bash line (#310)", () => {
+  const START = "mcp__plugin_desktop-commander_desktop-commander__start_process";
+  const EXECUTE = "mcp__plugin_context-mode_context-mode__ctx_execute";
+  const BATCH = "mcp__plugin_context-mode_context-mode__ctx_batch_execute";
+
+  /** The hook fed a non-Bash tool call, with the same clean override env as guard(). */
+  function tool(proj: string, home: string, tool_name: string, tool_input: Record<string, unknown>,
+    cwd: string = proj): { status: number | null; stderr: string } {
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home,
+      GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1",
+    };
+    delete env.CAIRN_ALLOW_DESTRUCTIVE_GIT;
+    delete env.CAIRN_ALLOW_UNSHIPPED_PUSH;
+    const r = spawnSync(process.execPath, [RUNGUARD], {
+      cwd: proj, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name, tool_input, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("start_process running `git reset --hard` is refused; running `git status` passes", () => {
+    const { proj, home } = fixture();
+    const reset = tool(proj, home, START, { command: "git reset --hard", timeout_ms: 5000 });
+    expect(reset.status).toBe(2);
+    expect(reset.stderr).toContain("git reset --hard");
+    expectOwnerTail(reset.stderr, "start_process", "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    expect(tool(proj, home, START, { command: "git status", timeout_ms: 5000 }).status).toBe(0);
+  });
+
+  it("every field shape the header lists is read; its harmless neighbour passes", () => {
+    const { proj, home } = fixture();
+    // Each row: [a tool input carrying `git reset --hard`, the same shape carrying `git status`]
+    const rows: Array<[name: string, refused: Record<string, unknown>, allowed: Record<string, unknown>]> = [
+      ["mcp__x__run", { cmd: "git reset --hard" }, { cmd: "git status" }],
+      ["mcp__x__run", { shell_command: "git reset --hard" }, { shell_command: "git status" }],
+      ["mcp__x__exec", { command: ["git", "reset", "--hard"] }, { command: ["git", "status"] }],
+      ["mcp__x__exec", { command: "git", args: ["reset", "--hard"] }, { command: "git", args: ["status"] }],
+      ["mcp__x__exec", { cmd: "git", arguments: ["reset", "--hard"] }, { cmd: "git", arguments: ["status"] }],
+      ["mcp__x__script", { script: "git reset --hard" }, { script: "git status" }],
+      ["mcp__x__script", { script: "git reset --hard", interpreter: "/bin/bash" }, { script: "git status", interpreter: "/bin/bash" }],
+      [EXECUTE, { language: "shell", code: "git reset --hard" }, { language: "shell", code: "git status" }],
+      [START, { command: "git reset --hard", shell: "zsh", timeout_ms: 1 }, { command: "git status", shell: "zsh", timeout_ms: 1 }],
+      [BATCH, { commands: [{ label: "a", command: "git status" }, { label: "b", command: "git reset --hard" }], queries: ["x"] },
+        { commands: [{ label: "a", command: "git status" }], queries: ["x"] }],
+      ["mcp__x__batch", { commands: ["git log -1", "git reset --hard"] }, { commands: ["git log -1"] }],
+    ];
+    for (const [name, refused, allowed] of rows) {
+      const label = JSON.stringify(refused);
+      const r = tool(proj, home, name, refused);
+      expect(r.status, label).toBe(2);
+      expect(r.stderr, label).toContain("git reset --hard");
+      expect(tool(proj, home, name, allowed).status, JSON.stringify(allowed)).toBe(0);
+    }
+  });
+
+  it("what the header puts out of scope, and words that only mention git, pass", () => {
+    const { proj, home } = fixture();
+    for (const [name, input] of [
+      [EXECUTE, { language: "python", code: "git reset --hard" }],
+      ["mcp__x__script", { script: "git reset --hard", language: "javascript" }],
+      ["mcp__plugin_desktop-commander_desktop-commander__interact_with_process", { pid: 1, input: "git reset --hard" }],
+      ["mcp__x__exec", { command: ["echo", "git reset --hard"] }],
+      ["mcp__x__exec", { command: "echo", args: ["git reset --hard"] }],
+      ["mcp__x__exec", { command: "echo", args: ["it's git reset --hard"] }],
+      ["mcp__x__write_file", { path: "notes.md", content: "git reset --hard" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      expect(tool(proj, home, name, input).status, JSON.stringify(input)).toBe(0);
+    }
+  });
+
+  it("the overrides keep their two shapes: the session env, or the one command's leading assignment", () => {
+    const { proj, home } = fixture();
+    expect(tool(proj, home, START, { command: "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset --hard" }).status).toBe(0);
+    expect(tool(proj, home, START, { command: "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 true && git reset --hard" }).status).toBe(2);
+    expect(tool(proj, home, START, { command: "git commit -m 'CAIRN_ALLOW_DESTRUCTIVE_GIT=1' && git reset --hard" }).status)
+      .toBe(2);
+  });
+
+  it("an MCP push meets the ship gate, from the folder the tool names, and a batch's earlier commit counts (#305)", () => {
+    const { proj, home } = fixture();
+    const other = freshDir("cairn-runguard-other-");
+    execFileSync("git", ["clone", "-q", proj, other]);
+    const push = { label: "p", command: "git push origin main" };
+    const commit = { label: "c", command: "git commit --allow-empty -m x" };
+    expect(tool(proj, home, START, { command: "git push origin main" }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"] }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push, commit], queries: ["x"] }).status).toBe(0);
+    const moved: Array<Record<string, unknown>> = [
+      { commands: [commit, push], queries: ["x"] },
+      { commands: [push, commit], queries: ["x"], concurrency: 4 },
+      { command: "git commit --allow-empty -m x && git push origin main" },
+    ];
+    for (const input of moved) {
+      const r = tool(proj, home, input.command ? START : BATCH, input);
+      expect(r.status, JSON.stringify(input)).toBe(2);
+      expect(r.stderr, JSON.stringify(input)).toContain("push as its own step");
+    }
+    // the folder the tool names is where the line starts (#306)
+    const there = tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: other });
+    expect(there.status).toBe(2);
+    expect(there.stderr).toContain("another repository");
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: proj }).status).toBe(0);
+    expect(tool(proj, home, BATCH, { commands: [push], queries: ["x"], cwd: "$WHERE" }).status).toBe(2);
+    // ...and a cd in one of a batch's commands may carry into the next, if they share a shell
+    const moved2 = tool(proj, home, BATCH, { commands: [{ label: "d", command: `cd ${other}` }, push], queries: ["x"] });
+    expect(moved2.status).toBe(2);
+    expect(moved2.stderr).toContain("another repository");
+  });
+
+  it("mid-run, an MCP checkout of the owner's checkout is refused like the Bash one", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = tool(proj, home, START, { command: "git checkout main" });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+    expect(guard(proj, home, "git checkout main").status).toBe(2);
+    expect(tool(proj, home, START, { command: "git log --oneline" }).status).toBe(0);
+  });
+});
