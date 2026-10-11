@@ -267,6 +267,106 @@ describe("unwrap: a wrapper in any letter case (#300)", () => {
   });
 });
 
+// #307: program runners outside the table (xcrun, arch, caffeinate, script,
+// gtimeout, flock ...) read as the command itself, so the git or rm they ran
+// reached no rule in either guard. Each is peeled now, flag values and all,
+// next to the same runner around a harmless command.
+describe("unwrap: program runners (#307)", () => {
+  /** The command words of each segment of a line, wrappers peeled. */
+  const peeled = (line: string): string[][] =>
+    (shellSegments(line) as Seg[]).map((s) => unwrap(s.words).words);
+
+  it("each runner is peeled to the command it runs, its harmless twin too", () => {
+    const rows: Array<[runner: string]> = [
+      ["xcrun"],
+      ["xcrun --sdk macosx"],
+      ["xcrun -sdk iphoneos -toolchain swift"],
+      ["arch -arm64"],
+      ["arch -x86_64 -i386"],
+      ["arch -arch arm64e -c"],
+      ["arch -e FOO=1 -d BAR"],
+      ["arch -arm64e"], // the e is the arch name, not -e
+      ["caffeinate -i"],
+      ["caffeinate -dimsu -t 60 -w 123"],
+      ["script -q /dev/null"],
+      ["script -a -t 30 /tmp/log"],
+      ["script -F -k /tmp/log"],
+      ["gtimeout 10"],
+      ["gtimeout -s KILL -k 2 10"],
+      ["flock /tmp/l"],
+      ["flock -n -w 5 -E 3 /tmp/l"],
+      ["flock --timeout 5 9"],
+      ["taskpolicy -b -c utility -t 4 -l 4"],
+      ["sandbox-exec -f prof.sb -D A=1"],
+      ["sandbox-exec -n no-network"],
+      ["chroot -u me /"],
+      ["chroot --userspec=a:b /"],
+      ["unbuffer -p"],
+      ["ionice -c 3 -n 7"],
+      ["chrt -f 10"],
+      ["taskset -c 0-3"],
+      ["genv -i"],
+      ["gnice -n 5"],
+      ["gstdbuf -oL"],
+      ["gnohup"],
+    ];
+    for (const [runner] of rows) {
+      expect(peeled(`${runner} git reset --hard`), runner).toEqual([["git", "reset", "--hard"]]);
+      expect(peeled(`${runner} git status`), runner).toEqual([["git", "status"]]);
+    }
+  });
+
+  it("script -c, flock -c and watch hand a shell the command line, which both guards read", () => {
+    const rows: Array<[line: string, script: string]> = [
+      ["script -q -c 'git reset --hard' /dev/null", "git reset --hard"],
+      ["script /tmp/log -c 'git reset --hard'", "git reset --hard"],
+      ["script -t -c 'git reset --hard'", "git reset --hard"], // util-linux -t has no separate value
+      ["script --command='git status; git reset --hard'", "git status; git reset --hard"],
+      ["flock /tmp/l -c 'git reset --hard'", "git reset --hard"],
+      ["flock -w 5 /tmp/l --command 'git reset --hard'", "git reset --hard"],
+      ["flock /tmp/l --command='git reset --hard'", "git reset --hard"],
+      ["watch -n 1 git reset --hard", "git reset --hard"],
+      ["watch -d 'git status; git reset --hard'", "git status; git reset --hard"],
+    ];
+    for (const [line, script] of rows) {
+      const [words] = peeled(line);
+      expect(words, line).toEqual(["sh", "-c", script]);
+      expect(shellCommandString(words.slice(1)), line).toBe(script);
+    }
+  });
+
+  it("script reports the typescript and log files it writes; a playback or a flush interval writes none", () => {
+    const writes = (words: string[]) => unwrap(words).writes;
+    expect(writes(["script", "-q", "hooks/a", "ls"])).toEqual(["hooks/a"]);
+    expect(writes(["script", "-a", "-t", "30", "log", "ls"])).toEqual(["log"]);
+    expect(writes(["script", "-t0", "log", "ls"])).toEqual(["log"]);
+    expect(writes(["script", "-O", "out", "-B", "io", "--log-timing", "tm", "-c", "ls"])).toEqual(["out", "io", "tm"]);
+    expect(writes(["script", "--timing=tm", "-c", "ls", "log"])).toEqual(["tm", "log"]);
+    expect(writes(["script", "-p", "hooks/a"])).toEqual([]);
+    expect(writes(["script", "-dp", "hooks/a"])).toEqual([]);
+    expect(writes(["flock", "/tmp/l", "ls"])).toEqual([]);
+  });
+
+  it("arch -e is an assignment the command runs with, like env's", () => {
+    expect(unwrap(["arch", "-e", "GIT_DIR=../x/.git", "-arm64", "git", "push"]).assigns).toEqual(["GIT_DIR=../x/.git"]);
+    expect(unwrap(["arch", "-d", "HOME", "git", "push"]).assigns).toEqual([]);
+  });
+
+  it("a g-prefixed GNU tool is reported under its plain name, and keeps its own rules", () => {
+    const r = unwrap(["GTIMEOUT", "5", "gxargs", "-I{}", "genv", "-C", "hooks", "gtime", "-o", "log", "rm", "{}"]);
+    expect(r.words).toEqual(["rm", "{}"]);
+    expect(r.wrappers.map((x: { name: string }) => x.name)).toEqual(["timeout", "xargs", "env", "time"]);
+    expect(r.dirs).toEqual(["hooks"]);
+    expect(r.writes).toEqual(["log"]);
+  });
+
+  it("covers the runners the issue names", () => {
+    for (const w of ["xcrun", "arch", "caffeinate", "script", "gtimeout", "flock"]) {
+      expect(WRAPPERS.has(w), w).toBe(true);
+    }
+  });
+});
+
 describe("braceExpand (#258)", () => {
   it("spells out comma lists and sequences the way bash does", () => {
     expect(braceExpand("{hooks,}")).toEqual(["hooks", ""]);

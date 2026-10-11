@@ -678,6 +678,57 @@ describe("run guard: macOS env -P and zsh's prefix words don't hide git (#258)",
   });
 });
 
+describe("run guard: a program runner doesn't hide git (#307)", () => {
+  // Each row: [refused form, the same runner around a harmless command].
+  // Before #307 these runners weren't in the shared wrapper table, so the
+  // runner's name read as the command and the git it ran met no rule; the
+  // first six are the forms the audit ran for real in a throwaway repo.
+  const rows: Array<[refused: string, allowed: string]> = [
+    ["xcrun git reset --hard", "xcrun git status"],
+    ["arch -arm64 git reset --hard", "arch -arm64 git status"],
+    ["caffeinate -i git reset --hard", "caffeinate -i git status"],
+    ["script -q /dev/null git reset --hard", "script -q /dev/null git status"],
+    ["gtimeout 10 git reset --hard", "gtimeout 10 git status"],
+    ["flock /tmp/l git reset --hard", "flock /tmp/l git status"],
+    ["xcrun --sdk macosx git push --force origin x", "xcrun --sdk macosx git push origin x"],
+    ["arch -arch x86_64 -e FOO=1 git clean -fd", "arch -arch x86_64 -e FOO=1 git clean -n"],
+    ["caffeinate -t 60 git checkout -- .", "caffeinate -t 60 git checkout -- a.txt"],
+    ["script -a -t 30 /tmp/log git stash clear", "script -a -t 30 /tmp/log git stash list"],
+    ["script -q -c 'git reset --hard' /dev/null", "script -q -c 'git status' /dev/null"],
+    ["flock -w 5 /tmp/l -c 'git reset --hard'", "flock -w 5 /tmp/l -c 'git status'"],
+    ["gtimeout -s KILL 10 git push -f", "gtimeout -s KILL 10 git push"],
+    ["taskpolicy -b git reset --hard", "taskpolicy -b git status"],
+    ["sandbox-exec -f prof.sb git reset --hard", "sandbox-exec -f prof.sb git status"],
+    ["unbuffer git reset --hard", "unbuffer git status"],
+    ["ionice -c 3 git reset --hard", "ionice -c 3 git status"],
+    ["watch -n 1 'git reset --hard'", "watch -n 1 'git status'"],
+    ["XCRUN Arch -arm64 GIT reset --hard", "XCRUN Arch -arm64 GIT status"],
+  ];
+
+  it("each refused form exits 2 with the table's refusal; its harmless twin exits 0", () => {
+    const { proj, home } = fixture();
+    for (const [refused, allowed] of rows) {
+      const r = guard(proj, home, refused);
+      expect(r.status, refused).toBe(2);
+      expect(r.stderr, refused).toContain("refused in every session");
+      expect(guard(proj, home, allowed).status, allowed).toBe(0);
+    }
+  });
+
+  it("a runner meets the ship gate and the live-run rule too", () => {
+    const bare = fixture(undefined, false);
+    expect(guard(bare.proj, bare.home, "xcrun git push origin main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "caffeinate -i git push origin HEAD:main").status).toBe(2);
+    expect(guard(bare.proj, bare.home, "caffeinate -i git push origin main:feature").status).toBe(0);
+    const live = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    for (const c of ["arch -arm64 git checkout main", "script -q /dev/null git switch main"]) {
+      const r = guard(live.proj, live.home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+    }
+  });
+});
+
 describe("run guard: a capitalised command name is the program a Mac runs (#300)", () => {
   // Each row: [capitalised, lowercase, capitalised harmless]. A Mac's
   // case-insensitive volume runs `GIT` as git and `SUDO` as sudo, so before

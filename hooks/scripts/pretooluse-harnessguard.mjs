@@ -24,9 +24,10 @@
  *   only its own command, #265), never taught by a refusal (#286). Bash is
  *   read as a shell reads it (shell-words.mjs, #270) for what it WRITES:
  *   redirects and the operands of commands that change files, through
- *   wrappers, bash -c, su -c, find -exec, xargs and a heredoc fed to a
- *   shell. A relative path is judged from every folder a cd, env -C or git
- *   -C on the line can reach (#258); after a cd it can't follow, refused.
+ *   wrappers and program runners (xcrun, script, flock, #307), bash -c,
+ *   su -c, find -exec, xargs and a heredoc fed to a shell. A relative
+ *   path is judged from every folder a cd, env -C or git -C on the line
+ *   can reach (#258); after a cd it can't follow, refused.
  *   Removing a protected folder or one holding it counts, and so does
  *   changing its mode, owner, flags or ACL (chmod, chown, chflags, setfacl,
  *   xattr -w, #299), or `claude mcp add` / `remove` writing an MCP server

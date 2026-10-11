@@ -1872,9 +1872,12 @@ The leak guard's sibling is the **run guard**, which protects your
 working tree and your history rather than your outbound text. It reads
 every git command the agent runs through Bash the way a shell would:
 through wrappers and their flag values (`sudo -u root`, `timeout 5`,
-`env`, `nice -n 5`), a `sh -c` string, shell keywords and grouping
-(`if`, `for`, `{ }`, `( )`), and a `$(…)` inside double quotes, which
-still runs. Quoted text that only mentions git never trips it — a commit
+`env`, `nice -n 5`), program runners that start another command
+(`xcrun`, `arch -arm64`, `caffeinate`, `script -q /dev/null`, `flock`,
+`watch`, and the g-prefixed GNU tools Homebrew installs), a `sh -c`
+string (and the line `script -c` or `flock -c` hands a shell), shell
+keywords and grouping (`if`, `for`, `{ }`, `( )`), and a `$(…)` inside
+double quotes, which still runs. Quoted text that only mentions git never trips it — a commit
 message saying "never `git reset --hard`" passes. A guard that breaks
 lets the command through rather than blocking work. It enforces three
 rules.
@@ -1962,8 +1965,10 @@ folder; downloads (`curl -o` / `-O`, `wget -O`); archives unpacked there
 (`tar -C`, `unzip -d`); patch tools (`git apply`, `patch`), judged by
 the files the patch touches; `git checkout`, `restore`, `rm` and `mv` on
 those paths; `find -delete` or `-exec` over them; paths piped into
-`xargs`; and all of these inside wrappers, `bash -c`, `su -c`, a heredoc
-fed to a shell, or shell keywords and grouping. Removing a protected
+`xargs`; the file a wrapper writes itself (`time -o`, `script`'s
+typescript); and all of these inside wrappers and the same program
+runners the run guard reads through, `bash -c`, `su -c`, a heredoc fed
+to a shell, or shell keywords and grouping. Removing a protected
 folder, or a folder that holds one (the project itself, your home),
 counts too. A relative path is judged from the tool's working folder and
 from every folder a `cd`, `pushd`, `env -C` or `git -C` on the line
