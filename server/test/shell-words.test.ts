@@ -545,6 +545,33 @@ describe("argCommands and pagerCommands (#315)", () => {
     expect(argCommands(["man", "-P", "less", "git"])).toEqual(["less"]);
   });
 
+  // #317: `gh repo clone` plants a tree where it's told, like git clone
+  // does, yet gh's words were all data. The clone is handed back as the
+  // `git clone` line it runs, so the harness guard judges its folder the
+  // way it judges git's -- and gh stays on ARG_SAFE for everything else.
+  it("hands back the git clone a gh repo clone, fork --clone or create --clone runs", () => {
+    const rows: Array<[words: string[], inner: string]> = [
+      [["gh", "repo", "clone", "o/r", ".claude/skills/x"], "git clone o/r .claude/skills/x"],
+      [["gh", "repo", "clone", "o/r"], "git clone o/r"], // lands in r, here
+      [["gh", "repo", "clone", "-u", "up", "o/r", "x", "--", "--depth", "1"], "git clone --depth 1 o/r x"],
+      [["gh", "repo", "fork", "o/skill", "--clone"], "git clone o/skill"],
+      [["gh", "repo", "fork", "--clone", "o/skill", "--fork-name", "mine"], "git clone o/skill mine"],
+      [["gh", "repo", "create", "o/x", "--clone", "--public"], "git clone o/x"],
+    ];
+    for (const [words, inner] of rows) {
+      expect(argCommands(words), words.join(" ")).toEqual([inner]);
+      expect(runnerCommands(words), words.join(" ")).toEqual([inner]);
+    }
+    for (const safe of [
+      ["gh", "repo", "fork", "o/skill"], ["gh", "repo", "fork", "o/skill", "--clone=false"],
+      ["gh", "repo", "create", "o/x", "--public"], ["gh", "repo", "view", "o/r"], ["gh", "repo", "clone"],
+      ["gh", "pr", "create", "--body", "git clone x .claude/skills/x"],
+    ]) {
+      expect(argCommands(safe), safe.join(" ")).toEqual([]);
+    }
+    expect(ARG_SAFE.has("gh")).toBe(true);
+  });
+
   it("a pager variable's value is a command line, set on a command, alone, or exported", () => {
     for (const name of ["PAGER", "MANPAGER", "GIT_PAGER", "GH_PAGER", "ACK_PAGER"]) {
       expect(pagerCommands([`${name}=${R}`], ["man", "ls"]), name).toEqual([R]);

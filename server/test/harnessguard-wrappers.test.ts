@@ -357,6 +357,79 @@ describe("harness guard reads the one option an ARG_SAFE program runs (#315)", (
   });
 });
 
+// #317: a command that plants a whole tree at a path wasn't read, so `git
+// clone URL .claude/skills/x` passed where a mkdir of that folder was
+// refused. Each is judged like that mkdir now -- git clone, worktree add,
+// submodule add and init; gh repo clone and fork --clone, through gh's
+// ARG_SAFE reader; npx degit; the create-* initializers -- from every
+// folder a cd or -C on the line can reach, with the repo's own name as the
+// folder when none is given. Every refused shape is paired with the same
+// command landing somewhere ordinary.
+describe("harness guard reads where a tree-creating command lands (#317)", () => {
+  const URL = "https://example.invalid/o/skill.git";
+
+  it("refuses the clone, worktree, submodule, init, gh, degit and create-* shapes into a protected folder; passes them elsewhere", () => {
+    const p = proj();
+    for (const d of [".claude/skills", "hooks", "src"]) mkdirSync(join(p, d), { recursive: true });
+    const pairs: Array<[write: string, read: string]> = [
+      [`git clone ${URL} .claude/skills/x`, `git clone ${URL} src/x`],
+      [`git clone --depth 1 ${URL} .claude/commands`, `git clone --depth 1 ${URL} ../x`],
+      [`git clone -b main -o up ${URL} hooks/x`, `git clone -b main -o up ${URL} /tmp/x`], // option values aren't the folder
+      [`cd .claude/skills && git clone ${URL} .`, `git clone ${URL} .`],
+      ["git clone git@example.invalid:o/hooks.git", `git clone ${URL}`], // the repo's own name lands in hooks/
+      [`cd .claude/skills && git clone ${URL}`, `cd src && git clone ${URL}`],
+      [`git -C .claude/skills clone ${URL}`, `git -C src clone ${URL}`],
+      ["git worktree add .claude/agents/x", "git worktree add ../wt"],
+      ["git worktree add -b feat .claude/agents/x main", "git worktree add -b feat ../wt main"],
+      ["git worktree add --lock --reason x hooks/x", "git worktree list"],
+      [`git submodule add ${URL} .claude/commands/x`, `git submodule add ${URL} vendor/x`],
+      [`git submodule add -b main ${URL} hooks/sub`, "git submodule update --init"],
+      ["git submodule add https://example.invalid/o/hooks.git", `git submodule add ${URL}`],
+      ["git init .claude/skills/x", "git init src/new"],
+      ["cd .claude/skills && git init", "git init"],
+      ["git init -b main .claude/commands", "git init -b main"],
+      ["gh repo clone o/r .claude/skills/x", "gh repo clone o/r /tmp/x"],
+      ["gh repo clone o/r .claude/skills/x -- --depth 1", "gh repo clone o/r"],
+      ["cd .claude/skills && gh repo clone o/r", "cd src && gh repo clone o/r"],
+      ["cd .claude/skills && gh repo fork o/skill --clone", "gh repo fork o/skill --clone"],
+      ["cd .claude/skills && gh repo fork o/skill --clone --fork-name mine", "gh repo fork o/skill"],
+      ["gh repo clone o/hooks", "gh repo view o/hooks"], // lands in hooks/
+      ["npx degit user/repo .claude/skills/x", "npx degit user/repo new-app"],
+      ["cd .claude/skills && npx degit user/repo", "npx degit user/repo"],
+      ["bunx degit user/repo hooks/x", "bunx degit user/repo src/x"],
+      ["npx create-skill .claude/skills/x", "npx create-skill my-skill"],
+      ["npx -y create-vite@latest .claude/commands/x", "npx -y create-vite@latest my-app"],
+      ["npm create vite .claude/skills/x", "npm create vite my-app"],
+      ["npm init vite .claude/skills/x", "npm init vite my-app"],
+      ["npm create vite -- .claude/skills/x --template react", "npm create vite -- my-app --template react"],
+      ["pnpm create vite .claude/skills/x", "pnpm create vite app"],
+      ["yarn create vite .claude/agents/x", "yarn create vite app"],
+      ["bunx create-x .claude/skills/x", "bunx create-x app"],
+      ["bun create vite hooks/x", "bun create vite app"],
+      ["pnpm dlx create-x .claude/skills/x", "pnpm dlx create-x app"],
+      ["cd .claude/skills && npm create vite", "npm create vite"],
+      ["cd hooks && npm init -y", "npm init -y"],
+      [`sudo git clone ${URL} .claude/skills/x`, `sudo git clone ${URL} src/x`], // through a wrapper
+      [`bash -c "git clone ${URL} .claude/skills/x"`, `bash -c "git clone ${URL} src/x"`], // and a nested shell
+      [`gh pr list && git clone ${URL} .claude/skills/x`, `gh pr create --body "git clone ${URL} .claude/skills/x"`],
+    ];
+    for (const [write, read] of pairs) {
+      expect(guard(p, write), write).toBe(2);
+      expect(guard(p, read), read).toBe(0);
+    }
+  });
+
+  it("the destination is judged from the payload's cwd, and reaches the guard through an MCP command field (#310)", () => {
+    const p = proj();
+    mkdirSync(join(p, ".claude", "skills"), { recursive: true });
+    expect(guard(p, `git clone ${URL}`, ".claude/skills")).toBe(2); // skill/ lands in the cwd
+    expect(guard(p, `git clone ${URL} ../../src/x`, ".claude/skills")).toBe(0);
+    expect(call(p, "mcp__shell__run", { command: `git clone ${URL} .claude/skills/x` })).toBe(2);
+    expect(call(p, "mcp__shell__run", { command: "gh repo clone o/r .claude/skills/x" })).toBe(2);
+    expect(call(p, "mcp__shell__run", { command: `git clone ${URL} src/x` })).toBe(0);
+  });
+});
+
 /** Writes a patch touching `target` into the fixture; returns its name. */
 function patchFile(projectDir: string, name: string, target: string): string {
   writeFileSync(join(projectDir, name), [

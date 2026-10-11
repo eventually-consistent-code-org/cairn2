@@ -1998,7 +1998,16 @@ remove, create or change files (`rm`, `touch`, `tee`, `chmod`, `sed -i`,
 folder; downloads (`curl -o` / `-O`, `wget -O`); archives unpacked there
 (`tar -C`, `unzip -d`); patch tools (`git apply`, `patch`), judged by
 the files the patch touches; `git checkout`, `restore`, `rm` and `mv` on
-those paths; `find -delete` or `-exec` over them; paths piped into
+those paths; the folder a tree-creating command plants, judged like a
+`mkdir` of it — `git clone`, `git worktree add`, `git submodule add`,
+`git init`, `gh repo clone`, `gh repo fork --clone`, `npx degit` and the
+`create-*` initializers (`npx create-x`, `npm create x`, `npm init x`,
+`pnpm`/`yarn`/`bun create`, and a bare `npm init`'s `package.json`),
+with the repo's own name as the folder when none is given, so a clone
+into `.claude/skills` or `~/.claude/skills` — the install line a skill
+README carries, which can plant a plugin with hooks and MCP servers of
+its own — is refused while one into `src/`, `/tmp` or the project root
+passes; `find -delete` or `-exec` over them; paths piped into
 `xargs`; the file a wrapper writes itself (`time -o`, `script`'s
 typescript); and all of these inside wrappers and the same program
 runners the run guard reads through — including the off-table backstop,

@@ -2557,6 +2557,111 @@ describe("harness guard protects the MCP scripts reached through a folder word (
   });
 });
 
+// #317: #309 protected the skill, agent and command folders against Write,
+// mkdir and cp, but a command that plants a whole tree at a path wasn't
+// read: `git clone URL .claude/skills/x` passed and planted a skill -- or
+// a plugin carrying its own hooks and MCP servers -- under a protected
+// folder, the install line a skill README carries. Each tree-creating
+// command is judged like a mkdir of where it lands now: git clone,
+// worktree add, submodule add and init; gh repo clone and fork --clone;
+// npx degit; and the create-* initializers. One landing elsewhere passes.
+describe("harness guard refuses tree-creating commands into protected folders (#317)", () => {
+  const URL = "https://example.invalid/o/skill.git";
+
+  /** A home with each protected folder and a repos/ beside them; a project with its own skills/ and src/. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-tree-proj-");
+    const home = freshDir("cairn-hooks-tree-home-");
+    for (const d of [join(home, ".claude", "skills"), join(home, ".claude", "agents"), join(home, ".claude", "commands"),
+      join(home, ".claude", "hooks"), join(home, "repos"), join(p, ".claude", "skills"), join(p, "src")]) {
+      mkdirSync(d, { recursive: true });
+    }
+    return { p, home };
+  }
+
+  /** Exit status and stderr for one Bash line, with no inherited override, CDPATH or plugin root. */
+  function run(p: string, home: string, command: string) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("refuses each tree command into a protected folder, by path, by cwd or by the repo's own name, naming the folder", () => {
+    const { p, home } = fixture();
+    const cases: Array<[command: string, phrase: string]> = [
+      [`git clone ${URL} ~/.claude/skills/x`, "your machine-wide skills"],
+      [`git clone --depth 1 ${URL} $HOME/.claude/agents`, "your machine-wide agent definitions"],
+      [`cd ~/.claude/skills && git clone ${URL}`, "your machine-wide skills"], // lands in skill/, here
+      [`cd ~/.claude/commands && git clone ${URL} .`, "your machine-wide slash commands"],
+      ["git worktree add ~/.claude/agents/x", "your machine-wide agent definitions"],
+      [`git submodule add ${URL} ~/.claude/skills/x`, "your machine-wide skills"],
+      ["git init ~/.claude/hooks/x", "your machine-wide Claude hooks"],
+      ["cd ~/.claude/skills && git init", "your machine-wide skills"],
+      ["gh repo clone o/skill ~/.claude/skills/x", "your machine-wide skills"],
+      ["cd ~/.claude/skills && gh repo clone o/skill", "your machine-wide skills"],
+      ["cd ~/.claude/skills && gh repo fork o/skill --clone", "your machine-wide skills"],
+      ["npx degit user/repo ~/.claude/skills/x", "your machine-wide skills"],
+      ["cd ~/.claude/commands && npx degit user/repo", "your machine-wide slash commands"],
+      ["npx create-skill ~/.claude/skills/x", "your machine-wide skills"],
+      ["npm create vite ~/.claude/skills/x", "your machine-wide skills"],
+      ["yarn create skill $HOME/.claude/agents/x", "your machine-wide agent definitions"],
+      ["cd ~/.claude/skills && npm init -y", "your machine-wide skills"], // a package.json there
+      [`git clone ${URL} .claude/skills/x`, "the project's skills"],
+      [`cd .claude/skills && git clone ${URL}`, "the project's skills"],
+      [`git clone ${URL} hooks/x`, "the hook directory"],
+      ["git clone git@example.invalid:o/hooks.git", "the hook directory"], // named by the repo
+    ];
+    for (const [c, phrase] of cases) {
+      const r = run(p, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(phrase);
+      expect(r.stderr, c).toContain("owner's go-ahead");
+      expect(r.stderr, c).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+    }
+  });
+
+  it("clones and scaffolds elsewhere, their listings, and gh's other commands stay ordinary work", () => {
+    const { p, home } = fixture();
+    for (const c of [
+      `git clone ${URL} ~/repos/skill`,
+      `git clone ${URL} /tmp/skill`,
+      `cd ~/repos && git clone ${URL}`,
+      `git clone ${URL}`, // skill/ at the project root
+      `git clone ${URL} src/skill`,
+      "git worktree add ../wt",
+      "git worktree add ~/repos/wt -b feat",
+      "git worktree list",
+      `git submodule add ${URL} vendor/skill`,
+      "git submodule update --init --recursive",
+      "git init",
+      "git init ~/repos/new",
+      "git init src/new",
+      "gh repo clone o/r /tmp/x",
+      "gh repo clone o/r",
+      "cd ~/repos && gh repo fork o/r --clone",
+      "gh repo fork o/r",
+      "gh repo view o/r",
+      `gh pr create --body "git clone ${URL} .claude/skills/x"`,
+      "npx degit user/repo new-app",
+      "npx degit user/repo ~/repos/app",
+      "npx create-vite my-app",
+      "npm create vite ~/repos/app",
+      "npm init -y",
+      "npm init vite@latest app -- --template react",
+      "yarn create vite app",
+      "bun create vite app",
+      "ls ~/.claude/skills",
+      "git clone --help",
+    ]) {
+      expect(run(p, home, c).status, c).toBe(0);
+    }
+  });
+});
+
 // #299: the holder rule ran only for removal, so `chmod 000` on the cairn
 // home (~/@cairn or CAIRN_HOME) passed -- and the run guard, unable to read
 // the stamp or the run list, then let an unshipped push through. Changing

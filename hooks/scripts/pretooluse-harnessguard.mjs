@@ -59,7 +59,13 @@
  *   --shell, a gh extension ...), and so is a pager variable set on the
  *   line (PAGER=, MANPAGER=, GIT_PAGER= ...). A
  *   relative path is judged from every folder a cd, env -C or git -C on the
- *   line can reach (#258); after a cd it can't follow, refused. Removing a
+ *   line can reach (#258); after a cd it can't follow, refused. A command
+ *   that plants a whole tree is judged by where it lands, like a mkdir of
+ *   it (#317): git clone, worktree add, submodule add and init, gh repo
+ *   clone and fork --clone, npx degit, and the create-* initializers npm,
+ *   pnpm, yarn, bun and npx run -- the repo's own name, here, when no
+ *   folder is given, so a clone into .claude/skills plants a skill, or a
+ *   plugin with hooks of its own, and is refused. Removing a
  *   protected folder or one holding it counts, and so does changing its
  *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
  *   #299), or claude writing its config itself: `claude mcp add` (#303),
@@ -320,6 +326,25 @@ const GIT_APPLY = { short: "pC", long: ["--directory", "--include", "--exclude",
 // git's global options that take the next word as their value.
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--config-env", "--super-prefix"]);
+
+// The options of git's tree-creating subcommands that take a value (#317),
+// so a destination is never mistaken for one: clone, worktree add,
+// submodule add and init.
+const GIT_CLONE = { short: "obujc", long: ["--template", "--origin", "--branch", "--upload-pack",
+  "--reference", "--reference-if-able", "--separate-git-dir", "--depth", "--shallow-since",
+  "--shallow-exclude", "--config", "--filter", "--jobs", "--server-option", "--bundle-uri"] };
+const GIT_WORKTREE_ADD = { short: "bB", long: ["--reason"] };
+const GIT_SUBMODULE_ADD = { short: "b", long: ["--branch", "--name", "--reference", "--depth"] };
+const GIT_INIT = { short: "b", long: ["--template", "--separate-git-dir", "--object-format", "--ref-format",
+  "--initial-branch"] };
+
+// An initializer package a runner scaffolds a tree with (#317): create-x,
+// @scope/create-x (its scope dropped by cmdName), create-x@latest.
+const CREATE_PKG = /^create-[\w.-]*(?:@[^@]*)?$/;
+
+// The runners whose `create <x>` / `init <x>` run an initializer, and
+// whose bare `init` writes a package.json here (#317).
+const INIT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 
 // The `claude mcp` subcommands that write a server config (#303); list,
 // get, serve, login and logout leave every config as it is.
@@ -1105,6 +1130,18 @@ function urlName(url) {
 }
 
 /**
+ * The folder git clone makes when none is given (#317): the repo's last
+ * name, from a URL, an scp-like host:path or a local path, minus .git --
+ * kept, or added, for a bare or mirror clone.
+ */
+function repoName(url, bare = false) {
+  const path = String(url).replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf(":")) + 1);
+  if (!name) return null;
+  return bare ? name.replace(/(?<!\.git)$/i, ".git") : name.replace(/\.git$/i, "") || null;
+}
+
+/**
  * Every path a patch names: `diff --git` pairs, ---/+++ (and context-diff
  * ***) header pairs, rename/copy lines, and Index: lines.
  */
@@ -1639,7 +1676,51 @@ function applyTargets(rest, seg, ctx, add) {
   }
 }
 
-/** git: checkout/restore pathspecs, rm/mv operands, apply's patch -- from its -C folder (#258). */
+/**
+ * The folder a tree-creating git command plants (#317), judged like a
+ * mkdir of it: `clone [opts] URL [DIR]` (DIR defaults to the repo's name,
+ * here), `worktree add [opts] DIR [branch]`, `submodule add [opts] URL
+ * [DIR]`, `init [DIR]` (here, by default). A clone into a protected
+ * folder plants a skill, or a plugin with hooks and MCP servers of its
+ * own -- the install line a README would carry.
+ */
+function gitTreeTargets(sub, rest, dir, add) {
+  if (sub === "clone") {
+    const { opts, operands } = parseOpts(rest, GIT_CLONE);
+    const [url, dest] = operands;
+    const name = url === undefined ? null : dest ?? repoName(url, hasOpt(opts, "--bare", "--mirror"));
+    if (name) add(name, "write", dir);
+  } else if (sub === "init") {
+    add(parseOpts(rest, GIT_INIT).operands[0] ?? ".", "write", dir);
+  } else {
+    // worktree and submodule: their own options may sit before `add`
+    const at = rest.findIndex((a) => !a.startsWith("-"));
+    if (at < 0 || rest[at] !== "add") return;
+    const { operands } = parseOpts(rest.slice(at + 1), sub === "worktree" ? GIT_WORKTREE_ADD : GIT_SUBMODULE_ADD);
+    const [first, second] = operands;
+    if (first === undefined) return;
+    const dest = sub === "worktree" ? first : second ?? repoName(first);
+    if (dest) add(dest, "write", dir);
+  }
+}
+
+/**
+ * The folder an initializer scaffolds (#317): every bare word it's given
+ * may be it -- `create-vite my-app --template react` names my-app, and
+ * `react` judged as a folder here is harmless -- and none means here.
+ */
+function scaffoldTargets(words, add) {
+  const bare = words.filter((a) => a !== "--" && !a.startsWith("-"));
+  for (const d of bare.length ? bare : ["."]) add(d, "write");
+}
+
+/** The folder degit fills (#317): `degit SRC [DIR]`, here when none. */
+function degitTargets(words, add) {
+  const bare = words.filter((a) => a !== "--" && !a.startsWith("-"));
+  if (bare.length) add(bare[1] ?? ".", "write");
+}
+
+/** git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree clone and kin plant (#317) -- from its -C folder (#258). */
 function gitTargets(args, seg, ctx, add) {
   let k = 0;
   let dir = ctx.dir;
@@ -1659,6 +1740,7 @@ function gitTargets(args, seg, ctx, add) {
       add(join(dest, basename(s)), "write", dir);
     }
   } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
+  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, args.slice(k + 1), dir, add);
 }
 
 /**
@@ -1753,8 +1835,30 @@ function claudeTargets(args, ctx, add) {
  * claude ...`), a program named claude, or a path into the package. The
  * words after it are claude's. A `-c` / `--call` / `--shell-mode` string is
  * a command line the runner hands a shell, read like `bash -c`.
+ *
+ * The tree an initializer plants (#317), judged like a mkdir of it: `npx
+ * degit SRC [DIR]`, `npx create-x [DIR]` and `bunx create-x [DIR]`; `npm
+ * create x [DIR]`, `npm init x [DIR]`, `pnpm create`, `yarn create` and
+ * `bun create` the same; none lands here. A bare `npm init` (pnpm's,
+ * yarn's, bun's too) writes a package.json here.
  */
-function runnerTargets(args, ctx, add, out) {
+function runnerTargets(cmd, args, ctx, add, out) {
+  // the bare words, past the values of a runner's own -p / -c
+  const bare = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") { bare.push(...args.slice(i + 1)); break; }
+    if (["-p", "--package", "-c", "--call"].includes(a)) { i++; continue; }
+    if (!a.startsWith("-")) bare.push(a);
+  }
+  const [head, ...tail] = bare;
+  if (head !== undefined && INIT_RUNNERS.has(cmd) && (head === "create" || head === "init")) {
+    if (tail.length) scaffoldTargets(tail.slice(1), add);
+    else if (head === "init") add("package.json");
+  } else if (head !== undefined && (cmd === "npx" || cmd === "pnpx" || cmd === "bunx")) {
+    if (cmdName(head) === "degit") degitTargets(tail, add);
+    else if (CREATE_PKG.test(cmdName(head))) scaffoldTargets(tail, add);
+  }
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const line = ["-c", "--call", "--shell-mode"].includes(a) ? args[i + 1]
@@ -1891,7 +1995,10 @@ function writeTargets(seg, ctx) {
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
   else if (cmd === "git") gitTargets(args, seg, ctx, add);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
-  else if (RUNNERS.has(cmd)) runnerTargets(args, ctx, add, out);
+  else if (RUNNERS.has(cmd)) runnerTargets(cmd, args, ctx, add, out);
+  // #317 -- an initializer run by name, or through `pnpm dlx` / `npm exec`
+  else if (cmd === "degit") degitTargets(args, add);
+  else if (CREATE_PKG.test(cmd)) scaffoldTargets(args, add);
   // #311 -- a program runner off the shared table (op run, bundle exec, tmux
   // new-session, uv run ...) may run a later word as the real command; read
   // those inner lines too. A program that only prints or searches its
