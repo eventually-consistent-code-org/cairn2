@@ -2019,6 +2019,16 @@ The protected set also covers cairn's own trust anchors:
 - `~/.claude/skills/`, `~/.claude/agents/` and `~/.claude/commands/`,
   since a folder in `~/.claude/skills/` carrying a plugin manifest loads
   next session as a plugin with its own hooks and MCP servers;
+- `~/.claude/hooks/`, and every script a hook or the status line runs in
+  your user settings, the project's `.claude/settings.json` and
+  `settings.local.json`, or the project's and the live plugin's
+  `hooks/hooks.json` — wherever it lives (`~/.config/…`, `$HOME/bin/…`,
+  `$CLAUDE_PROJECT_DIR/…`, `${CLAUDE_PLUGIN_ROOT}/…`). A script swapped
+  in runs at the next hook event, outside any tool call, so replacing
+  one is refused like adding a hook is; so are removing the folder
+  around it and a rename that drops a new one in its place. The
+  settings are read fresh on every call; one that won't parse is
+  skipped, and the folder rule still stands;
 - the project's `.claude/hooks/`, `.claude/agents/`, `.claude/skills/`
   and `.claude/commands/`;
 - Cursor's `.cursor/hooks.json` and `.cursor/hooks/`, plus removing or

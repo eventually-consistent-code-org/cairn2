@@ -6,7 +6,11 @@
  *   server configs (.mcp.json, ~/.claude.json, Cursor's project and home
  *   mcp.json, #298), the settings cascade, the plugin manifest, .claude/hooks
  *   and agents (and Cursor's hooks, #269), the skill, agent and command
- *   folders in .claude and ~/.claude (#309), the plugin copy that runs (#267:
+ *   folders in .claude and ~/.claude (#309), ~/.claude/hooks and every
+ *   script those settings run as a hook or the status line, wherever it
+ *   lives (#312: read fresh from the settings and hooks.json files each
+ *   run, so replacing ~/.config/x/statusline is refused like adding a
+ *   hook is), the plugin copy that runs (#267:
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
@@ -122,6 +126,13 @@ const HOME_FILES = [
   ["", [".claude.json"], "your machine-wide MCP server config"],
   [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
 ];
+
+// What a refusal calls a script the settings run (#312), and a folder on the way to one.
+const SCRIPT_WHAT = "a script your settings run as a hook or status line";
+const SCRIPT_HOLDER = `the folder holding ${SCRIPT_WHAT}`;
+
+// A word that is a URL, never a file a hook runs.
+const URL_WORD = /^[a-z][\w+.-]*:\/\//i;
 
 // Stand-ins for names the command line doesn't spell out, each matching
 // any name, dotfiles included. ANY: what `rsync src/ dir` or `cp -r src/.
@@ -328,6 +339,8 @@ let HOMES = [];
 // *.json files directly in it (the way the run guard reads runs/); `carve`
 // lists project folders inside dir that stay ordinary work.
 let ZONES = [];
+// The scripts the protected settings run (#312), each in every spelling.
+let SCRIPTS = [];
 // The protected paths find could walk to, listed once per run, and the
 // zones too big to list in full.
 let ENTRIES = null;
@@ -451,6 +464,10 @@ function expandVars(raw) {
  * (`claude plugin init` scaffolds exactly that), ~/.claude/agents and
  * ~/.claude/commands. No carve-out: a project inside one is a plugin that
  * loads, so its files are the harness too.
+ *
+ * And ~/.claude/hooks (#312), where your settings keep the scripts their
+ * hooks run: a script swapped there runs at the next hook event, outside
+ * any tool call, where no guard sees what it does.
  */
 function outsideZones() {
   const zones = [];
@@ -467,14 +484,20 @@ function outsideZones() {
     add(join(home, ".claude", "skills"), "your machine-wide skills", true);
     add(join(home, ".claude", "agents"), "your machine-wide agent definitions", true);
     add(join(home, ".claude", "commands"), "your machine-wide slash commands", true);
+    add(join(home, ".claude", "hooks"), "your machine-wide Claude hooks", true);
   }
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL("../..", import.meta.url));
+  const pluginRoot = livePluginRoot();
   const plugin = spellings(pluginRoot);
   if (!plugin.some((r) => ROOTS.some((root) => holds(root, r)))) {
     const carve = ROOTS.filter((root) => plugin.some((r) => holds(r, root)));
     add(pluginRoot, "the installed plugin these hooks run from", true, carve);
   }
   return zones;
+}
+
+/** The plugin root these hooks run from: CLAUDE_PLUGIN_ROOT, which Claude Code hands its hooks, else two up from here. */
+function livePluginRoot() {
+  return resolve(process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL("../..", import.meta.url)));
 }
 
 /** The protected place outside the project a path lies inside, or null -- letter case aside (#295). */
@@ -500,6 +523,100 @@ function readText(abs) {
   }
 }
 
+// Scripts the settings run (#312)
+
+/** Every command line a settings or hooks.json file runs: each hook's `command`, and the status line's. */
+function settingsCommands(json) {
+  const out = [];
+  const walk = (v, depth) => {
+    if (!v || typeof v !== "object" || depth > 8) return;
+    if (typeof v.command === "string") out.push(v.command);
+    for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(json?.hooks, 0);
+  if (typeof json?.statusLine?.command === "string") out.push(json.statusLine.command);
+  return out;
+}
+
+/**
+ * The file one word of a hook command names, spelled out the way the
+ * hook's shell would: ~, $HOME, $CLAUDE_PROJECT_DIR and $CLAUDE_PLUGIN_ROOT
+ * (braced or not), else from the project root, where hooks run. Null for
+ * a program found on PATH (node, bash, npx), a flag, an assignment, a URL,
+ * a device, a word with any other variable, a substitution or a wildcard,
+ * and a folder that's there -- `cd "$CLAUDE_PROJECT_DIR"` runs nothing.
+ */
+function scriptFile(word, vars) {
+  if (word.startsWith("-") || ASSIGNMENT.test(word) || URL_WORD.test(word)) return null;
+  let w = word.replace(/^~(?=\/|$)/, () => vars.HOME);
+  const m = /^\$(?:(\w+)|\{(\w+)\})(?=\/|$)/.exec(w);
+  if (m) {
+    const v = vars[m[1] ?? m[2]];
+    if (!v) return null;
+    w = v + w.slice(m[0].length);
+  }
+  if (!w.includes("/") || /[$`*?[]/.test(w)) return null;
+  const abs = resolve(vars.CLAUDE_PROJECT_DIR, w);
+  if (abs === "/dev" || abs.startsWith("/dev/")) return null;
+  try { if (statSync(abs).isDirectory()) return null; } catch { /* not there yet: one planted there runs too */ }
+  return abs;
+}
+
+/** The files one hook command names: every word that is a path, its `< file` inputs, and the same inside `bash -c`. */
+function commandScripts(command, vars, depth = 0) {
+  const out = [];
+  for (const seg of shellSegments(command, READ)) {
+    const { words } = unwrap(seg.words, READ);
+    const str = SHELLS.has(cmdName(words[0])) ? shellCommandString(words.slice(1)) : null;
+    // the -c string is a command line, read as one below, not a path
+    for (const w of [...seg.words, ...(seg.inputs ?? [])]) {
+      const f = w === str ? null : scriptFile(w, vars);
+      if (f) out.push(f);
+    }
+    if (str && depth < 3) out.push(...commandScripts(str, vars, depth + 1));
+  }
+  return out;
+}
+
+/**
+ * Every script the protected settings run (#312), in each spelling: the
+ * paths that hook commands and the status line name in your machine-wide
+ * settings, the project's settings, and the project's and the live
+ * plugin's hooks/hooks.json. A file that can't be read or parsed is
+ * skipped quietly -- the folder rules still stand, and a comment in
+ * settings never blocks every write -- and nothing is kept between runs.
+ */
+function settingsScripts() {
+  const home = resolve(homedir());
+  const project = ROOTS[0];
+  const plugin = livePluginRoot();
+  // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means
+  const sources = [
+    ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin]),
+    ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin]),
+    [join(project, "hooks", "hooks.json"), project],
+    [join(plugin, "hooks", "hooks.json"), plugin],
+  ];
+  const seen = new Set();
+  const out = new Set();
+  for (const [file, pluginRoot] of sources) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    try {
+      const vars = { HOME: home, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_ROOT: pluginRoot };
+      for (const c of settingsCommands(JSON.parse(readText(file) ?? ""))) {
+        for (const f of commandScripts(c, vars)) for (const s of spellings(f)) out.add(s);
+      }
+    } catch { /* missing, unreadable or malformed: skip this file */ }
+  }
+  return [...out];
+}
+
+/** True when `abs` is a folder on the way to a script the settings run (#312). */
+function holdsScript(abs) {
+  return SCRIPTS.some((s) => holds(abs, s) && !same(abs, s));
+}
+
 // Rules
 
 /** The file itself is protected (the check every version of this guard made), letter case aside (#295). */
@@ -510,9 +627,10 @@ function fileRule(abs) {
   const zone = zoneOf(abs);
   if (zone) return zone;
   const rel = projectRelative(abs);
-  if (rel === null) return null; // elsewhere outside the project -- not this guard's business
-  for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
-  return null;
+  if (rel !== null) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
+  // a script the settings run, wherever it lives (#312); anything else
+  // outside the project is not this guard's business
+  return SCRIPTS.some((s) => same(abs, s)) ? SCRIPT_WHAT : null;
 }
 
 /** The path names a protected FOLDER: writing into it, replacing it or removing it (#265), letter case aside (#295). */
@@ -523,21 +641,28 @@ function dirRule(abs) {
   const zone = ZONES.find((z) => same(z.dir, abs));
   if (zone) return zone.what;
   const rel = projectRelative(abs);
-  if (!rel) return null;
-  const r = fold(rel);
-  if (r === "hooks") return "the hook directory";
-  for (const [up, sub, what] of SUB_TREES) if (r === `${up}/${sub}` || r.endsWith(`/${up}/${sub}`)) return what;
-  const name = r.split("/").pop();
-  if (name === ".claude") return "a Claude settings directory";
-  if (name === ".claude-plugin") return "the plugin manifest";
-  if (name === ".cursor") return "Cursor's settings directory";
-  return null;
+  if (rel) {
+    const r = fold(rel);
+    if (r === "hooks") return "the hook directory";
+    for (const [up, sub, what] of SUB_TREES) if (r === `${up}/${sub}` || r.endsWith(`/${up}/${sub}`)) return what;
+    const name = r.split("/").pop();
+    if (name === ".claude") return "a Claude settings directory";
+    if (name === ".claude-plugin") return "the plugin manifest";
+    if (name === ".cursor") return "Cursor's settings directory";
+  }
+  // A folder on the way to a script the settings run, while it isn't there
+  // as a folder (#312): a write here -- `mv /tmp/x ~/.config/iterm2` --
+  // puts a new script in the old one's place. Into one that's there, a
+  // write lands beside the script and is judged by its own name.
+  if (!holdsScript(abs)) return null;
+  try { return statSync(abs).isDirectory() ? null : SCRIPT_WHAT; } catch { return SCRIPT_WHAT; }
 }
 
 /**
  * Removing the project, or any folder above it, removes everything in it
  * (#265); locking one with chmod, chown or an ACL locks everything in it
- * too (#299). The same goes for the home folder and each cairn home.
+ * too (#299). The same goes for the home folder, each cairn home, and a
+ * folder on the way to a script the settings run (#312).
  */
 function holderRule(abs) {
   if (ROOTS.some((root) => holds(abs, root))) {
@@ -547,7 +672,8 @@ function holderRule(abs) {
     return "the folder holding your machine-wide Claude settings";
   }
   const zone = ZONES.find((z) => holds(abs, z.dir));
-  return zone ? `the folder holding ${zone.what}` : null;
+  if (zone) return `the folder holding ${zone.what}`;
+  return holdsScript(abs) ? SCRIPT_HOLDER : null;
 }
 
 /** Could this name, once the shell expands it in `dir`, be a *.json file there? */
@@ -653,6 +779,14 @@ function globRule(abs, mode) {
   }
   const zone = zoneGlob(p, remove);
   if (zone) return zone;
+  // a script the settings run (#312): its own name, or a folder on the way
+  // to it that a removal takes or a copied folder's unknown contents fill
+  for (const s of SCRIPTS) {
+    const d = s.split(sep).filter(Boolean);
+    if (p.length > d.length || !p.every((x, j) => could(x, d[j]))) continue;
+    if (p.length === d.length || STANDINS.includes(p[p.length - 1])) return SCRIPT_WHAT;
+    if (remove || mode === "perm") return SCRIPT_HOLDER;
+  }
   if (remove || mode === "perm") {
     for (const dir of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
       const d = dir.split(sep).filter(Boolean);
@@ -913,12 +1047,13 @@ function treeRule(abs) {
 
 /**
  * Every protected path find could reach: the fixed surfaces, what hooks/
- * holds on disk, and the protected places outside the project (#263) --
- * a zone too big to list goes in UNLISTED.
+ * holds on disk, the scripts the settings run (#312), and the protected
+ * places outside the project (#263) -- a zone too big to list goes in
+ * UNLISTED.
  */
 function protectedEntries() {
   if (ENTRIES) return ENTRIES;
-  ENTRIES = [];
+  ENTRIES = [...SCRIPTS];
   for (const root of ROOTS) {
     const trees = SUB_TREES.map(([up, sub]) => join(root, up, sub));
     ENTRIES.push(join(root, "hooks"), join(root, "hooks", "hooks.json"), join(root, ".mcp.json"),
@@ -958,11 +1093,12 @@ function protectedEntries() {
 
 /**
  * The folders from `start` down to each protected place under it -- the
- * project, the home folder, each zone -- every one a folder holding it.
+ * project, the home folder, each zone, each script the settings run --
+ * every one a folder holding it.
  */
 function holdersUnder(start) {
   const out = [];
-  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir)]) {
+  for (const anchor of [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir), ...SCRIPTS]) {
     const rest = below(start, anchor);
     if (rest) for (let k = 0; k <= rest.length; k++) out.push(join(start, ...rest.slice(0, k)));
   }
@@ -1805,6 +1941,9 @@ try {
   // The session-wide override is the human's to set. The Bash prefix form
   // is read per command, in lineTargets.
   if (process.env.CAIRN_HARNESS_EDIT === "1") process.exit(0);
+
+  // What the protected settings run, read fresh on every call (#312).
+  SCRIPTS = settingsScripts();
 
   let hit = null;
 
