@@ -1318,8 +1318,9 @@ function gitTargets(args, seg, ctx, add) {
  * init scaffolds a plugin in ~/.claude/skills; configure --values-stdin
  * saves a plugin's options; marketplace add, remove and update change the
  * marketplaces plugins install from; import brings another agent's config
- * in. A dry run (prune, import) and help pass -- help only right after
- * the subcommand words, where no option can have swallowed it as a value.
+ * in. A dry run (prune, import) and help pass -- help only as the last
+ * word, right after the subcommand words, where no option can have
+ * swallowed it as a value.
  */
 function claudeTargets(args, ctx, add) {
   // a nested shell's "$1" is whatever its caller's xargs or find handed it
@@ -1328,8 +1329,9 @@ function claudeTargets(args, ctx, add) {
   // the scope options sit before `--`; what follows it is a server's own command line
   const end = words.includes("--") ? words.indexOf("--") : words.length;
   const head = words.slice(0, end);
-  // -h, --help, or the help subcommand of a command group (`claude plugin help install`)
-  const help = head.findIndex((a, i) => a === "-h" || a === "--help" ||
+  // -h or --help ending the options, or the help subcommand of a command
+  // group (`claude plugin help install`), which only ever prints
+  const help = head.findIndex((a, i) => ((a === "-h" || a === "--help") && i === head.length - 1) ||
     (a === "help" && ["plugin", "plugins", "marketplace", "mcp"].some((c) => same(head[i - 1] ?? "", c))));
   if (!streamed && help >= 0 && head.slice(0, help).every((a) => CLAUDE_COMMAND_WORDS.some((c) => same(a, c)))) return;
   // the words after the first one naming a subcommand, or null

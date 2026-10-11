@@ -1978,9 +1978,10 @@ counts too. So does Claude Code writing that configuration itself:
 off next session), `init` and `configure --values-stdin`; the `claude
 plugin marketplace` writes; and `claude import` — run as `claude` or
 through `npx`, `bunx`, `pnpm dlx`, `yarn dlx` or `node` and its CLI.
-Listing, a dry run and `--help` pass. A relative path is judged from the tool's working folder and
-from every folder a `cd`, `pushd`, `env -C` or `git -C` on the line
-could have moved to, in any order, because a `cd` can fail or run later.
+Listing, a dry run and `--help` pass. A relative path is judged from
+the tool's working folder and from every folder a `cd`, `pushd`, `env
+-C` or `git -C` on the line could have moved to, in any order, because a
+`cd` can fail or run later.
 After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
 relative write is refused with a line saying so — name the folder
 plainly, or write to an absolute path, and it can judge it. Reading

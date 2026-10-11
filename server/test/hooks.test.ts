@@ -1835,7 +1835,7 @@ describe("harness guard refuses Claude Code's plugin and import commands (#308)"
     }
   });
 
-  it("help counts only right after the subcommand words, where no option can have swallowed it", () => {
+  it("help counts only right after the subcommand words, ending them, where no option can have swallowed it", () => {
     const { p, home } = fixture();
     for (const c of ["claude --help", "claude plugin -h", "claude plugin install --help", "claude mcp add --help",
       "claude plugin help install"]) {
@@ -1844,7 +1844,7 @@ describe("harness guard refuses Claude Code's plugin and import commands (#308)"
     // anywhere else the flag may be a value an option swallowed (`--description -h`
     // scaffolds a plugin described "-h") or a word for a server's command line
     for (const c of ["claude plugin init helper --description -h", "claude plugin install evil --help",
-      "claude mcp add evil --help -- node x", "claude plugin prune -s --dry-run"]) {
+      "claude mcp add evil --help -- node x", "claude plugin prune -s --dry-run", "claude plugin --help disable cairn"]) {
       expect(run(p, home, c).status, c).toBe(2);
     }
   });
