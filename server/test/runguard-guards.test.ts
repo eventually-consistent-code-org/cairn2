@@ -1425,3 +1425,135 @@ describe("run guard: a stamp or run list that exists but can't be read refuses (
     expect(guard(proj, home, "git checkout main").status).toBe(0);
   });
 });
+
+describe("run guard: a commit or ref move earlier in the line can't slip past the ship gate (#305)", () => {
+  /**
+   * Repo on main with a `feature` branch one commit ahead, and a clean
+   * stamp at main's tip -- so a push of main on its own passes, and only
+   * what runs ahead of it on the line can change what lands.
+   */
+  function stampedMain(): { proj: string; home: string } {
+    const f = fixture(undefined, false);
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    writeFileSync(join(f.proj, "f.txt"), "f\n");
+    git(f.proj, "add", "f.txt");
+    git(f.proj, "commit", "-q", "-m", "feature", "--no-gpg-sign");
+    git(f.proj, "checkout", "-q", "main");
+    stamp(f.proj, f.home, { head: git(f.proj, "rev-parse", "main") });
+    return f;
+  }
+
+  // The host's own push settings must not decide these
+  const push = (proj: string, home: string, command: string, env: Record<string, string> = {}) =>
+    guard(proj, home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", ...env });
+
+  // Each row: [a commit or ref move runs first, then the push -- the push on its own].
+  // Before #305 the guard resolved the pushed commit before the line ran, so
+  // each one passed under the clean stamp and landed an unchecked commit.
+  const rows: Array<[moved: string, alone: string]> = [
+    ["git commit --allow-empty -m x && git push origin HEAD:main", "git push origin HEAD:main"],
+    ["git commit -am fix && git push", "git push"],
+    ["git merge feature && git push origin main", "git push origin main"],
+    ["git branch -f main feature && git push origin main", "git push origin main"],
+    ["git reset --soft HEAD~1; git push origin main", "git push origin main"],
+    ["git cherry-pick feature && git push origin main", "git push origin main"],
+    ["git rebase feature && git push origin main", "git push origin main"],
+    ["git revert --no-edit HEAD && git push origin main", "git push origin main"],
+    ["git pull && git push origin main", "git push origin main"],
+    ["git fetch origin && git push origin FETCH_HEAD:main", "git push origin main"],
+    ["git am fix.patch && git push origin main", "git push origin main"],
+    ["git update-ref refs/heads/main feature && git push origin main", "git push origin main"],
+    ["git checkout feature && git push origin HEAD:main", "git push origin HEAD:main"],
+    ["git checkout -B main feature && git push origin main", "git push origin main"],
+    ["git switch -C main feature && git push origin main", "git push origin main"],
+    ["git stash pop && git push origin main", "git push origin main"],
+    ["git tag -f v1 feature && git push origin v1:main", "git push origin main"],
+    ["git tag v2 feature && git push origin v2:main", "git push origin main"],
+    ["git push origin feature && git push origin origin/feature:main", "git push origin main"],
+    // an alias, a wrapper, a nested shell, another program, a write into the ref store
+    ["git ci -m x && git push origin main", "git push origin main"],
+    ["sudo -u me git commit -am x && git push origin main", "git push origin main"],
+    ["bash -c 'git commit -am x' && git push origin main", "git push origin main"],
+    ["npm version patch && git push origin main", "git push origin main"],
+    ["echo abc > .git/refs/heads/main && git push origin main", "git push origin main"],
+    // order the guard can't trust: a substitution, a loop, a function, the background
+    ['echo "$(git commit -am x)" && git push origin main', "git push origin main"],
+    ["for i in 1 2; do git push origin main; git commit --allow-empty -m x; done", "git push origin main"],
+    ["f() { git push origin main; }; git commit --allow-empty -m x; f", "git push origin main"],
+    ["git push origin main & git commit --allow-empty -m x", "git push origin main"],
+  ];
+
+  it("each is refused even under a clean stamp, saying push alone; the push on its own passes", () => {
+    const { proj, home } = stampedMain();
+    for (const [moved, alone] of rows) {
+      const r = push(proj, home, moved);
+      expect(r.status, moved).toBe(2);
+      expect(r.stderr, moved).toContain("earlier command on this line");
+      expect(r.stderr, moved).toContain("push as its own step");
+      expectOwnerTail(r.stderr, moved, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+      expect(push(proj, home, alone).status, alone).toBe(0);
+    }
+  });
+
+  it("read-only commands before the push, and anything after it, keep today's answer", () => {
+    const { proj, home } = stampedMain();
+    for (const c of [
+      "git status && git push origin main",
+      "git log --oneline -3; git push origin main",
+      "git diff --stat 2>&1 && git push origin main",
+      "git rev-parse HEAD >/dev/null; git push origin main",
+      "git add -A && git push origin main",
+      "git branch -a && git branch --list 'f*' && git tag -l && git push origin main",
+      "git remote -v && git stash list && git push origin main",
+      "git config user.name x && git push origin main",
+      "cd . && echo pushing && git push origin main",
+      "git push origin main && git commit --allow-empty -m next",
+      "git push origin main; git checkout -b next",
+      "git push origin main && git tag v3",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("a push the gate never checks keeps today's answer, and its override still lifts it", () => {
+    const { proj, home } = stampedMain();
+    for (const c of [
+      "git commit --allow-empty -m x && git push origin feature",
+      "git merge main && git push -u origin feature",
+      "git tag v1 && git push origin v1",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+    const moved = "git commit --allow-empty -m x && git push origin main";
+    expect(push(proj, home, moved, { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(0);
+    expect(push(proj, home, `git commit --allow-empty -m x && CAIRN_ALLOW_UNSHIPPED_PUSH=1 ${moved.split("&& ")[1]}`)
+      .status).toBe(0);
+    // ...and with no stamp at all it is still refused, by whichever reason comes first
+    rmSync(join(home, "ship-gate"), { recursive: true });
+    expect(push(proj, home, moved).status).toBe(2);
+  });
+
+  it("mid-run, a push with a commit ahead of it is refused even with authority; on its own it passes", () => {
+    const phases = [{ number: 3, name: "p3", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }];
+    const pushAuth = { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" };
+    const { proj, home } = fixture({ status: "running", phases, pushAuth, currentPhase: 3 });
+    for (const c of [
+      "git commit -am x && git push origin runbranch",
+      "git rebase main; git push -u origin runbranch",
+      "make release && git push origin runbranch",
+    ]) {
+      const r = push(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+      expect(r.stderr, c).toContain("push as its own step");
+      expectOwnerTail(r.stderr, c);
+    }
+    for (const c of [
+      "git push origin runbranch",
+      "git status && git push origin runbranch",
+      "git push origin runbranch && git commit --allow-empty -m next",
+    ]) {
+      expect(push(proj, home, c).status, c).toBe(0);
+    }
+  });
+});

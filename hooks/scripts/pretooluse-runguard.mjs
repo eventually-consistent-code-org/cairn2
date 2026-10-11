@@ -1,10 +1,19 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302) --
- *   refuses git commands that rewrite a working tree or its history out
- *   from under whoever is in it, or push past the ship gate. Exit 2 blocks;
- *   ANY internal error exits 0 -- a broken guard never blocks work.
+ * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
+ *   #305) -- refuses git commands that rewrite a working tree or its history
+ *   out from under whoever is in it, or push past the ship gate. Exit 2
+ *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
+ *   The rules are spelled out in the block below.
+ *
+ * removeWhen: headless runs execute in platform-provided isolated
+ *   checkouts that cannot reach the human's working directory.
+ * Author(s): John Reed
+ */
+
+/*
+ * The rules
  *
  *   Always, in every session: the git commands that throw work away with
  *   no undo (the table in destructive(): hard reset; force, mirror and
@@ -32,14 +41,20 @@
  *   phases in flight (#260). No override: push authority is the owner's
  *   staging decision (ADR 0007).
  *
+ *   A push either of those gates checks is its own step (#305). The guard
+ *   works out what a push sends before the line runs, so anything earlier
+ *   on the line that could make a commit or move a ref refuses it: a git
+ *   command that isn't read-only (commit, merge, reset, checkout, branch
+ *   -f, fetch, another push, an alias git may expand -- see movesRefs),
+ *   any program off a short read-only list (npm version commits), or a
+ *   redirect into a file. In a loop, a function, a pipe, the background or
+ *   a $(...) the order can't be trusted, so such a command anywhere counts.
+ *   A push on its own, and whatever runs after it, are judged as before.
+ *
  *   Commands are read by shell-words.mjs, shared with the harness guard
  *   (#270), so rules see through wrappers and their flag values (sudo -u
  *   root, timeout 5). Quoted text never refuses, but a double-quoted $(...)
  *   still runs, so its body is checked as a command of its own (#257).
- *
- * removeWhen: headless runs execute in platform-provided isolated
- *   checkouts that cannot reach the human's working directory.
- * Author(s): John Reed
  */
 
 import { execFileSync } from "node:child_process";
@@ -94,54 +109,167 @@ const UNSHIPPED_ENV = "CAIRN_ALLOW_UNSHIPPED_PUSH";
 const DEFAULT_BRANCHES = ["main", "master"];
 
 /**
- * Every git invocation in a command line, parsed: the leading VAR=value
- * assignments, the -C directories in order, the -c and --config-env
- * values, the subcommand, its args (cut at a bare `--`) and the paths
- * past that `--`, which are paths, not flags -- `git checkout -- .`
- * (#264). Recurses into `sh -c '<script>'` style wrappers.
+ * git subcommands that never make a commit or move a ref (#305) -- they
+ * read, or touch only the index, the work tree or the config (whose push
+ * settings linePushConfig watches). Any other subcommand can: an alias,
+ * a third-party git-foo, or a typo help.autocorrect runs as the real thing.
  */
-function gitInvocations(line, depth = 0) {
-  const found = [];
-  for (const seg of shellSegments(line, READ)) {
-    // Assignments and wrappers come off the front, flag values and all, so
-    // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
-    // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
-    const { words, assigns } = unwrap(seg.words, READ);
-    const cmd = commandName(words[0]);
+const GIT_READS = new Set(["", "status", "log", "diff", "show", "add", "rm", "mv", "restore", "grep",
+  "blame", "annotate", "shortlog", "describe", "rev-parse", "rev-list", "ls-files", "ls-tree",
+  "ls-remote", "cat-file", "show-ref", "for-each-ref", "show-branch", "name-rev", "merge-base",
+  "diff-tree", "diff-index", "diff-files", "range-diff", "cherry", "whatchanged", "format-patch",
+  "archive", "bundle", "count-objects", "fsck", "verify-commit", "verify-tag", "check-ignore",
+  "check-attr", "check-mailmap", "check-ref-format", "var", "version", "help", "config", "clean",
+  "apply", "gc", "prune", "repack", "pack-refs", "hash-object", "write-tree", "interpret-trailers",
+  "stripspace", "sparse-checkout", "update-index", "read-tree", "checkout-index"]);
 
-    // sh -c / bash -lc: the script is one quoted word -- parse it too,
-    // found the same way the harness guard finds it (#270)
-    if (SHELLS.has(cmd) && depth < 2) {
-      const script = shellCommandString(words.slice(1));
-      if (script) found.push(...gitInvocations(script, depth + 1));
-      continue;
-    }
-    if (cmd !== "git") continue;
+// Subcommands whose first word decides (#305): these actions leave every ref alone.
+const GIT_READ_ACTIONS = new Map([
+  ["stash", ["list", "show"]],
+  ["remote", [undefined, "-v", "--verbose", "show", "get-url"]],
+  ["worktree", ["list", "lock", "unlock", "prune", "repair", "move", "remove"]],
+  ["notes", [undefined, "list", "show"]],
+  ["submodule", [undefined, "status", "summary"]],
+]);
 
-    let i = 1;
-    const dirs = [];
-    const configs = [];
-    const configEnvs = [];
-    while (i < words.length && words[i].startsWith("-")) {
-      if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
-      if (words[i] === "-c") configs.push(words[i + 1] ?? "");
-      if (words[i] === "--config-env") configEnvs.push(words[i + 1] ?? "");
-      if (words[i].startsWith("--config-env=")) configEnvs.push(words[i].slice(13));
-      i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
+/**
+ * Programs that read and never make a commit or move a ref (#305), plus
+ * the shell's own folder and variable builtins. Anything else earlier on
+ * a line can -- `npm version` commits, and a script can do anything.
+ */
+const HARMLESS = new Set(["", "cd", "pushd", "popd", "dirs", "echo", "printf", "true", "false", ":",
+  "test", "[", "[[", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "which",
+  "type", "date", "sleep", "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "readlink",
+  "stat", "file", "du", "df", "diff", "cmp", "jq", "whoami", "id", "uname", "hostname", "export",
+  "unset", "set", "local", "declare", "typeset", "readonly", "read", "wait", "exit", "return", "shift"]);
+
+// Reserved words whose body runs again, later or alongside (#305): order on the line can't be trusted.
+const REPEATS = new Set(["while", "until", "for", "select", "repeat", "function", "coproc"]);
+
+// A lone word before `(`: `name () { ...; }` defines a function.
+const FUNC_NAME = /^[A-Za-z_][\w.:-]*$/;
+
+/**
+ * Every git invocation in a command line, parsed, and every command's
+ * place in it (#305). Each invocation carries the leading VAR=value
+ * assignments, the -C directories in order, the -c and --config-env
+ * values, the subcommand, its args (cut at a bare `--`), the paths past
+ * that `--`, which are paths, not flags -- `git checkout -- .` (#264) --
+ * and `step`, its index in `steps`. `steps` holds, for every command in
+ * line order, whether it can make a commit or move a ref; `unordered`
+ * says that order can't be trusted -- a loop or function body, a pipe,
+ * the background, or a substitution, whose body is read after the line.
+ * Recurses into `sh -c '<script>'` style wrappers.
+ */
+function readLine(line) {
+  const out = { invs: [], steps: [], unordered: /\$\(|`/.test(line) };
+  const walk = (text, depth) => {
+    // the last command ended in `>&` or `<&`, so the `&` was a redirect's,
+    // and this one starts with its descriptor -- `2>&1` reads as `2>`, `1`
+    let descriptor = false;
+    for (const seg of shellSegments(text, READ)) {
+      const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
+      descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
+      if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
+      if (seg.reserved.some((w) => REPEATS.has(w))) out.unordered = true;
+      if (seg.op === "(" && seg.words.length === 1 && FUNC_NAME.test(seg.words[0])) out.unordered = true;
+
+      // Assignments and wrappers come off the front, flag values and all, so
+      // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
+      // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
+      const { words, assigns } = unwrap(segWords, READ);
+      const cmd = commandName(words[0]);
+
+      // sh -c / bash -lc: the script is one quoted word -- parse it too,
+      // found the same way the harness guard finds it (#270)
+      if (SHELLS.has(cmd) && depth < 2) {
+        const script = shellCommandString(words.slice(1));
+        if (script) walk(script, depth + 1);
+        else out.steps.push(true); // a script file: anything at all
+        continue;
+      }
+      if (cmd !== "git") {
+        out.steps.push(!HARMLESS.has(cmd) || writesFile(words));
+        continue;
+      }
+
+      let i = 1;
+      const dirs = [];
+      const configs = [];
+      const configEnvs = [];
+      while (i < words.length && words[i].startsWith("-")) {
+        if (words[i] === "-C") dirs.push(words[i + 1] ?? "");
+        if (words[i] === "-c") configs.push(words[i + 1] ?? "");
+        if (words[i] === "--config-env") configEnvs.push(words[i + 1] ?? "");
+        if (words[i].startsWith("--config-env=")) configEnvs.push(words[i].slice(13));
+        i += GIT_VALUE_OPTS.has(words[i]) ? 2 : 1;
+      }
+      const rest = words.slice(i + 1);
+      const dashes = rest.indexOf("--");
+      const inv = {
+        assigns,
+        dirs,
+        configs,
+        configEnvs,
+        sub: words[i] ?? "",
+        args: dashes < 0 ? rest : rest.slice(0, dashes),
+        paths: dashes < 0 ? [] : rest.slice(dashes + 1),
+        step: out.steps.length,
+      };
+      out.steps.push(movesRefs(inv) || writesFile(words));
+      out.invs.push(inv);
     }
-    const rest = words.slice(i + 1);
-    const dashes = rest.indexOf("--");
-    found.push({
-      assigns,
-      dirs,
-      configs,
-      configEnvs,
-      sub: words[i] ?? "",
-      args: dashes < 0 ? rest : rest.slice(0, dashes),
-      paths: dashes < 0 ? [] : rest.slice(dashes + 1),
-    });
+  };
+  walk(line, 0);
+  return out;
+}
+
+/**
+ * True when a command's words send its output into a file (#305) -- `> f`,
+ * `2>>f` -- rather than a descriptor or /dev/null. A file could be a ref.
+ * A `>` ending the words had its `&` read as an operator: `2>&1`.
+ */
+function writesFile(words) {
+  for (let k = 0; k < words.length; k++) {
+    const at = words[k].indexOf(">");
+    if (at < 0) continue;
+    const target = words[k].slice(at + 1).replace(/^>/, "") || (words[k + 1] ?? "");
+    if (target && !target.startsWith("&") && target !== "/dev/null") return true;
   }
-  return found;
+  return false;
+}
+
+// The options of `git branch` and `git tag` that take a value, and the ones that list.
+const REF_VALUED = ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+  "--format", "--set-upstream-to", "--message", "--file", "--local-user", "--cleanup"];
+const REF_READ = { longs: ["--list", "--show-current", "--verify", ...REF_VALUED], valued: REF_VALUED };
+
+/**
+ * True when `git branch` or `git tag` only lists (#305): no ref named, or
+ * --list, --show-current, a tag's --verify. Naming one creates, moves,
+ * copies or deletes it -- a deleted tag can unshadow the branch it hid.
+ */
+function listsRefs(inv) {
+  const tag = inv.sub === "tag";
+  const { flags, words } = readArgs(inv.args, { ...REF_READ, short: tag ? "muF" : "u" });
+  return !words.length || flags.has("--list") || flags.has("-l") || flags.has("--show-current")
+    || (tag && (flags.has("--verify") || flags.has("-v")));
+}
+
+/**
+ * True when this git invocation can make a commit or move a ref (#305):
+ * every subcommand but the read-only ones in GIT_READS, the listing forms
+ * of branch and tag, the reading actions of stash, remote, worktree, notes
+ * and submodule, and a reflog that neither expires nor deletes entries
+ * (`main@{1}` is read from it). A push counts: it moves the remote-tracking
+ * refs a later push can name, and -u changes the upstream it follows.
+ */
+function movesRefs(inv) {
+  const { sub, args } = inv;
+  if (sub === "branch" || sub === "tag") return !listsRefs(inv);
+  if (sub === "reflog") return args[0] === "expire" || args[0] === "delete";
+  if (GIT_READ_ACTIONS.has(sub)) return !GIT_READ_ACTIONS.get(sub).includes(args[0]);
+  return !GIT_READS.has(sub);
 }
 
 /** `git -C <dir>` retargets the command (and stacks); honour it over the tool's cwd. */
@@ -527,6 +655,10 @@ function globSources(src, dst, defaults, dir) {
 // can't read, so what it lands is unknown (#302) -- see configUnknown.
 const UNKNOWN = Symbol("unknown source");
 
+// Why a push with a commit or ref move ahead of it on its line can't be vouched for (#305).
+const MOVED_BEFORE = "an earlier command on this line can make a commit or move a ref first, and the " +
+  "guard checks what a push sends before the line runs";
+
 /**
  * What `git push <args>` would land on the default branch, as the source
  * revs being pushed there (null for a deletion, UNKNOWN when the settings
@@ -801,7 +933,9 @@ function destructive(inv, dir) {
  * its last run: { head, clean, at }. A missing stamp is a refusal, and so
  * is one that exists but can't be read (#299): a gate that can't see its
  * stamp refuses, never skips. So is a push whose settings can't be read
- * (#302) -- the guard can't say what it lands, so no stamp covers it.
+ * (#302) -- the guard can't say what it lands, so no stamp covers it --
+ * and one with a commit or a ref move ahead of it on the line (#305): the
+ * commit the guard checks now is not the one the push will send.
  */
 function shipGateRefusal(inv, dir, projectDir, baseDir) {
   try {
@@ -813,6 +947,8 @@ function shipGateRefusal(inv, dir, projectDir, baseDir) {
       "  run the config change as a command of its own, then push -- or run /cairn:ship.",
       "this push may land on the default branch"];
     }
+    if (inv.movedBefore) return [MOVED_BEFORE, "  push as its own step, once the drift check has seen " +
+      "the commit -- or run /cairn:ship."];
 
     const { base, hash } = pathHash(projectDir);
     const path = join(baseDir, "ship-gate", `${base}-${hash}.json`);
@@ -858,10 +994,13 @@ try {
   let runs;
   const currentRuns = () => (runs ??= liveRuns(projectDir, baseDir));
 
-  const invs = gitInvocations(command);
-  const lineConfig = linePushConfig(command, invs);
-  for (const inv of invs) {
+  const line = readLine(command);
+  const lineConfig = linePushConfig(command, line.invs);
+  for (const inv of line.invs) {
     inv.lineConfig = lineConfig;
+    // #305 -- something before it on the line can make a commit or move a
+    // ref; in a line whose order can't be trusted, anywhere but itself
+    inv.movedBefore = line.steps.some((moves, k) => moves && (k < inv.step || (line.unordered && k !== inv.step)));
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
@@ -905,6 +1044,14 @@ try {
         console.error("  the phase ends verified-not-pushed; push it yourself from your own");
         console.error("  terminal once the run is done.");
         process.exit(2);
+      }
+      // #305 -- authority covers a push the guard can see, not one a
+      // commit earlier on the line changes after the guard has looked
+      if (live.length && inv.movedBefore) {
+        refuse([
+          `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${MOVED_BEFORE}.`,
+          "  push as its own step, so what it sends is what was checked.",
+        ]);
       }
       continue;
     }
