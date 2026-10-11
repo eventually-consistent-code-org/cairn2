@@ -1269,3 +1269,51 @@ describe("harness guard sees the literal target after an unquoted substitution (
     }
   });
 });
+
+// #320: #319 queued no body for `<(...)`, `>(...)` or `$((...))`, so a
+// write inside one went unseen: `tee >(cat > hooks/hooks.json)` overwrote
+// the hook list. Each body is read as a line of its own now, like a $(...)'s.
+describe("harness guard sees a write inside a process substitution or arithmetic (#320)", () => {
+  it("each reported form is refused, naming the hook directory", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    for (const c of [
+      "cat a.txt | tee >(cat > hooks/hooks.json)",
+      "cat a.txt > >(tee hooks/hooks.json)",
+      "cat a.txt | tee >(tee hooks/hooks.json)",
+      "echo $((1 + $(rm -rf hooks | wc -c)))",
+      "echo $(( $(cp evil.json hooks/hooks.json) ))",
+      "diff <(cp evil.json hooks/hooks.json) /dev/null",
+      "diff <(sort <(rm -rf hooks)) b",
+      "cat a.txt | tee >(cat > .mcp.json)",
+      "bash -c 'cat a | tee >(cat > hooks/hooks.json)'",
+      // a `$((` that isn't arithmetic is a command substitution holding a subshell in some shells
+      "echo $((rm -rf hooks))",
+      "echo $( (rm -rf hooks) )",
+      "echo $( (cd x && rm -rf hooks) )",
+      "echo $((`cp evil.json hooks/hooks.json`))",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+    }
+  });
+
+  it("the everyday process substitutions and arithmetic pass", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const c of [
+      "diff <(sort a) <(sort b)",
+      "comm <(ls a) <(ls b)",
+      "echo $((1+2))",
+      "while read l; do echo $l; done < <(git log --oneline)",
+      "paste <(cut -f1 a) <(cut -f2 b) > out.txt",
+      "cat a.txt | tee >(cat > notes.txt)",
+      "cat a.txt > >(tee /tmp/notes.txt)",
+      "echo $(( $(wc -l < a.txt) + 1 ))",
+      "echo $(( x * 2 ))",
+      "n=$((n + 1)); echo $n",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});

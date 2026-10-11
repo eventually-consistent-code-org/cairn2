@@ -2141,3 +2141,47 @@ describe("run guard: an unquoted substitution never cuts a destructive flag off 
     }
   });
 });
+
+// #320: #319 queued no body for `<(...)`, `>(...)` or `$((...))`, so a
+// destructive command inside one ran unseen. Before #319 the split at `(`
+// surfaced it by accident; now each body is read as a line of its own.
+describe("run guard: a command inside a process substitution or arithmetic is seen (#320)", () => {
+  it("each reported form is refused", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "diff <(git reset --hard) /dev/null",
+      "<(git push --force)",
+      "cat <(git push --force origin main)",
+      "echo $(( $(git reset --hard) ))",
+      "echo $((1 + $(git clean -fdx | wc -c)))",
+      "tee >(git reset --hard) < a.txt",
+      "diff <(sort <(git reset --hard)) b",
+      // a `$((` that isn't arithmetic is a command substitution holding a subshell in some shells
+      "echo $((git reset --hard))",
+      "echo $( (git reset --hard) )",
+      "echo $( (cd x && git reset --hard) )",
+      "echo $((`git reset --hard`))",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("the everyday process substitutions and arithmetic pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "diff <(sort a) <(sort b)",
+      "comm <(ls a) <(ls b)",
+      "echo $((1+2))",
+      "while read l; do echo $l; done < <(git log --oneline)",
+      "paste <(cut -f1 a) <(cut -f2 b) > out.txt",
+      "diff <(git show HEAD:a) <(git show HEAD~1:a)",
+      "echo $(( $(git rev-list --count HEAD) + 1 ))",
+      "echo $(( x * 2 ))",
+      "n=$((n + 1)); git status",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});

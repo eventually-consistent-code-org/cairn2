@@ -654,6 +654,17 @@ describe("run guard hook", () => {
     expect(runHookRaw(RUNGUARD, proj, cwdPayload("git diff $(git rev-parse HEAD~1)", proj), env).status).toBe(0);
   });
 
+  it("a reset inside a process substitution or arithmetic is still a reset (#320)", () => {
+    const { proj, home } = runFixture();
+    const env = { CAIRN_HOME: home };
+    const r = runHookRaw(RUNGUARD, proj, cwdPayload("diff <(git reset --hard) /dev/null", proj), env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("git reset");
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("echo $(( $(git reset --hard) ))", proj), env).status).toBe(2);
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("diff <(sort a) <(sort b)", proj), env).status).toBe(0);
+    expect(runHookRaw(RUNGUARD, proj, cwdPayload("echo $((1+2))", proj), env).status).toBe(0);
+  });
+
   it("allows the same command inside the run's own worktree", () => {
     const { proj, home } = runFixture("running");
     const wt = join(freshDir("cairn-hooks-runguard-wt-"), "tree");
@@ -943,6 +954,17 @@ describe("harness guard hook", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("hook directory");
     expect(runHookRaw(HARNESSGUARD, p, bashPayload("cp $(ls *.txt | head -1) /tmp/")).status).toBe(0);
+  });
+
+  it("a write inside a process substitution or arithmetic is seen (#320)", () => {
+    const p = proj();
+    const r = runHookRaw(HARNESSGUARD, p, bashPayload("cat a.txt | tee >(cat > hooks/hooks.json)"));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("hook directory");
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("cat a.txt > >(tee hooks/hooks.json)")).status).toBe(2);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("echo $((1 + $(rm -rf hooks | wc -c)))")).status).toBe(2);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("diff <(sort a) <(sort b)")).status).toBe(0);
+    expect(runHookRaw(HARNESSGUARD, p, bashPayload("paste <(cut -f1 a) <(cut -f2 b) > out.txt")).status).toBe(0);
   });
 
   it("reading a protected file stays frictionless", () => {

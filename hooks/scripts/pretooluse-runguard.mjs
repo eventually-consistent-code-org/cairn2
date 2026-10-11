@@ -85,8 +85,13 @@
  *   as a command of its own (#257). An unquoted $(...) or backtick is one
  *   word of the command around it (#319): `git reset $(git rev-parse X)
  *   --hard` is a hard reset, its --hard never cut off into a line of its
- *   own. A command that only exists in a substitution's output (`$(cat
- *   script)` run as a command) is still not seen.
+ *   own. A process substitution's body runs too, and so does a $(...)
+ *   inside arithmetic -- or the whole `$((...))`, when a shell can't parse
+ *   it as arithmetic and runs it as a subshell -- so `diff <(git reset
+ *   --hard) x`, `$(( $(git reset --hard) ))` and `$((git reset --hard))`
+ *   are read as the reset they are (#320). A command
+ *   that only exists in a substitution's output (`$(cat script)` run as a
+ *   command) is still not seen.
  *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
@@ -147,7 +152,8 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
 /**
  * How this guard reads a command line (shell-words.mjs): ( ) and #
  * comments end a command, a $(...) or backtick is one word whose body is
- * a command of its own (#257, #319), and backslash-newline joins lines.
+ * a command of its own (#257, #319) -- a <(...), >(...) or $((...)) too
+ * (#320) -- and backslash-newline joins lines.
  * Redirects and heredocs are not modelled, so a heredoc body line reads
  * as a command of its own.
  */

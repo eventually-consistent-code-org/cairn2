@@ -92,8 +92,9 @@
  *
  *   Not seen: a write in an interpreter (python -c, an MCP tool running
  *   python or javascript), a write that only exists in a substitution's
- *   output (`$(cat script)` run as a command -- the body of a $(...) and
- *   the literal target after one are read, #319), an archive's members,
+ *   output (`$(cat script)` run as a command -- the body of a $(...), a
+ *   <(...), >(...) or $((...)), and the literal target after any of them
+ *   are read, #319, #320), an archive's members,
  *   paths an upstream command finds, modes cp -p, rsync or tar copy, the
  *   program a hook or an MCP server starts by name off PATH. An MCP server
  *   that runs arbitrary code is that same class: gate it with the

@@ -60,9 +60,10 @@ describe("shellSegments", () => {
     expect(words("rm -rf $(dirname \"$(pwd)/x)y\")/hooks", sub))
       .toEqual([["rm", "-rf", "$(dirname \"$(pwd)/x)y\")/hooks"], ["dirname", "$(pwd)/x)y"], ["pwd"]]);
     expect(words("echo foo$(x)bar `y`z", sub)).toEqual([["echo", "foo$(x)bar", "`y`z"], ["x"], ["y"]]);
-    // arithmetic and process substitution are words with no command line inside
-    expect(words("echo $((1+2)) >(cat)", sub)).toEqual([["echo", "$((1+2))", ">(cat)"]]);
-    expect(words("diff <(sort a) <(sort b)", sub)).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
+    // arithmetic and process substitution are words too; their bodies are read after the line (#320)
+    expect(words("echo $((1+2)) >(cat)", sub)).toEqual([["echo", "$((1+2))", ">(cat)"], ["1+2"], ["cat"]]);
+    expect(words("diff <(sort a) <(sort b)", sub))
+      .toEqual([["diff", "<(sort a)", "<(sort b)"], ["sort", "a"], ["sort", "b"]]);
     // a redirect past a substitution is still a redirect
     const [seg] = shellSegments("echo x > $(pwd)/hooks/hooks.json", sub) as Seg[];
     expect(seg.words).toEqual(["echo", "x"]);
@@ -73,6 +74,53 @@ describe("shellSegments", () => {
     // a subshell run as a command is still a break
     expect(words("(cd x && rm -rf hooks); echo $(date)", sub))
       .toEqual([["cd", "x"], ["rm", "-rf", "hooks"], ["echo", "$(date)"], ["date"]]);
+  });
+
+  // #320: #319 made `<(...)`, `>(...)` and `$((...))` one word but queued
+  // no body for them, so `diff <(git reset --hard) x` ran its reset unseen.
+  // Each body runs, so each is read as a line of its own, like a $(...)'s.
+  it("process substitution and arithmetic bodies are read as command lines (#320)", () => {
+    const sub = { subshells: true, substitutions: true, redirects: true };
+    expect(words("diff <(git reset --hard) /dev/null", sub))
+      .toEqual([["diff", "<(git reset --hard)", "/dev/null"], ["git", "reset", "--hard"]]);
+    expect(words("<(git push --force)", sub)).toEqual([["<(git push --force)"], ["git", "push", "--force"]]);
+    // a `>(...)` after a redirect is the redirect's target; the command inside it is a segment of its own
+    const [seg, inner] = shellSegments("cat a > >(tee hooks/hooks.json)", sub) as Seg[];
+    expect(seg.words).toEqual(["cat", "a"]);
+    expect(seg.redirects).toEqual([">(tee hooks/hooks.json)"]);
+    expect(inner.words).toEqual(["tee", "hooks/hooks.json"]);
+    const [, tee, cat] = shellSegments("cat a.txt | tee >(cat > hooks/hooks.json)", sub) as Seg[];
+    expect(tee.words).toEqual(["tee", ">(cat > hooks/hooks.json)"]);
+    expect(cat.words).toEqual(["cat"]);
+    expect(cat.redirects).toEqual(["hooks/hooks.json"]);
+    // an arithmetic body is read as a line too: a substitution inside it runs, and a body
+    // that isn't arithmetic is a command substitution holding a subshell in some shells
+    expect(words("echo $((1+2)) $(( x * 2 ))", sub))
+      .toEqual([["echo", "$((1+2))", "$(( x * 2 ))"], ["1+2"], ["x", "*", "2"]]);
+    expect(words("echo $((git reset --hard))", sub))
+      .toEqual([["echo", "$((git reset --hard))"], ["git", "reset", "--hard"]]);
+    expect(words("echo $( (git reset --hard) )", sub))
+      .toEqual([["echo", "$( (git reset --hard) )"], ["git", "reset", "--hard"]]);
+    expect(words("echo $( (cd x && rm -rf hooks) )", sub))
+      .toEqual([["echo", "$( (cd x && rm -rf hooks) )"], ["cd", "x"], ["rm", "-rf", "hooks"]]);
+    expect(words("echo $((1 + $(rm -rf hooks | wc -c)))", sub)).toEqual([
+      ["echo", "$((1 + $(rm -rf hooks | wc -c)))"], ["1", "+", "$(rm -rf hooks | wc -c)"],
+      ["rm", "-rf", "hooks"], ["wc", "-c"]]);
+    expect(words("echo $(( $(git reset --hard) ))", sub)).toEqual([
+      ["echo", "$(( $(git reset --hard) ))"], ["$(git reset --hard)"], ["git", "reset", "--hard"]]);
+    expect(words("echo $((`git reset --hard`))", sub)).toEqual([
+      ["echo", "$((`git reset --hard`))"], ["`git reset --hard`"], ["git", "reset", "--hard"]]);
+    // nested process substitutions (a body's own bodies follow it), and one inside a $(...)
+    expect(words("diff <(sort <(cat a)) <(sort b)", sub)).toEqual([
+      ["diff", "<(sort <(cat a))", "<(sort b)"], ["sort", "<(cat a)"], ["cat", "a"], ["sort", "b"]]);
+    expect(words("echo $(diff <(git reset --hard) x)", sub)).toEqual([
+      ["echo", "$(diff <(git reset --hard) x)"], ["diff", "<(git reset --hard)", "x"], ["git", "reset", "--hard"]]);
+    // the everyday shapes keep their words
+    expect(words("while read l; do echo $l; done < <(git log --oneline)", sub).at(-1))
+      .toEqual(["git", "log", "--oneline"]);
+    expect(words("paste <(cut -f1 a) <(cut -f2 b) > out.txt", sub)[0]).toEqual(["paste", "<(cut -f1 a)", "<(cut -f2 b)"]);
+    // the body is queued only when substitutions are read
+    expect(words("diff <(sort a) <(sort b)", { subshells: true })).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
   });
 
   it("redirects: targets are collected, descriptors and input are not", () => {

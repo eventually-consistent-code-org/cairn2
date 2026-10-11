@@ -240,7 +240,10 @@ function commandStart(words) {
  *   comments       an unquoted `#` at a word start comments out its line.
  *   substitutions  `$(...)` and backtick bodies, quoted or not, are run by
  *                  the shell (#257): each is split as a command line of its
- *                  own and appended after the line's segments.
+ *                  own and appended after the line's segments. So are the
+ *                  bodies of `<(...)`, `>(...)` and `$((...))` (#320): a
+ *                  substitution runs inside arithmetic, and a body that
+ *                  isn't arithmetic is a command substitution after all.
  *
  * Whatever `read` says, a `$(...)`, backtick, `$((...))`, `<(...)` or
  * `>(...)` outside quotes is one word, however many words run inside it
@@ -356,10 +359,15 @@ export function shellSegments(command, read = {}) {
     }
 
     // $( ... ), $(( ... )), <( ... ) and >( ... ) outside quotes -- one word
-    // to the matching paren (#319). Arithmetic has no command inside it.
+    // to the matching paren (#319), and each body runs, so each is queued
+    // (#320). A `$((...))` is read as a command line too, whatever it is: a
+    // $(...) or backtick inside arithmetic runs, and a shell that can't
+    // parse the body as arithmetic falls back to a command substitution
+    // holding a subshell, so `$((git reset --hard))` may well be the reset.
     if ((c === "$" || c === "<" || c === ">") && n === "(") {
       const end = closeParen(command, i + 2);
-      substitute(end, c === "$" && command[i + 2] !== "(" ? command.slice(i + 2, end) : null);
+      const body = command.slice(i + 2, end);
+      substitute(end, c === "$" && command[i + 2] === "(" ? body.replace(/^\((.*)\)$/s, "$1") : body);
       continue;
     }
 
