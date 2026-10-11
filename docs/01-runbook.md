@@ -1189,8 +1189,8 @@ Cursor additionally gets the hooks port: `cairn-setup cursor` installs a
 single adapter (`.cursor/hooks/cairn/cursor-adapter.mjs`) plus the cairn
 hook scripts, and merges entries into `.cursor/hooks.json` — sessionStart
 resumes continuity (banner + handoff as `additional_context`), preToolUse
-runs the run guard and the harness guard (Shell through both, file writes
-through the harness guard; the entry fails closed), beforeShellExecution
+runs the run guard and the harness guard (Shell and every MCP call through
+both, file writes through the harness guard; the entry fails closed), beforeShellExecution
 runs the leak guard (deny with the offending lines),
 afterShellExecution/afterFileEdit capture breadcrumbs + observations, and
 preCompact refreshes the handoff. OpenCode gets an `opencode.json` `mcp`
@@ -1206,7 +1206,7 @@ ship-gate stamp and run manifests):
 | Harness | Leak guard | Run guard | Harness guard |
 |---|---|---|---|
 | Claude Code | yes | yes | yes |
-| Cursor | yes | yes | yes — file-tool path field assumed; an unreadable call is denied |
+| Cursor | yes | yes — Shell and MCP calls | yes — file-tool path field assumed; an unreadable call is denied; MCP calls judged as in Claude Code |
 | Codex, Gemini CLI, Copilot CLI, OpenCode, Grok Build, Zed | no | no | no |
 
 Where a guard doesn't run, its rule is prose in `AGENTS.md` and nothing

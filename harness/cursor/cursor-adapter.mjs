@@ -11,11 +11,13 @@
  *   break the session because THEY broke -- except preToolUse, below.
  *
  *   preToolUse (#269) runs the two guards that only Claude Code ran before:
- *   Shell goes to the run guard and the harness guard as a Bash call, and
- *   the file tools go to the harness guard. That entry is set failClosed,
- *   and anything short of a clean answer from a guard (a crash, a timeout,
- *   a missing script) denies here too -- a guard that didn't run never
- *   reads as allow.
+ *   Shell goes to the run guard and the harness guard as a Bash call, the
+ *   file tools go to the harness guard, and every MCP:<name> call goes to
+ *   both as the MCP call Claude Code would send (#313): mcp__cursor__<name>,
+ *   its tool_input untouched, so #310's path and command-field rules judge
+ *   it the same way. That entry is set failClosed, and anything short of a
+ *   clean answer from a guard (a crash, a timeout, a missing script) denies
+ *   here too -- a guard that didn't run never reads as allow.
  *   Confirmed in Cursor's hooks docs: preToolUse fires for every tool;
  *   tool_name is Shell, Read, Write, Grep, Delete, Task or MCP:<name>;
  *   Shell's tool_input carries command and working_directory; the answer
@@ -89,7 +91,8 @@ function shellQuote(s) {
 function preToolUse(payload, projectDir) {
   const tool = payload?.tool_name ?? "";
   const input = payload?.tool_input ?? {};
-  const cwd = input.working_directory || payload?.cwd || projectDir;
+  // only a string folder: an MCP input is free-form, and a guard handed an object for cwd would crash open
+  const cwd = [input.working_directory, payload?.cwd].find((d) => typeof d === "string" && d) || projectDir;
   const checks = [];
   if (tool === "Shell") {
     const bash = { tool_name: "Bash", tool_input: { command: input.command ?? "" }, cwd };
@@ -108,6 +111,10 @@ function preToolUse(payload, projectDir) {
         : { tool_name: "Write", tool_input: { file_path: p }, cwd };
       checks.push(["harness guard", "pretooluse-harnessguard.mjs", child]);
     }
+  } else if (tool.startsWith("MCP:")) {
+    // #313: a read passes both guards on its own; a write or a command line meets them
+    const mcp = { tool_name: `mcp__cursor__${tool.slice(4).trim()}`, tool_input: input, cwd };
+    checks.push(["run guard", "pretooluse-runguard.mjs", mcp], ["harness guard", "pretooluse-harnessguard.mjs", mcp]);
   }
   for (const [name, script, child] of checks) {
     const r = runScript(script, child, projectDir);

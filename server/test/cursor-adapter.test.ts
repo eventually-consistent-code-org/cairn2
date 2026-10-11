@@ -113,7 +113,8 @@ describe("cursor-adapter", () => {
 
 // #269: outside Claude Code the run guard and the harness guard never ran.
 // Cursor's blocking preToolUse now runs them: Shell through both guards as
-// a Bash call, the file tools through the harness guard.
+// a Bash call, the file tools through the harness guard, and MCP calls
+// through both as Claude-shaped MCP calls (#313).
 describe("cursor-adapter preToolUse runs the run guard and the harness guard (#269)", () => {
   /** A git project for the guards to judge, with an ordinary file in it. */
   function project(): string {
@@ -198,10 +199,52 @@ describe("cursor-adapter preToolUse runs the run guard and the harness guard (#2
   it("tools that only read are not judged", () => {
     const proj = project();
     const home = fresh("cairn-home-");
-    for (const tool of ["Read", "Grep", "Task", "MCP:issue_get"]) {
+    for (const tool of ["Read", "Grep", "Task"]) {
       expect(pre(proj, home, tool, { path: join(proj, ".cursor", "hooks.json") }), tool)
         .toEqual({ permission: "allow" });
     }
+  });
+
+  // #313: MCP:<name> calls went straight to allow, so an MCP write_file onto
+  // the hook config or a start_process running a reset got through here
+  // while Claude Code refused the same call. Each one now meets both guards
+  // as mcp__cursor__<name>, its input as given.
+  it("MCP: a write onto the hook config or a destructive command line is refused", () => {
+    const proj = project();
+    const home = fresh("cairn-home-");
+    for (const path of [join(proj, ".cursor", "hooks.json"), ".cursor/hooks.json"]) {
+      const resp = pre(proj, home, "MCP:write_file", { path, content: "{}" });
+      expect(resp.permission, path).toBe("deny");
+      expect(resp.user_message, path).toContain("harness guard");
+      expect(resp.agent_message, path).toContain("Cursor's hooks");
+    }
+    expect(pre(proj, home, "MCP:write_file", { path: "hooks/hooks.json", content: "{}" }).permission).toBe("deny");
+    const reset = pre(proj, home, "MCP:start_process", { command: "git reset --hard HEAD~1", timeout_ms: 1000 });
+    expect(reset.permission).toBe("deny");
+    expect(reset.user_message).toContain("run guard");
+    expect(pre(proj, home, "MCP:start_process", { command: "rm -rf .cursor/hooks" }).permission).toBe("deny");
+  });
+
+  it("MCP: ordinary writes, reads and tools with no path or command pass", () => {
+    const proj = project();
+    const home = fresh("cairn-home-");
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["MCP:write_file", { path: "src/x.txt", content: "x" }],
+      ["MCP:read_file", { path: join(proj, ".cursor", "hooks.json") }],
+      ["MCP:issue_get", { path: join(proj, ".cursor", "hooks.json") }],
+      ["MCP:start_process", { command: "git status" }],
+      ["MCP:list_directory", { path: ".cursor" }],
+    ];
+    for (const [tool, input] of calls) {
+      expect(pre(proj, home, tool, input), `${tool} ${JSON.stringify(input)}`).toEqual({ permission: "allow" });
+    }
+  });
+
+  it("MCP: a folder field that isn't a string can't steer the guards off the workspace", () => {
+    const proj = project();
+    const home = fresh("cairn-home-");
+    const resp = pre(proj, home, "MCP:start_process", { command: "git reset --hard HEAD~1", working_directory: {} });
+    expect(resp.permission).toBe("deny");
   });
 
   it("a guard that crashes or is missing fails closed", () => {
@@ -222,6 +265,8 @@ describe("cursor-adapter preToolUse runs the run guard and the harness guard (#2
     const crashed = run("Shell", { command: "ls", working_directory: proj });
     expect(crashed.permission).toBe("deny");
     expect(crashed.user_message).toContain("failed to run");
+    // an MCP call meets the same crashed guard (#313)
+    expect(run("MCP:read_file", { path: join(proj, "src", "a.ts") }).permission).toBe("deny");
     // no harness guard script beside the adapter and none in a repo two levels up
     expect(run("Write", { file_path: join(proj, "src", "a.ts") }).permission).toBe("deny");
   });
