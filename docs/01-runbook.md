@@ -1991,7 +1991,11 @@ The protected set also covers cairn's own trust anchors:
 - the live plugin folder, everything in it except the project itself
   when the project sits inside it;
 - `~/.claude/plugins/` (the registry and the plugin cache);
-- the project's `.claude/hooks/` and `.claude/agents/`;
+- `~/.claude/skills/`, `~/.claude/agents/` and `~/.claude/commands/`,
+  since a folder in `~/.claude/skills/` carrying a plugin manifest loads
+  next session as a plugin with its own hooks and MCP servers;
+- the project's `.claude/hooks/`, `.claude/agents/`, `.claude/skills/`
+  and `.claude/commands/`;
 - Cursor's `.cursor/hooks.json` and `.cursor/hooks/`, plus removing or
   replacing the `.cursor` folder itself.
 

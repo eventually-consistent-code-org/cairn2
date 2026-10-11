@@ -5,7 +5,8 @@
  *   files that define the agent's own harness: the hook directory, the MCP
  *   server configs (.mcp.json, ~/.claude.json, Cursor's project and home
  *   mcp.json, #298), the settings cascade, the plugin manifest, .claude/hooks
- *   and agents (and Cursor's hooks, #269), the plugin copy that runs (#267:
+ *   and agents (and Cursor's hooks, #269), the skill, agent and command
+ *   folders in .claude and ~/.claude (#309), the plugin copy that runs (#267:
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
@@ -63,15 +64,19 @@ const PROTECTED = [
   { re: /^(?:.*\/)?\.claude-plugin\/[^/]+\.json$/i, what: "the plugin manifest" },
   { re: /^(?:.*\/)?\.claude\/hooks\//i, what: "the project's Claude hooks" },
   { re: /^(?:.*\/)?\.claude\/agents\//i, what: "the project's agent definitions" },
+  { re: /^(?:.*\/)?\.claude\/skills\//i, what: "the project's skills" },
+  { re: /^(?:.*\/)?\.claude\/commands\//i, what: "the project's slash commands" },
   { re: /^(?:.*\/)?\.cursor\/hooks(?:\.json$|\/)/i, what: "Cursor's hooks" },
   { re: /^(?:.*\/)?\.cursor\/mcp\.json$/i, what: "Cursor's MCP server config" },
 ];
 
 // Folders whose whole contents are protected, as [parent, folder, what]
-// (#267; Cursor's, #269).
+// (#267; Cursor's, #269; skills and slash commands, #309).
 const SUB_TREES = [
   [".claude", "hooks", "the project's Claude hooks"],
   [".claude", "agents", "the project's agent definitions"],
+  [".claude", "skills", "the project's skills"],
+  [".claude", "commands", "the project's slash commands"],
   [".cursor", "hooks", "Cursor's hooks"],
 ];
 
@@ -367,6 +372,13 @@ function expandVars(raw) {
  * script -- when it lies outside the project. A dev install whose root IS
  * the project is covered by PROTECTED; a project inside the plugin root
  * (a worktree) is carved out of it.
+ *
+ * And the folders Claude Code loads every session from the home folder
+ * (#309): ~/.claude/skills, where a folder carrying a plugin manifest
+ * loads next session as a plugin with its own hooks and MCP servers
+ * (`claude plugin init` scaffolds exactly that), ~/.claude/agents and
+ * ~/.claude/commands. No carve-out: a project inside one is a plugin that
+ * loads, so its files are the harness too.
  */
 function outsideZones() {
   const zones = [];
@@ -378,7 +390,12 @@ function outsideZones() {
     add(join(base, "ship-gate"), "the ship-gate stamp", true);
     add(join(base, "runs"), "the run manifests", false);
   }
-  for (const home of HOMES) add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
+  for (const home of HOMES) {
+    add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
+    add(join(home, ".claude", "skills"), "your machine-wide skills", true);
+    add(join(home, ".claude", "agents"), "your machine-wide agent definitions", true);
+    add(join(home, ".claude", "commands"), "your machine-wide slash commands", true);
+  }
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL("../..", import.meta.url));
   const plugin = spellings(pluginRoot);
   if (!plugin.some((r) => ROOTS.some((root) => holds(root, r)))) {
