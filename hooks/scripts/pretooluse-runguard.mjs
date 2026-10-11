@@ -85,8 +85,13 @@
  *   as a command of its own (#257). An unquoted $(...) or backtick is one
  *   word of the command around it (#319): `git reset $(git rev-parse X)
  *   --hard` is a hard reset, its --hard never cut off into a line of its
- *   own. A command that only exists in a substitution's output (`$(cat
- *   script)` run as a command) is still not seen.
+ *   own. A process substitution's body runs too, and so does a $(...)
+ *   inside arithmetic -- or the whole `$((...))`, when a shell can't parse
+ *   it as arithmetic and runs it as a subshell -- so `diff <(git reset
+ *   --hard) x`, `$(( $(git reset --hard) ))` and `$((git reset --hard))`
+ *   are read as the reset they are (#320). A command
+ *   that only exists in a substitution's output (`$(cat script)` run as a
+ *   command) is still not seen.
  *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
@@ -118,8 +123,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
-  SHELLS, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString, shellSegments,
-  toolCommandLines, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
+  shellSegments, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
@@ -147,7 +152,9 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
 /**
  * How this guard reads a command line (shell-words.mjs): ( ) and #
  * comments end a command, a $(...) or backtick is one word whose body is
- * a command of its own (#257, #319), and backslash-newline joins lines.
+ * a command of its own (#257, #319) -- a <(...), >(...) or $((...)) too
+ * (#320) -- and backslash-newline joins lines. Bodies nest
+ * SUBSTITUTION_DEPTH levels; a line nested deeper is refused unread (#321).
  * Redirects and heredocs are not modelled, so a heredoc body line reads
  * as a command of its own.
  */
@@ -239,8 +246,9 @@ const FUNC_NAME = /^[A-Za-z_][\w.:-]*$/;
  */
 function readLine(line) {
   const out = { invs: [], steps: [], unordered: /\$\(|`/.test(line), moves: [], repeats: false,
-    cdpaths: [], envSets: Object.fromEntries(GIT_ENV.map((k) => [k, []])) };
+    cdpaths: [], envSets: Object.fromEntries(GIT_ENV.map((k) => [k, []])), deep: false };
   const walk = (text, depth, inherit) => {
+    if (out.deep) return; // nothing more is read of a line the reader gave up on (#321)
     // the last command ended in `>&` or `<&`, so the `&` was a redirect's,
     // and this one starts with its descriptor -- `2>&1` reads as `2>`, `1`
     let descriptor = false;
@@ -250,6 +258,9 @@ function readLine(line) {
     const pagers = [];
     const flush = () => { for (const [line, env] of pagers.splice(0)) walk(line, depth + 1, env); };
     for (const seg of shellSegments(text, READ)) {
+      // #321 -- substitutions nested deeper than the reader reads: the
+      // line is refused as a whole (judgeLine), so stop reading it here
+      if (seg.deep) { out.deep = true; return; }
       flush();
       const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
@@ -1331,6 +1342,15 @@ function toolLines(payload) {
  */
 function judgeLine(line, start, ctx) {
   const { currentRuns, where } = ctx;
+  // #321 -- a line nested past what the reader reads holds commands the
+  // guard never saw; fail closed rather than let the unread part run
+  if (line.deep) {
+    refuse([
+      `cairn run guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
+      "levels), so what runs inside them can't be judged.",
+      "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
+    ]);
+  }
   // #306 -- where each git command may run: every folder the line can cd
   // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
   const places = line.invs.length ? linePlaces(where, start) : [];

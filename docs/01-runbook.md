@@ -2034,12 +2034,25 @@ After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
 relative write is refused with a line saying so — name the folder
 plainly, or write to an absolute path, and it can judge it. The same
 line refuses a write whose folder a substitution computes (`rm -rf
-$(pwd)/hooks`): nothing in front of the `$(…)` anchors it, so it could
-land anywhere. A `$(…)` elsewhere on the line is one word of its
+$(somecmd)/hooks`, `echo x > $(somecmd)/notes.txt`): nothing in front
+of the `$(…)` anchors it, so it could land anywhere, a protected folder
+included. The two computed folders the guard does know are spelled out
+first, the way `$PWD` is — `$(pwd)` (or `` `pwd` ``) is the shell's
+folder and `$(git rev-parse --show-toplevel)` is the repo root above it
+— so `echo x > $(pwd)/notes.txt` passes and `rm -rf $(pwd)/hooks` is
+refused as the hook directory it is. A `$(…)` elsewhere on the line is one word of its
 command, so the literal target after it is judged as itself — `cp
 $(echo x) hooks/hooks.json` is a cp onto the hooks file — and a computed
 name under a folder the guard knows (`/tmp/$(date +%s).bak`) is judged
-there, as a `$NAME` is. Reading
+there, as a `$NAME` is. The body of a `<(…)` or `>(…)` runs too, and so
+does a `$(…)` inside `$((…))` — or the whole `$((…))`, in a shell that
+can't parse it as arithmetic and runs it as a subshell — so each is read
+as a line of its own: `tee >(cat > hooks/hooks.json)` is a write onto
+the hooks file and `$((rm -rf hooks))` removes the hook directory, while
+`diff <(sort a) <(sort b)` and `echo $((1+2))` are the ordinary work
+they look like. Bodies nest eight levels deep; a line nested deeper is
+refused unread by both guards, with a line saying so — flatten it into
+steps of its own and they can judge it. Reading
 these files is untouched — inspecting a hook is ordinary work — and so
 is a heredoc that is only data. The refusal names the file and then asks
 the question that matters: if you did not ask for this, something the
@@ -2147,8 +2160,9 @@ one shared shell reader, so a fix reaches both, but it is still a
 reading of the command text, not the shell itself. The harness guard
 doesn't see a write inside an interpreter (`python -c`, or an MCP tool
 running code), a write that only exists in a substitution's output
-(`$(cat script)` run as a command — the body of a `$(…)` and the
-literal target after one are read), an archive's members, paths an
+(`$(cat script)` run as a command — the body of a `$(…)`, a `<(…)`,
+`>(…)` or `$((…))`, and the literal target after any of them are read),
+an archive's members, paths an
 upstream command finds for itself (`git ls-files | xargs rm`), or an MCP
 tool outside the shapes above.
 

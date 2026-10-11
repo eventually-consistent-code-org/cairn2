@@ -19,7 +19,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Constants
@@ -1237,13 +1237,24 @@ describe("harness guard sees the literal target after an unquoted substitution (
     const p = proj();
     mkdirSync(join(p, "hooks"), { recursive: true });
     for (const c of [
+      "rm -rf $(somecmd)/hooks",
+      "echo x > $(somecmd)/hooks/hooks.json",
+      "cp evil.json $(cat where)/hooks/",
+      "cp evil.json `dirname x`/hooks/hooks.json",
+      "echo x > $(somecmd)/notes.txt", // any folder, so maybe a protected one: no tail clears it
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain("goes somewhere the guard couldn't tell");
+    }
+    // the shell's own folder is known (#321): judged there, and named for what it is
+    for (const c of [
       "rm -rf $(pwd)/hooks",
       "echo x > $(pwd)/hooks/hooks.json",
       "cp evil.json $(pwd)/hooks/",
       "cp evil.json `pwd`/hooks/hooks.json",
     ]) {
       expect(guard(p, c), c).toBe(2);
-      expect(stderrOf(p, c), c).toContain("goes somewhere the guard couldn't tell");
+      expect(stderrOf(p, c), c).toContain("hook directory");
     }
   });
 
@@ -1266,6 +1277,178 @@ describe("harness guard sees the literal target after an unquoted substitution (
       "git rm -r $(echo hooks)", // an opaque name under a known folder: judged like $NAME, not refused
     ]) {
       expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
+// #320: #319 queued no body for `<(...)`, `>(...)` or `$((...))`, so a
+// write inside one went unseen: `tee >(cat > hooks/hooks.json)` overwrote
+// the hook list. Each body is read as a line of its own now, like a $(...)'s.
+describe("harness guard sees a write inside a process substitution or arithmetic (#320)", () => {
+  it("each reported form is refused, naming the hook directory", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    for (const c of [
+      "cat a.txt | tee >(cat > hooks/hooks.json)",
+      "cat a.txt > >(tee hooks/hooks.json)",
+      "cat a.txt | tee >(tee hooks/hooks.json)",
+      "echo $((1 + $(rm -rf hooks | wc -c)))",
+      "echo $(( $(cp evil.json hooks/hooks.json) ))",
+      "diff <(cp evil.json hooks/hooks.json) /dev/null",
+      "diff <(sort <(rm -rf hooks)) b",
+      "cat a.txt | tee >(cat > .mcp.json)",
+      "bash -c 'cat a | tee >(cat > hooks/hooks.json)'",
+      // a `$((` that isn't arithmetic is a command substitution holding a subshell in some shells
+      "echo $((rm -rf hooks))",
+      "echo $( (rm -rf hooks) )",
+      "echo $( (cd x && rm -rf hooks) )",
+      "echo $((`cp evil.json hooks/hooks.json`))",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+    }
+  });
+
+  it("the everyday process substitutions and arithmetic pass", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    for (const c of [
+      "diff <(sort a) <(sort b)",
+      "comm <(ls a) <(ls b)",
+      "echo $((1+2))",
+      "while read l; do echo $l; done < <(git log --oneline)",
+      "paste <(cut -f1 a) <(cut -f2 b) > out.txt",
+      "cat a.txt | tee >(cat > notes.txt)",
+      "cat a.txt > >(tee /tmp/notes.txt)",
+      "echo $(( $(wc -l < a.txt) + 1 ))",
+      "echo $(( x * 2 ))",
+      "n=$((n + 1)); echo $n",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+});
+
+// #321: #319 marked every substitution-led slashed target as a folder the
+// guard can't follow, so `echo x > $(pwd)/notes.txt` was refused; and it
+// re-read nested bodies without limit, so a 120-deep line took seconds.
+describe("harness guard: a computed folder it knows is judged there, and nesting is capped (#321)", () => {
+  /** The guard's refusal text for one Bash command string. */
+  function stderrOf(projectDir: string, command: string): string {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
+    delete env.CAIRN_HARNESS_EDIT;
+    delete env.CDPATH;
+    return spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: projectDir, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "" }),
+    }).stderr ?? "";
+  }
+
+  it("$(pwd) and the repo root are the shell's folders: an ordinary file there passes", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, ".git"), { recursive: true });
+    for (const c of [
+      "echo x > $(pwd)/notes.txt",
+      'cp a.txt "$(pwd)/notes.txt"',
+      "cp a.txt `pwd`/notes.txt",
+      "echo x > $(pwd -P)/notes.txt",
+      "echo x > $(git rev-parse --show-toplevel)/notes.txt",
+      'cp a.txt "$(git rev-parse --show-toplevel)/server/notes.txt"',
+      "mkdir -p $(pwd)/build && cp a.txt $(pwd)/build/",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+
+  it("a protected name under them is still refused, named for what it is", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, ".git"), { recursive: true });
+    writeFileSync(join(p, ".mcp.json"), "{}");
+    for (const [c, what] of [
+      ["echo x > $(pwd)/hooks/hooks.json", "hook directory"],
+      ["rm -rf $(pwd)/hooks", "hook directory"],
+      ["cp x $(pwd)/.mcp.json", ".mcp.json"],
+      ["cp x `pwd`/.mcp.json", ".mcp.json"],
+      ["rm -rf $(git rev-parse --show-toplevel)/hooks", "hook directory"],
+      ["echo x > $(git rev-parse --show-toplevel)/.claude/settings.json", "settings"],
+      // from a subfolder, the repo root is the project and the shell's folder is the subfolder
+      ["echo x > $(git rev-parse --show-toplevel)/hooks/hooks.json", "hook directory"],
+    ] as const) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain(what);
+    }
+    mkdirSync(join(p, "server"), { recursive: true });
+    expect(guard(p, "echo x > $(git rev-parse --show-toplevel)/hooks/hooks.json", "server")).toBe(2);
+    expect(guard(p, "echo x > $(pwd)/hooks/hooks.json", "server")).toBe(0); // server/hooks is not the hook dir
+  });
+
+  it("the computed folders follow the cd candidates, as $PWD does, never the hook's cwd alone", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "server"), { recursive: true });
+    mkdirSync(join(p, ".git"), { recursive: true });
+    writeFileSync(join(p, ".mcp.json"), "{}");
+    for (const [c, what] of [
+      ["cd hooks && echo x > $(pwd)/hooks.json", "hook directory"],
+      [`cd .. && rm -rf $(pwd)/${basename(p)}/hooks`, "hook directory"],
+      ["pushd hooks && echo x > $(pwd)/hooks.json", "hook directory"],
+      ["env -C hooks sh -c 'echo x > $(pwd)/hooks.json'", "hook directory"],
+      ["cd server && cp a $(git rev-parse --show-toplevel)/.mcp.json", ".mcp.json"],
+      ["cd server && echo x > `git rev-parse --show-toplevel`/hooks/hooks.json", "hook directory"],
+      // a cd the guard can't follow: the pwd after it is unknown, and so is the write
+      ["cd $(mktemp -d) && echo x > $(pwd)/x", "goes somewhere the guard couldn't tell"],
+      // outside any repo, git would fail and the expansion is empty: unknown too
+      ["cd /tmp && echo x > $(git rev-parse --show-toplevel)/notes.txt", "goes somewhere the guard couldn't tell"],
+    ] as const) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain(what);
+    }
+    for (const c of [
+      "cd /tmp && echo x > $(pwd)/notes.txt",
+      "cd server && echo x > $(pwd)/notes.txt",
+      "cd server && cp a $(git rev-parse --show-toplevel)/notes.txt",
+    ]) {
+      expect(guard(p, c), c).toBe(0);
+    }
+  });
+
+  it("any other substitution in front of a path is still a folder it can't tell", () => {
+    const p = proj();
+    for (const c of [
+      "echo x > $(somecmd)/notes.txt",
+      "cp a.txt $(dirname $0)/notes.txt",
+      "echo x > `mktemp -d`/notes.txt",
+    ]) {
+      expect(guard(p, c), c).toBe(2);
+      expect(stderrOf(p, c), c).toContain("goes somewhere the guard couldn't tell");
+    }
+  });
+
+  it("a line nested deeper than the reader reads is refused unread; eight levels are read", () => {
+    const p = proj();
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    const nested = (d: number, inner: string) => "echo " + "$(a ".repeat(d) + inner + ")".repeat(d);
+    expect(guard(p, nested(8, "rm -rf hooks"))).toBe(2);
+    expect(stderrOf(p, nested(8, "rm -rf hooks"))).toContain("hook directory");
+    expect(guard(p, nested(8, "ls hooks"))).toBe(0);
+    for (const c of [nested(9, "ls"), nested(9, "rm -rf hooks"), "echo " + "$(a ".repeat(9) + "ls",
+      "bash -c '" + nested(9, "ls") + "'", "diff <(" + nested(9, "ls") + ") b"]) {
+      expect(guard(p, c), c.slice(0, 40)).toBe(2);
+      expect(stderrOf(p, c), c.slice(0, 40)).toContain("deeper than the guard reads");
+    }
+    // the human's inline override still covers the line it prefixes
+    expect(guard(p, "CAIRN_HARNESS_EDIT=1 " + nested(9, "ls"))).toBe(0);
+  });
+
+  it("a pathological nesting is refused in bounded time", () => {
+    const p = proj();
+    const nested = (d: number) => "echo " + "$(a ".repeat(d) + "rm -rf hooks" + ")".repeat(d);
+    for (const c of [nested(120), "echo " + "$(a ".repeat(120) + "rm -rf hooks"]) {
+      const t0 = Date.now();
+      expect(guard(p, c)).toBe(2);
+      expect(Date.now() - t0).toBeLessThan(1500); // ~9 s before the cap; a generous ceiling, not a benchmark
     }
   });
 });

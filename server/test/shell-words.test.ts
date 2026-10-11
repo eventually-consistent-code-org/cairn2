@@ -9,8 +9,9 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  WRAPPERS, SHELLS, ARG_SAFE, braceExpand, commandName, shellSegments, unwrap, shellCommandString,
-  shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands, toolCommandLines,
+  WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
+  shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
+  toolCommandLines, tooDeep,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -60,9 +61,10 @@ describe("shellSegments", () => {
     expect(words("rm -rf $(dirname \"$(pwd)/x)y\")/hooks", sub))
       .toEqual([["rm", "-rf", "$(dirname \"$(pwd)/x)y\")/hooks"], ["dirname", "$(pwd)/x)y"], ["pwd"]]);
     expect(words("echo foo$(x)bar `y`z", sub)).toEqual([["echo", "foo$(x)bar", "`y`z"], ["x"], ["y"]]);
-    // arithmetic and process substitution are words with no command line inside
-    expect(words("echo $((1+2)) >(cat)", sub)).toEqual([["echo", "$((1+2))", ">(cat)"]]);
-    expect(words("diff <(sort a) <(sort b)", sub)).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
+    // arithmetic and process substitution are words too; their bodies are read after the line (#320)
+    expect(words("echo $((1+2)) >(cat)", sub)).toEqual([["echo", "$((1+2))", ">(cat)"], ["1+2"], ["cat"]]);
+    expect(words("diff <(sort a) <(sort b)", sub))
+      .toEqual([["diff", "<(sort a)", "<(sort b)"], ["sort", "a"], ["sort", "b"]]);
     // a redirect past a substitution is still a redirect
     const [seg] = shellSegments("echo x > $(pwd)/hooks/hooks.json", sub) as Seg[];
     expect(seg.words).toEqual(["echo", "x"]);
@@ -73,6 +75,99 @@ describe("shellSegments", () => {
     // a subshell run as a command is still a break
     expect(words("(cd x && rm -rf hooks); echo $(date)", sub))
       .toEqual([["cd", "x"], ["rm", "-rf", "hooks"], ["echo", "$(date)"], ["date"]]);
+  });
+
+  // #320: #319 made `<(...)`, `>(...)` and `$((...))` one word but queued
+  // no body for them, so `diff <(git reset --hard) x` ran its reset unseen.
+  // Each body runs, so each is read as a line of its own, like a $(...)'s.
+  it("process substitution and arithmetic bodies are read as command lines (#320)", () => {
+    const sub = { subshells: true, substitutions: true, redirects: true };
+    expect(words("diff <(git reset --hard) /dev/null", sub))
+      .toEqual([["diff", "<(git reset --hard)", "/dev/null"], ["git", "reset", "--hard"]]);
+    expect(words("<(git push --force)", sub)).toEqual([["<(git push --force)"], ["git", "push", "--force"]]);
+    // a `>(...)` after a redirect is the redirect's target; the command inside it is a segment of its own
+    const [seg, inner] = shellSegments("cat a > >(tee hooks/hooks.json)", sub) as Seg[];
+    expect(seg.words).toEqual(["cat", "a"]);
+    expect(seg.redirects).toEqual([">(tee hooks/hooks.json)"]);
+    expect(inner.words).toEqual(["tee", "hooks/hooks.json"]);
+    const [, tee, cat] = shellSegments("cat a.txt | tee >(cat > hooks/hooks.json)", sub) as Seg[];
+    expect(tee.words).toEqual(["tee", ">(cat > hooks/hooks.json)"]);
+    expect(cat.words).toEqual(["cat"]);
+    expect(cat.redirects).toEqual(["hooks/hooks.json"]);
+    // an arithmetic body is read as a line too: a substitution inside it runs, and a body
+    // that isn't arithmetic is a command substitution holding a subshell in some shells
+    expect(words("echo $((1+2)) $(( x * 2 ))", sub))
+      .toEqual([["echo", "$((1+2))", "$(( x * 2 ))"], ["1+2"], ["x", "*", "2"]]);
+    expect(words("echo $((git reset --hard))", sub))
+      .toEqual([["echo", "$((git reset --hard))"], ["git", "reset", "--hard"]]);
+    expect(words("echo $( (git reset --hard) )", sub))
+      .toEqual([["echo", "$( (git reset --hard) )"], ["git", "reset", "--hard"]]);
+    expect(words("echo $( (cd x && rm -rf hooks) )", sub))
+      .toEqual([["echo", "$( (cd x && rm -rf hooks) )"], ["cd", "x"], ["rm", "-rf", "hooks"]]);
+    expect(words("echo $((1 + $(rm -rf hooks | wc -c)))", sub)).toEqual([
+      ["echo", "$((1 + $(rm -rf hooks | wc -c)))"], ["1", "+", "$(rm -rf hooks | wc -c)"],
+      ["rm", "-rf", "hooks"], ["wc", "-c"]]);
+    expect(words("echo $(( $(git reset --hard) ))", sub)).toEqual([
+      ["echo", "$(( $(git reset --hard) ))"], ["$(git reset --hard)"], ["git", "reset", "--hard"]]);
+    expect(words("echo $((`git reset --hard`))", sub)).toEqual([
+      ["echo", "$((`git reset --hard`))"], ["`git reset --hard`"], ["git", "reset", "--hard"]]);
+    // nested process substitutions (a body's own bodies follow it), and one inside a $(...)
+    expect(words("diff <(sort <(cat a)) <(sort b)", sub)).toEqual([
+      ["diff", "<(sort <(cat a))", "<(sort b)"], ["sort", "<(cat a)"], ["cat", "a"], ["sort", "b"]]);
+    expect(words("echo $(diff <(git reset --hard) x)", sub)).toEqual([
+      ["echo", "$(diff <(git reset --hard) x)"], ["diff", "<(git reset --hard)", "x"], ["git", "reset", "--hard"]]);
+    // the everyday shapes keep their words
+    expect(words("while read l; do echo $l; done < <(git log --oneline)", sub).at(-1))
+      .toEqual(["git", "log", "--oneline"]);
+    expect(words("paste <(cut -f1 a) <(cut -f2 b) > out.txt", sub)[0]).toEqual(["paste", "<(cut -f1 a)", "<(cut -f2 b)"]);
+    // the body is queued only when substitutions are read
+    expect(words("diff <(sort a) <(sort b)", { subshells: true })).toEqual([["diff", "<(sort a)", "<(sort b)"]]);
+  });
+
+  // #321: every substitution body was re-read without limit, and the
+  // guards' own re-reads of a runner's inner line multiplied that, so a
+  // line nested 120 deep held a guard for seconds. Bodies nest a fixed
+  // number of levels now; past that a deep segment stands in, unread.
+  it("substitution bodies nest to SUBSTITUTION_DEPTH levels; deeper is marked, not read (#321)", () => {
+    const sub = { subshells: true, substitutions: true };
+    const nested = (d: number, tail = ")".repeat(d)) => "echo " + "$(a ".repeat(d) + "x" + tail;
+    expect(SUBSTITUTION_DEPTH).toBe(8);
+    // eight levels: every body read, down to the innermost `a x`
+    const full = shellSegments(nested(8), sub) as Array<Seg & { deep?: boolean }>;
+    expect(full).toHaveLength(9);
+    expect(full.at(-1)?.words).toEqual(["a", "x"]);
+    expect(tooDeep(full)).toBe(false);
+    // nine: the eighth body is read, the ninth is a deep marker and nothing below it is
+    const deep = shellSegments(nested(9), sub) as Array<Seg & { deep?: boolean }>;
+    expect(deep).toHaveLength(10);
+    expect(deep[8].words).toEqual(["a", "$(a x)"]);
+    expect(deep.at(-1)).toMatchObject({ words: [], redirects: [], deep: true });
+    expect(tooDeep(deep)).toBe(true);
+    // unterminated, backticks and quotes nest the same way
+    expect(tooDeep(shellSegments(nested(9, ""), sub))).toBe(true);
+    expect(tooDeep(shellSegments("echo `a " + "$(b ".repeat(8) + "x`", sub))).toBe(true); // 9 levels
+    expect(tooDeep(shellSegments("echo `a " + "$(b ".repeat(7) + "x`", sub))).toBe(false); // 8
+    expect(tooDeep(shellSegments("echo " + '"$(a '.repeat(9) + "x", sub))).toBe(true);
+    expect(tooDeep(shellSegments(nested(8, ""), sub))).toBe(false);
+    // the marker only comes with substitutions read; without it the word is whole either way
+    expect(tooDeep(shellSegments(nested(9), { subshells: true }))).toBe(false);
+    // wide is not deep: fifty substitutions on one line are all read
+    const wide = "echo " + "$(a x) ".repeat(50);
+    expect(shellSegments(wide, sub)).toHaveLength(51);
+    expect(tooDeep(shellSegments(wide, sub))).toBe(false);
+  });
+
+  it("a pathological nesting is read in bounded time (#321)", () => {
+    const sub = { subshells: true, substitutions: true, redirects: true };
+    const nested = (d: number) => "echo " + "$(a ".repeat(d) + "rm -rf hooks";
+    let flat = "echo";
+    while (flat.length < 2000) flat += " $(cat notes.txt | wc -l) and some words";
+    // generous ceilings: the point is that the reader stops at the cap, not a benchmark
+    for (const [line, ceiling] of [[nested(120), 500], [nested(1000), 1000], [flat, 300]] as const) {
+      const t0 = Date.now();
+      for (let i = 0; i < 5; i++) shellSegments(line, sub);
+      expect(Date.now() - t0, line.slice(0, 40)).toBeLessThan(ceiling);
+    }
   });
 
   it("redirects: targets are collected, descriptors and input are not", () => {

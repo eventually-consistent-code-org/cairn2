@@ -2141,3 +2141,101 @@ describe("run guard: an unquoted substitution never cuts a destructive flag off 
     }
   });
 });
+
+// #320: #319 queued no body for `<(...)`, `>(...)` or `$((...))`, so a
+// destructive command inside one ran unseen. Before #319 the split at `(`
+// surfaced it by accident; now each body is read as a line of its own.
+describe("run guard: a command inside a process substitution or arithmetic is seen (#320)", () => {
+  it("each reported form is refused", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "diff <(git reset --hard) /dev/null",
+      "<(git push --force)",
+      "cat <(git push --force origin main)",
+      "echo $(( $(git reset --hard) ))",
+      "echo $((1 + $(git clean -fdx | wc -c)))",
+      "tee >(git reset --hard) < a.txt",
+      "diff <(sort <(git reset --hard)) b",
+      // a `$((` that isn't arithmetic is a command substitution holding a subshell in some shells
+      "echo $((git reset --hard))",
+      "echo $( (git reset --hard) )",
+      "echo $( (cd x && git reset --hard) )",
+      "echo $((`git reset --hard`))",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("the everyday process substitutions and arithmetic pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "diff <(sort a) <(sort b)",
+      "comm <(ls a) <(ls b)",
+      "echo $((1+2))",
+      "while read l; do echo $l; done < <(git log --oneline)",
+      "paste <(cut -f1 a) <(cut -f2 b) > out.txt",
+      "diff <(git show HEAD:a) <(git show HEAD~1:a)",
+      "echo $(( $(git rev-list --count HEAD) + 1 ))",
+      "echo $(( x * 2 ))",
+      "n=$((n + 1)); git status",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});
+
+// #321: every substitution body was re-read without limit, and the guard's
+// own re-reads of a runner's inner line multiplied that, so a line nested
+// 120 deep took six seconds. Bodies nest eight levels now; deeper is
+// refused unread, since what runs there was never seen.
+describe("run guard: a line nested deeper than the reader reads is refused unread (#321)", () => {
+  const nested = (d: number, inner: string) => "echo " + "$(a ".repeat(d) + inner + ")".repeat(d);
+
+  it("eight levels are read; nine are refused whatever is inside, naming the owner's ways", () => {
+    const { proj, home } = fixture();
+    expect(guard(proj, home, nested(8, "git status")).status).toBe(0);
+    const r8 = guard(proj, home, nested(8, "git reset --hard"));
+    expect(r8.status).toBe(2);
+    expect(r8.stderr).toContain("git reset --hard");
+    for (const c of [nested(9, "git status"), nested(9, "git reset --hard"),
+      "echo " + "$(a ".repeat(9) + "git status", "bash -c '" + nested(9, "ls") + "'",
+      "git log $(" + nested(9, "ls") + ")"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c.slice(0, 40)).toBe(2);
+      expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
+      expectOwnerTail(r.stderr, c.slice(0, 40));
+    }
+  });
+
+  it("a pathological nesting is refused in bounded time", () => {
+    const { proj, home } = fixture();
+    for (const c of [nested(120, "git reset --hard"), "echo " + "$(a ".repeat(120) + "git reset --hard"]) {
+      const t0 = Date.now();
+      expect(guard(proj, home, c).status).toBe(2);
+      expect(Date.now() - t0).toBeLessThan(1500); // ~6 s before the cap; a generous ceiling, not a benchmark
+    }
+  });
+
+  it("the everyday computed folders still pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "cd $(git rev-parse --show-toplevel) && npm test",
+      'cd "$(git rev-parse --show-toplevel)" && git status',
+      "echo x > $(pwd)/notes.txt",
+      "git -C $(git rev-parse --show-toplevel) log --oneline",
+      // the harness guard's computed-folder writes: no git command in them, nothing to say
+      "cd hooks && echo x > $(pwd)/hooks.json",
+      `cd .. && rm -rf $(pwd)/${basename(proj)}/hooks`,
+      "cd /tmp && echo x > $(pwd)/notes.txt",
+      "cd server && cp a $(git rev-parse --show-toplevel)/.mcp.json",
+      "cd $(mktemp -d) && echo x > $(pwd)/x",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+    // a cd the guard can't follow still loses the push after it, and a destructive git is refused anywhere
+    expect(guard(proj, home, "cd $(mktemp -d) && git push origin main").status).toBe(2);
+    expect(guard(proj, home, "cd $(pwd)/sub && git reset --hard").status).toBe(2);
+  });
+});
