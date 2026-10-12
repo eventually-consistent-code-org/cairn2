@@ -3626,6 +3626,24 @@ describe("posttooluse-observe", () => {
     expect(rows[1].target).toContain("a.ts");
   });
 
+  // #324: Escape on a running tool arrives as PostToolUseFailure with
+  // is_interrupt true -- a cancellation, never an error row.
+  it("an interrupted PostToolUseFailure payload stays error: false and carries interrupted: true", () => {
+    const proj = freshDir("cairn-obs-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+      session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Bash",
+      tool_input: { command: "npm test -- --run" },
+      error: "Tool execution was interrupted", is_interrupt: true,
+    }));
+    expect(r.status).toBe(0);
+    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
+      .trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "Bash", error: false, interrupted: true });
+    expect(rows[0].target).toContain("npm test");
+  });
+
   it("a successful PostToolUse payload with no tool_response stays error: false", () => {
     const proj = freshDir("cairn-obs-");
     mkdirSync(join(proj, ".cairn"), { recursive: true });

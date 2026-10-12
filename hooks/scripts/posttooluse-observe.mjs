@@ -16,7 +16,10 @@
  *   PostToolUse row is error: true only when a harness that does deliver
  *   failures there (Cursor's adapter, a tool_response carrying is_error /
  *   success:false / a non-zero exit_code) says so. Before this both events
- *   were not wired and the flag was dead -- always false.
+ *   were not wired and the flag was dead -- always false. One exception
+ *   (#324): a PostToolUseFailure with is_interrupt true is the owner hitting
+ *   Escape, not the tool failing -- that row keeps error: false and carries
+ *   interrupted: true instead, so retro never reads a cancellation as churn.
  * Author(s): John Reed
  */
 
@@ -44,7 +47,13 @@ function targetOf(payload) {
   return undefined;
 }
 
+/** The owner cancelled the call (Escape) -- a PostToolUseFailure that is not an error. */
+function interrupted(payload) {
+  return payload.is_interrupt === true;
+}
+
 function errored(payload) {
+  if (interrupted(payload)) return false;
   // A failed call only ever arrives on PostToolUseFailure -- that event IS the flag.
   if (payload.hook_event_name === "PostToolUseFailure") return true;
   if (typeof payload.error === "string" && payload.tool_response == null) return true;
@@ -71,6 +80,7 @@ function main() {
     target: targetOf(payload),
     error: errored(payload),
   };
+  if (interrupted(payload)) row.interrupted = true;
   mkdirSync(dir, { recursive: true });
   appendFileSync(path, JSON.stringify(row) + "\n");
 
