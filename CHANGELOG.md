@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.8.3 — the error flag (2026-10-12)
+
+A small release that makes one retro signal real. The observation
+buffer the retro verb reviews records every Edit, Write and Bash call
+with an error flag, and across the thirteen waves of v2.8.2 — full of
+failing probes and red test runs — not one row ever carried it. Claude
+Code emits no PostToolUse event for a tool call that fails; the failure
+arrives as a separate PostToolUseFailure event, which nothing listened
+to. So the flag was structurally false, and any lesson card that cited
+error churn from the buffer would have been fabricated.
+
+Both fixes are hook-side only. No server change, no new tool.
+
+Tool count holds at 87. Suite 2120 → 2124.
+
+### hooks
+
+- The observe hook is wired to PostToolUseFailure beside PostToolUse,
+  on the same Edit, Write and Bash matcher. A failed call now lands in
+  the buffer as an error row carrying the tool name and target, as the
+  flag always promised. The script's header says which event carries
+  which flag (#323).
+- An interrupted call is a cancellation, not an error. The owner
+  pressing Escape on a running tool arrives as a failure event with
+  is_interrupt set; that row keeps the error flag false and carries an
+  interrupted flag instead, so retro never reads a cancellation as
+  error-to-retry churn (#324).
+
+### audit
+
+- A phase-scoped security record (security-25-7) now stands beside the
+  surface records; the two residual minors it carries are in the record,
+  not the tracker: phase 25.7's acceptance shape promised a sweep
+  manifest delta that was never computed, and the harness guard's
+  documented interpreter blind spot was confirmed live on a protected
+  file by the #323 fix itself.
+
 ## v2.8.2 — the hardening (2026-10-11)
 
 The second sweep, taken on v2.8.1, filed twenty findings against the
