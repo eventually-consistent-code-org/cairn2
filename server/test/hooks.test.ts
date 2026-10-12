@@ -3599,4 +3599,52 @@ describe("posttooluse-observe", () => {
     expect(r.status).toBe(0);
     expect(existsSync(join(proj, ".cairn"))).toBe(false);
   });
+
+  // #323: a failed call never reaches PostToolUse -- it arrives as
+  // PostToolUseFailure with no tool_response at all. That event is the flag.
+  it("a PostToolUseFailure payload lands as error: true with tool and target", () => {
+    const proj = freshDir("cairn-obs-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+      session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Bash",
+      tool_use_id: "toolu_01", tool_input: { command: "npm test -- --run" },
+      error: "Command exited with code 1", is_interrupt: false,
+    }));
+    expect(r.status).toBe(0);
+    const edit = runHookRaw(OBSERVE, proj, JSON.stringify({
+      session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Edit",
+      tool_input: { file_path: join(proj, "src", "a.ts") },
+      error: "String to replace not found in file.", is_interrupt: false,
+    }));
+    expect(edit.status).toBe(0);
+    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
+      .trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ tool: "Bash", error: true });
+    expect(rows[0].target).toContain("npm test");
+    expect(rows[1]).toMatchObject({ tool: "Edit", error: true });
+    expect(rows[1].target).toContain("a.ts");
+  });
+
+  it("a successful PostToolUse payload with no tool_response stays error: false", () => {
+    const proj = freshDir("cairn-obs-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+      session_id: "s1", hook_event_name: "PostToolUse", tool_name: "Write",
+      tool_input: { file_path: join(proj, "b.ts") },
+    }));
+    expect(r.status).toBe(0);
+    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
+      .trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "Write", error: false });
+  });
+
+  it("hooks.json wires PostToolUseFailure to the observe script on the same matcher", () => {
+    const cfg = JSON.parse(readFileSync(join(scriptsDir, "..", "hooks.json"), "utf8"));
+    const fail = cfg.hooks.PostToolUseFailure;
+    expect(fail).toHaveLength(1);
+    expect(fail[0].matcher).toBe("Edit|Write|Bash");
+    expect(fail[0].hooks.map((h: { command: string }) => h.command).join(" ")).toContain("posttooluse-observe.mjs");
+  });
 });

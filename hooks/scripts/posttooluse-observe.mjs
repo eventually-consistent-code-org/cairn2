@@ -1,13 +1,22 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PostToolUse hook -- append one lightweight observation row per
+ * Purpose: PostToolUse + PostToolUseFailure hook -- append one observation row per
  *   Edit/Write/Bash call to .cairn/observations/observations.jsonl: which
  *   tool, which target, did it error. Raw material for retro's candidate-card
  *   review (repeated error->fix churn, hotspot files) -- observations NEVER
  *   inject into context or become memory on their own; retro is the gate.
  *   Only fires in cairn-initialized projects (.cairn/ exists). Capped,
  *   fire-and-forget, invisible on failure.
+ *
+ *   Which event carries which flag (#323): Claude Code emits NO PostToolUse
+ *   event for a call that fails -- a failed call arrives as PostToolUseFailure
+ *   instead, with no tool_response at all (just an `error` string and
+ *   `is_interrupt`). So every PostToolUseFailure row is error: true, and a
+ *   PostToolUse row is error: true only when a harness that does deliver
+ *   failures there (Cursor's adapter, a tool_response carrying is_error /
+ *   success:false / a non-zero exit_code) says so. Before this both events
+ *   were not wired and the flag was dead -- always false.
  * Author(s): John Reed
  */
 
@@ -36,6 +45,9 @@ function targetOf(payload) {
 }
 
 function errored(payload) {
+  // A failed call only ever arrives on PostToolUseFailure -- that event IS the flag.
+  if (payload.hook_event_name === "PostToolUseFailure") return true;
+  if (typeof payload.error === "string" && payload.tool_response == null) return true;
   const resp = payload.tool_response;
   if (resp == null) return false;
   if (resp.is_error === true || resp.success === false) return true;

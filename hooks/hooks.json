@@ -1,5 +1,5 @@
 {
-  "description": "cairn continuity hooks -- PreToolUse leak guard + run guard + harness guard, PostToolUse breadcrumb + observation capture + loop check, PreCompact refresh, SessionStart resume injection, Stop cost tracker, TaskCreated/TaskCompleted tracker mirror spool. All are dependency-free, fire-and-forget Node scripts (see hooks/scripts/).",
+  "description": "cairn continuity hooks -- PreToolUse leak guard + run guard + harness guard, PostToolUse breadcrumb + observation capture + loop check, PostToolUseFailure observation capture (the error flag lives here -- a failed call never reaches PostToolUse), PreCompact refresh, SessionStart resume injection, Stop cost tracker, TaskCreated/TaskCompleted tracker mirror spool. All are dependency-free, fire-and-forget Node scripts (see hooks/scripts/).",
   "hooks": {
     "PreToolUse": [
       {
@@ -50,6 +50,18 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/posttooluse-loopcheck.mjs\"",
+            "timeout": 3000
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/posttooluse-observe.mjs\"",
             "timeout": 3000
           }
         ]
