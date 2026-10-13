@@ -15,11 +15,11 @@ same courtesy.
 
 Cairn's column reflects version <!-- auto:version -->2.8.3<!-- /auto:version -->:
 <!-- auto:verb-count -->39<!-- /auto:verb-count --> verbs,
-<!-- auto:tool-count -->87<!-- /auto:tool-count --> typed MCP tools, 1258
+<!-- auto:tool-count -->87<!-- /auto:tool-count --> typed MCP tools, 2124
 passing tests, <!-- auto:tracker-count -->8<!-- /auto:tracker-count --> tracker
 backends. Counts are script-computed from the same sources CI gates on and
 refreshed each release by `scripts/refresh-comparison.mjs`; the test count
-is re-measured by a full suite run (verified 2026-09-10).
+is re-measured by a full suite run (verified 2026-10-12).
 
 ## The head-to-head — tools doing a similar job
 
