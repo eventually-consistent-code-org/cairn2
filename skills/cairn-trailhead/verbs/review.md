@@ -33,9 +33,11 @@ round) and never join the diff panel.
 
 With no project seats and no `seats` config block, the review-stage
 roster opens with the five shipped axes, in this order — today's
-review, byte for byte — and one signal-gated default seat after them:
-the five axes are byte-identical, ux joins when `touches-ui` fires (so
-a server-only diff convenes exactly the five it always did):
+review, byte for byte — and two signal-gated default seats after them:
+the five axes are byte-identical, ux joins when `touches-ui` fires, and
+lean joins when `diff-large` or `touches-server` fires (so a server-only
+diff convenes the five it always did plus lean; a small docs-only diff
+convenes neither):
 
 | seat | what it's looking for |
 |---|---|
@@ -45,6 +47,7 @@ a server-only diff convenes exactly the five it always did):
 | security | injection, auth gaps, secrets in the diff, trust boundaries crossed without a check |
 | tests | claims the diff makes that nothing verifies — new behavior with no test, a test that can't actually fail |
 | ux | whether the diff ships its states, contrast, grid, breakpoints and interaction or only describes them — seated only when the diff touches UI files |
+| lean | code that should not exist — a feature nobody asked for, a helper the repo already has rebuilt, a dependency for a few lines, an abstraction or option for later — seated when the diff is large or touches server code; never cuts the floor (trust-boundary validation, data-loss handling, security, accessibility, anything the user asked for) |
 
 A project-added seat (`.cairn/roles/*.md`) joins the panel where the
 roster puts it, same rules as every default. A seat disabled in

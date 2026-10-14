@@ -17,7 +17,7 @@ eval what a guard can diff.**
 |---|---|
 | routing table ↔ verb files ↔ command shims agree | `scripts/check-surface.mjs` |
 | tool count, version surfaces, diagram labels, dist freshness | `scripts/check-pins.mjs`, `check-versions.mjs`, `check-diagrams.mjs`, `check-dist.mjs` |
-| review panel = the five axes first, in order, with these categories; then only signal-gated default seats (ux) | `server/test/seats.test.ts` (byte-identical pin) |
+| review panel = the five axes first, in order, with these categories; then only signal-gated default seats (ux, lean) | `server/test/seats.test.ts` (byte-identical pin) |
 | `do` confirms before a mutating verb, runs a read-only one directly, stays out of a plain question | `evals/01–03` |
 | `mark` makes exactly one tracker call and never asks | `evals/04` |
 | `ship` stops on flagged drift and leads with the flag's own line | `evals/05` |
