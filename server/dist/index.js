@@ -254,10 +254,12 @@ export function buildServer(deps) {
         return { ...summarise(rows), spans: sessionSpans(rows).length };
     };
     server.registerTool("context_get", {
+        annotations: { readOnlyHint: true },
         description: "Get the active cairn context (phase, issue)",
         inputSchema: z.object({}),
     }, wrap(() => getCtx().get()));
     server.registerTool("context_set", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Set/clear active cairn context fields (null clears)",
         inputSchema: z.object({
             phase: z.number().nullable().optional(),
@@ -302,10 +304,12 @@ export function buildServer(deps) {
         return state;
     }));
     server.registerTool("context_meter", {
+        annotations: { readOnlyHint: true },
         description: "Context rent rollup: per-turn average, bands, residency, prefix",
         inputSchema: z.object({}),
     }, wrap(() => contextMeterReport(dir())));
     server.registerTool("issue_create", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Create an issue in the configured tracker. `phase`: cairn phase " +
             "number ('14', '1.5' -- matches the 'Phase N: <name>' title) or " +
             "tracker phase id ('id:<raw>' if numeric). Estimates " +
@@ -347,10 +351,12 @@ export function buildServer(deps) {
         return { ...issue, ...(estimateSkipped ? { estimateSkipped } : {}) };
     }));
     server.registerTool("issue_get", {
+        annotations: { readOnlyHint: true },
         description: "Fetch one issue",
         inputSchema: z.object({ id: z.string() }),
     }, wrap(async (a) => (await getTracker()).getIssue(a.id)));
     server.registerTool("issue_update", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Update an issue. `claim` picks it up: in_progress, claim comment " +
             "posted here, clock started; returns claimAt. `phase`: cairn number " +
             "('14', '1.5') or 'id:<raw>'; phaseSkipped when the backend can't re-parent",
@@ -479,6 +485,7 @@ export function buildServer(deps) {
         return t;
     };
     server.registerTool("issue_link", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Link two issues (blocks/parent-of/relates-to/supersedes); " +
             "UNSUPPORTED unless the tracker hasDependencies",
         inputSchema: z.object({
@@ -492,6 +499,7 @@ export function buildServer(deps) {
         return { linked: { from: a.from, type: a.type, to: a.to } };
     }));
     server.registerTool("issue_unlink", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Remove an issue link; UNSUPPORTED unless the tracker hasDependencies",
         inputSchema: z.object({
             from: z.string(),
@@ -504,6 +512,7 @@ export function buildServer(deps) {
         return { unlinked: { from: a.from, type: a.type, to: a.to } };
     }));
     server.registerTool("issue_links", {
+        annotations: { readOnlyHint: true },
         description: "List issue links — for one issue (either direction) or the whole project",
         inputSchema: z.object({ id: z.string().optional() }),
     }, wrap(async (a) => {
@@ -511,6 +520,7 @@ export function buildServer(deps) {
         return { links: await t.listLinks(a.id) };
     }));
     server.registerTool("graph_report", {
+        annotations: { readOnlyHint: true },
         description: "Dependency-graph report: ready frontier (open issues with no open " +
             "blockers), inherited effective priorities, dangling edges, and optionally " +
             "one issue's supersedes lineage. UNSUPPORTED unless the tracker hasDependencies",
@@ -531,6 +541,7 @@ export function buildServer(deps) {
         };
     }));
     server.registerTool("tracker_migrate", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Promote a local-tracker project to a hosted backend: phases, " +
             "issues, comments, worklogs, and links carry over with an id remap and " +
             "provenance backlinks. Source must be tracker.type: local. dryRun reports " +
@@ -580,6 +591,7 @@ export function buildServer(deps) {
         return { ...result, record: recordPath };
     }));
     server.registerTool("issue_close", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Close an issue. Duration is measured server-side (`measured` names the rung); " +
             "`timeSpentMinutes` is only the caller's claim. " +
             "Evidence `{ command, result }` posts with the measured line as one comment before the close",
@@ -687,6 +699,7 @@ export function buildServer(deps) {
         };
     }));
     server.registerTool("issue_list", {
+        annotations: { readOnlyHint: true },
         description: "List issues, optionally by phase/state (phase: cairn phase number " +
             "or tracker phase id, 'id:<raw>' if numeric; state matches the semantic " +
             "category — open/in_progress/closed — or an exact state name)",
@@ -703,15 +716,18 @@ export function buildServer(deps) {
         return tracker.listIssues({ ...a, phase });
     }));
     server.registerTool("phase_create", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Create a phase (milestone/epic/list per backend)",
         inputSchema: z.object({ name: z.string() }),
     }, wrap(async (a) => (await getTracker()).createPhase(a.name)));
-    server.registerTool("phase_list", { description: "List phases", inputSchema: z.object({}) }, wrap(async () => (await getTracker()).listPhases()));
+    server.registerTool("phase_list", { annotations: { readOnlyHint: true }, description: "List phases", inputSchema: z.object({}) }, wrap(async () => (await getTracker()).listPhases()));
     server.registerTool("plan_scaffold_project", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Create .cairn/plans/PROJECT.md + roadmap.md (never overwrites)",
         inputSchema: z.object({ name: z.string() }),
     }, wrap((a) => scaffoldProject(dir(), a.name)));
     server.registerTool("plan_scaffold_phase", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Create phases/NN-slug/ (or NN.F-slug/ for a decimal insert) with " +
             "CONTEXT.md + PLAN.md (+RESEARCH.md)",
         inputSchema: z.object({
@@ -721,14 +737,17 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => scaffoldPhase(dir(), a.number, a.name, { research: a.research })));
     server.registerTool("plan_status", {
+        annotations: { readOnlyHint: true },
         description: "Phases, artifact presence, and referenced tracker issues",
         inputSchema: z.object({}),
     }, wrap(() => projectStatus(dir())));
     server.registerTool("plan_phase_ensure", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Ensure the tracker has a phase named 'Phase N: <name>' (idempotent)",
         inputSchema: z.object({ number: z.number(), name: z.string() }),
     }, wrap(async (a) => ensurePhase(await getTracker(), a.number, a.name)));
     server.registerTool("plan_drift", {
+        annotations: { readOnlyHint: true },
         description: "Flag plan-referenced issues that are missing or closed-unverified, a stale " +
             "security audit (latest security record written dirty or before code commits since " +
             "its stamp), and work that has gone quiet (an issue held in progress with no tracker " +
@@ -744,6 +763,7 @@ export function buildServer(deps) {
         return report;
     }));
     server.registerTool("plan_issues_set", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Set the tracker issue ids a phase's PLAN.md advances",
         inputSchema: z.object({
             phaseDir: z.string(),
@@ -778,6 +798,7 @@ export function buildServer(deps) {
         return idx;
     };
     server.registerTool("mem_index", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Index reference material into the searchable memory store (disposable, rebuildable)",
         inputSchema: z.object({
             content: z.string(),
@@ -804,6 +825,7 @@ export function buildServer(deps) {
         return { ok: true };
     }));
     server.registerTool("mem_search", {
+        annotations: { readOnlyHint: true },
         description: "Full-text search the memory index, optionally scoped to a phase/issue",
         inputSchema: z.object({
             query: z.string(),
@@ -817,6 +839,7 @@ export function buildServer(deps) {
         return getMemIndex().search(a.query, { phase: a.phase, issueId: a.issueId, role: a.role }, a.limit ?? 10);
     }));
     server.registerTool("mem_stats", {
+        annotations: { readOnlyHint: true },
         description: "Memory index size — chunk count and approximate token usage (capacity guard signal), " +
             "recall-banner token accounting, card-store health for `audit memory`: cards that " +
             "fail to parse (silently skipped by list and recall), broken provenance, near-duplicates, " +
@@ -842,6 +865,7 @@ export function buildServer(deps) {
         return { ...index, cards, observations };
     }));
     server.registerTool("mem_card_create", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Write a durable memory card (decision/constraint/gotcha/reference/note) with provenance",
         inputSchema: z.object({
             type: z.enum(["decision", "constraint", "gotcha", "reference", "note"]),
@@ -877,6 +901,7 @@ export function buildServer(deps) {
         return card;
     }));
     server.registerTool("mem_card_list", {
+        annotations: { readOnlyHint: true },
         description: "List memory cards, optionally filtered by phase/issue/role scope",
         inputSchema: z.object({
             scopePhase: z.number().optional(),
@@ -889,6 +914,7 @@ export function buildServer(deps) {
         return listCards(dir(), a);
     }));
     server.registerTool("mem_card_recall", {
+        annotations: { readOnlyHint: true },
         description: "List memory cards with staleness checked against their provenance (the anti-rot check)",
         inputSchema: z.object({
             scopePhase: z.number().optional(),
@@ -909,6 +935,7 @@ export function buildServer(deps) {
         });
     }));
     server.registerTool("mem_card_update", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Patch a memory card's frontmatter -- confidence, scopeRole, and/or provenance " +
             "(all optional, at least one required; body and id are immutable)",
         inputSchema: z.object({
@@ -933,6 +960,7 @@ export function buildServer(deps) {
         return card;
     }));
     server.registerTool("mem_compact", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Retro-gated card compaction (#172) -- the capacity guard's action. 'propose' reports " +
             "the card store's token size against its threshold plus the aged low-confidence cards " +
             "that would be retired, the exact archive body, and the provenance union, without " +
@@ -960,6 +988,7 @@ export function buildServer(deps) {
         return result;
     }));
     server.registerTool("mem_timeline", {
+        annotations: { readOnlyHint: true },
         description: "Chronological neighbors around an anchor (a memory card id or an index chunk source) -- " +
             'answers "what was happening around this decision?" at index cost. Day-precision caveat: cards ' +
             "carry a day-precision created date while index chunks carry a full ISO timestamp, so entries are " +
@@ -1026,6 +1055,7 @@ export function buildServer(deps) {
         return [...beforeMerged, ...afterMerged];
     }));
     server.registerTool("plan_unplanned", {
+        annotations: { readOnlyHint: true },
         description: "Tracker issues (non-closed) that no phase's PLAN.md references — work at risk of being missed",
         inputSchema: z.object({}),
     }, wrap(async () => {
@@ -1033,6 +1063,7 @@ export function buildServer(deps) {
         return unplannedReport(await getTracker(d), d);
     }));
     server.registerTool("plan_import", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Reverse-mirror a tracker phase (by id or name substring) into .cairn/plans/ artifacts",
         inputSchema: z.object({ phaseRef: z.string() }),
     }, wrap(async (a) => {
@@ -1049,6 +1080,7 @@ export function buildServer(deps) {
         return result;
     }));
     server.registerTool("continuity_checkpoint", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Write/refresh the session handoff (checkpoint) for this project",
         inputSchema: z.object({
             source: HandoffSourceEnum.optional(),
@@ -1092,14 +1124,17 @@ export function buildServer(deps) {
         return readHandoff(d);
     }));
     server.registerTool("continuity_get", {
+        annotations: { readOnlyHint: true },
         description: "Read the current session handoff, if any (flags handoffs older than 14 days as stale, never errors on staleness)",
         inputSchema: z.object({}),
     }, wrap(() => readHandoff(dir())));
     server.registerTool("continuity_clear", {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
         description: "Delete the session handoff for this project, if any",
         inputSchema: z.object({}),
     }, wrap(() => ({ cleared: clearHandoff(dir()) })));
     server.registerTool("ledger_append", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Append a verified-task line to a phase's LEDGER.md (append-only). Requires typed evidence " +
             "`{ command, result }` or an `evidenceWaived` reason (docs/planning-only); neither is refused, " +
             "and verify fails a phase whose lines carry neither. kind \"evidence\" logs evidence with no " +
@@ -1135,6 +1170,7 @@ export function buildServer(deps) {
         return result;
     }));
     server.registerTool("budget_check", {
+        annotations: { readOnlyHint: true },
         description: "Spend ledger gate for headless batch runs — re-reads actual spend (latest metrics row per session; "
             + "sessions since the run opened count in full, pre-existing sessions count as the delta past their "
             + "run-open baseline) and answers proceed/stop against the run's ceilings. "
@@ -1174,6 +1210,7 @@ export function buildServer(deps) {
         return checkBudget(refreshSpend(ledger));
     }));
     server.registerTool("run_manifest", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "The run manifest for headless batch runs (#132) — the executor's SOLE source of "
             + "authority, under ~/.cairn/runs/ (never the repo). action 'create' writes one per "
             + "run (pushAuth ALWAYS starts false); 'read' returns it plus its file path (the run "
@@ -1250,6 +1287,7 @@ export function buildServer(deps) {
         }
     }));
     server.registerTool("milestone_create", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Start the next milestone — native tracker object when the backend supports it; stamps milestone_id into roadmap.md",
         inputSchema: z.object({ name: z.string() }),
     }, wrap(async (a) => {
@@ -1257,6 +1295,7 @@ export function buildServer(deps) {
         return milestoneCreate(await getTracker(d), d, a.name);
     }));
     server.registerTool("milestone_list", {
+        annotations: { readOnlyHint: true },
         description: "Current milestone number, archived milestones, and the tracker's native list when supported",
         inputSchema: z.object({}),
     }, wrap(async () => {
@@ -1264,6 +1303,7 @@ export function buildServer(deps) {
         return milestoneList(await getTracker(d), d);
     }));
     server.registerTool("milestone_complete", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Complete the current milestone: gate on all-phases-verified, close tracker phases, " +
             "release the native milestone when supported, archive phases/ to milestones/vN/, bump roadmap. " +
             "Idempotent — safe to re-run after a partial tracker failure",
@@ -1273,11 +1313,13 @@ export function buildServer(deps) {
         return milestoneComplete(await getTracker(d), d, a.summary);
     }));
     server.registerTool("plan_resync", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Detect out-of-band commits (covered by no LEDGER.md range) since the last resync marker; " +
             "advances the marker. First run initializes the marker and reports nothing",
         inputSchema: z.object({}),
     }, wrap(() => resyncReport(dir())));
     server.registerTool("plan_tracker_delta", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Diff the live tracker against the last-seen snapshot cursor: new issues/phases, " +
             "field edits, external state changes. Peek by default; ack: true advances the cursor. " +
             "First run initializes the cursor and reports nothing",
@@ -1287,6 +1329,7 @@ export function buildServer(deps) {
         return trackerDelta(d, await getTracker(d), { ack: a.ack });
     }));
     server.registerTool("plan_meta_set", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Set wave grouping (wave_N frontmatter) and/or the TDD-eligible task list on a phase's PLAN.md",
         inputSchema: z.object({
             phaseDir: z.string(),
@@ -1307,10 +1350,12 @@ export function buildServer(deps) {
         return { ok: true, ...readPlanMeta(d, a.phaseDir) };
     }));
     server.registerTool("config_get", {
+        annotations: { readOnlyHint: true },
         description: "Read cairn.json as the validated, post-defaults effective config",
         inputSchema: z.object({}),
     }, wrap(() => loadConfig(dir())));
     server.registerTool("config_set", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Merge-patch cairn.json (null deletes a key). Validates the merged result before " +
             "writing; refuses secret-looking keys/values — credentials live in env vars",
         inputSchema: z.object({ patch: z.record(z.string(), z.unknown()) }),
@@ -1339,6 +1384,7 @@ export function buildServer(deps) {
         }
     };
     server.registerTool("config_probe", {
+        annotations: { readOnlyHint: true },
         description: "Credential preflight (CRN-48) -- one cheap authenticated call to the configured " +
             "tracker (and docs connector, when configured), each mapped to a specific verdict: " +
             "ok / bad_host / bad_token / missing_scope / rate_limited / down. A probe failure IS " +
@@ -1379,6 +1425,7 @@ export function buildServer(deps) {
         return out;
     }));
     server.registerTool("issue_comment", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Post a plain-language comment on a tracker issue (management-visible progress note)",
         inputSchema: z.object({ id: z.string(), text: z.string() }),
     }, wrap(async (a) => (await getTracker()).commentIssue(a.id, a.text)));
@@ -1393,6 +1440,7 @@ export function buildServer(deps) {
         ".txt": "text/plain",
     };
     server.registerTool("issue_attach", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Attach a file (screenshot, render, visual evidence) to a tracker issue. " +
             "UNSUPPORTED on backends without native attachments",
         inputSchema: z.object({
@@ -1419,6 +1467,7 @@ export function buildServer(deps) {
         return tracker.attachFile(a.id, filename, data, mediaType);
     }));
     server.registerTool("trace_start", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Open a persistent debugging session (.cairn/trace/<id>.md). Creates the tracker " +
             "bug issue (label cairn:bug) when no issueId is given. Survives /clear by construction",
         inputSchema: z.object({
@@ -1441,6 +1490,7 @@ export function buildServer(deps) {
         return { id, issue: issueId };
     }));
     server.registerTool("trace_log", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Append a typed entry (evidence|hypothesis|test|verdict) to an open trace — append-only",
         inputSchema: z.object({
             id: z.string(),
@@ -1454,12 +1504,14 @@ export function buildServer(deps) {
         return out;
     }));
     server.registerTool("trace_list", {
+        annotations: { readOnlyHint: true },
         description: "List trace sessions (open and/or resolved) with entry counts",
         inputSchema: z.object({
             status: z.enum(["open", "resolved"]).optional(),
         }),
     }, wrap((a) => listTraces(dir(), a.status)));
     server.registerTool("trace_close", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Resolve a trace: requires >=1 evidence entry, >=1 test entry (the first test is the repro: " +
             "command + observed failing output), and a verdict entry; archives the session, comments the " +
             "resolution plus the repro on the bug issue and closes it",
@@ -1487,6 +1539,7 @@ export function buildServer(deps) {
     const registerSessionTools = (kind, label) => {
         const spec = KIND_SPECS[kind];
         server.registerTool(`${kind}_start`, {
+            annotations: { readOnlyHint: false, destructiveHint: false },
             description: `Open a persistent ${kind} session (.cairn/${kind}/<id>.md). Creates the tracker ` +
                 `issue (label ${label}) when no issueId is given. Survives /clear by construction`,
             inputSchema: z.object({
@@ -1511,6 +1564,7 @@ export function buildServer(deps) {
             return { id, issue: issueId };
         }));
         server.registerTool(`${kind}_log`, {
+            annotations: { readOnlyHint: false, destructiveHint: false },
             description: `Append a typed entry (${spec.entryKinds.join("|")}) to an open ${kind} session — append-only`,
             inputSchema: z.object({
                 id: z.string(),
@@ -1524,6 +1578,7 @@ export function buildServer(deps) {
             return out;
         }));
         server.registerTool(`${kind}_close`, {
+            annotations: { readOnlyHint: false, destructiveHint: true },
             description: `Resolve a ${kind} session: requires a ${spec.closeGate} entry; archives it, comments ` +
                 `the resolution on the issue and closes it`,
             inputSchema: z.object({ id: z.string(), resolution: z.string() }),
@@ -1550,12 +1605,14 @@ export function buildServer(deps) {
     registerSessionTools("draft", "cairn:sketch");
     registerSessionTools("thread", "cairn:thread");
     server.registerTool("session_landscape", {
+        annotations: { readOnlyHint: true },
         description: "Deterministic join over trace/probe/draft/thread sessions — open + resolved with " +
             "resolutions, counts by kind, phase linkage. Frontier-mode grounding: never re-propose " +
             "an archived stop-verdict probe",
         inputSchema: z.object({}),
     }, wrap(() => sessionLandscape(dir())));
     server.registerTool("plan_check", {
+        annotations: { readOnlyHint: true },
         description: "Deterministic plan-quality scan (#2891): cross-plan contract drift " +
             "(Produces/Consumes without a shared fixture), unanchored quantitative thresholds, " +
             "a planned phase whose CONTEXT.md lacks the approaches-considered block, and a task " +
@@ -1568,6 +1625,7 @@ export function buildServer(deps) {
         return planCheck(dir(), a.phase);
     }));
     server.registerTool("audit_record", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Write the audit record (.cairn/audit/<scope>-<date>.md) — single writer; same scope+date " +
             "supersedes, prior dates immutable. Every finding needs a failure_scenario (inputs/state → wrong " +
             "output/crash). Critical/important need a refutation `panel` (>=1 vote, >=2 on security); quorum " +
@@ -1617,6 +1675,7 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => writeAuditRecord(dir(), a.scope, a.verdict, a.findings, { legs: a.legs })));
     server.registerTool("map_set", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Merge-patch the project knowledge graph (.cairn/map/map.json) -- nodes merge by id " +
             "(null deletes). Edge ops: edgesAdd/edgesRemove patch by exact from+to+type triple (removes " +
             "before adds; adds dedupe silently; removing a missing edge is a no-op); edges replaces the " +
@@ -1638,6 +1697,7 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => mapSet(dir(), a.patch, { rebuild: a.rebuild })));
     server.registerTool("map_get", {
+        annotations: { readOnlyHint: true },
         description: "Read the project knowledge graph, optionally filtered by nodeType, edgeType, or a " +
             "node id (self + touching edges + neighbor nodes). Missing store reads as empty",
         inputSchema: z.object({
@@ -1647,6 +1707,7 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => mapGet(dir(), a)));
     server.registerTool("map_query", {
+        annotations: { readOnlyHint: true },
         description: "Composite graph query: node + depth (0-3, default 1) walks a BFS neighborhood over " +
             "edges in both directions; nodeType/edgeType/label (case-insensitive substring) filters AND " +
             "together. Returns { nodes, edges, meta } with edges limited to both endpoints in the result",
@@ -1661,16 +1722,19 @@ export function buildServer(deps) {
     // ---- workspace tools (basecamp) -- these operate on the LAUNCH dir, never
     // the focus-resolved dir: they are the layer that manages focus itself.
     server.registerTool("workspace_list", {
+        annotations: { readOnlyHint: true },
         description: "Workspace name, root, members (name/path/configured), and current focus. " +
             "No workspace resolves to { workspace: null } — never an error",
         inputSchema: z.object({}),
     }, wrap(() => findWorkspace(launchDir) ?? { workspace: null }));
     server.registerTool("workspace_focus", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Set (or clear, with project: null) the workspace focus — every tool then " +
             "operates on the focused member's project dir. Validates the member exists and is configured",
         inputSchema: z.object({ project: z.string().nullable() }),
     }, wrap((a) => setFocus(launchDir, a.project)));
     server.registerTool("workspace_status", {
+        annotations: { readOnlyHint: true },
         description: "Curated cross-project read: per configured member { name, phase, openIssues, " +
             "openSessions } from that member's own stores/tracker. Read-only, never switches focus; " +
             "a member whose tracker errors reports { name, error } instead of failing the call",
@@ -1712,11 +1776,13 @@ export function buildServer(deps) {
         note: z.string().optional(),
     });
     server.registerTool("board_get", {
+        annotations: { readOnlyHint: true },
         description: "Read the workspace dispatch board (.cairn/basecamp/board.json) — workstreams " +
             "sorted by id plus counts by status. Missing board reads as empty",
         inputSchema: z.object({}),
     }, wrap(() => boardGet(launchDir)));
     server.registerTool("board_update", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Merge-patch the dispatch board: workstreams merge by id (null deletes); " +
             "title+project required on create; project must name a workspace member. Rejected " +
             "patches leave the board untouched",
@@ -1725,6 +1791,7 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => boardUpdate(launchDir, a.patch)));
     server.registerTool("outlook_refresh", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Re-derive another registered project's outlook snapshot in place (#92) -- " +
             "used by outlook --refresh on stale cards. project matches a registry entry by " +
             "case-insensitive name substring or exact path; ambiguous or missing matches error " +
@@ -1743,12 +1810,14 @@ export function buildServer(deps) {
         return { refreshed: entries[0].name, path: entries[0].path };
     }));
     server.registerTool("outlook_forget", {
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description: "Prune a project from the machine registry (#92) -- outlook forget <project>. " +
             "Matches by case-insensitive name substring or exact path; returns what was removed " +
             "(empty = no match). Does not touch the project itself or its snapshots",
         inputSchema: z.object({ project: z.string() }),
     }, wrap((a) => ({ removed: forgetProject(a.project) })));
     server.registerTool("outlook_emit", {
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Explicit outlook snapshot emit for lifecycle gates (verify/ship/summit). " +
             "Re-derives the local snapshot and optionally attaches a verb-supplied tracker block " +
             "(open/inProgress/blocked counts, nextVerb, asOf) that carries forward through later " +
@@ -1770,6 +1839,7 @@ export function buildServer(deps) {
         return { emitted: true };
     }));
     server.registerTool("outlook_get", {
+        annotations: { readOnlyHint: true },
         description: "Portfolio aggregate (#55): every registered cairn project on this machine as a " +
             "card — snapshot (phases/sessions/tracker block), staleness vs live git HEAD, per-project " +
             "{name, error} isolation. Reads ~/.cairn/registry.json + outlook mirrors only; never walks " +
@@ -1779,12 +1849,14 @@ export function buildServer(deps) {
         inputSchema: z.object({ artifact: z.boolean().optional() }),
     }, wrap((a) => outlookAggregate(undefined, a.artifact ? { artifact: true } : undefined)));
     server.registerTool("peer_list", {
+        annotations: { readOnlyHint: true },
         description: "Detected external AI peer CLIs (codex/opencode/antigravity/grok) — {peers: [on PATH, enabled, " +
             "input cap, execCapable (config-declared trust to execute the product during review)], maxConcurrent: " +
             "resource-aware fan-out budget — dispatch peers in batches of at most this many, never all at once",
         inputSchema: z.object({}),
     }, wrap(() => peerList(dir())));
     server.registerTool("peer_run", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Run one external peer CLI with capped stdin input — advisory output, non-zero exit is a result. " +
             "Outbound content leaves the machine: the capped input is leak-scanned first and a hit refuses the run. " +
             "cwdMode 'scratch' (default) runs the child contained in a throwaway temp dir with the capped input " +
@@ -1803,6 +1875,7 @@ export function buildServer(deps) {
         });
     }));
     server.registerTool("peer_state", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Per-run peers convergence state (.cairn/peers/<slug>/) — ops: start (mode/target/" +
             "focus/peers; refuses an unfinished run on the slug), record_output (peer/round raw reply, " +
             "verbatim file), record_findings (peer/round, stable ids f1, f2, ...), verdict (findingId + " +
@@ -1870,6 +1943,7 @@ export function buildServer(deps) {
         }
     }));
     server.registerTool("seat_roster", {
+        annotations: { readOnlyHint: true },
         description: "Merged seat roster — shipped default seats (templates/seats/) overridden by project seats " +
             "(.cairn/roles/*.md, matched by name; a read path — the server never writes there), then " +
             "filtered/ordered by cairn.json's optional `seats` block (absent = all defaults enabled). " +
@@ -1900,6 +1974,7 @@ export function buildServer(deps) {
         };
     }));
     server.registerTool("research_sections", {
+        annotations: { readOnlyHint: true },
         description: "Parse a research artifact's ##+ section markers " +
             "(<!-- namespace: done|pending|failed [date] [model] [— note] -->) for one " +
             "namespace (scout, survey, ...). Unmarked sections report state 'unmarked'; a " +
@@ -1967,6 +2042,7 @@ export function buildServer(deps) {
         return { path: rel, flipped: heading, sections };
     }));
     server.registerTool("docs_publish", {
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description: "Publish project docs to the configured docs connector: README.md as the landing page " +
             "(with a contents section), docs/ (+ CHANGELOG.md) as its child page tree. Idempotent. " +
             "Refused unless confirm: true — the owner's explicit yes",
@@ -1983,6 +2059,7 @@ export function buildServer(deps) {
         return publishTree(await getDocsConnector(d), d, a.projectName);
     }));
     server.registerTool("docs_status", {
+        annotations: { readOnlyHint: true },
         description: "Docs connector status — configured connector and the project's landing page, when one exists. " +
             "A configured-but-unreachable connector reports {configured:true, reachable:false, error, message} " +
             "instead of throwing",
@@ -2009,6 +2086,7 @@ export function buildServer(deps) {
         }
     }));
     server.registerTool("docs_drift", {
+        annotations: { readOnlyHint: true },
         description: "Deterministic docs-drift report — flags verified phases (live and archived) the public " +
             "docs have NOT caught up with: no CHANGELOG.md/docs/ entry mentions the phase, or the " +
             "newest docs commit predates the phase's last LEDGER.md commit. Pure filesystem + git " +
@@ -2016,6 +2094,7 @@ export function buildServer(deps) {
         inputSchema: z.object({}),
     }, wrap(async () => docsDriftReport(dir())));
     server.registerTool("distill_manifest", {
+        annotations: { readOnlyHint: true },
         description: "Assemble one phase's distill manifest — the scope an incremental distill run may " +
             "synthesize from: the phase's PLAN.md issues, its parsed LEDGER.md entries (each " +
             "carrying the commit range the task landed as), and the union commit range those " +
@@ -2025,6 +2104,7 @@ export function buildServer(deps) {
         inputSchema: z.object({ phase: z.number() }),
     }, wrap((a) => distillManifest(dir(), a.phase)));
     server.registerTool("token_estimate", {
+        annotations: { readOnlyHint: true },
         description: "Predict a phase's approximate agent-token spend as a RANGE before it runs (#129), " +
             "calibrated from the metrics history the Stop hook writes (latest row per session — " +
             "rows are cumulative). Tokens-per-point and tokens-per-issue distributions from " +

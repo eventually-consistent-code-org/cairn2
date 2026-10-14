@@ -233,7 +233,11 @@ p.stdout.on("data", (d) => {
     try { msg = JSON.parse(line); } catch { continue; }
     if (msg.id === 2 && msg.result && msg.result.tools) {
       let chars = 0;
-      for (const t of msg.result.tools) chars += JSON.stringify(t).length;
+      // Only what reaches the model is rent: the name, the description and
+      // the input schema. Annotations (readOnlyHint and friends, #344) ride
+      // in tools/list for the harness's permission layer and never enter
+      // the model's tool definitions, so they are measured out here.
+      for (const { annotations, ...t } of msg.result.tools) chars += JSON.stringify(t).length;
       process.stdout.write("CHARS:" + chars + ":" + msg.result.tools.length + "\\n");
       p.kill();
       process.exit(0);
