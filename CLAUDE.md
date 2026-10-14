@@ -40,8 +40,7 @@ MCP entry is `server/dist/index.js`, wired in `.mcp.json` via
 `${CLAUDE_PLUGIN_ROOT}`, which passes `CLAUDE_PROJECT_DIR` (required).
 
 Env (no `.env.example`): `CLAUDE_PROJECT_DIR`, `GITHUB_TOKEN`,
-`CAIRN_SETUP_OFFLINE`, `CAIRN_TASK_MIRROR_NO_SPAWN`,
-`CAIRN_TASK_MIRROR_BACKOFF_MS`, `CLAUDE_CODE_ENABLE_TODO_TOOLS`.
+`CAIRN_SETUP_OFFLINE`.
 `cairn.json` is gitignored but present locally — machine-local config.
 
 ## Gotchas

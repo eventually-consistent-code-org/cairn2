@@ -10,6 +10,11 @@ Claude Code's native Tasks can be auto-mirrored to an external tracker with
 hooks. Probed end-to-end against CLI 2.1.223 on 2026-08-14; verdict
 VALIDATED, resolution proceed.
 
+**Retired in phase 26 (2026-10-13, #329).** The spool hook, worker, tests
+and advisory left the plugin because Claude Code ships the task tools
+default-off on every current model, so the two events never fire. Nothing
+below was disproved; it returns the day the tools are on by default again.
+
 ## What got validated
 
 - `TaskCreated` and `TaskCompleted` both fire, including from headless

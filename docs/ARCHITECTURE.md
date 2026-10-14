@@ -230,9 +230,8 @@ distinction matters more than the count.
 
 - **Recorders** write state and are invisible by construction: the
   breadcrumb that refreshes the session handoff, the observation
-  capture, the pre-compaction refresh, the session-start resume
-  injection, the stop-time cost tracker, and the native-task mirror
-  spool. Any error is a silent no-op — a recorder must never be the
+  capture, the session-start resume injection, and the stop-time cost
+  tracker. Any error is a silent no-op — a recorder must never be the
   reason a session stops.
 - **Refusers** block a tool call and say why. The leak guard stops a
   commit whose staged diff would carry internal references into source.

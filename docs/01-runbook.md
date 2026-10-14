@@ -1481,16 +1481,14 @@ observation log (tool, target, error flag) that `retro` reviews for
 candidate lessons and then clears. Every hook is fire-and-forget
 and targets under 100ms; a hook failure is never visible to your session.
 
-One more hook pair drives the **native-task mirror**: `TaskCreated` /
-`TaskCompleted` events append one row to a per-project spool under
-`~/.cairn/spool/`, and a detached worker mirrors it to the tracker on its
-own clock — a task created in-session shows up as a tracker item and
-closes itself when the task completes. **Flag requirement:** Claude Code
-2.1.233+ ships the task tools (TaskCreate and friends) default-off on
-newer models unless `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` is set — no tools
-means no tasks, no task events, and a mirror that sits dormant without
-erroring. The session-start hook prints a one-line advisory in cairn
-projects when the flag isn't set.
+There is no longer a native-task mirror. Earlier releases listened for
+`TaskCreated` / `TaskCompleted` and mirrored each native task to the
+tracker; Claude Code ships the task tools default-off on every current
+model, so those events never arrive, and the hook pair, its spool and
+the session-start advisory were retired in phase 26 (2026-10-13). The
+verbs' own claim/progress/close comments are the tracker mirror. The
+validated design stays in the repo's `native-task-hook-mirror` skill
+for the day the tools come back on by default.
 
 Guard rails worth knowing:
 
