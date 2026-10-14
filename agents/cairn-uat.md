@@ -57,6 +57,15 @@ direction or from `tokens.json`, that's not a UAT finding — it's an
 violates ("diverges from decision <id>: <what was decided>"), so whoever
 picks it up isn't left reconstructing which pick got broken.
 
+When the walk reaches a screen, also check that it renders all four states
+— Default, Loading, Empty, Error — as views you can actually see, not
+prose that describes them (one HTML file with a visible state toggle
+counts). A screen missing one is handed off the same way: an `audit ui`
+finding citing the file. That four-state floor is paraphrased from
+zeeshani42's `ui-ux-designer` skill (MIT,
+github.com/zeeshani42/your-ui-ux-designer); `audit ui` applies it
+whenever the phase declared no UI criteria of its own.
+
 ## Closing discipline
 
 Same as every audit mode, no exceptions: `audit_record(scope, verdict,
