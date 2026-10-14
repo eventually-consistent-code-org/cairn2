@@ -8,7 +8,12 @@
  *   The rules are spelled out in the block below.
  *
  * removeWhen: headless runs execute in platform-provided isolated
- *   checkouts that cannot reach the human's working directory.
+ *   checkouts that cannot reach the human's working directory, and a
+ *   default-branch push needs the human's hand. Half met
+ *   (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): EnterWorktree
+ *   (2.1.222) confines edits and Bash to the native worktree. Still open:
+ *   the fallback worktree path, default-branch pushes in auto mode
+ *   (allowed by default), the other harnesses.
  * Author(s): John Reed
  */
 

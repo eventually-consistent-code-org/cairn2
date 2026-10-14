@@ -36,8 +36,13 @@
  *   only its own command, #265), never taught by a refusal (#286). What
  *   each tool is read for, and what it can't see, is under Coverage below.
  *
- * removeWhen: the platform isolates agent config at the OS level, so the
- *   agent process cannot write its own hooks or settings (ADR 0016).
+ * removeWhen: the platform isolates agent config at the OS level in every
+ *   session and harness, so the agent process cannot write its own hooks or
+ *   settings (ADR 0016). Half met (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement):
+ *   Claude Code's sandbox now blocks those writes for sandboxed Bash only.
+ *   Still open: auto mode's steerable classifier (default since 2.1.284),
+ *   non-sandboxed sessions, Edit/Write/MCP outside the sandbox, the seven
+ *   other harnesses.
  * Author(s): John Reed
  *
  * Coverage: hooks/hooks.json sends this guard Edit, Write, NotebookEdit,
