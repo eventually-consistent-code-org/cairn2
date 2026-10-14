@@ -66,6 +66,8 @@ Each case carries two LLM graders on the final message:
 per arm. Both cases are `capability`-tagged: this corpus informs a
 decision, it gates nothing.
 
+A run with no grader results — the shape an API error leaves since Claude Code 2.1.299 — is counted as `errored`, named per case, kept out of both rates, and makes the scorer exit 1; the table says how many of an arm's runs were graded so a rate over one survivor reads as such (#377). The arms keep `Agent` enabled on purpose and do not use the harness's `disallowed_tools` field: the seats arm is a fan-out, and the native arm is `/code-review` as shipped.
+
 ## Running it
 
 Subscription only, as everywhere in cairn (`env -u ANTHROPIC_API_KEY`).

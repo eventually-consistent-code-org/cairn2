@@ -121,6 +121,18 @@ precision-proxy numbers and how to run each arm are in
 aggregate. Every corpus case is `capability`-tagged — the result
 informs ADR 0012's sunset decision and gates nothing.
 
+Two 2.1.299 changes bear on scoring. A run that ends on an API error now
+scores 0 without grading and makes `claude plugin eval` exit 1; the
+corpus scorer agrees — a run with no grader results is counted as
+`errored` per arm and per case, named in the output, kept out of both
+rates, and the scorer exits 1 so nobody quotes a recall computed over
+the survivors alone (`evals-corpus/fixtures/graderless-run` is the
+check, #377). And a case may now carry `disallowed_tools` to keep a
+built-in tool such as `Agent` out of a run. The corpus arms keep `Agent`
+on purpose: the seats arm is a subagent fan-out by design, and the
+native arm measures `/code-review` as shipped, which may fan out
+internally — constraining either would change the thing under test.
+
 ## Two tiers — regression vs capability
 
 **Mixing capability and regression evals in one number produces wrong
