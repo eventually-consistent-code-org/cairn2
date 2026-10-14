@@ -83,7 +83,10 @@ Non-trivial design questions — anything past a one-line pick — go to the
 `cairn-designer` agent (Task tool), handed the session id and the question.
 The verb stays the orchestrator: session lifecycle (`draft_start`/
 `draft_close`) and the tracker mirror are `draft`'s job; the wireframe →
-tokens → prototype work itself is the agent's. A question simple enough to
+tokens → prototype work itself is the agent's. At the hi-fi stage the agent
+reads an installed `ui-ux-designer` skill (when one is present) for its
+acceptance bar — see "The hi-fi acceptance bar" in `agents/cairn-designer.md`;
+it reads the file, it is granted no Skill tool. A question simple enough to
 decide without comparing variants doesn't need dispatch at all — see Fast
 lane.
 

@@ -52,6 +52,34 @@ not silence. Notes don't get their own mirror comment; they carry forward
 into later stages so a constraint from the wireframe round doesn't get
 forgotten by the time prototypes are built.
 
+## The hi-fi acceptance bar
+
+At stage 3, before the first prototype, look for an installed
+`ui-ux-designer` skill: Glob for `ui-ux-designer/SKILL.md` under the
+project skills root (`.claude/skills/`), then the user skills root
+(`~/.claude/skills/`), and Read the first hit. Read it, never invoke it —
+you have no Skill tool and get none. Absent from both roots: one
+`draft_log(kind: "note")` saying so, and nothing else changes.
+
+Skip its session gate — every answer already lives in a cairn artifact:
+design system and tokens come from stage 2; industry and output target
+come from the draft question (output target is HTML — stage 3 is
+throwaway HTML until `--wrap`); style is the stage-3 pick; dark mode is a
+stage-2 token decision (undecided reads as "no", logged as a note). Never
+let the skill re-ask what the session already decided.
+
+Its silent validation checklist is the acceptance bar for every hi-fi
+variant: the four states rendered (Default, Loading, Empty, Error — one
+HTML file with a visible state toggle counts), visible focus rings and a
+sane tab order, a reduced-motion alternative for every animation, and the
+HTML breakpoints emitted with real reflow rules. A variant that describes
+a state instead of rendering it is a `draft_log(kind: "note")` naming the
+gap — never presented as a pick.
+
+Credit: `ui-ux-designer` by zeeshani42
+(github.com/zeeshani42/your-ui-ux-designer), MIT license. Read by
+reference, never vendored.
+
 ## Traceability as you go
 
 Every locked direction gets a `decision` node via `map_set`, plus BOTH
