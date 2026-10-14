@@ -1,5 +1,80 @@
 # Changelog
 
+## Unreleased — the fifth seat (phase 26.5, 2026-10-14)
+
+GitHub Copilot CLI joins the peers council as the fifth seat, and the
+council's own arithmetic changes with it: convergence now counts distinct
+labs, not seats, because Copilot reaches only labs already in the room
+(OpenAI through codex, Google through antigravity, Anthropic as the
+adjudicator). It is a fifth harness, not a fifth vendor — five seats, four
+labs. The hardening the survey said must land with it lands here too: every
+seat's child environment loses the tracker credentials, and a reviewer that
+dies with only an error on standard error is an incomplete seat, never a
+clean pass. Three platform-delta items from the 2.1.299 changelog read ride
+along, one of them a live-confirmed breakage.
+
+Tool count holds at 87. Suite 2130 → 2170. Footprint 13108 → 13137 of a
+13145 pin.
+
+### peers
+
+- `copilot` is a provider. Its template runs the CLI contained by a flag
+  set — no questions, no auto-update, no custom instructions, no built-in
+  or cairn MCP servers, a 30-credit cap (the CLI's floor); contained runs
+  add view-only tools and a temp-dir lockout, and the prompt rides as the
+  last argument. Output is text, read by the shared fence parser; there is
+  no JSONL parser. Templates gain a `model` (flag + default), resolved from
+  `peers.<provider>.model` in cairn.json or the template default
+  `gpt-6.1-sol`; config load refuses a Claude model (the adjudicator's own
+  family) and refuses `auto` (not a pin — its default pick is a Claude
+  model). `peer_list` reports the resolved model. Drilled live on Copilot
+  CLI 1.0.96: a file beside the scratch folder under the system temp dir
+  was unreadable, a fenced finding parsed, a 150,000-character prompt ran
+  under the cap. The pinned default was not on the maintainer's plan; pin
+  one your plan serves.
+- Every seat declares the lab behind its model; Copilot's follows its
+  pinned id, opencode's is unknown because it picks its own. `peer_list`
+  reports `lab`, and the peers verb's convergence bar is three distinct
+  labs raising a claim — codex plus a gpt-pinned Copilot is one lab
+  speaking twice; an unknown lab never completes a cluster on its own.
+- Every seat is spawned with the server's environment minus tracker
+  credentials: each adapter's default token variable, both GitHub
+  spellings, the two Copilot trust-widening variables, and whatever
+  `tokenEnv` / `patEnv` / `apiKeyEnv` the project's configuration names
+  for the tracker and the docs connector. A seat's own credential is kept.
+  A parity test fails when an adapter declares a credential default the
+  drop list lacks.
+- Peer output records carry the exit code the run returned. A seat whose
+  round-one exit was non-zero with no findings raised is an incomplete
+  seat beside the silent ones: status names it with the tail of its
+  standard error, close refuses over it unless the caller accepts degraded
+  coverage, and then stamps the seat and its reason into the record. A
+  seat that spoke and then died keeps its findings; a clean exit with
+  nothing to say is still clean.
+
+### agents
+
+- Both plugin agents name cairn's tools by full MCP id. Claude Code 2.1.299
+  resolves an agent's tool list against the named MCP server only, so the
+  bare names granted nothing: a live probe found the acceptance-testing
+  agent running with Read and Bash alone while the server sat connected.
+  A test holds every entry to a registered tool; a headless run of the
+  plugin proved both agents see their tools again.
+
+### evals
+
+- The review-corpus scorer counts a run with no grader results as errored,
+  per arm and per case, keeps it out of both rates, says how many runs
+  were graded, and exits non-zero. Since 2.1.299 the platform scores such a
+  run zero and fails the suite; the scorer now agrees instead of hiding
+  the run. The corpus arms keep the subagent tool enabled on purpose.
+
+### context
+
+- The compaction sunset line names idle compaction (2.1.299) as a second
+  main-session trigger the drift report cannot observe; the remaining gap
+  — no plugin can declare a main-session threshold — stays explicit.
+
 ## v2.8.3 — the error flag (2026-10-12)
 
 A small release that makes one retro signal real. The observation

@@ -9,6 +9,7 @@ for work items; git owns prose.
 ## Server subsystems
 <!-- docs: done -->
 
+
 The boundaries below are not only described here — `server/test/architecture.test.ts`
 asserts them on every run, so this section and the code cannot drift apart
 quietly. Four rules hold today:
@@ -102,8 +103,14 @@ reason.
 - `audit/` — audit records: single-writer, date-scoped, immutable
   history.
 - `map/` — the project knowledge graph (build, query, diff).
-- `peers/` — external-CLI peer review and council runs (roster,
-  throttled fan-out, resumable state).
+- `peers/` — external-CLI peer review and council runs (roster of
+  five seats: codex, opencode, antigravity, grok, copilot; fixed-argv
+  templates, a model pin for seats whose CLI takes one, the lab behind
+  each seat, the child env minus tracker credentials, scratch-dir
+  containment, the outbound leak gate, convergence state that records
+  exit codes and names incomplete seats). ADR 0022 — removeWhen: the
+  roster is composed by lab at dispatch, or every seated CLI exposes its
+  model before the run.
 - `seats/` — the review roster: seat schema and roster resolution,
   dose-tiered brief composition, signal dispatch with the yield store,
   and finding dedup (see the Seats subsystem section below).
