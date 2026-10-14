@@ -183,7 +183,7 @@ describe("cairn-setup", () => {
 
     const hooks = JSON.parse(readFileSync(join(proj, ".cursor", "hooks.json"), "utf8"));
     expect(hooks.version).toBe(1);
-    for (const ev of ["sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "afterFileEdit", "preCompact"]) {
+    for (const ev of ["sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "afterFileEdit"]) {
       expect(JSON.stringify(hooks.hooks[ev])).toContain("cursor-adapter.mjs");
     }
     expect(hooks.hooks.stop).toBeUndefined(); // cost tracker is Claude-only

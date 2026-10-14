@@ -6,7 +6,6 @@
     "preToolUse": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs", "failClosed": true, "timeout": 30 }],
     "beforeShellExecution": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
     "afterShellExecution": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
-    "afterFileEdit": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }],
-    "preCompact": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }]
+    "afterFileEdit": [{ "command": "node .cursor/hooks/cairn/cursor-adapter.mjs" }]
   }
 }

@@ -2,12 +2,13 @@
 
 // Purpose: Tier A0 kill drill (mechanical) — Drill A phase 3 + Drill B.
 //          Fresh server ("new session"): continuity_get resume data, tracker
-//          cross-check via issue_get (trust order), PreCompact unthrottled
-//          refresh, then a manufactured tracker contradiction.
+//          cross-check via issue_get (trust order), a second resume read,
+//          then a manufactured tracker contradiction. (The PreCompact leg
+//          left with the hook in #328.)
 // Author(s): John Reed
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Client } from "@modelcontextprotocol/client";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve, join, basename } from "node:path";
@@ -16,7 +17,6 @@ import { homedir } from "node:os";
 const PROJECT = process.argv[2];
 const SERVER = process.argv[3];
 const ISSUE_ID = process.argv[4];
-const HOOKS = process.argv[5];
 
 const hash = createHash("sha256")
   .update(resolve(PROJECT))
@@ -65,29 +65,10 @@ check(
   live.state === "in_progress",
 );
 
-// --- Drill B: PreCompact unthrottled refresh ---
-console.log("drill B: fresh write then immediate precompact...");
-await call("continuity_checkpoint", {
-  source: "tool",
-  notes: "fresh write for drill B",
-});
-const before = statSync(HANDOFF).mtimeMs;
-execFileSync("node", [join(HOOKS, "precompact-refresh.mjs")], {
-  cwd: PROJECT,
-  env: { ...process.env, CLAUDE_PROJECT_DIR: PROJECT },
-});
-const h1 = JSON.parse(readFileSync(HANDOFF, "utf8"));
-check(
-  "precompact wrote despite <60s-old file (unthrottled)",
-  statSync(HANDOFF).mtimeMs > before,
-);
-check("precompact stamped source", h1.source === "precompact");
-check("task survives precompact refresh", h1.task?.current === "step-2");
-
-// post-compaction resume: same task
+// --- Drill B: a second resume read sees the same task ---
 const got2 = await call("continuity_get", {});
 check(
-  "post-compaction resume reads exact task",
+  "second resume read gives the exact task",
   got2.handoff.task?.current === "step-2" && got2.handoff.issue === ISSUE_ID,
 );
 
