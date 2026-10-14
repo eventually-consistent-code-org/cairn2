@@ -10,6 +10,9 @@
  *
  * removeWhen: one call can produce the whole panel's findings already
  *   merged, matching this engine's output on a recorded corpus (ADR 0012).
+ *   The corpus and both arms exist since 2026-10-13 (evals-corpus/, #334);
+ *   the numbers land in the ADR's Evidence section once the native arm
+ *   runs on Claude Code 2.1.288+.
  * Author(s): John Reed
  */
 // Constants

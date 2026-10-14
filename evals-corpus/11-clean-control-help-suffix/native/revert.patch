@@ -1,0 +1,482 @@
+diff --git a/commands/audit.md b/commands/audit.md
+index 67d1def..dddb21a 100644
+--- a/commands/audit.md
++++ b/commands/audit.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/sweep (whole-project rescan) (/cairn:help)"
++description: "Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/sweep (whole-project rescan) (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<mode> [target] | --fix"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/auto.md b/commands/auto.md
+index ceb7b95..de08fb2 100644
+--- a/commands/auto.md
++++ b/commands/auto.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Chained hands-off execution of remaining phases (opt-in) (/cairn:help)"
++description: "Chained hands-off execution of remaining phases (opt-in) (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[--batch [--budget <tokens|$usd>] [--phases <N,N,...>]]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/backtrack.md b/commands/backtrack.md
+index 4452c93..def8758 100644
+--- a/commands/backtrack.md
++++ b/commands/backtrack.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Safe git undo by phase/plan manifest — reverts only (/cairn:help)"
++description: "Safe git undo by phase/plan manifest — reverts only (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<phase|plan> | --apply"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/basecamp.md b/commands/basecamp.md
+index 530fa4b..8189051 100644
+--- a/commands/basecamp.md
++++ b/commands/basecamp.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Multi-project workspaces — dispatch board, focus, parallel workstreams (/cairn:help)"
++description: "Multi-project workspaces — dispatch board, focus, parallel workstreams (cairn — /cairn:help for the verb reference)"
+ argument-hint: "init | focus <member> | dispatch | claim|update|done <id>"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/brief.md b/commands/brief.md
+index 3b02252..985c03b 100644
+--- a/commands/brief.md
++++ b/commands/brief.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Onboarding briefing from cards + plans (/cairn:help)"
++description: "Onboarding briefing from cards + plans (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[--stdout]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/distill.md b/commands/distill.md
+index 288347b..42195fb 100644
+--- a/commands/distill.md
++++ b/commands/distill.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Ship-time synthesis — plans + cards → public-safe docs/ (/cairn:help)"
++description: "Ship-time synthesis — plans + cards → public-safe docs/ (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[<N>]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/do.md b/commands/do.md
+index 2cd212a..a2b8438 100644
+--- a/commands/do.md
++++ b/commands/do.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Freeform smart router — classify intent, dispatch the right verb (/cairn:help)"
++description: "Freeform smart router — classify intent, dispatch the right verb (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<request>\""
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/docs.md b/commands/docs.md
+index 60727fa..3221f31 100644
+--- a/commands/docs.md
++++ b/commands/docs.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Publish repo docs to the configured docs connector (Confluence or Docusaurus) — landing page + page tree (/cairn:help)"
++description: "Publish repo docs to the configured docs connector (Confluence or Docusaurus) — landing page + page tree (cairn — /cairn:help for the verb reference)"
+ argument-hint: "publish [--name \"<project>\"] | (none = status)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/draft.md b/commands/draft.md
+index b8ce4b0..39c11fd 100644
+--- a/commands/draft.md
++++ b/commands/draft.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Multi-variant mockups on a shared theme (/cairn:help)"
++description: "Multi-variant mockups on a shared theme (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<design question>\" | (none = frontier) | --wrap [<id>]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/fast.md b/commands/fast.md
+index 55d10ca..86efa33 100644
+--- a/commands/fast.md
++++ b/commands/fast.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Trivial inline change — one issue, ≤3 files, atomic commit (/cairn:help)"
++description: "Trivial inline change — one issue, ≤3 files, atomic commit (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<change>\""
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/help.md b/commands/help.md
+index 99be806..f1c2755 100644
+--- a/commands/help.md
++++ b/commands/help.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Render this verb reference (/cairn:help)"
++description: "Render this verb reference (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[verb]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/import.md b/commands/import.md
+index 5aadc0f..0c52e72 100644
+--- a/commands/import.md
++++ b/commands/import.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Reverse-mirror a tracker epic/milestone/list into plan artifacts (/cairn:help)"
++description: "Reverse-mirror a tracker epic/milestone/list into plan artifacts (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<phase url, id, or name>"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/map.md b/commands/map.md
+index 2e1a769..4ef448b 100644
+--- a/commands/map.md
++++ b/commands/map.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Project knowledge graph — build, query, diff, status (/cairn:help)"
++description: "Project knowledge graph — build, query, diff, status (cairn — /cairn:help for the verb reference)"
+ argument-hint: "build | \"<question>\" | diff | status"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/mark.md b/commands/mark.md
+index da0be1f..0488579 100644
+--- a/commands/mark.md
++++ b/commands/mark.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Zero-friction capture — backlog/seed to tracker, note to memory (/cairn:help)"
++description: "Zero-friction capture — backlog/seed to tracker, note to memory (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<text>\" [--seed \"<trigger>\"] [--note]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/medic.md b/commands/medic.md
+index 9899a0d..82ad0e1 100644
+--- a/commands/medic.md
++++ b/commands/medic.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Planning-dir health, repair, and workflow forensics (/cairn:help)"
++description: "Planning-dir health, repair, and workflow forensics (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[--repair] | forensics [phase]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/new.md b/commands/new.md
+index b254cea..246c583 100644
+--- a/commands/new.md
++++ b/commands/new.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Start here — new project: interview, plan artifacts, tracker mirror, issues (/cairn:help)"
++description: "Start here — new project: interview, plan artifacts, tracker mirror, issues (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[project name]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/outlook.md b/commands/outlook.md
+index cbfdfdb..956fe72 100644
+--- a/commands/outlook.md
++++ b/commands/outlook.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Portfolio board — every cairn project on this machine, staleness-flagged, cost rollup (/cairn:help)"
++description: "Portfolio board — every cairn project on this machine, staleness-flagged, cost rollup (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[<project>] | --refresh | forget <project>"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/peers.md b/commands/peers.md
+index af147b8..5e826e0 100644
+--- a/commands/peers.md
++++ b/commands/peers.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Convene external AI CLIs as reviewers — convergence with adversarial judgment (/cairn:help)"
++description: "Convene external AI CLIs as reviewers — convergence with adversarial judgment (cairn — /cairn:help for the verb reference)"
+ argument-hint: "(none = status) | review [target] | plan <phase> | council [dimensions]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/plan.md b/commands/plan.md
+index dc805f5..618a761 100644
+--- a/commands/plan.md
++++ b/commands/plan.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Plan a phase — research per depth, write PLAN.md, reconcile tracker (/cairn:help)"
++description: "Plan a phase — research per depth, write PLAN.md, reconcile tracker (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<N> [--quick|--deep] [--challenge] [--model <auto|haiku|sonnet|opus>] [--tdd] [--mvp] [--prd <file>] [--ingest <glob>] [--gaps]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/probe.md b/commands/probe.md
+index dcae710..2edd92e 100644
+--- a/commands/probe.md
++++ b/commands/probe.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Risk-ordered throwaway spike experiments with verdicts (/cairn:help)"
++description: "Risk-ordered throwaway spike experiments with verdicts (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<question>\" | (none = frontier) | --wrap [<id>]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/profile.md b/commands/profile.md
+index fcd2e0a..bbb5986 100644
+--- a/commands/profile.md
++++ b/commands/profile.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Developer profile — calibrates how cairn talks to you (/cairn:help)"
++description: "Developer profile — calibrates how cairn talks to you (cairn — /cairn:help for the verb reference)"
+ argument-hint: "(interview-lite)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/recall.md b/commands/recall.md
+index 61da22a..d8f9b19 100644
+--- a/commands/recall.md
++++ b/commands/recall.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Search memory, scoped to the active context, with staleness flags (/cairn:help)"
++description: "Search memory, scoped to the active context, with staleness flags (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<query>\" [--phase N] [--issue <id>]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/remember.md b/commands/remember.md
+index 8365037..3431195 100644
+--- a/commands/remember.md
++++ b/commands/remember.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Store a durable fact as a memory card (or bulk into the index) (/cairn:help)"
++description: "Store a durable fact as a memory card (or bulk into the index) (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<fact>\" [--type decision|constraint|gotcha|reference]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/resync.md b/commands/resync.md
+index 5b86ec8..4ca3255 100644
+--- a/commands/resync.md
++++ b/commands/resync.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Detect out-of-band commits; refresh plan context (/cairn:help)"
++description: "Detect out-of-band commits; refresh plan context (cairn — /cairn:help for the verb reference)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+ 
+diff --git a/commands/retro.md b/commands/retro.md
+index 2b13327..c617789 100644
+--- a/commands/retro.md
++++ b/commands/retro.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Retrospective — provenance-backed lesson cards, confidence re-grading (/cairn:help)"
++description: "Retrospective — provenance-backed lesson cards, confidence re-grading (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[<N> | --milestone]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/review.md b/commands/review.md
+index 8b3b1a5..9ef8aef 100644
+--- a/commands/review.md
++++ b/commands/review.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Five-axis code review of a diff, branch, or phase (/cairn:help)"
++description: "Five-axis code review of a diff, branch, or phase (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[target] | --seat <name> [target] | --fix"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/route.md b/commands/route.md
+index 0a8a6f6..ea172a7 100644
+--- a/commands/route.md
++++ b/commands/route.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Re-route the roadmap — insert/remove/edit phases (/cairn:help)"
++description: "Re-route the roadmap — insert/remove/edit phases (cairn — /cairn:help for the verb reference)"
+ argument-hint: "insert|remove|edit <N> [\"name\"]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/scout.md b/commands/scout.md
+index 1ca48f6..49f6c82 100644
+--- a/commands/scout.md
++++ b/commands/scout.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Research a phase only — resumable RESEARCH.md checkpoints (/cairn:help)"
++description: "Research a phase only — resumable RESEARCH.md checkpoints (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<N> [<N> ...]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/ship.md b/commands/ship.md
+index 83a979d..dff54e5 100644
+--- a/commands/ship.md
++++ b/commands/ship.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Gate on drift-clean + no open issues in verified phases, then push (/cairn:help)"
++description: "Gate on drift-clean + no open issues in verified phases, then push (cairn — /cairn:help for the verb reference)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+ 
+diff --git a/commands/status.md b/commands/status.md
+index 9054d57..129137a 100644
+--- a/commands/status.md
++++ b/commands/status.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "One view — phases, issue states, drift, unplanned work (/cairn:help)"
++description: "One view — phases, issue states, drift, unplanned work (cairn — /cairn:help for the verb reference)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+ 
+diff --git a/commands/summit.md b/commands/summit.md
+index 1a9b560..1609776 100644
+--- a/commands/summit.md
++++ b/commands/summit.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Complete the milestone — verify gate, tracker close/release, archive, tag (/cairn:help)"
++description: "Complete the milestone — verify gate, tracker close/release, archive, tag (cairn — /cairn:help for the verb reference)"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+ 
+diff --git a/commands/survey.md b/commands/survey.md
+index 0fde680..9eb2529 100644
+--- a/commands/survey.md
++++ b/commands/survey.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Project-wide research — findings, then discussed roadmap changes (/cairn:help)"
++description: "Project-wide research — findings, then discussed roadmap changes (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[\"<topic>\"]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/thread.md b/commands/thread.md
+index 8d7faf6..4e30e9b 100644
+--- a/commands/thread.md
++++ b/commands/thread.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Persistent context threads that survive /clear (/cairn:help)"
++description: "Persistent context threads that survive /clear (cairn — /cairn:help for the verb reference)"
+ argument-hint: "\"<name>\" | (none = list open) | --wrap"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/trace.md b/commands/trace.md
+index 37ee2f1..caa5b62 100644
+--- a/commands/trace.md
++++ b/commands/trace.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Persistent debugging session — evidence→hypothesis→test, tracker-mirrored (/cairn:help)"
++description: "Persistent debugging session — evidence→hypothesis→test, tracker-mirrored (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[\"<bug>\" | <id> | close <id>]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/triage.md b/commands/triage.md
+index 367dbcd..d12f0e9 100644
+--- a/commands/triage.md
++++ b/commands/triage.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Open-issue sweep against project conventions — report by default, --apply for the safe subset (/cairn:help)"
++description: "Open-issue sweep against project conventions — report by default, --apply for the safe subset (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[--stale-days N] | --apply"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/tune.md b/commands/tune.md
+index 4b75c62..fe92f09 100644
+--- a/commands/tune.md
++++ b/commands/tune.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Configure cairn.json — models, continuity, leak guard (/cairn:help)"
++description: "Configure cairn.json — models, continuity, leak guard (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[key] [value]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/verify.md b/commands/verify.md
+index b115212..5c90380 100644
+--- a/commands/verify.md
++++ b/commands/verify.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Goal-backward phase check, drift clean, write VERIFICATION.md (/cairn:help)"
++description: "Goal-backward phase check, drift clean, write VERIFICATION.md (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<N>"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/waypoint.md b/commands/waypoint.md
+index b8dd552..c995236 100644
+--- a/commands/waypoint.md
++++ b/commands/waypoint.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Pause/resume session continuity (/cairn:help)"
++description: "Pause/resume session continuity (cairn — /cairn:help for the verb reference)"
+ argument-hint: "[resume]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/commands/work.md b/commands/work.md
+index 854cecf..e644f10 100644
+--- a/commands/work.md
++++ b/commands/work.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "Execute a phase — claim issues, do the work, close on verified done (/cairn:help)"
++description: "Execute a phase — claim issues, do the work, close on verified done (cairn — /cairn:help for the verb reference)"
+ argument-hint: "<N> [--wave [N]]"
+ allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+ ---
+diff --git a/scripts/check-footprint.mjs b/scripts/check-footprint.mjs
+index 263d5eb..999a12a 100644
+--- a/scripts/check-footprint.mjs
++++ b/scripts/check-footprint.mjs
+@@ -48,12 +48,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+ // deliberate, and a budget the tree already fails would just be noise
+ // everyone learns to skip.
+ //
+-// Headroom is small on purpose. The guard's first run found a 438-token
+-// saving in the command descriptions: all 39 ended with the same
+-// "(cairn — /cairn:help for the verb reference)" suffix. The owner chose
+-// to shorten it to "(/cairn:help)" rather than drop it (#226, phase 26) --
+-// discoverability kept, most of the rent returned -- and the budget came
+-// down with it (see the 2026-10-13 re-pin below).
++// Headroom is small on purpose. There is a known 438-token saving sitting
++// in the command descriptions (see issue #226): all 39 end with the same
++// "(cairn — /cairn:help for the verb reference)" suffix, which this guard
++// found on its first run. Spending that is a discoverability decision the
++// owner makes, not a tidy-up; when it happens, this budget comes down with
++// it.
+ //
+ // It jumped from 2300 to 13712 when tool schemas came inside the fence.
+ // Nothing got worse that day; the guard simply stopped excluding 83% of
+@@ -108,13 +108,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+ // Re-pinned DOWN to 13429 (2026-10-13, #329): the native-task mirror left
+ // with its session-start advisory, 52 tokens of standing rent that warned
+ // about a flag nobody sets for a mechanism that could not fire. Reading
+-// 13391; same ~38 cushion.
+-//
+-// Re-pinned DOWN to 13145 (2026-10-13, #226): the 39 command descriptions
+-// now end in "(/cairn:help)" instead of the 42-character suffix. Reading
+-// 13107 (the #332 manifest field had meanwhile spent 18 of the cushion);
+-// same ~38 cushion.
+-const BUDGET_TOKENS = 13145;
++// 13391; same ~38 cushion. #226 (the command-description suffix) is the
++// next planned drop.
++const BUDGET_TOKENS = 13429;
+ 
+ /** chars / 4 — see the note above on why this approximation is the right one. */
+ const estimateTokens = (chars) => Math.ceil(chars / 4);
+diff --git a/scripts/gen-commands.mjs b/scripts/gen-commands.mjs
+index 130d33c..af3a364 100644
+--- a/scripts/gen-commands.mjs
++++ b/scripts/gen-commands.mjs
+@@ -53,7 +53,7 @@ if (rows.length === 0) {
+ for (const { verb, purpose, args } of rows) {
+   const fm = [
+     "---",
+-    `description: ${JSON.stringify(`${purpose} (/cairn:help)`)}`,
++    `description: ${JSON.stringify(`${purpose} (cairn — /cairn:help for the verb reference)`)}`,
+   ];
+   if (args) fm.push(`argument-hint: ${JSON.stringify(args)}`);
+   fm.push(`allowed-tools: ${JSON.stringify(ALLOWED_TOOLS)}`);
