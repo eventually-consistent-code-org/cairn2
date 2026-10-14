@@ -139,9 +139,9 @@ pairing overlay applies:
    Plain language throughout (leak-guard discipline, same as `trace`).
    Then `context_set(phase: <N>, issueId: id)`.
 5. Do the work the issue + PLAN.md describe. Track in-session with TaskCreate
-   (needs `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` on newer models where task tools
-   default off — when TaskCreate isn't available, skip in-session tracking);
-   the tracker stays the durable truth.
+   where the harness offers it (newer models ship the task tools default
+   off — when TaskCreate isn't available, skip in-session tracking); the
+   tracker stays the durable truth.
    When this issue's id is in PLAN.md `tdd:` frontmatter, the work is
    RED → GREEN → REFACTOR, each its own commit: (RED) write the failing
    test, run it, show the failure, commit; (GREEN) minimal code to pass,

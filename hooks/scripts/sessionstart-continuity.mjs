@@ -8,10 +8,8 @@
  *   payload's `source` and speaks only for `startup` and `clear`, the two
  *   sessions that begin empty: `compact`, `resume` and `fork` are restored
  *   by the platform itself and get nothing (#328). A payload with no source
- *   (another harness's adapter, a bare run) counts as `startup`. Also emits
- *   a one-line task-mirror advisory in cairn projects when
- *   CLAUDE_CODE_ENABLE_TODO_TOOLS isn't set (#107). Fire-and-forget:
- *   any error, or nothing to show, is a silent no-op.
+ *   (another harness's adapter, a bare run) counts as `startup`.
+ *   Fire-and-forget: any error, or nothing to show, is a silent no-op.
  *
  * removeWhen: the platform persists working context across /clear and a
  *   fresh start natively. The compaction half of this clause was met by
@@ -24,7 +22,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   handoffPath, bannerPath, mtimeMs, readJson, resumeMode, humanizeAge, existsSync,
-  readCairnConfig,
 } from "./lib.mjs";
 
 /** The hook payload, or {} when stdin is empty or not JSON. */
@@ -90,16 +87,6 @@ function main() {
     }
   } catch { /* no marker or unreadable: no nudge */ }
 
-  // Task-mirror advisory (#107): Claude Code 2.1.233+ ships the native task
-  // tools default-OFF on newer models unless CLAUDE_CODE_ENABLE_TODO_TOOLS=1.
-  // No tools -> no tasks -> no TaskCreated/TaskCompleted events -> the mirror
-  // spool never fires. The model isn't visible from hook context, so this is
-  // phrased conditionally and only emitted for cairn projects.
-  if (readCairnConfig(projectDir) && process.env.CLAUDE_CODE_ENABLE_TODO_TOOLS !== "1") {
-    parts.push("note: Claude Code 2.1.233+ ships task tools default-off on newer models" +
-      " — if TaskCreate is unavailable this session, cairn's native-task tracker mirror" +
-      " is dormant; set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to wake it.");
-  }
 
   if (parts.length === 0) return;
 

@@ -43,7 +43,6 @@ describe("sunset clauses (#210)", () => {
       "hooks/scripts/posttooluse-loopcheck.mjs",
       "hooks/scripts/stop-costtracker.mjs",
       "hooks/scripts/sessionstart-continuity.mjs",
-      "hooks/scripts/task-mirror-worker.mjs",
     ];
     const missing = gates.filter((g) => !existsSync(join(ROOT, g)) || !/removeWhen:/.test(read(g).split("\n").slice(0, 40).join("\n")));
     expect(missing).toEqual([]);

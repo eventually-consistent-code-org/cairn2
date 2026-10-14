@@ -96,13 +96,9 @@ function runHook(
   // export CLAUDE_PROJECT_DIR, which every hook script prefers over cwd --
   // inherited unstripped it silently redirects every fixture path to the
   // real repo. Strip it and CAIRN_* unless a test passes one via extraEnv.
-  // CLAUDE_CODE_ENABLE_TODO_TOOLS is stripped for the same reason: the
-  // sessionstart advisory (#107) keys off its absence, and a runner that
-  // happens to export it would silently flip the advisory tests.
   const env: Record<string, string | undefined> = { ...process.env, HOME: home, ...extraEnv };
   for (const k of Object.keys(env)) {
-    const strip = k === "CLAUDE_PROJECT_DIR" || k === "CLAUDE_CODE_ENABLE_TODO_TOOLS" ||
-      k.startsWith("CAIRN_");
+    const strip = k === "CLAUDE_PROJECT_DIR" || k.startsWith("CAIRN_");
     if (strip && !(k in extraEnv)) delete env[k];
   }
   return execFileSync(process.execPath, [script], {
@@ -380,41 +376,8 @@ describe("sessionstart-continuity", () => {
     }));
     writeHandoffFixture(home, proj, baseHandoff());
 
-    // Flag set so the task-mirror advisory (#107) stays out of the way --
-    // this test is about resume suppression only.
-    const stdout = runHook(SESSIONSTART, proj, home, { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" });
-    expect(stdout).toBe("");
-  });
-
-  it("task-mirror advisory (#107): cairn project without the flag gets one conditional line", () => {
-    const proj = freshDir("cairn-hooks-proj-");
-    const home = freshDir("cairn-hooks-home-");
-    writeFileSync(join(proj, "cairn.json"), JSON.stringify({
-      tracker: { type: "github", config: { repo: "o/r" } },
-      continuity: { resume: "off" },
-    }));
-
     const stdout = runHook(SESSIONSTART, proj, home);
-    const parsed = JSON.parse(stdout);
-    const ctx: string = parsed.hookSpecificOutput.additionalContext;
-    expect(ctx).toContain("CLAUDE_CODE_ENABLE_TODO_TOOLS=1");
-    expect(ctx).toContain("mirror");
-    // Conditional phrasing -- the hook can't see the model, so it must never
-    // assert the tools ARE off, only what to do if they are.
-    expect(ctx).toContain("if TaskCreate is unavailable");
-  });
-
-  it("task-mirror advisory: flag set means no advisory; non-cairn dir means no advisory", () => {
-    const home = freshDir("cairn-hooks-home-");
-
-    const cairnProj = freshDir("cairn-hooks-proj-");
-    writeFileSync(join(cairnProj, "cairn.json"), JSON.stringify({
-      tracker: { type: "github", config: { repo: "o/r" } },
-    }));
-    expect(runHook(SESSIONSTART, cairnProj, home, { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" })).toBe("");
-
-    const plainProj = freshDir("cairn-hooks-proj-");
-    expect(runHook(SESSIONSTART, plainProj, home)).toBe("");
+    expect(stdout).toBe("");
   });
 
   it("source gate (#328): startup and clear inject; compact, resume and fork stay silent", () => {
@@ -423,7 +386,7 @@ describe("sessionstart-continuity", () => {
     writeFileSync(join(proj, "cairn.json"),
       JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     writeHandoffFixture(home, proj, baseHandoff({ next_action: "carry on from here" }));
-    const run = (source?: string) => runHook(SESSIONSTART, proj, home, { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" },
+    const run = (source?: string) => runHook(SESSIONSTART, proj, home, {},
       source === undefined ? "" : JSON.stringify({ hook_event_name: "SessionStart", source }));
 
     for (const source of ["startup", "clear"]) {

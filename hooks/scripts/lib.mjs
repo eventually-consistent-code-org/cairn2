@@ -2,8 +2,8 @@
 
 /**
  * Purpose: shared, dependency-free helpers for cairn's plugin hook scripts
- *   (posttooluse-breadcrumb, sessionstart-continuity, task-mirror-spool,
- *   task-mirror-worker).
+ *   (posttooluse-breadcrumb, sessionstart-continuity, the guards, the
+ *   observers and the cost tracker).
  *   node: builtins only -- these scripts must never import server code, so
  *   the handoff/banner path scheme is recomputed here rather than reused
  *   from server/src/core/continuity.ts (which stays the source of truth).
@@ -69,12 +69,6 @@ export function metricsSegments(current) {
   return [...closed.map((n) => join(dir, n)), current];
 }
 
-/** Per-project native-Task event spool (task-mirror-spool.mjs appends, task-mirror-worker.mjs drains). */
-export function spoolPath(projectDir) {
-  const { base, hash } = pathHash(projectDir);
-  return join(homedir(), ".cairn", "spool", `${base}-${hash}.jsonl`);
-}
-
 /** Current repeated-call streak (tool + input hash + count) the loop check keeps per project. */
 export function loopStatePath(projectDir) {
   const { base, hash } = pathHash(projectDir);
@@ -85,12 +79,6 @@ export function loopStatePath(projectDir) {
 export function meterPath(projectDir) {
   const { base, hash } = pathHash(projectDir);
   return join(homedir(), ".cairn", "state", `${base}-${hash}-meter.json`);
-}
-
-/** (session_id, task_id) -> tracker issue id map the mirror worker keeps beside the spool. */
-export function spoolMapPath(projectDir) {
-  const { base, hash } = pathHash(projectDir);
-  return join(homedir(), ".cairn", "spool", `${base}-${hash}-map.json`);
 }
 
 /** mtime in ms of `path`, or null when it doesn't exist. */

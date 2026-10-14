@@ -103,9 +103,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // quote and counted the code between them as prose -- 1923 characters
 // where the hook's real literals hold 596. Replaced by a string-state walk
 // that also sees the template literals the resume block is built from.
-// Corrected reading 13443; same ~38 cushion. The deletions of phase 26
-// (#328, #329) bring it down further and re-pin as they land.
-const BUDGET_TOKENS = 13481;
+// Corrected reading 13443; same ~38 cushion.
+//
+// Re-pinned DOWN to 13429 (2026-10-13, #329): the native-task mirror left
+// with its session-start advisory, 52 tokens of standing rent that warned
+// about a flag nobody sets for a mechanism that could not fire. Reading
+// 13391; same ~38 cushion. #226 (the command-description suffix) is the
+// next planned drop.
+const BUDGET_TOKENS = 13429;
 
 /** chars / 4 — see the note above on why this approximation is the right one. */
 const estimateTokens = (chars) => Math.ceil(chars / 4);
