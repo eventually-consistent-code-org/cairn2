@@ -6,7 +6,11 @@
  * as packet.txt, so the screened packet is all a peer can see (#74).
  * cwdMode "project" is the explicit escape hatch back to the project-dir
  * cwd (#56), refused unless the peer's cairn.json entry says execCapable;
- * every send is leak-scanned before anything spawns (#268). Never exec,
+ * every send is leak-scanned before anything spawns (#268), and the child
+ * never inherits a tracker credential: every seat's env is the server's
+ * minus the token variables cairn's own adapters read (#340) -- grok and
+ * opencode carry shell tools and no sandbox, so an inherited GITHUB_TOKEN
+ * is a write-capable tracker token in a reviewer's hands. Never exec,
  * never shell interpolation — argv is always one of the four fixed templates
  * below plus (for argv-mode peers) the capped input as the single final
  * element; stdin-mode peers get input piped instead, per each CLI's
@@ -73,21 +77,73 @@ export interface PeerResult {
 //   opencode    — `run [message..]` takes the prompt positionally; same
 //                 argv-mode rules as grok. No documented sandbox flag as
 //                 of 2026-08 — scratch cwd only, same as grok.
+//
+// envDrop is the per-seat ADDITION to PEER_ENV_DROP below -- variables that
+// steer one particular CLI's trust or auth and must never reach it from
+// the server's environment. Empty for the four seated today; the Copilot
+// seat (#338) fills it.
 const TEMPLATES: Record<Provider, {
   argv: readonly string[];
   tail: readonly string[];
   inputVia: "stdin" | "argv";
   scratchSandboxArgs: readonly string[];
+  envDrop: readonly string[];
 }> = {
   codex: { argv: ["codex", "exec", "--skip-git-repo-check"], tail: ["-"],
-    inputVia: "stdin", scratchSandboxArgs: ["--sandbox", "read-only"] },
+    inputVia: "stdin", scratchSandboxArgs: ["--sandbox", "read-only"], envDrop: [] },
   opencode: { argv: ["opencode", "run"], tail: [],
-    inputVia: "argv", scratchSandboxArgs: [] },
+    inputVia: "argv", scratchSandboxArgs: [], envDrop: [] },
   antigravity: { argv: ["agy"], tail: ["-p"],
-    inputVia: "argv", scratchSandboxArgs: ["--sandbox"] },
+    inputVia: "argv", scratchSandboxArgs: ["--sandbox"], envDrop: [] },
   grok: { argv: ["grok", "-p"], tail: [],
-    inputVia: "argv", scratchSandboxArgs: [] },
+    inputVia: "argv", scratchSandboxArgs: [], envDrop: [] },
 };
+
+// Credential variables dropped from EVERY seat's child env (#340): the
+// default token names each of cairn's tracker adapters reads, GitHub's
+// two spellings (Copilot prefers GH_TOKEN/GITHUB_TOKEN over its own
+// stored login, so an inherited tracker token would hijack that seat's
+// auth), and the two Copilot variables that widen its trust. The list is
+// the DEFAULT names; peerChildEnv adds whatever cairn.json actually
+// configured (tokenEnv / patEnv / apiKeyEnv, tracker and docs) so a custom
+// variable name is covered too. COPILOT_GITHUB_TOKEN is deliberately kept:
+// it is the seat's own credential, not cairn's. leak-patterns.test.ts
+// holds the parity check -- every default an adapter declares must be here.
+export const PEER_ENV_DROP: readonly string[] = [
+  "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "JIRA_API_TOKEN", "ASANA_TOKEN",
+  "AZURE_DEVOPS_PAT", "CLICKUP_TOKEN", "LINEAR_API_KEY",
+  "COPILOT_ALLOW_ALL", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
+];
+
+// The credential-naming keys a tracker or docs connector config may carry.
+// Each adapter's schema defaults one of these to the names above; a user
+// who renamed theirs still gets it dropped because we read the configured
+// value, not the default.
+const CREDENTIAL_ENV_KEYS = ["tokenEnv", "patEnv", "apiKeyEnv"] as const;
+
+/**
+ * The environment a peer child is spawned with: `base` (the server's own
+ * env by default) minus PEER_ENV_DROP, minus the seat's template envDrop,
+ * minus every credential variable cairn.json names for the tracker and
+ * the docs connector. Pure -- builds a fresh object, never mutates `base`.
+ * Exported so the drop is testable without spawning anything.
+ */
+export function peerChildEnv(cfg: { tracker?: { config?: unknown }; docs?: { config?: unknown } },
+  provider: Provider, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const drop = new Set<string>([...PEER_ENV_DROP, ...TEMPLATES[provider].envDrop]);
+  for (const block of [cfg.tracker?.config, cfg.docs?.config]) {
+    if (!block || typeof block !== "object") continue;
+    for (const key of CREDENTIAL_ENV_KEYS) {
+      const name = (block as Record<string, unknown>)[key];
+      if (typeof name === "string" && name) drop.add(name);
+    }
+  }
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (!drop.has(k)) env[k] = v;
+  }
+  return env;
+}
 
 // The two cwd stances a peer child can run under. "scratch" (default) is
 // containment; "project" is the repo-access grant the peers verb hands
@@ -215,7 +271,10 @@ export function peerList(projectDir: string): {
  *
  * The outbound leak gate is enforced here too (#268): the capped input —
  * the exact bytes the child would get — is scanned before any scratch
- * dir or child process exists, and a hit refuses the run.
+ * dir or child process exists, and a hit refuses the run. The child's
+ * environment is the server's minus every tracker credential (#340,
+ * peerChildEnv) — containment covers what the peer can READ from its
+ * own process, not only what it can see on disk.
  *
  * :param opts.cwdMode: "scratch" (default) or "project"
  */
@@ -284,8 +343,12 @@ export async function peerRun(projectDir: string, provider: Provider,
 
   const start = Date.now();
   return new Promise<PeerResult>((resolve, reject) => {
+    // #340: the child gets the server's env minus every tracker credential
+    // -- see peerChildEnv. Built per spawn so a token exported mid-session
+    // is still dropped.
     const child = execFile(bin, args,
-      { cwd, timeout: timeoutMs, maxBuffer: MAX_BUFFER, killSignal: "SIGKILL" },
+      { cwd, timeout: timeoutMs, maxBuffer: MAX_BUFFER, killSignal: "SIGKILL",
+        env: peerChildEnv(cfg, provider) },
       (error, stdout, stderr) => {
         const durationMs = Date.now() - start;
 
