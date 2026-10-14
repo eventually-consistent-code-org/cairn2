@@ -52,14 +52,51 @@ fails any invented finding (a proxy — the harness keeps no transcript).
 Method and commands: `evals-corpus/README.md`;
 `scripts/eval-corpus-score.mjs` prints the two numbers per arm.
 
-Status: corpus, cases and scorer built 2026-10-13 on Claude Code
-2.1.287. The native arm needs 2.1.288 or later, so both arms run after
-the upgrade checklist (#331); the numbers land here, dated, with the
-CLI version the aggregate records. Decision rule, written before the
-run: native matches or beats the seats on recall without losing
-precision → the correctness axis is a delegation candidate for the next
-major, and ADR 0010's byte-identical default fold holds until then;
-otherwise the clause stands as unmet with the numbers. Either way the
-other four axes, tracker filing, the audit record and refutation voting
-are outside what the native call can see, and this ADR's dedup stays
-while any two seats run.
+Decision rule, written before the run: native matches or beats the
+seats on recall without losing precision → the correctness axis is a
+delegation candidate for the next major, and ADR 0010's byte-identical
+default fold holds until then; otherwise the clause stands as unmet
+with the numbers.
+
+**Result (2026-10-14, Claude Code 2.1.299, one run per case, eleven
+items per arm, latest run of each case scored):**
+
+| arm | recall | precision proxy | cost per review |
+|---|---|---|---|
+| seats — five-seat panel, dedup, refutation (`/cairn:review`) | 100% (10/10) | 100% (11/11) | ~$0.75 median |
+| native — `/code-review <branch> high --max-findings all` | 100% (10/10) | 27% (3/11) | ~$0.19 median |
+
+**The clause is unmet.** The native call matches the panel on recall —
+it named the known defect at its file on every item — and loses on
+precision: on eight of eleven items, the clean control among them, it
+raised efficiency notes on untouched code, comment inconsistencies and
+hypotheticals as numbered findings with failure scenarios, and the
+correctness-axis judge failed the run for it. `--max-findings all` is
+the arm as #334 specified it and asks for exactly that breadth; the
+panel's refutation vote and dedup are what the native call lacks, and
+they are what the precision column measures. The native call is ~4×
+cheaper per review, which is the number a future delegation argues
+from. The fairer second shape — the native call at its default finding
+limit — is #372.
+
+How the numbers got here, because the first pass read differently. The
+first full seats run scored recall 70% / precision 73% and the first
+native run 90% / 0%; reading the misses showed three corpus defects,
+each fixed in the generator and rerun for the affected cases only (the
+scorer pools runs, latest per case): the main suite's `audit_record`
+mock answered with a canned foreign record, so the reviewer reported
+the tool instead of filing; the precision grader judged clarity notes
+as invented defects, outside the correctness axis this test scores; and
+the ground truth for items 04, 07 and 10 described the wrong mechanism
+or file (checked against the fix commits, not against the review
+output — all three reviews had named the real defect). Both arms were
+rerun on those items with the corrected graders; the seats' three
+misses and the native's one became passes, and three native runs also
+passed precision where the fuller ground-truth text covered more of
+what they raised. Single-run, judge-scored numbers — the precision
+column in particular is a Haiku judge's verdict per run, stated as a
+proxy.
+
+Either way the other four axes, tracker filing, the audit record and
+refutation voting are outside what the native call can see, and this
+ADR's dedup stays while any two seats run.

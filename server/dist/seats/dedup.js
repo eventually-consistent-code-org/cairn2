@@ -10,9 +10,12 @@
  *
  * removeWhen: one call can produce the whole panel's findings already
  *   merged, matching this engine's output on a recorded corpus (ADR 0012).
- *   The corpus and both arms exist since 2026-10-13 (evals-corpus/, #334);
- *   the numbers land in the ADR's Evidence section once the native arm
- *   runs on Claude Code 2.1.288+.
+ *   Tested 2026-10-14 on Claude Code 2.1.299 (evals-corpus/, #334): the
+ *   native `/code-review high --max-findings all` matched the panel on
+ *   recall (100% / 100%) and lost on precision (27% vs 100%) -- it raises
+ *   what dedup and the refutation vote would have removed. Unmet; the
+ *   numbers and the method are in the ADR's Evidence section. Next test:
+ *   the native call at its default finding limit (#372).
  * Author(s): John Reed
  */
 // Constants
