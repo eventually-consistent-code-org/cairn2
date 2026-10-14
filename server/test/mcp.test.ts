@@ -79,6 +79,42 @@ describe("cairn MCP server", () => {
   const listToolNames = async (): Promise<string[]> =>
     (await client.listTools()).tools.map((t) => t.name).sort();
 
+  // Tool annotations (#344): the read/write split lives on the tool record,
+  // where a harness's permission layer can see it, not only in verb prose.
+  it("every registered tool carries annotations with readOnlyHint set (#344)", async () => {
+    const tools = (await client.listTools()).tools;
+    expect(tools.length).toBeGreaterThan(0);
+    for (const t of tools) {
+      expect(typeof t.annotations?.readOnlyHint, `${t.name} has no readOnlyHint`).toBe("boolean");
+      // a non-read-only tool says whether it destroys; the spec's default
+      // for an unstated destructiveHint is true, which would prompt on every
+      // additive tool (comment, append, create) for no reason
+      if (!t.annotations?.readOnlyHint) {
+        expect(typeof t.annotations?.destructiveHint, `${t.name} has no destructiveHint`).toBe("boolean");
+      }
+    }
+  });
+
+  it("no *_get / *_list tool is marked mutating, and the deleting/finalizing tools are destructive (#344)", async () => {
+    const tools = (await client.listTools()).tools;
+    const byName = new Map(tools.map((t) => [t.name, t.annotations ?? {}]));
+    for (const [name, a] of byName) {
+      if (/_(get|list)$/.test(name)) expect(a.readOnlyHint, `${name} should be read-only`).toBe(true);
+    }
+    for (const name of [
+      "issue_close", "tracker_migrate", "mem_compact", "continuity_clear", "outlook_forget",
+      "issue_unlink", "milestone_complete", "trace_close", "probe_close", "draft_close",
+      "thread_close",
+    ]) {
+      expect(byName.get(name)?.readOnlyHint, name).toBe(false);
+      expect(byName.get(name)?.destructiveHint, `${name} should be destructive`).toBe(true);
+    }
+    // a repeat with the same arguments is a no-op on these
+    for (const name of ["context_set", "config_set", "plan_issues_set", "plan_meta_set"]) {
+      expect(byName.get(name)?.idempotentHint, `${name} should be idempotent`).toBe(true);
+    }
+  });
+
   it("lists the expected tools", async () => {
     const tools = await listToolNames();
     expect(tools).toEqual(

@@ -13,9 +13,12 @@ purpose column and dispatch.
    of …" → `verbs/review.md` with `--seat <seat>` and the rest of the
    request as the target — the single-seat consultation path, never a
    full panel.
-3. Read-only verb (`status`, `recall`, `help`) with a clear match → run it
-   directly.
-4. Mutating verb (`new plan work verify ship import remember`) or low
+3. Read-only verb with a clear match → run it directly. Read-only means
+   every server tool the verb calls carries `readOnlyHint: true` in its
+   MCP annotations (`status`, `recall`, `help` are the everyday cases);
+   the annotation is the source, not this list.
+4. Mutating verb — one that calls any tool without `readOnlyHint` (`new
+   plan work verify ship import remember` and most others) — or low
    confidence → confirm first: "Sounds like `/cairn:plan 4 --deep` — run it?"
 5. "Rescan this project" / "sweep" / "audit everything" → `/cairn:audit
    sweep` (add `--fix` only when the request asks for fixes) — always
