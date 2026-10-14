@@ -19,8 +19,12 @@
  *   node cost-report.mjs --reports    # report bytes per coordinator session
  *   node cost-report.mjs --json      # machine-readable summary
  *
- * removeWhen: the platform exposes per-session cumulative spend through
- *   an API cairn can read.
+ * removeWhen: the platform exposes per-session cumulative spend, attributed
+ *   to the work item, through an API cairn can read. Half met
+ *   (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): session cost now
+ *   appears in headless results and the status-line payload. Still open: no
+ *   per-phase or per-issue attribution, and the mods `turn.complete` event
+ *   reports tokens, not dollars.
  * Author(s): John Reed
  */
 

@@ -14,8 +14,12 @@
  *   tells us whether report compression is worth building, nothing more.
  *   Fire-and-forget and throttled -- a hook must never be visible or block.
  *
- * removeWhen: the platform exposes per-session cumulative spend through
- *   an API cairn can read.
+ * removeWhen: the platform exposes per-session cumulative spend, attributed
+ *   to the work item, through an API cairn can read. Half met
+ *   (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): session cost now
+ *   appears in headless results and the status-line payload. Still open: no
+ *   per-phase or per-issue attribution, and the mods `turn.complete` event
+ *   reports tokens, not dollars.
  *
  * Prices (#330): list price per model GENERATION, not per family name --
  *   a 4.1-era Opus and a 5.5-era Opus differ 3.75x on input. A model id the

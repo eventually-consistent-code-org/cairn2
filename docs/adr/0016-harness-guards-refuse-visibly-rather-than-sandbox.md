@@ -2,7 +2,7 @@
 
 Date: 2026-09-20. Status: accepted.
 
-removeWhen: the platform isolates agent configuration at the operating-system level — the agent process cannot write its own hooks or settings, and the human edits them through a channel the agent cannot reach — so the visible-refusal hooks become redundant.
+removeWhen: the platform isolates agent configuration at the operating-system level in every session and every harness cairn runs in — the agent process cannot write its own hooks or settings, and the human edits them through a channel the agent cannot reach — so the visible-refusal hooks become redundant. Half met (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): Claude Code's sandbox now blocks writes to the `.claude` settings, hooks, skills, agents, commands, `.mcp.json`, `.git/hooks` and `~/.claude` at the OS level, for sandboxed Bash only. Still open: auto mode (the default since 2.1.284) routes a protected-path write to a steerable classifier rather than a wall; non-sandboxed sessions and the Edit/Write/MCP paths outside the sandbox; the seven other harnesses.
 
 ## Context
 

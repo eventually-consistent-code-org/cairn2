@@ -8,7 +8,11 @@
  *
  * removeWhen: the harness lets a plugin declare its preferred compaction
  * threshold for the sessions it runs in, or its default lands at the
- * fraction cairn wants -- either makes the drift report moot.
+ * fraction cairn wants -- either makes the drift report moot. Half met
+ * (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): `autoCompactWindow`
+ * in agent frontmatter (2.1.296) does this for subagents, and cairn's two
+ * agents set it (#332). Still open: the main session, where this report
+ * remains the only lever.
  */
 /**
  * :param desiredPct: the project's configured preference, or null
