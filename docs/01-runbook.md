@@ -549,6 +549,15 @@ questions dispatch to the `cairn-designer` agent — the verb keeps the
 session lifecycle and tracker mirror; the agent does the wireframe → tokens
 → prototype work. No fast lane, by design.
 
+Both plugin agents (`cairn-designer`, `cairn-uat`) name cairn's tools in
+their frontmatter by full id — `mcp__plugin_cairn_cairn__<tool>` — never by
+the bare tool name. Since Claude Code 2.1.299 an agent's `tools:` list takes
+only the named MCP server's tools, and a bare name grants nothing: before
+#376 both agents ran with Read/Write/Bash alone while the server sat
+connected beside them. `server/test/agents.test.ts` holds every entry to a
+tool the server registers; a live `claude -p --plugin-dir . --agent
+cairn:<agent>` dispatch is the acceptance when the list changes.
+
 ### Capture & memory
 
 **`mark "<text>" [--seed "<trigger>"] [--note]`** — zero-friction capture in
