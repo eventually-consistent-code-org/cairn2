@@ -113,6 +113,10 @@ function main() {
   const issue = flag("--issue");
   const phase = flag("--phase");
   const total = rows.reduce((s, r) => s + (r.est_cost_usd ?? 0), 0);
+  // Sessions whose row names a model the tracker could not price (#330):
+  // their dollars are missing from every sum below, and the report says so.
+  const unpriced = rows.filter((r) => (r.unpriced_models ?? []).length > 0);
+  const unpricedIds = [...new Set(unpriced.flatMap((r) => r.unpriced_models))].sort();
 
   if (issue !== undefined) {
     const cost = rows.filter((r) => r.issue === issue)
@@ -146,6 +150,8 @@ function main() {
     console.log(JSON.stringify({
       sessions: rows.length,
       total_est_usd: Number(total.toFixed(2)),
+      unpriced_sessions: unpriced.length,
+      unpriced_models: unpricedIds,
       by_phase: Object.fromEntries(groupCost(rows, "phase")),
       by_issue: Object.fromEntries(groupCost(rows, "issue")),
       by_kind: Object.fromEntries(groupCost(rows, "kind")),
@@ -155,6 +161,9 @@ function main() {
   }
 
   console.log(`agent spend (approximate, ${rows.length} sessions): $${total.toFixed(2)}`);
+  if (unpriced.length) {
+    console.log(`  ${unpriced.length} session(s) carry an unpriced model -- dollars above omit them: ${unpricedIds.join(", ")}`);
+  }
   const byPhase = groupCost(rows, "phase");
   if (byPhase.length) {
     console.log("by phase:");
