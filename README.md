@@ -12,7 +12,7 @@ What makes it different — mechanism, not vocabulary:
 |---|---|
 | **Server-validated lifecycle** | Plan↔tracker drift is computed math, verify gates work goal-backward from the phase goal, and checkpoint markers are parsed by a real server — correctness is code, not prompt discipline. |
 | **Tracker-first** | <!-- auto:trackers -->Eight write-through backends (GitHub, GitLab, Jira, Asana, Azure Boards, ClickUp, Linear, local files)<!-- /auto:trackers --> hold the single source of truth for work, mirrored in plain language a non-engineer can read. |
-| **Cross-vendor adversarial review** | `peers` seats codex, grok, antigravity, and opencode as reviewers — and their claims are verified against source before they count. (Install the CLIs you want seated.) |
+| **Cross-vendor adversarial review** | `peers` seats codex, grok, antigravity, opencode, and copilot as reviewers — five seats, four labs — and their claims are verified against source before they count. (Install the CLIs you want seated.) |
 | **Memory with provenance** | Git-committed memory cards record their source commit; recall serves a `STALE` flag when the code moved — and the cards feed `plan`, `work`, and `verify`. |
 
 > This repo is the cairn 2.0 rebuild; the earlier 1.x plugin lives in the

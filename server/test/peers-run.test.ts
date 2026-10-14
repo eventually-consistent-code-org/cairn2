@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
-import { peerList, peerRun, peerChildEnv, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
+import { peerList, peerRun, peerChildEnv, peerModel, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
 import { parseFindings } from "../src/peers/findings.js";
 import { runStart, runStatus, recordPeerOutput } from "../src/peers/state.js";
 
@@ -606,7 +606,7 @@ describe("peerRun — child environment drops tracker credentials (#340)", () =>
     + "echo \"JIRA_API_TOKEN=${JIRA_API_TOKEN-unset}\"\n"
     + "echo \"COPILOT_GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN-unset}\"\n"
     + "echo \"CAIRN_TEST_KEEP=${CAIRN_TEST_KEEP-unset}\"\n";
-  const BIN: Record<string, string> = { codex: "codex", opencode: "opencode", antigravity: "agy", grok: "grok" };
+  const BIN: Record<string, string> = { codex: "codex", opencode: "opencode", antigravity: "agy", grok: "grok", copilot: "copilot" };
   const SET = ["GITHUB_TOKEN", "GH_TOKEN", "JIRA_API_TOKEN", "COPILOT_GITHUB_TOKEN", "CAIRN_TEST_KEEP"];
   const saved: Record<string, string | undefined> = {};
 
@@ -682,5 +682,109 @@ describe("peerRun → state: a seat that dies with only stderr is incomplete, ne
     expect(status.resumable.incompleteSeats[0]).toMatchObject({ peer: "grok", kind: "failed", exitCode: 1 });
     expect(status.resumable.incompleteSeats[0].reason).toContain("not logged in");
     expect(status.resumable.complete).toBe(false);
+  });
+});
+
+
+// #338: GitHub Copilot CLI as the fifth seat. Containment is a flag SET,
+// so the test pins each flag by name; the model is the one dynamic argv
+// element besides the input, and it comes from cairn.json or the template,
+// never from the call.
+describe("copilot seat (#338)", () => {
+  const ARGS_ECHO = "#!/bin/sh\ncat > /dev/null\necho \"args:$*\"\n";
+  const ALWAYS = ["-s", "--no-ask-user", "--no-auto-update", "--no-color", "--no-custom-instructions",
+    "--disable-builtin-mcps", "--disable-mcp-server cairn", "--max-ai-credits 30"];
+  const SCRATCH = ["--available-tools=view", "--allow-tool=view", "--disallow-temp-dir"];
+  const FORBIDDEN = ["--yolo", "--allow-all", "--share-gist", "--remote"];
+  const argsLine = (out: string): string => out.split("\n").find((l) => l.startsWith("args:")) ?? "";
+
+  it("scratch run: every always-flag, the pinned model, every scratch flag, no forbidden flag, and -p <input> last", async () => {
+    runnableStubPath({ copilot: ARGS_ECHO });
+    const d = projectDir();
+    const line = argsLine((await peerRun(d, "copilot", "hello copilot")).output);
+    for (const f of ALWAYS) expect(line, f).toContain(f);
+    expect(line).toContain("--model gpt-6.1-sol");
+    for (const f of SCRATCH) expect(line, f).toContain(f);
+    for (const f of FORBIDDEN) expect(line, f).not.toContain(f);
+    expect(line.endsWith(" -p hello copilot")).toBe(true);
+    expect(line.indexOf("--disallow-temp-dir")).toBeLessThan(line.indexOf(" -p "));
+  });
+
+  it("--disallow-temp-dir and --disable-mcp-server cairn each ride a scratch run on their own", async () => {
+    runnableStubPath({ copilot: ARGS_ECHO });
+    const line = argsLine((await peerRun(projectDir(), "copilot", "x")).output);
+    expect(line.split(" ")).toContain("--disallow-temp-dir");
+    expect(line).toMatch(/--disable-mcp-server cairn( |$)/);
+  });
+
+  it("project mode drops the scratch flags and keeps every always-flag", async () => {
+    runnableStubPath({ copilot: ARGS_ECHO });
+    const d = projectDir({ peers: { copilot: { execCapable: true } } });
+    const line = argsLine((await peerRun(d, "copilot", "x", undefined, { cwdMode: "project" })).output);
+    for (const f of SCRATCH) expect(line, f).not.toContain(f);
+    for (const f of ALWAYS) expect(line, f).toContain(f);
+  });
+
+  it("peers.copilot.model in cairn.json overrides the pinned default, in argv and in peerList", async () => {
+    runnableStubPath({ copilot: ARGS_ECHO });
+    const d = projectDir({ peers: { copilot: { model: "gpt-5.4" } } });
+    const line = argsLine((await peerRun(d, "copilot", "x")).output);
+    expect(line).toContain("--model gpt-5.4");
+    expect(line).not.toContain("gpt-6.1-sol");
+    expect(peerList(d).peers.find((p) => p.provider === "copilot")?.model).toBe("gpt-5.4");
+    expect(peerList(projectDir()).peers.find((p) => p.provider === "copilot")?.model).toBe("gpt-6.1-sol");
+    expect(peerList(d).peers.find((p) => p.provider === "grok")?.model).toBeUndefined();
+    expect(peerModel({ peers: {} }, "copilot")).toBe("gpt-6.1-sol");
+  });
+
+  it("a claude-* model pin is refused at config load -- the adjudicator's own family", async () => {
+    runnableStubPath({ copilot: ARGS_ECHO });
+    const d = projectDir({ peers: { copilot: { model: "claude-sonnet-5.5" } } });
+    await expect(peerRun(d, "copilot", "x")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(peerRun(d, "copilot", "x")).rejects.toThrow(/Claude model/);
+  });
+
+  it("drops COPILOT_ALLOW_ALL and COPILOT_CUSTOM_INSTRUCTIONS_DIRS from the child, keeps COPILOT_GITHUB_TOKEN", async () => {
+    const SET = ["COPILOT_ALLOW_ALL", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "COPILOT_GITHUB_TOKEN"];
+    const saved: Record<string, string | undefined> = {};
+    for (const k of SET) { saved[k] = process.env[k]; process.env[k] = `v-${k}`; }
+    try {
+      runnableStubPath({ copilot: "#!/bin/sh\ncat > /dev/null\n"
+        + "echo \"ALLOW=${COPILOT_ALLOW_ALL-unset}\"\necho \"DIRS=${COPILOT_CUSTOM_INSTRUCTIONS_DIRS-unset}\"\n"
+        + "echo \"TOKEN=${COPILOT_GITHUB_TOKEN-unset}\"\n" });
+      const out = (await peerRun(projectDir(), "copilot", "x")).output;
+      expect(out).toContain("ALLOW=unset");
+      expect(out).toContain("DIRS=unset");
+      expect(out).toContain("TOKEN=v-COPILOT_GITHUB_TOKEN");
+    } finally {
+      for (const k of SET) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+  });
+
+  it("one fenced finding parses from -s text output; the stderr warning is stripped", async () => {
+    runnableStubPath({ copilot: "#!/bin/sh\ncat > /dev/null\n"
+      + "echo 'warning: auto-update disabled' 1>&2\n"
+      + "echo 'Findings:'\necho '```json'\n"
+      + "echo '{\"claim\": \"retry loop has no cap\", \"evidence\": \"src/x.ts:12\", \"severity\": \"important\", \"recommendation\": \"cap at 3\"}'\n"
+      + "echo '```'\n" });
+    const result = await peerRun(projectDir(), "copilot", "x");
+    expect(result.exitCode).toBe(0);
+    const parsed = parseFindings(result.output);
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.findings[0].claim).toBe("retry loop has no cap");
+    expect(parsed.unparsed).toEqual([]);
+  });
+
+  it("exit 1 + stderr only (model not on plan, not logged in, credit cap) records as an incomplete seat (#339)", async () => {
+    runnableStubPath({ copilot: "#!/bin/sh\ncat > /dev/null\necho 'Error: Model \"gpt-6.1-sol\" from --model flag is not available.' 1>&2\nexit 1\n" });
+    const d = projectDir();
+    const result = await peerRun(d, "copilot", "x");
+    expect(result.exitCode).toBe(1);
+    expect(parseFindings(result.output)).toEqual({ findings: [], unparsed: [] });
+    runStart(d, "run", { mode: "review", target: "t", peers: ["copilot"] });
+    recordPeerOutput(d, "run", "copilot", 1, result.output, result.exitCode);
+    const seat = runStatus(d, "run").resumable.incompleteSeats[0];
+    expect(seat).toMatchObject({ peer: "copilot", kind: "failed", exitCode: 1 });
+    expect(seat.reason).toContain("not available");
   });
 });

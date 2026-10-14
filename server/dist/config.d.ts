@@ -69,10 +69,12 @@ export declare const ConfigSchema: z.ZodObject<{
         opencode: "opencode";
         antigravity: "antigravity";
         grok: "grok";
+        copilot: "copilot";
     }> & z.core.$partial, z.ZodObject<{
         enabled: z.ZodOptional<z.ZodBoolean>;
         maxInputChars: z.ZodOptional<z.ZodNumber>;
         execCapable: z.ZodOptional<z.ZodBoolean>;
+        model: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
     peerFanout: z.ZodOptional<z.ZodObject<{
         maxConcurrent: z.ZodNumber;

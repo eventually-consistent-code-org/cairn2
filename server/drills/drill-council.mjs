@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 // Purpose: Tier F2 council drill (mechanical) — the peers council flow per
-//          verbs/peers.md rehearsed end-to-end with STUB CLIs for all four
-//          providers + the REAL tracker for the run mirror. Proves: the
+//          verbs/peers.md rehearsed end-to-end with STUB CLIs for all five
+//          providers (copilot's stub answers an explicit empty finding set,
+//          so the four-seat council run below keeps its cluster arithmetic)
+//          + the REAL tracker for the run mirror. Proves: the
 //          outbound leak gate blocking a poisoned packet, dimension fan-out
 //          over per-seat rosters (peer x dimension) with cap trimming and
 //          the exec-capable grant, prior-disposition suppression riding in
@@ -123,7 +125,24 @@ writeFileSync(
   ].join("\n"),
 );
 
-for (const bin of ["codex", "opencode", "agy", "grok"]) {
+// copilot (#338) is argv-mode like agy (`-p <prompt>` last) and, in this
+// drill, a seat that reviews and finds nothing: an explicit fenced `[]` is
+// the parser's "no findings" shape, so detection sees five seats while the
+// council run keeps its four-seat roster and its 3-seat cluster.
+writeFileSync(
+  join(STUBS, "copilot"),
+  [
+    "#!/bin/sh",
+    "cat > /dev/null",
+    `for a; do last="$a"; done; printf '%s' "$last" > "${CAPTURE}/copilot.functionality.in"`,
+    "echo '```json'",
+    "echo '[]'",
+    "echo '```'",
+    "",
+  ].join("\n"),
+);
+
+for (const bin of ["codex", "opencode", "agy", "grok", "copilot"]) {
   chmodSync(join(STUBS, bin), 0o755);
 }
 
@@ -208,15 +227,16 @@ const check = (label, ok, detail = "") => {
 };
 
 // -- detection ----------------------------------------------------------------
-console.log("detection: four stubs on PATH, config surfaced...");
+console.log("detection: five stubs on PATH, config surfaced...");
 // peer_list wire shape is {peers, maxConcurrent} since #75 — council mode
 // must batch its fan-out by the budget instead of dispatching every seat
 // at once (the 2026-08-12 16-seat dispatch exhausted the host's memory).
 const listOut = await call("peer_list", {});
 const list = listOut.peers;
 check(
-  "all four providers detected on PATH",
-  Array.isArray(list) && list.length === 4 && list.every((p) => p.onPath),
+  "all five providers detected on PATH, copilot reporting its pinned model",
+  Array.isArray(list) && list.length === 5 && list.every((p) => p.onPath)
+    && list.find((p) => p.provider === "copilot")?.model === "gpt-6.1-sol",
   JSON.stringify(list).slice(0, 120),
 );
 check(

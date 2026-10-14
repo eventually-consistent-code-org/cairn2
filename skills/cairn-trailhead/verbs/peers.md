@@ -4,7 +4,9 @@ args: "(none = status) | review [target] | plan <phase> | council [dimensions]"
 status: live
 ---
 
-Convene the external AI CLIs (codex, opencode, antigravity, grok) as
+Convene the external AI CLIs (codex, opencode, antigravity, grok, copilot
+— five seats, four labs: Copilot is a fifth harness, not a fifth vendor,
+and runs pinned to a non-Claude model) as
 reviewers — a second (third, fourth) opinion on top of cairn's own
 judgment, never a replacement for it. `peer_run` moves bytes to a peer and back; everything
 below is the loop that decides what a peer's answer is actually worth.

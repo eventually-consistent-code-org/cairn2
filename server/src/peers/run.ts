@@ -1,6 +1,6 @@
 /**
  * Purpose: allow-listed external-CLI adapters (codex/opencode/antigravity/
- * grok) — runs each as a fixed-argv child process with a hard cap on input
+ * grok/copilot) — runs each as a fixed-argv child process with a hard cap on input
  * size and a timeout, CONTAINED by default: the child runs from a fresh
  * scratch dir under the OS tmpdir with the capped input staged beside it
  * as packet.txt, so the screened packet is all a peer can see (#74).
@@ -11,7 +11,7 @@
  * minus the token variables cairn's own adapters read (#340) -- grok and
  * opencode carry shell tools and no sandbox, so an inherited GITHUB_TOKEN
  * is a write-capable tracker token in a reviewer's hands. Never exec,
- * never shell interpolation — argv is always one of the four fixed templates
+ * never shell interpolation — argv is always one of the five fixed templates
  * below plus (for argv-mode peers) the capped input as the single final
  * element; stdin-mode peers get input piped instead, per each CLI's
  * verified prompt convention. A peer's non-zero exit is a result, not an
@@ -77,17 +77,46 @@ export interface PeerResult {
 //   opencode    — `run [message..]` takes the prompt positionally; same
 //                 argv-mode rules as grok. No documented sandbox flag as
 //                 of 2026-08 — scratch cwd only, same as grok.
+//   copilot     — GitHub Copilot CLI (#338, phase 26.5). `-p <prompt>` runs
+//                 one prompt headless, `-s` prints only the reply (the
+//                 fence parser reads it; JSONL would escape the fences).
+//                 It is a fifth HARNESS, not a fifth vendor: every model it
+//                 reaches is OpenAI's, Google's, or Anthropic's, so the
+//                 seat is pinned to a non-Claude model (`--model`, default
+//                 gpt-6.1-sol, overridable via peers.copilot.model; a
+//                 claude-* pin is refused at config load -- the
+//                 adjudicator's own family shares its blind spots).
+//                 Containment is a flag SET, not one switch: always
+//                 --no-ask-user --no-auto-update --no-color
+//                 --no-custom-instructions --disable-builtin-mcps
+//                 --disable-mcp-server cairn (cairn-setup registers cairn's
+//                 own server in ~/.copilot/mcp-config.json -- without this
+//                 a project-mode reviewer would see tracker-write tools)
+//                 --max-ai-credits 30 (the CLI's floor; 1.0.96 refuses
+//                 less); scratch runs add --available-tools=view
+//                 --allow-tool=view --disallow-temp-dir (cairn's scratch
+//                 dir lives under os.tmpdir(), and without the last flag
+//                 `view` reaches every sibling there -- #74 by a side
+//                 door). Never --yolo / --allow-all* / --share-gist /
+//                 --remote*. An unavailable model, a missing login or a
+//                 credit cap exits 1 with stderr only -- a #339 incomplete
+//                 seat, never a clean pass.
 //
 // envDrop is the per-seat ADDITION to PEER_ENV_DROP below -- variables that
 // steer one particular CLI's trust or auth and must never reach it from
 // the server's environment. Empty for the four seated today; the Copilot
 // seat (#338) fills it.
+//
+// `model` is the one dynamic argv element besides the input: the flag and
+// the pinned default, with peers.<provider>.model in cairn.json as the
+// owner's override. Only seats whose CLI takes a model flag declare it.
 const TEMPLATES: Record<Provider, {
   argv: readonly string[];
   tail: readonly string[];
   inputVia: "stdin" | "argv";
   scratchSandboxArgs: readonly string[];
   envDrop: readonly string[];
+  model?: { flag: string; default: string };
 }> = {
   codex: { argv: ["codex", "exec", "--skip-git-repo-check"], tail: ["-"],
     inputVia: "stdin", scratchSandboxArgs: ["--sandbox", "read-only"], envDrop: [] },
@@ -97,7 +126,25 @@ const TEMPLATES: Record<Provider, {
     inputVia: "argv", scratchSandboxArgs: ["--sandbox"], envDrop: [] },
   grok: { argv: ["grok", "-p"], tail: [],
     inputVia: "argv", scratchSandboxArgs: [], envDrop: [] },
+  copilot: {
+    argv: ["copilot", "-s", "--no-ask-user", "--no-auto-update", "--no-color",
+      "--no-custom-instructions", "--disable-builtin-mcps", "--disable-mcp-server", "cairn",
+      "--max-ai-credits", "30"],
+    tail: ["-p"],
+    inputVia: "argv",
+    scratchSandboxArgs: ["--available-tools=view", "--allow-tool=view", "--disallow-temp-dir"],
+    envDrop: ["COPILOT_ALLOW_ALL", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"],
+    model: { flag: "--model", default: "gpt-6.1-sol" },
+  },
 };
+
+/** The model id a seat runs with: the cairn.json pin, else the template default. */
+export function peerModel(cfg: { peers?: Partial<Record<Provider, { model?: string }>> },
+  provider: Provider): string | undefined {
+  const t = TEMPLATES[provider].model;
+  if (!t) return undefined;
+  return cfg.peers?.[provider]?.model ?? t.default;
+}
 
 // Credential variables dropped from EVERY seat's child env (#340): the
 // default token names each of cairn's tracker adapters reads, GitHub's
@@ -156,6 +203,7 @@ const INSTALL_HINTS: Record<Provider, string> = {
   opencode: "install the opencode CLI and put it on PATH (see https://opencode.ai)",
   antigravity: "install the Antigravity CLI ('agy') and put it on PATH (see antigravity docs)",
   grok: "install the Grok CLI and put it on PATH (see xAI's grok-cli docs)",
+  copilot: "install the GitHub Copilot CLI and put it on PATH (brew install --cask copilot-cli), then `copilot login`",
 };
 
 // What to tell the user when a peer blows the timeout. opencode gets a
@@ -174,6 +222,8 @@ const TIMEOUT_HINTS: Record<Provider, string> = {
     "and pin a model in opencode.json",
   antigravity: "raise timeoutMs, or check that the antigravity CLI responds on stdin",
   grok: "raise timeoutMs, or check that the grok CLI responds on stdin",
+  copilot: "raise timeoutMs, or run `copilot login` (an unauthenticated headless run may wait on a "
+    + "device code) and confirm the pinned model is on your plan (peers.copilot.model overrides the default)",
 };
 
 const DEFAULT_MAX_INPUT_CHARS = 200_000;
@@ -230,6 +280,8 @@ export function peerList(projectDir: string): {
     enabled: boolean;
     maxInputChars: number;
     execCapable: boolean;
+    /** Present for seats whose CLI takes a model flag: the id the seat runs with (#338). */
+    model?: string;
   }>;
   maxConcurrent: number;
 } {
@@ -243,6 +295,7 @@ export function peerList(projectDir: string): {
       maxInputChars: peerCfg.maxInputChars ?? DEFAULT_MAX_INPUT_CHARS,
       // Trust flag from config only (#67) — default untrusted, never probed.
       execCapable: peerCfg.execCapable ?? false,
+      ...(TEMPLATES[provider].model ? { model: peerModel(cfg, provider) } : {}),
     };
   });
   return {
@@ -300,7 +353,7 @@ export async function peerRun(projectDir: string, provider: Provider,
       `peers.${provider}.execCapable to true in cairn.json`);
   }
 
-  const { argv, tail, inputVia, scratchSandboxArgs } = TEMPLATES[provider];
+  const { argv, tail, inputVia, scratchSandboxArgs, model } = TEMPLATES[provider];
   const [bin, ...templateArgs] = argv;
   // Name the binary once: the parenthetical only earns its place when the
   // binary differs from the provider name (antigravity's CLI is `agy`).
@@ -326,7 +379,11 @@ export async function peerRun(projectDir: string, provider: Provider,
   // has any (see the template notes) — project mode is the explicit
   // repo-access grant, so it stays unsandboxed.
   const sandboxArgs = cwdMode === "scratch" ? scratchSandboxArgs : [];
-  const fixedArgs = [...templateArgs, ...sandboxArgs, ...tail];
+  // The pinned model rides right after the template's constant flags (#338):
+  // cairn.json's peers.<provider>.model, else the template default. Never
+  // from the call -- a reviewer's model is the owner's choice.
+  const modelArgs = model ? [model.flag, peerModel(cfg, provider) as string] : [];
+  const fixedArgs = [...templateArgs, ...modelArgs, ...sandboxArgs, ...tail];
   const args = inputVia === "argv" ? [...fixedArgs, sendInput] : fixedArgs;
 
   // Containment (#74): stage the capped input in a fresh scratch dir and

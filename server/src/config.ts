@@ -91,8 +91,33 @@ export const ConfigSchema = z.object({
         // which external CLI may execute the product during functionality
         // review. Default false when absent — never runtime-probed.
         execCapable: z.boolean().optional(),
+        // Model pin for seats whose CLI takes a model flag (#338, copilot
+        // today); absent = the template default. A claude-* id is refused
+        // below: the adjudicator's own family shares its blind spots.
+        model: z.string().min(1).optional(),
       }),
     )
+    .superRefine((peers, ctx) => {
+      for (const [provider, entry] of Object.entries(peers ?? {})) {
+        const model = (entry as { model?: string } | undefined)?.model;
+        if (model && /^claude[-_]/i.test(model)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [provider, "model"],
+            message: `'${model}' is a Claude model — the ${provider} seat may not run the adjudicator's own family; pin an OpenAI or Google model id instead`,
+          });
+        } else if (model && /^auto$/i.test(model)) {
+          // "auto" lets the CLI pick, and Copilot's documented default pick
+          // is a Claude model -- so it is not a pin at all (verified live
+          // 2026-10-14: `--model auto` runs, every catalog id did not).
+          ctx.addIssue({
+            code: "custom",
+            path: [provider, "model"],
+            message: `'auto' is not a pin — the ${provider} seat must name one non-Claude model id, because auto may route to the adjudicator's own family`,
+          });
+        }
+      }
+    })
     .optional(),
   // Fan-out throttle (#75) — lives in its own top-level block instead of
   // inside `peers` because that record is enum-keyed by provider name: a

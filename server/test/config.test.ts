@@ -293,3 +293,31 @@ describe("peers config", () => {
       .toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
   });
 });
+
+
+describe("peers model pin (#338)", () => {
+  const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  it("accepts copilot as a provider key and a model pin", () => {
+    const dir = writeTmpConfig({ ...base, peers: { copilot: { model: "gpt-5.4", enabled: true } } });
+    expect(loadConfig(dir).peers).toEqual({ copilot: { model: "gpt-5.4", enabled: true } });
+  });
+
+  it("refuses a claude-* model pin on any seat with a one-line reason naming the family rule", () => {
+    const dir = writeTmpConfig({ ...base, peers: { copilot: { model: "claude-sonnet-5.5" } } });
+    expect(() => loadConfig(dir)).toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(() => loadConfig(dir)).toThrow(/copilot\.model: 'claude-sonnet-5.5' is a Claude model/);
+  });
+
+  it("'auto' is refused as a pin -- the CLI's auto pick may be a Claude model", () => {
+    const dir = writeTmpConfig({ ...base, peers: { copilot: { model: "auto" } } });
+    expect(() => loadConfig(dir)).toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(() => loadConfig(dir)).toThrow(/not a pin/);
+  });
+
+  it("an empty model string is rejected; absent is fine", () => {
+    expect(() => loadConfig(writeTmpConfig({ ...base, peers: { copilot: { model: "" } } })))
+      .toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(loadConfig(writeTmpConfig({ ...base, peers: { copilot: {} } })).peers).toEqual({ copilot: {} });
+  });
+});

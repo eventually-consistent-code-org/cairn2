@@ -804,7 +804,7 @@ manifest, and the remote is always untouched — pushing the reverts is your
 call.
 
 **`peers (none = status) | review [target] | plan <phase> | council [dimensions]`** — convene
-external AI CLIs (codex, opencode, antigravity, grok) as reviewers — a second
+external AI CLIs (codex, opencode, antigravity, grok, copilot — five seats, four labs) as reviewers — a second
 opinion on top of cairn's judgment, never a replacement. **A peer saying
 something doesn't make it true**: every peer finding is verified against the
 actual code (or plan) before it goes anywhere near the tracker. Bare
@@ -1785,7 +1785,8 @@ nothing.
 | `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
 | `leakGuard.extraPatterns` | string[] | `[]` | Additional regex patterns to guard against |
-| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok` — unknown provider names are rejected |
+| `peers.<provider>.enabled` | boolean | `true` when absent | Per-provider toggle; providers: `codex`, `opencode`, `antigravity`, `grok`, `copilot` — unknown provider names are rejected |
+| `peers.<provider>.model` | string | template default (`copilot`: `gpt-6.1-sol`) | Model pin for seats whose CLI takes a model flag — today only `copilot`. A `claude-*` id is refused at load (the adjudicator's own family shares its blind spots), and so is `auto` (not a pin — Copilot's auto pick defaults to a Claude model). Pin a model your plan actually has; an unavailable one exits 1 with stderr only and the run records the seat as incomplete |
 | `peers.<provider>.maxInputChars` | positive integer | `200000` | Input cap per provider; longer input is head-truncated with a verbatim marker line |
 | `peers.<provider>.execCapable` | boolean | `false` when absent | Your declared trust that this CLI may run from the project folder to exercise the product during a functionality review. Without it every peer runs contained in a scratch folder, and `peer_run` refuses project mode. Never probed at runtime |
 | `peerFanout.maxConcurrent` | positive integer | *(optional block)* — absent, sized to the host: min(cores − 1, free memory ÷ 750MB, 8), at least 1 | How many peer CLIs run at once; `peer_list` reports it and the `peers` verb dispatches in batches no wider. Its own block because `peers` is keyed by provider name |

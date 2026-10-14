@@ -5,5 +5,5 @@
  * (which itself needs config.ts for loadConfig).
  * Author(s): John Reed
  */
-export declare const PROVIDERS: readonly ["codex", "opencode", "antigravity", "grok"];
+export declare const PROVIDERS: readonly ["codex", "opencode", "antigravity", "grok", "copilot"];
 export type Provider = (typeof PROVIDERS)[number];

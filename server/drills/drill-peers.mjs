@@ -34,7 +34,7 @@ const STUBS = join(PROJECT, "stub-bin");
 const CAPTURE = join(PROJECT, "capture");
 mkdirSync(STUBS, { recursive: true });
 mkdirSync(CAPTURE, { recursive: true });
-for (const p of ["codex", "opencode", "grok"]) {
+for (const p of ["codex", "opencode", "grok", "copilot"]) {
   writeFileSync(
     join(STUBS, p),
     `#!/bin/sh\ncat > "${CAPTURE}/${p}.in"\necho "finding: export handler swallows write errors at src/export/handler.ts:87 (severity: critical)"\n`,
@@ -107,14 +107,14 @@ const check = (label, ok, detail = "") => {
 };
 
 // -- detection -----------------------------------------------------------------
-console.log("detection: all four stubs on PATH...");
+console.log("detection: all five stubs on PATH...");
 // peer_list wire shape is {peers, maxConcurrent} since #75 — the fan-out
 // budget rides along with the roster.
 const listOut = await call("peer_list", {});
 const list = listOut.peers;
 check(
-  "all four providers detected on PATH",
-  Array.isArray(list) && list.length === 4 && list.every((p) => p.onPath),
+  "all five providers detected on PATH",
+  Array.isArray(list) && list.length === 5 && list.every((p) => p.onPath),
   JSON.stringify(list).slice(0, 120),
 );
 check(
@@ -158,11 +158,11 @@ check(
   scanLines(CLEAN.split("\n"), buildPatterns(null)).length === 0,
 );
 const results = {};
-for (const p of ["codex", "opencode", "antigravity", "grok"]) {
+for (const p of ["codex", "opencode", "antigravity", "grok", "copilot"]) {
   results[p] = await call("peer_run", { provider: p, input: CLEAN });
 }
 check(
-  "all four ran, exit 0, findings returned",
+  "all five ran, exit 0, findings returned",
   Object.values(results).every(
     (r) => r.exitCode === 0 && r.output.includes("finding:"),
   ),

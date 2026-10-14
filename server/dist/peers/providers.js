@@ -5,4 +5,4 @@
  * (which itself needs config.ts for loadConfig).
  * Author(s): John Reed
  */
-export const PROVIDERS = ["codex", "opencode", "antigravity", "grok"];
+export const PROVIDERS = ["codex", "opencode", "antigravity", "grok", "copilot"];

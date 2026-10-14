@@ -1,6 +1,6 @@
 /**
  * Purpose: allow-listed external-CLI adapters (codex/opencode/antigravity/
- * grok) — runs each as a fixed-argv child process with a hard cap on input
+ * grok/copilot) — runs each as a fixed-argv child process with a hard cap on input
  * size and a timeout, CONTAINED by default: the child runs from a fresh
  * scratch dir under the OS tmpdir with the capped input staged beside it
  * as packet.txt, so the screened packet is all a peer can see (#74).
@@ -11,7 +11,7 @@
  * minus the token variables cairn's own adapters read (#340) -- grok and
  * opencode carry shell tools and no sandbox, so an inherited GITHUB_TOKEN
  * is a write-capable tracker token in a reviewer's hands. Never exec,
- * never shell interpolation — argv is always one of the four fixed templates
+ * never shell interpolation — argv is always one of the five fixed templates
  * below plus (for argv-mode peers) the capped input as the single final
  * element; stdin-mode peers get input piped instead, per each CLI's
  * verified prompt convention. A peer's non-zero exit is a result, not an
@@ -31,6 +31,12 @@ export interface PeerResult {
     truncatedInput: boolean;
     durationMs: number;
 }
+/** The model id a seat runs with: the cairn.json pin, else the template default. */
+export declare function peerModel(cfg: {
+    peers?: Partial<Record<Provider, {
+        model?: string;
+    }>>;
+}, provider: Provider): string | undefined;
 export declare const PEER_ENV_DROP: readonly string[];
 /**
  * The environment a peer child is spawned with: `base` (the server's own
@@ -63,6 +69,8 @@ export declare function peerList(projectDir: string): {
         enabled: boolean;
         maxInputChars: number;
         execCapable: boolean;
+        /** Present for seats whose CLI takes a model flag: the id the seat runs with (#338). */
+        model?: string;
     }>;
     maxConcurrent: number;
 };
