@@ -11,8 +11,15 @@
  * fraction cairn wants -- either makes the drift report moot. Half met
  * (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): `autoCompactWindow`
  * in agent frontmatter (2.1.296) does this for subagents, and cairn's two
- * agents set it (#332). Still open: the main session, where this report
- * remains the only lever.
+ * agents set it (#332). Still open: the main session, where no plugin can
+ * declare a threshold. Idle compaction (Claude Code 2.1.299: a 200K+
+ * token conversation left idle ~54 minutes compacts before its prompt
+ * cache expires; `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` moves the floor,
+ * `"idleCompaction": false` in settings turns it off) is a SECOND
+ * main-session trigger, time-based and owned by user settings -- this
+ * report compares only CLAUDE_AUTOCOMPACT_PCT_OVERRIDE and cannot see it,
+ * and it is not the lever the clause asks for (phase 26.5 RESEARCH.md,
+ * 2026-10-14 scout, #378).
  */
 
 export interface ContextEconomyConfig {
