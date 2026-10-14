@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 // @ts-expect-error untyped hook module
 import { buildPatterns, scanLines, isAllowedPath, patternsForFile } from "../../hooks/scripts/leak-patterns.mjs";
 import { buildLeakPatterns, scanForLeaks, type LeakScanConfig } from "../src/peers/leak-scan.js";
+import { PEER_ENV_DROP } from "../src/peers/run.js";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const jiraCfg = { tracker: { type: "jira", config: { projectKey: "DRILL" } }, leakGuard: { enabled: true, allow: [], extraPatterns: [] } };
 const ghCfg = { tracker: { type: "github", config: { repo: "o/r" } }, leakGuard: { enabled: true, allow: [], extraPatterns: [] } };
@@ -137,5 +141,39 @@ describe("leak patterns", () => {
     expect(isAllowedPath("src/thing.ts", [])).toBe(false);
     expect(isAllowedPath("generated/deep/file.ts", ["generated/**"])).toBe(true);
     expect(isAllowedPath("src/one.ts", ["src/one.ts"])).toBe(true);
+  });
+});
+
+
+// #340: the outbound packet scan (above) and the child-env credential drop
+// are the two halves of one containment claim -- what a peer can SEE in
+// its input and what it can READ from its own process. They live in one
+// test file on purpose, so neither can drift without the other noticing.
+// The parity check is a source scan, not an import: every credential
+// variable an adapter declares as its default (`tokenEnv`/`patEnv`/
+// `apiKeyEnv: z.string().default("X")`) or reads literally
+// (`process.env.X`) must be on PEER_ENV_DROP. A new adapter that forgets
+// fails here, not in a reviewer's shell.
+describe("peer child env drop covers every adapter credential default (#340)", () => {
+  const adaptersDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "tracker", "adapters");
+  const declared = new Set<string>();
+  for (const f of readdirSync(adaptersDir).filter((n) => n.endsWith(".ts"))) {
+    const src = readFileSync(join(adaptersDir, f), "utf8");
+    for (const m of src.matchAll(/(?:tokenEnv|patEnv|apiKeyEnv):\s*z\.string\(\)\.default\("([A-Z0-9_]+)"\)/g)) declared.add(m[1]);
+    for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]*TOKEN[A-Z0-9_]*)/g)) declared.add(m[1]);
+  }
+
+  it("scans at least the eight shipped adapters' defaults", () => {
+    expect(declared.size).toBeGreaterThanOrEqual(7);
+  });
+
+  it("every declared credential default is on the drop list", () => {
+    const missing = [...declared].filter((name) => !PEER_ENV_DROP.includes(name));
+    expect(missing).toEqual([]);
+  });
+
+  it("the drop list keeps the Copilot seat's own credential", () => {
+    expect(PEER_ENV_DROP).not.toContain("COPILOT_GITHUB_TOKEN");
+    expect(PEER_ENV_DROP).toContain("GH_TOKEN");
   });
 });

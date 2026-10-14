@@ -714,6 +714,20 @@ functionality review. That is a trust grant, and the grant lives in
 `execCapable: true` (#268). Which review dimension earns the grant stays
 the `peers` verb's call — this layer can't tell what a send is for.
 
+Containment covers the child's own process too (#340). Every seat is
+spawned with the server's environment minus tracker credentials: the
+default token variable of each tracker adapter (`GITHUB_TOKEN`, `GH_TOKEN`,
+`GITLAB_TOKEN`, `JIRA_API_TOKEN`, `ASANA_TOKEN`, `AZURE_DEVOPS_PAT`,
+`CLICKUP_TOKEN`, `LINEAR_API_KEY`), whatever `tokenEnv` / `patEnv` /
+`apiKeyEnv` your `cairn.json` actually names for the tracker and the docs
+connector, and the two Copilot trust-widening variables
+(`COPILOT_ALLOW_ALL`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`). A reviewer with
+shell tools and no sandbox (grok, opencode) would otherwise hold a
+write-capable tracker token, and Copilot would read an inherited
+`GH_TOKEN` as its own login. A seat's own credential (`COPILOT_GITHUB_TOKEN`)
+is kept. The list is `PEER_ENV_DROP` in `src/peers/run.ts`; a parity test
+fails if an adapter declares a credential default the list lacks.
+
 ### Outbound leak scan
 
 Before any scratch dir or child process exists, `peer_run` scans the

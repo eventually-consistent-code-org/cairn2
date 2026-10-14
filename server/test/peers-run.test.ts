@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
-import { peerList, peerRun } from "../src/peers/run.js";
+import { peerList, peerRun, peerChildEnv, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
 
 // Stub CLIs are shell scripts prepended onto PATH per test, so no real
 // codex/opencode/agy/grok binary is ever assumed. Restore PATH after
@@ -588,5 +588,74 @@ describe("peerRun — server-enforced rules (#268)", () => {
       const err = await refusal(peerRun(d, "codex", input));
       expect(err.message).toContain("line(s) 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 (+15 more)");
     });
+  });
+});
+
+
+// #340: a peer child never inherits a tracker credential. grok and opencode
+// carry shell tools and no sandbox, and Copilot prefers GH_TOKEN/GITHUB_TOKEN
+// over its own stored login -- so the server's env, which legitimately holds
+// the tracker token, is NOT the child's env. The stub prints the variables
+// by name so the assertion is on what the child actually saw.
+describe("peerRun — child environment drops tracker credentials (#340)", () => {
+  const ENV_ECHO = "#!/bin/sh\ncat > /dev/null\n"
+    + "echo \"GITHUB_TOKEN=${GITHUB_TOKEN-unset}\"\n"
+    + "echo \"GH_TOKEN=${GH_TOKEN-unset}\"\n"
+    + "echo \"JIRA_API_TOKEN=${JIRA_API_TOKEN-unset}\"\n"
+    + "echo \"COPILOT_GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN-unset}\"\n"
+    + "echo \"CAIRN_TEST_KEEP=${CAIRN_TEST_KEEP-unset}\"\n";
+  const BIN: Record<string, string> = { codex: "codex", opencode: "opencode", antigravity: "agy", grok: "grok" };
+  const SET = ["GITHUB_TOKEN", "GH_TOKEN", "JIRA_API_TOKEN", "COPILOT_GITHUB_TOKEN", "CAIRN_TEST_KEEP"];
+  const saved: Record<string, string | undefined> = {};
+
+  function plantCredentials(): void {
+    for (const k of SET) {
+      saved[k] = process.env[k];
+      process.env[k] = `secret-${k.toLowerCase()}`;
+    }
+  }
+  afterEach(() => {
+    for (const k of SET) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: every drop-list token is absent in the child; unrelated vars and the seat's own credential survive`, async () => {
+      plantCredentials();
+      runnableStubPath({ [BIN[provider]]: ENV_ECHO });
+      const d = projectDir();
+      const result = await peerRun(d, provider, "hello");
+      expect(result.output).toContain("GITHUB_TOKEN=unset");
+      expect(result.output).toContain("GH_TOKEN=unset");
+      expect(result.output).toContain("JIRA_API_TOKEN=unset");
+      // Copilot's own credential is the seat's, not cairn's -- kept.
+      expect(result.output).toContain("COPILOT_GITHUB_TOKEN=secret-copilot_github_token");
+      expect(result.output).toContain("CAIRN_TEST_KEEP=secret-cairn_test_keep");
+    });
+  }
+
+  it("a custom tokenEnv named in cairn.json is dropped too, not only the defaults", async () => {
+    const custom = "MY_RENAMED_JIRA_SECRET";
+    process.env[custom] = "shh";
+    saved[custom] = undefined; SET.push(custom);
+    runnableStubPath({ grok: "#!/bin/sh\ncat > /dev/null\necho \"CUSTOM=${MY_RENAMED_JIRA_SECRET-unset}\"\n" });
+    const d = projectDir({ tracker: { type: "jira", config: {
+      baseUrl: "https://x.atlassian.net", projectKey: "X", tokenEnv: custom } } });
+    const result = await peerRun(d, "grok", "hello");
+    expect(result.output).toContain("CUSTOM=unset");
+  });
+
+  it("peerChildEnv is pure: fresh object, base untouched, docs connector token dropped as well", () => {
+    const base: NodeJS.ProcessEnv = {
+      PATH: "/bin", GITHUB_TOKEN: "t", CONFLUENCE_API_TOKEN: "c", KEEP_ME: "k",
+    };
+    const env = peerChildEnv(
+      { tracker: { config: { repo: "o/r" } }, docs: { config: { tokenEnv: "CONFLUENCE_API_TOKEN" } } },
+      "codex", base);
+    expect(env).toEqual({ PATH: "/bin", KEEP_ME: "k" });
+    expect(base.GITHUB_TOKEN).toBe("t"); // not mutated
+    for (const k of PEER_ENV_DROP) expect(k in env).toBe(false);
   });
 });

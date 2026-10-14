@@ -6,7 +6,11 @@
  * as packet.txt, so the screened packet is all a peer can see (#74).
  * cwdMode "project" is the explicit escape hatch back to the project-dir
  * cwd (#56), refused unless the peer's cairn.json entry says execCapable;
- * every send is leak-scanned before anything spawns (#268). Never exec,
+ * every send is leak-scanned before anything spawns (#268), and the child
+ * never inherits a tracker credential: every seat's env is the server's
+ * minus the token variables cairn's own adapters read (#340) -- grok and
+ * opencode carry shell tools and no sandbox, so an inherited GITHUB_TOKEN
+ * is a write-capable tracker token in a reviewer's hands. Never exec,
  * never shell interpolation — argv is always one of the four fixed templates
  * below plus (for argv-mode peers) the capped input as the single final
  * element; stdin-mode peers get input piped instead, per each CLI's
@@ -27,6 +31,22 @@ export interface PeerResult {
     truncatedInput: boolean;
     durationMs: number;
 }
+export declare const PEER_ENV_DROP: readonly string[];
+/**
+ * The environment a peer child is spawned with: `base` (the server's own
+ * env by default) minus PEER_ENV_DROP, minus the seat's template envDrop,
+ * minus every credential variable cairn.json names for the tracker and
+ * the docs connector. Pure -- builds a fresh object, never mutates `base`.
+ * Exported so the drop is testable without spawning anything.
+ */
+export declare function peerChildEnv(cfg: {
+    tracker?: {
+        config?: unknown;
+    };
+    docs?: {
+        config?: unknown;
+    };
+}, provider: Provider, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 export type PeerCwdMode = "scratch" | "project";
 /**
  * Reports detection/config state for every allow-listed provider — never
@@ -66,7 +86,10 @@ export declare function peerList(projectDir: string): {
  *
  * The outbound leak gate is enforced here too (#268): the capped input —
  * the exact bytes the child would get — is scanned before any scratch
- * dir or child process exists, and a hit refuses the run.
+ * dir or child process exists, and a hit refuses the run. The child's
+ * environment is the server's minus every tracker credential (#340,
+ * peerChildEnv) — containment covers what the peer can READ from its
+ * own process, not only what it can see on disk.
  *
  * :param opts.cwdMode: "scratch" (default) or "project"
  */
