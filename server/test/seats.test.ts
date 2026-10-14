@@ -69,10 +69,12 @@ function makeProject(opts: {
   return d;
 }
 
-// Shipped-default roster order == filename order (the 01-..06- prefixes in
+// Shipped-default roster order == filename order (the 01-..07- prefixes in
 // templates/seats/ enforce it). The first five are review's axes in review's
-// order — the byte-identical promise; the sixth (interrogation) is the
-// plan-stage seat and never joins the diff panel.
+// order — the byte-identical promise (ADR 0010); the sixth (interrogation)
+// is the plan-stage seat and never joins the diff panel; the seventh (ux)
+// is review-stage but signal-gated on touches-ui, so under auto dispatch a
+// server-only diff still convenes exactly the five axes.
 const REVIEW_PANEL_NAMES = [
   "correctness",
   "clarity",
@@ -80,7 +82,10 @@ const REVIEW_PANEL_NAMES = [
   "security",
   "tests",
 ];
-const DEFAULT_NAMES = [...REVIEW_PANEL_NAMES, "interrogation"];
+// The full review-stage roster: the five axes first, then the signal-gated
+// default seats.
+const REVIEW_STAGE_NAMES = [...REVIEW_PANEL_NAMES, "ux"];
+const DEFAULT_NAMES = [...REVIEW_PANEL_NAMES, "interrogation", "ux"];
 
 // Review's flow: stage-filter the roster FIRST, then dispatch — the panel
 // selectSeats sees is exactly the review-stage seats.
@@ -170,7 +175,7 @@ describe("seat schema (parseSeatDoc)", () => {
 });
 
 describe("seat roster (loadRoster)", () => {
-  it("no project seats, no seats block: the six shipped defaults", () => {
+  it("no project seats, no seats block: the seven shipped defaults", () => {
     const roster = loadRoster(makeProject());
     expect(roster.seats.map((s) => s.name)).toEqual(DEFAULT_NAMES);
     expect(roster.seats.every((s) => s.valid && s.source === "default")).toBe(
@@ -200,6 +205,25 @@ describe("seat roster (loadRoster)", () => {
         `${name} stage`,
       ).toBe("review");
     }
+  });
+
+  it("ux ships as the seventh default: stage review, dose minimal, gated on touches-ui", () => {
+    const roster = loadRoster(makeProject());
+    expect(roster.seats.at(-1)?.name).toBe("ux"); // after interrogation
+    const seat = roster.seats.find((s) => s.name === "ux")?.seat;
+    expect(seat).toBeDefined();
+    expect(seat?.stage).toBe("review");
+    expect(seat?.dose).toBe("minimal");
+    expect(seat?.signals).toEqual(["touches-ui"]); // the one gate — never fires on a server-only diff
+    expect(seat?.model).toBeUndefined();
+    expect(seat?.categories).toEqual([
+      "states",
+      "accessibility",
+      "responsiveness",
+      "interaction",
+    ]);
+    // honesty line: unread means unscored
+    expect(seat?.scale.honesty).toContain("unread means unscored");
   });
 
   it("a project seat overrides the default by name, in place", () => {
@@ -243,6 +267,7 @@ describe("seat roster (loadRoster)", () => {
       "architecture",
       "tests",
       "interrogation",
+      "ux",
     ]);
   });
 
@@ -279,10 +304,10 @@ describe("seat roster (loadRoster)", () => {
 });
 
 describe("stage filtering (seatsForStage)", () => {
-  it("review stage seats the five defaults; plan stage seats interrogation", () => {
+  it("review stage seats the five axes then ux; plan stage seats interrogation", () => {
     const roster = loadRoster(makeProject());
     expect(seatsForStage(roster, "review").map((s) => s.name)).toEqual(
-      REVIEW_PANEL_NAMES,
+      REVIEW_STAGE_NAMES,
     );
     expect(seatsForStage(roster, "plan").map((s) => s.name)).toEqual([
       "interrogation",
@@ -298,7 +323,7 @@ describe("stage filtering (seatsForStage)", () => {
       },
     }));
     expect(seatsForStage(roster, "review").map((s) => s.name)).toEqual(
-      REVIEW_PANEL_NAMES,
+      REVIEW_STAGE_NAMES,
     );
     expect(seatsForStage(roster, "plan").map((s) => s.name)).toEqual([
       "interrogation",
@@ -359,7 +384,7 @@ describe("seat_roster tool", () => {
     const roster = JSON.parse(
       (res.content as Array<{ text: string }>)[0].text,
     );
-    expect(roster.seats).toHaveLength(7);
+    expect(roster.seats).toHaveLength(8); // seven defaults + the broken project seat
     const correctness = roster.seats.find(
       (s: { name: string }) => s.name === "correctness",
     );
@@ -378,6 +403,14 @@ describe("seat_roster tool", () => {
       dose: "full",
       stage: "plan",
     });
+    const ux = roster.seats.find((s: { name: string }) => s.name === "ux");
+    expect(ux).toMatchObject({
+      source: "default",
+      valid: true,
+      dose: "minimal",
+      stage: "review",
+      signals: ["touches-ui"],
+    });
     expect(correctness.lens).toContain("logic errors");
     expect(Array.isArray(correctness.categories)).toBe(true);
     expect(Array.isArray(correctness.signals)).toBe(true);
@@ -391,11 +424,14 @@ describe("seat_roster tool", () => {
 
   // Regression pin — the fold-never-stack promise, machine-checked: with no
   // project seats and no seats config block, the REVIEW-STAGE roster consumed
-  // over MCP (stage review|any — review's panel filter) IS review's five
-  // axes, in review's order, with review's category coverage. The plan-stage
-  // interrogation seat rides the roster but never this panel. If this test
-  // moves, review's default behavior moved with it.
-  it("no-config review panel is exactly review's five axes, in order (byte-identical pin)", async () => {
+  // over MCP (stage review|any — review's panel filter) opens with review's
+  // five axes, in review's order, with review's category coverage — and
+  // ONLY signal-gated default seats (ux, on touches-ui) sit after them, so a
+  // server-only diff under auto dispatch convenes exactly the five (ADR 0010,
+  // amendment 2026-10-14). The plan-stage interrogation seat rides the
+  // roster but never this panel. If this test moves, review's default
+  // behavior moved with it.
+  it("no-config review panel is review's five axes first, in order, then ux (byte-identical pin)", async () => {
     const server = buildServer({
       projectDir: makeProject(),
       tracker: new FakeTracker(),
@@ -411,6 +447,7 @@ describe("seat_roster tool", () => {
       seats: Array<{
         name: string;
         categories: string[];
+        signals: string[];
         source: string;
         valid: boolean;
         stage: string;
@@ -423,14 +460,21 @@ describe("seat_roster tool", () => {
       (s) => s.valid && (s.stage === "review" || s.stage === "any"),
     );
 
-    // Today's five review axes, today's order — the panel, exactly.
-    expect(panel.map((s) => s.name)).toEqual([
+    // The five review axes, in their order, FIRST — byte-identical.
+    expect(panel.slice(0, 5).map((s) => s.name)).toEqual([
       "correctness",
       "clarity",
       "architecture",
       "security",
       "tests",
     ]);
+    // Then only the signal-gated defaults: ux, and nothing else. Any seat
+    // sitting here must declare at least one signal, or it would fire on
+    // every pass and break the unconfigured-projects promise.
+    expect(panel.slice(5).map((s) => s.name)).toEqual(["ux"]);
+    for (const s of panel.slice(5)) {
+      expect(s.signals.length, `${s.name} must be signal-gated`).toBeGreaterThan(0);
+    }
     expect(
       roster.seats.every((s) => s.valid && s.source === "default"),
     ).toBe(true);
@@ -455,6 +499,12 @@ describe("seat_roster tool", () => {
       "trust-boundaries",
     ]);
     expect(byName.tests).toEqual(["coverage", "failability"]);
+    expect(byName.ux).toEqual([
+      "states",
+      "accessibility",
+      "responsiveness",
+      "interaction",
+    ]);
     await client.close();
   });
 });
@@ -659,6 +709,47 @@ describe("signal derivation (deriveSignals)", () => {
     });
   }
 
+  // touches-ui — every listed extension and path segment, one at a time, so
+  // dropping any single rule fails exactly one case. Paths are kept free of
+  // the other vocabularies' triggers so the assertion is the ux gate alone.
+  const UI_EXTS = ["css", "scss", "less", "tsx", "jsx", "vue", "svelte", "html"];
+  for (const ext of UI_EXTS) {
+    it(`touches-ui fires on a .${ext} file`, () => {
+      expect(deriveSignals({ files: [`web/widget.${ext}`], ...mid }))
+        .toEqual(["touches-ui"]);
+    });
+  }
+  const UI_SEGS = ["components", "ui", "pages", "views", "layouts"];
+  for (const seg of UI_SEGS) {
+    it(`touches-ui fires on a ${seg}/ path segment`, () => {
+      expect(deriveSignals({ files: [`web/${seg}/thing.ts`], ...mid }))
+        .toEqual(["touches-ui"]);
+    });
+  }
+
+  it("touches-ui matches case-insensitively and rides alongside other signals", () => {
+    expect(deriveSignals({ files: ["server/src/Components/Table.TSX"], ...mid }))
+      .toEqual(["touches-server", "touches-ui"]);
+  });
+
+  it("touches-ui does NOT fire on a server-only diff", () => {
+    const s = deriveSignals({
+      files: [
+        "server/src/index.ts",
+        "server/src/seats/signals.ts",
+        "server/test/seats.test.ts",
+        "server/package.json",
+        "scripts/check-surface.mjs",
+        "docs/ARCHITECTURE.md",
+      ],
+      ...mid,
+    });
+    expect(s).not.toContain("touches-ui");
+    // a .ts file or a "uitools" folder is not a UI file — exact segments only
+    expect(deriveSignals({ files: ["server/src/uitools/build.ts"], ...mid }))
+      .not.toContain("touches-ui");
+  });
+
   it("size signals: strict bounds, mid-size diffs emit neither", () => {
     expect(deriveSignals({ files: ["a.txt"], insertions: 10, deletions: 5 }))
       .toEqual(["diff-small"]);
@@ -692,7 +783,7 @@ describe("signal derivation (deriveSignals)", () => {
     });
     for (const sig of s) {
       expect(sig).toMatch(
-        /^(touches-(auth|server|docs|tests|config|ci|scripts)|diff-(small|large))$/,
+        /^(touches-(auth|server|docs|tests|config|ci|scripts|ui)|diff-(small|large))$/,
       );
     }
   });
@@ -716,7 +807,7 @@ describe("seat selection (selectSeats)", () => {
     expect(sel.effectiveDial).toBe("auto");
     expect(sel.fired.map((s) => s.name)).toEqual(["clarity"]);
     expect(sel.gated.map((g) => g.name)).toEqual([
-      "correctness", "architecture", "security", "tests",
+      "correctness", "architecture", "security", "tests", "ux",
     ]);
     for (const g of sel.gated) {
       expect(g.reason).toBe("no-matching-signals");
@@ -724,14 +815,44 @@ describe("seat selection (selectSeats)", () => {
     }
   });
 
-  it("auto: a server-code diff fires the whole review panel", () => {
+  it("auto: a server-code diff fires exactly the five axes; ux sits out on touches-ui", () => {
     const roster = reviewPanel(loadRoster(makeProject()));
     const signals = deriveSignals({
       files: ["server/src/a.ts"], insertions: 100, deletions: 100,
     });
     const sel = selectSeats(roster, signals, { dial: "auto" });
+    // the ADR 0010 amendment, machine-checked: unconfigured projects with a
+    // server-only diff see the same five seats they always did
     expect(sel.fired.map((s) => s.name)).toEqual(REVIEW_PANEL_NAMES);
-    expect(sel.gated).toEqual([]);
+    expect(sel.gated).toEqual([
+      expect.objectContaining({ name: "ux", reason: "no-matching-signals" }),
+    ]);
+  });
+
+  it("auto: a diff that touches UI files seats ux alongside the axes it also fires", () => {
+    const roster = reviewPanel(loadRoster(makeProject()));
+    const signals = deriveSignals({
+      files: ["src/components/Table.tsx", "src/styles/table.css"],
+      insertions: 100, deletions: 100,
+    });
+    expect(signals).toContain("touches-ui");
+    const sel = selectSeats(roster, signals, { dial: "auto" });
+    expect(sel.fired.map((s) => s.name)).toContain("ux");
+    expect(sel.fired.at(-1)?.name).toBe("ux"); // roster order: after the axes
+    expect(sel.gated.map((g) => g.name)).not.toContain("ux");
+  });
+
+  it("auto: ux is yield-gated like any non-security seat", () => {
+    const roster = reviewPanel(loadRoster(makeProject()));
+    const signals = ["touches-ui"];
+    const yields: Record<string, YieldCounters> = {
+      ux: { dispatched: 10, findingsRaised: 2, findingsSurvived: 0 },
+    };
+    const sel = selectSeats(roster, signals, { dial: "auto", yields });
+    expect(sel.fired.map((s) => s.name)).not.toContain("ux");
+    expect(sel.gated).toContainEqual(
+      expect.objectContaining({ name: "ux", reason: "low-yield" }),
+    );
   });
 
   it("a seat declaring NO signals always fires — gating is opt-in", () => {
@@ -740,7 +861,7 @@ describe("seat selection (selectSeats)", () => {
     })));
     const sel = selectSeats(roster, [], { dial: "auto" });
     expect(sel.fired.map((s) => s.name)).toEqual(["vibes"]);
-    expect(sel.gated).toHaveLength(REVIEW_PANEL_NAMES.length);
+    expect(sel.gated).toHaveLength(REVIEW_STAGE_NAMES.length);
   });
 
   it("inherit follows cairn.json seats.dispatch; absent resolves to auto, off is the opt-in (#345)", () => {
@@ -769,6 +890,7 @@ describe("seat selection (selectSeats)", () => {
     ]);
     expect(sel.gated).toEqual([
       expect.objectContaining({ name: "correctness", reason: "low-yield" }),
+      expect.objectContaining({ name: "ux", reason: "no-matching-signals" }),
     ]);
     expect(sel.gated[0].note).toContain("low yield");
   });
@@ -790,7 +912,10 @@ describe("seat selection (selectSeats)", () => {
     });
     expect(sel.fired.map((s) => s.name)).toContain("security");
     expect(sel.fired.map((s) => s.name)).toContain("style");
-    expect(sel.gated).toEqual([]);
+    // nothing gated on YIELD — ux sits out here only because touches-ui
+    // did not fire, which is the signal rule, not the yield floor
+    expect(sel.gated.filter((g) => g.reason === "low-yield")).toEqual([]);
+    expect(sel.gated.map((g) => g.name)).toEqual(["ux"]);
   });
 
   it("yield gate needs history and a strictly-low rate", () => {
@@ -991,7 +1116,7 @@ describe("seats dispatch config", () => {
     const roster = loadRoster(makeProject());
     const STANDARD = new Set([
       "touches-auth", "touches-server", "touches-docs", "touches-tests",
-      "touches-config", "touches-ci", "touches-scripts",
+      "touches-config", "touches-ci", "touches-scripts", "touches-ui",
       "diff-small", "diff-large",
     ]);
     for (const entry of roster.seats) {

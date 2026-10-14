@@ -31,4 +31,19 @@ One review path exists.
 - The lenses-vs-council distinction is stated wherever both appear,
   preventing a second council from growing by accident.
 
+## Amendment 2026-10-14
+
+The default roster may grow by signal-gated default seats. The five
+axes stay byte-identical and first, in review's order; a default seat
+added after them must declare at least one scope signal, so under the
+default auto dispatch it sits out whenever its signal does not fire.
+The first such seat is ux (seventh in the roster, after the plan-stage
+interrogation seat), gated on `touches-ui` — presentation files and
+UI-shaped path segments. With the default auto dispatch a server-only
+diff therefore convenes the same five seats it always did, so
+unconfigured projects see identical output unless their diff touches UI
+files. The byte-identical pin now checks the five-first ordering plus
+the signal-gating of every default seat after them; the original
+removeWhen stands.
+
 Commits: a2dfab7 (fold), 8d213b6 (wave-brief reuse).

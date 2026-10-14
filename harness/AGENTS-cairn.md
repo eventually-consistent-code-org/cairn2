@@ -80,6 +80,7 @@ panel; plan-stage seats convene at plan time and never join it.
 | security | injection, auth gaps, secrets in the diff, trust boundaries crossed without a check | injection, auth, secrets, trust-boundaries | full | review |
 | tests | claims the diff makes that nothing verifies — new behavior with no test, a test that can't actually fail | coverage, failability | standard | review |
 | interrogation | the product case a plan stands on — who it serves, how it fails them, why now, and whether the scope is honest | audience, failure-modes, why-now, scope-honesty | full | plan |
+| ux | whether the diff ships its states, contrast, grid, breakpoints and interaction or only describes them — an empty state in the PR body is not an empty state in the component | states, accessibility, responsiveness, interaction | minimal | review |
 <!-- cairn:seats:end -->
 
 ## Shared rules (inherited by every subroutine)

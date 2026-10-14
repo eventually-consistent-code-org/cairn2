@@ -32,8 +32,10 @@ plan-stage seats convene at plan time instead (`plan`'s challenge
 round) and never join the diff panel.
 
 With no project seats and no `seats` config block, the review-stage
-roster is exactly the five shipped defaults, in this order — today's
-review, byte for byte:
+roster opens with the five shipped axes, in this order — today's
+review, byte for byte — and one signal-gated default seat after them:
+the five axes are byte-identical, ux joins when `touches-ui` fires (so
+a server-only diff convenes exactly the five it always did):
 
 | seat | what it's looking for |
 |---|---|
@@ -42,6 +44,7 @@ review, byte for byte:
 | architecture | the wrong layer doing the work, coupling that will bite the next change, reuse that got skipped |
 | security | injection, auth gaps, secrets in the diff, trust boundaries crossed without a check |
 | tests | claims the diff makes that nothing verifies — new behavior with no test, a test that can't actually fail |
+| ux | whether the diff ships its states, contrast, grid, breakpoints and interaction or only describes them — seated only when the diff touches UI files |
 
 A project-added seat (`.cairn/roles/*.md`) joins the panel where the
 roster puts it, same rules as every default. A seat disabled in
@@ -56,7 +59,7 @@ on every pass (`"seats": { "dispatch": "off" }` in cairn.json). On
 `auto`, derive scope signals
 from the resolved diff per the standard vocabulary (`touches-auth`,
 `touches-server`, `touches-docs`, `touches-tests`, `touches-config`,
-`touches-ci`, `touches-scripts` from paths; `diff-small` under 50
+`touches-ci`, `touches-scripts`, `touches-ui` from paths; `diff-small` under 50
 changed lines, `diff-large` over 500 — the tested rules live in
 `server/src/seats/signals.ts`) and seat only the seats whose declared
 `signals` intersect the derived set. A seat declaring NO signals always
