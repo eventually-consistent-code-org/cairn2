@@ -18,7 +18,14 @@
 //                 not recoverable here.
 //
 // Usage:
-//   node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json> [--json]
+//   node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json]
+//
+// Several sources pool into one table: each arm runs as its own
+// `claude plugin eval` invocation and lands in its own results/<timestamp>,
+// and a rerun of a few cases (a corrected ground truth) lands in another.
+// A case named in a later source replaces the same case from an earlier
+// one -- give the sources oldest first, and the latest run of each case
+// is the one scored. A directory given alone resolves to its latest run.
 //
 // Exit 0 when at least one corpus case per arm was found; 2 on a load
 // error or when an arm has no cases in the aggregate (it did not run).
@@ -90,28 +97,36 @@ function scoreArm(cases) {
 function main() {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
-  const src = args.find((a) => !a.startsWith("--"));
-  if (!src) {
-    console.error("usage: node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json> [--json]");
+  const srcs = args.filter((a) => !a.startsWith("--"));
+  if (!srcs.length) {
+    console.error("usage: node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json]");
     process.exit(2);
   }
 
-  let aggregate;
-  let source;
+  // Pool the sources, latest-given wins per case name (see the header).
+  const sources = [];
+  const versions = new Set();
+  const byName = new Map();
   try {
-    source = resolveSource(src);
-    aggregate = JSON.parse(readFileSync(source, "utf8"));
+    for (const src of srcs) {
+      const source = resolveSource(src);
+      const aggregate = JSON.parse(readFileSync(source, "utf8"));
+      sources.push(source);
+      if (aggregate.claudeVersion) versions.add(aggregate.claudeVersion);
+      for (const c of aggregate.cases ?? []) {
+        if (CASE.test(c.name ?? "")) byName.set(c.name, c);
+      }
+    }
   } catch (e) {
     console.error(`eval-corpus-score: ${e.message}`);
     process.exit(2);
   }
 
   const byArm = { seats: [], native: [] };
-  for (const c of aggregate.cases ?? []) {
-    const m = CASE.exec(c.name ?? "");
-    if (m) byArm[m[2]].push(c);
-  }
-  const out = { source, claudeVersion: aggregate.claudeVersion, arms: {} };
+  for (const c of byName.values()) byArm[CASE.exec(c.name)[2]].push(c);
+  const claudeVersion = [...versions].join(", ");
+  const source = sources.join(", ");
+  const out = { sources, claudeVersion, arms: {} };
   let missing = 0;
   for (const [arm, cases] of Object.entries(byArm)) {
     if (!cases.length) { out.arms[arm] = null; missing += 1; continue; }
@@ -122,7 +137,7 @@ function main() {
     console.log(JSON.stringify(out, null, 2));
   } else {
     const pct = (x) => (x === null ? "n/a" : `${(x * 100).toFixed(0)}%`);
-    console.log(`review corpus (${source}, Claude Code ${aggregate.claudeVersion ?? "?"})`);
+    console.log(`review corpus (${source}, Claude Code ${claudeVersion || "?"})`);
     for (const [arm, s] of Object.entries(out.arms)) {
       if (!s) { console.log(`  ${arm}: no corpus cases in this aggregate -- the arm did not run`); continue; }
       console.log(`  ${arm}: ${s.cases} case(s), ${s.runs} run(s), recall ${pct(s.recall)}, precision ${pct(s.precision)}`);

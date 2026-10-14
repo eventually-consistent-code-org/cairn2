@@ -6,7 +6,8 @@
 //
 //   evals-corpus/NN-<slug>/seats/    case.yaml (prompt: /cairn:review corpus/NN-<slug>)
 //   evals-corpus/NN-<slug>/native/   case.yaml (prompt: /code-review corpus/NN-<slug> high --max-findings all)
-//     graders/   k-NN.md (the known defect is named) + precision.md (nothing invented)
+//     graders/   k-NN.md (the known defect is named) + precision.md (no defect invented;
+//                correctness axis only -- clarity/style notes are ignored)
 //     fixture/   the files the fix touched, as the FIX left them (tests excluded)
 //     revert.patch   the fix reversed -- the defect, reintroduced
 //     scaffold.sh    builds the workspace repo: main = fix state, corpus/NN-<slug> = +revert,
@@ -21,7 +22,8 @@
 // lived. Reverting a fix on top of its own state always applies.
 //
 // Also refreshes evals-corpus/mocks as a copy of evals/mocks (the harness
-// rejects a symlink there). Idempotent -- rerun after editing corpus.json
+// rejects a symlink there), with the corpus's own audit_record answer
+// written over the copy. Idempotent -- rerun after editing corpus.json
 // or the mocks; committed output, like the command shims.
 //
 // Author(s): John Reed
@@ -45,6 +47,17 @@ const MOCKS_DST = join(DIR, "mocks");
 const EXCLUDED = ["server/test/", "evals/", "evals-corpus/", "README.md", "server/README.md", "CHANGELOG.md", "docs/comparison.md"];
 const TOOLS_SEATS = ["Read", "Glob", "Grep", "Bash", "Skill", "ToolSearch", "AskUserQuestion", "Agent", "mcp__plugin_cairn_cairn__*"];
 const TOOLS_NATIVE = ["Read", "Glob", "Grep", "Bash", "Skill", "ToolSearch", "Agent", "ReportFindings"];
+// Corpus-own mock answers, written over the copied main-suite mocks (see the
+// copy step in main). `{{input.x}}` interpolates the call's own arguments.
+const CORPUS_MOCKS = {
+  audit_record: JSON.stringify({
+    path: ".cairn/audit/{{input.scope}}-2026-10-14.md",
+    recorded: true,
+    verdict: "{{input.verdict}}",
+    findings: "as submitted",
+    note: "eval mock: the record was accepted exactly as sent; no server-side quorum ran, so the surviving set is the findings you submitted -- file from those",
+  }),
+};
 
 
 function git(args) {
@@ -95,9 +108,14 @@ The review raised the known defect in ${item.file}: ${item.finding}.
 function precisionGrader(item) {
   const branch = `corpus/${item.id}-${item.slug}`;
   const control = item.control
-    ? ` This diff contains no defect at all: a review that raises no finding and says so passes; any finding raised fails.`
+    ? ` This diff contains no defect at all: a review that raises no defect finding passes, whether or not it adds clarity or style notes; any finding presented as a defect fails.`
     : ` The one known defect is: ${item.finding} (in ${item.file}); raising it is correct.`;
-  const criteria = `Every finding the review of branch ${branch} against main raised describes a real defect present in that diff -- wrong behaviour the code change actually causes -- not a style preference, a hypothetical, or a claim about code the diff does not touch.${control} A review with one or more findings that are not real defects in this diff fails.`;
+  // Correctness axis only (the issue's scope): the native call cannot see
+  // clarity, architecture or test-coverage by design, so a seats-arm
+  // clarity note must not count against it as an invented defect. The
+  // first full run (2026-10-14) failed precision on exactly that -- a
+  // stale-comment minor beside a confirmed, correct finding.
+  const criteria = `Judge only the findings the review of branch ${branch} against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch.${control} Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.`;
   return `---
 type: llm
 focus: last_message
@@ -161,6 +179,14 @@ function main() {
   // copied in whole on every run -- one source, never two to keep in step.
   rmSync(MOCKS_DST, { recursive: true, force: true });
   cpSync(MOCKS_SRC, MOCKS_DST, { recursive: true });
+  // ...except the mocks the review verb reads back: the main suite's
+  // audit_record answer is a canned foreign record (two 2026-09-17 findings,
+  // a placeholder commit), and a reviewer handed someone else's results
+  // stops and reports the tool instead of filing its own. The corpus
+  // accepts the record as sent, so the arm's final message is the review.
+  for (const [tool, body] of Object.entries(CORPUS_MOCKS)) {
+    writeFileSync(join(MOCKS_DST, "cairn", `${tool}.md`), body + "\n");
+  }
 
   let n = 0;
   for (const item of items) {
