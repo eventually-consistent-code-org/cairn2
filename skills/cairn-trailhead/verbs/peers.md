@@ -34,7 +34,9 @@ dispatch — right after the focus ask — call `peer_state(op: "start")`
 with the run's slug, mode, target, chosen focus, and the roster
 `peer_list()` reported available. From there the store is the run's
 memory, not the conversation: every `peer_run` reply lands via
-`op: "record_output"` (verbatim, per peer per round), every
+`op: "record_output"` (verbatim, per peer per round, with the `exitCode`
+`peer_run` returned — a seat that died with only stderr must not read as
+a clean pass), every
 `parseFindings` result via `op: "record_findings"` (stable ids f1,
 f2, ...), and every adversarial judgment via `op: "verdict"` —
 `verified`, `dead`, `disputed`, or `open-disagreement` — the moment
@@ -220,7 +222,11 @@ mutates before that gate, in any mode.
    judge the `unparsed` pile too. No peers at all → the absent-peers
    rule below: cairn's own pass still writes the report.
 6. Converge: cluster near-duplicate claims across peers by topic. 3+
-   peers independently raising a claim = converged; a single-peer claim
+   peers independently raising a claim = converged. An incomplete seat
+   — one that never answered, or exited non-zero with no findings
+   (`status` names it with its stderr tail) — is outside that count, and
+   `close` refuses over it unless `allowIncomplete` stamps it into the
+   record as deliberately degraded coverage. A single-peer claim
    stands or falls on its evidence (the templates' evidence-or-discarded
    rule is the floor). Adjudicate every claim against the actual
    artifacts — the docs, the transcripts, spot-checkable competitor

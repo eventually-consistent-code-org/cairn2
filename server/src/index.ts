@@ -2750,11 +2750,11 @@ export function buildServer(deps: {
       annotations: { readOnlyHint: false, destructiveHint: false },
       description:
         "Per-run peers convergence state (.cairn/peers/<slug>/) — ops: start (mode/target/" +
-        "focus/peers; refuses an unfinished run on the slug), record_output (peer/round raw reply, " +
+        "focus/peers; refuses an unfinished run on the slug), record_output (peer/round raw reply + exitCode, " +
         "verbatim file), record_findings (peer/round, stable ids f1, f2, ...), verdict (findingId + " +
         "verified|dead|disputed|open-disagreement; verified/dead terminal), status (what's recorded + " +
-        "what's missing to resume), close (blocks on unresolved findings AND on rostered seats with " +
-        "no round-1 output — allowIncomplete: true closes anyway and stamps incompleteSeats; returns " +
+        "what's missing to resume), close (refuses unresolved findings and incomplete seats — silent, or " +
+        "non-zero exit with no findings — unless allowIncomplete: true stamps them; returns " +
         "audit_record-shaped provenance), abandon",
       // Permissive envelope on purpose -- op-specific requirements are
       // checked in-handler so a missing field comes back as a structured
@@ -2777,6 +2777,7 @@ export function buildServer(deps: {
         peer: z.string().optional(),
         round: z.number().int().optional(),
         output: z.string().optional(),
+        exitCode: z.number().int().optional(),
         findings: z.array(z.record(z.string(), z.unknown())).optional(),
         findingId: z.string().optional(),
         verdict: z.enum(VERDICTS).optional(),
@@ -2802,6 +2803,7 @@ export function buildServer(deps: {
         peer?: string;
         round?: number;
         output?: string;
+        exitCode?: number;
         findings?: Array<Record<string, unknown>>;
         findingId?: string;
         verdict?: Verdict;
@@ -2834,6 +2836,7 @@ export function buildServer(deps: {
               need(a.peer, "peer"),
               need(a.round, "round"),
               need(a.output, "output"),
+              a.exitCode,
             );
           case "record_findings":
             // recordFindings re-validates each element against FindingSchema,

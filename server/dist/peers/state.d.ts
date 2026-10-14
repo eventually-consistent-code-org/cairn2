@@ -26,6 +26,24 @@ export interface OutputRecord {
     round: number;
     file: string;
     recordedAt: string;
+    /** The child's exit code as peer_run returned it (#339). Absent on
+     *  records written before the field existed, or when the caller had
+     *  none to give -- absent never reads as failed. */
+    exitCode?: number;
+}
+/**
+ * A seat the run cannot count on (#339): `silent` never answered round 1;
+ * `failed` answered with a non-zero exit and raised no findings -- the
+ * shape a not-logged-in, rate-limited or credit-capped CLI produces, which
+ * parses to empty piles and would otherwise read exactly like a clean
+ * pass. `reason` is plain language for the status line; for a failed
+ * seat it ends with the stderr tail the child left.
+ */
+export interface IncompleteSeat {
+    peer: string;
+    kind: "silent" | "failed";
+    exitCode?: number;
+    reason: string;
 }
 export interface FindingRecord {
     id: string;
@@ -42,6 +60,9 @@ interface RunState {
 }
 export interface RunResumable {
     peersMissingRound1: string[];
+    /** Silent AND failed seats, each with its reason (#339) -- a superset of
+     *  peersMissingRound1, which stays for callers that only knew silence. */
+    incompleteSeats: IncompleteSeat[];
     disputedAwaitingRound2: string[];
     unresolved: string[];
     complete: boolean;
@@ -77,10 +98,14 @@ export interface CloseSummary {
     peers: string[];
     roundsRun: number;
     closedAt: string;
-    /** Rostered peers with no round-1 output — present only on a close that
-     *  went through with allowIncomplete, so provenance shows the degradation
-     *  was deliberate. */
+    /** Rostered peers the run could not count on — never answered round 1,
+     *  or exited non-zero with no findings (#339) — present only on a close
+     *  that went through with allowIncomplete, so provenance shows the
+     *  degradation was deliberate. */
     incompleteSeats?: string[];
+    /** One plain line per incomplete seat ("grok exited 1 with no findings
+     *  -- see stderr: ..."), same order as incompleteSeats. */
+    incompleteDetail?: string[];
 }
 /**
  * Creates the run dir and state.json for a new convergence run. An
@@ -119,7 +144,7 @@ export declare function runAbandon(projectDir: string, slug: string): {
  * folded into the index. Re-recording the same peer+round overwrites
  * (a retried send supersedes the interrupted one).
  */
-export declare function recordPeerOutput(projectDir: string, slug: string, peer: string, round: number, rawOutput: string): OutputRecord;
+export declare function recordPeerOutput(projectDir: string, slug: string, peer: string, round: number, rawOutput: string, exitCode?: number | null): OutputRecord;
 /**
  * Enters parsed findings into the run under stable ids (f1, f2, ... —
  * assigned in arrival order, never reused), tagged with the peer and
@@ -164,10 +189,12 @@ export declare function runStatus(projectDir: string, slug: string): RunStatusRe
  * verdict is "findings" iff anything survived (verified or
  * open-disagreement).
  *
- * A rostered peer with no round-1 output is a SILENT SEAT — closing over
- * one hides a reviewer that never answered, so it refuses (CONFIG_INVALID
- * naming the seats) unless the caller passes allowIncomplete, which closes
- * anyway and stamps the summary's incompleteSeats so provenance shows the
+ * A rostered peer with no round-1 output is a SILENT SEAT, and one whose
+ * round-1 exit was non-zero with no findings raised is a FAILED SEAT (#339)
+ * — closing over either hides a reviewer that never actually reviewed, so
+ * it refuses (CONFIG_INVALID naming each seat and its reason) unless the
+ * caller passes allowIncomplete, which closes anyway and stamps the
+ * summary's incompleteSeats (+ incompleteDetail) so provenance shows the
  * degradation was deliberate. allowIncomplete never waives unresolved
  * findings — those always block.
  */

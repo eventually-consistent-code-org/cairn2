@@ -432,3 +432,87 @@ describe("atomicity", () => {
     check();
   });
 });
+
+
+// #339: a seat that exits non-zero and raises nothing parses to empty
+// piles, which read exactly like a clean pass -- the 2026-08-12 "silent
+// reviewer closes as pass" class through a different door. The exit code
+// now rides on the output record, and status/close name the seat with the
+// stderr tail instead of counting it.
+describe("exit codes and incomplete seats (#339)", () => {
+  const STDERR_ONLY = "\n--- stderr ---\nerror: not logged in\nrun `grok login` first\n";
+  function started(): string {
+    const dir = freshDir();
+    runStart(dir, "x", META);
+    return dir;
+  }
+  const stateOf = (dir: string) => JSON.parse(readFileSync(
+    join(dir, ".cairn", "peers", "x", "state.json"), "utf8"));
+
+  it("recordPeerOutput stores the exit code on the record; a call without one stays silent on it", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordPeerOutput(dir, "x", "grok", 1, "err", 1);
+    recordPeerOutput(dir, "x", "codex", 2, "again");
+    const outputs = stateOf(dir).outputs as Array<{ peer: string; round: number; exitCode?: number }>;
+    expect(outputs.find((o) => o.peer === "codex" && o.round === 1)?.exitCode).toBe(0);
+    expect(outputs.find((o) => o.peer === "grok")?.exitCode).toBe(1);
+    expect("exitCode" in outputs.find((o) => o.peer === "codex" && o.round === 2)!).toBe(false);
+  });
+
+  it("non-zero exit with no findings: status names the seat, kind failed, with the stderr tail; run is not complete", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordFindings(dir, "x", "codex", 1, [GOOD]);
+    recordVerdict(dir, "x", "f1", "verified");
+    recordPeerOutput(dir, "x", "grok", 1, STDERR_ONLY, 1);
+    const status = runStatus(dir, "x");
+    expect(status.resumable.peersMissingRound1).toEqual([]);
+    expect(status.resumable.incompleteSeats).toHaveLength(1);
+    expect(status.resumable.incompleteSeats[0]).toMatchObject({ peer: "grok", kind: "failed", exitCode: 1 });
+    expect(status.resumable.incompleteSeats[0].reason).toContain("grok exited 1 with no findings");
+    expect(status.resumable.incompleteSeats[0].reason).toContain("not logged in");
+    expect(status.resumable.complete).toBe(false);
+  });
+
+  it("non-zero exit WITH findings is not incomplete; zero exit with no findings is not incomplete", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "spoke then died", 2);
+    recordFindings(dir, "x", "codex", 1, [GOOD]);
+    recordPeerOutput(dir, "x", "grok", 1, "nothing to report", 0);
+    expect(runStatus(dir, "x").resumable.incompleteSeats).toEqual([]);
+  });
+
+  it("a silent seat is listed as incomplete too, kind silent, beside peersMissingRound1", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    const status = runStatus(dir, "x");
+    expect(status.resumable.peersMissingRound1).toEqual(["grok"]);
+    expect(status.resumable.incompleteSeats).toEqual([
+      { peer: "grok", kind: "silent", reason: "grok never answered round 1" },
+    ]);
+  });
+
+  it("an output record with no exit code is never read as failed (old records, old callers)", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out");
+    recordPeerOutput(dir, "x", "grok", 1, STDERR_ONLY);
+    expect(runStatus(dir, "x").resumable.incompleteSeats).toEqual([]);
+  });
+
+  it("runClose refuses over a failed seat naming the reason; allowIncomplete closes and stamps seat + detail", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordFindings(dir, "x", "codex", 1, [GOOD]);
+    recordVerdict(dir, "x", "f1", "verified");
+    recordPeerOutput(dir, "x", "grok", 1, STDERR_ONLY, 1);
+    let message = "";
+    try { runClose(dir, "x"); } catch (e) { message = e instanceof CairnError ? e.message : String(e); }
+    expect(message).toContain("incomplete seat");
+    expect(message).toContain("grok exited 1 with no findings");
+    const summary = runClose(dir, "x", { allowIncomplete: true });
+    expect(summary.incompleteSeats).toEqual(["grok"]);
+    expect(summary.incompleteDetail?.[0]).toContain("see stderr: error: not logged in");
+    expect(summary.verdict).toBe("findings");
+  });
+});

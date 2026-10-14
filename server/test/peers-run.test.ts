@@ -3,6 +3,8 @@ import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { peerList, peerRun, peerChildEnv, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
+import { parseFindings } from "../src/peers/findings.js";
+import { runStart, runStatus, recordPeerOutput } from "../src/peers/state.js";
 
 // Stub CLIs are shell scripts prepended onto PATH per test, so no real
 // codex/opencode/agy/grok binary is ever assumed. Restore PATH after
@@ -657,5 +659,28 @@ describe("peerRun — child environment drops tracker credentials (#340)", () =>
     expect(env).toEqual({ PATH: "/bin", KEEP_ME: "k" });
     expect(base.GITHUB_TOKEN).toBe("t"); // not mutated
     for (const k of PEER_ENV_DROP) expect(k in env).toBe(false);
+  });
+});
+
+
+// #339 end to end: the Copilot-shaped failure -- exit 1, stderr only -- is
+// the symptom (parses to empty piles, indistinguishable from a clean seat)
+// and the fix (recorded with its exit code, status names it incomplete).
+describe("peerRun → state: a seat that dies with only stderr is incomplete, never clean (#339)", () => {
+  it("exit 1 + stderr-only parses to empty piles, and records as a failed seat with the stderr tail", async () => {
+    runnableStubPath({ grok: "#!/bin/sh\ncat > /dev/null\necho 'error: not logged in -- run grok login' 1>&2\nexit 1\n" });
+    const d = projectDir();
+    const result = await peerRun(d, "grok", "hello");
+    expect(result.exitCode).toBe(1);
+    // The symptom: nothing in either pile -- exactly what a clean seat looks like.
+    expect(parseFindings(result.output)).toEqual({ findings: [], unparsed: [] });
+    // The fix: the exit code rides into the run state and the seat is named.
+    runStart(d, "run", { mode: "review", target: "t", peers: ["grok"] });
+    recordPeerOutput(d, "run", "grok", 1, result.output, result.exitCode);
+    const status = runStatus(d, "run");
+    expect(status.resumable.incompleteSeats).toHaveLength(1);
+    expect(status.resumable.incompleteSeats[0]).toMatchObject({ peer: "grok", kind: "failed", exitCode: 1 });
+    expect(status.resumable.incompleteSeats[0].reason).toContain("not logged in");
+    expect(status.resumable.complete).toBe(false);
   });
 });

@@ -18,6 +18,11 @@ import { join } from "node:path";
 import { CairnError } from "../errors.js";
 import { FindingSchema, type Finding } from "./findings.js";
 
+// Mirrors the divider run.ts stitches between a child's stdout and stderr
+// (and findings.ts strips) -- the stderr tail is the reason a failed seat
+// reports.
+const STDERR_DIVIDER = "\n--- stderr ---\n";
+
 
 // Constants
 
@@ -48,6 +53,25 @@ export interface OutputRecord {
   round: number;
   file: string;
   recordedAt: string;
+  /** The child's exit code as peer_run returned it (#339). Absent on
+   *  records written before the field existed, or when the caller had
+   *  none to give -- absent never reads as failed. */
+  exitCode?: number;
+}
+
+/**
+ * A seat the run cannot count on (#339): `silent` never answered round 1;
+ * `failed` answered with a non-zero exit and raised no findings -- the
+ * shape a not-logged-in, rate-limited or credit-capped CLI produces, which
+ * parses to empty piles and would otherwise read exactly like a clean
+ * pass. `reason` is plain language for the status line; for a failed
+ * seat it ends with the stderr tail the child left.
+ */
+export interface IncompleteSeat {
+  peer: string;
+  kind: "silent" | "failed";
+  exitCode?: number;
+  reason: string;
 }
 
 export interface FindingRecord {
@@ -67,6 +91,9 @@ interface RunState {
 
 export interface RunResumable {
   peersMissingRound1: string[];
+  /** Silent AND failed seats, each with its reason (#339) -- a superset of
+   *  peersMissingRound1, which stays for callers that only knew silence. */
+  incompleteSeats: IncompleteSeat[];
   disputedAwaitingRound2: string[];
   unresolved: string[];   // finding ids still disputed or never judged
   complete: boolean;
@@ -100,10 +127,14 @@ export interface CloseSummary {
   peers: string[];
   roundsRun: number;
   closedAt: string;
-  /** Rostered peers with no round-1 output — present only on a close that
-   *  went through with allowIncomplete, so provenance shows the degradation
-   *  was deliberate. */
+  /** Rostered peers the run could not count on — never answered round 1,
+   *  or exited non-zero with no findings (#339) — present only on a close
+   *  that went through with allowIncomplete, so provenance shows the
+   *  degradation was deliberate. */
   incompleteSeats?: string[];
+  /** One plain line per incomplete seat ("grok exited 1 with no findings
+   *  -- see stderr: ..."), same order as incompleteSeats. */
+  incompleteDetail?: string[];
 }
 
 
@@ -271,7 +302,8 @@ export function runAbandon(projectDir: string, slug: string): { slug: string; ab
  * (a retried send supersedes the interrupted one).
  */
 export function recordPeerOutput(projectDir: string, slug: string,
-  peer: string, round: number, rawOutput: string): OutputRecord {
+  peer: string, round: number, rawOutput: string,
+  exitCode?: number | null): OutputRecord {
   const s = slugify(slug);
   const state = readState(projectDir, s);
   assertOpen(s, state);
@@ -282,7 +314,13 @@ export function recordPeerOutput(projectDir: string, slug: string,
   const dir = runDir(projectDir, s);
   writeAtomic(join(dir, file), rawOutput);
 
-  const record: OutputRecord = { peer, round, file, recordedAt: new Date().toISOString() };
+  // #339: the exit code rides on the record when the caller has one. null
+  // and undefined both mean "not given" -- old callers and old records
+  // stay silent on it rather than reading as a zero.
+  const record: OutputRecord = {
+    peer, round, file, recordedAt: new Date().toISOString(),
+    ...(typeof exitCode === "number" ? { exitCode } : {}),
+  };
   const existing = state.outputs.findIndex((o) => o.peer === peer && o.round === round);
   if (existing === -1) {
     state.outputs.push(record);
@@ -408,6 +446,46 @@ const missingRound1 = (state: RunState): string[] =>
   state.meta.peers.filter((p) =>
     !state.outputs.some((o) => o.peer === p && o.round === 1));
 
+// The last stretch of what the child wrote to stderr, one line, for the
+// reason a failed seat reports. Falls back to the whole output when run.ts
+// stitched no divider (the child wrote nothing to stderr).
+const STDERR_TAIL_CHARS = 200;
+function stderrTail(raw: string): string {
+  const at = raw.indexOf(STDERR_DIVIDER);
+  const text = (at === -1 ? raw : raw.slice(at + STDERR_DIVIDER.length))
+    .replace(/\s+/g, " ").trim();
+  if (!text) return "(no stderr)";
+  return text.length > STDERR_TAIL_CHARS ? `...${text.slice(-STDERR_TAIL_CHARS)}` : text;
+}
+
+// Every seat the run cannot count on (#339), silent first, then failed:
+// a round-1 record carrying a non-zero exit code for a peer that raised
+// no findings in any round. A non-zero exit WITH findings is a seat that
+// spoke and then died -- its findings stand, the run goes on. A zero exit
+// with no findings is a clean "nothing to report". Absent exit code is
+// never read as failed. One definition, shared by runStatus and runClose,
+// so the resume map and the close gate cannot disagree.
+function incompleteSeats(projectDir: string, slug: string, state: RunState): IncompleteSeat[] {
+  const out: IncompleteSeat[] = missingRound1(state).map((peer) => ({
+    peer, kind: "silent", reason: `${peer} never answered round 1`,
+  }));
+  for (const o of state.outputs) {
+    if (o.round !== 1 || typeof o.exitCode !== "number" || o.exitCode === 0) continue;
+    if (state.findings.some((f) => f.peer === o.peer)) continue;
+    let raw = "";
+    try {
+      raw = readFileSync(join(runDir(projectDir, slug), o.file), "utf8");
+    } catch {
+      // the verbatim file is gone -- the exit code alone still makes the case
+    }
+    out.push({
+      peer: o.peer, kind: "failed", exitCode: o.exitCode,
+      reason: `${o.peer} exited ${o.exitCode} with no findings -- see stderr: ${stderrTail(raw)}`,
+    });
+  }
+  return out;
+}
+
 /**
  * The resume map: everything recorded so far, plus what's still missing —
  * peers with no round-1 output, disputed findings whose peer hasn't
@@ -423,6 +501,7 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
     state.outputs.some((o) => o.peer === peer && o.round === round);
 
   const peersMissingRound1 = missingRound1(state);
+  const incomplete = incompleteSeats(projectDir, s, state);
   const disputedAwaitingRound2 = state.findings
     .filter((f) => f.verdict === "disputed" && !answered(f.peer, 2))
     .map((f) => f.id);
@@ -437,10 +516,11 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
     findings: state.findings,
     resumable: {
       peersMissingRound1,
+      incompleteSeats: incomplete,
       disputedAwaitingRound2,
       unresolved,
       complete: !isFinished(state.meta)
-        && peersMissingRound1.length === 0
+        && incomplete.length === 0
         && disputedAwaitingRound2.length === 0
         && unresolved.length === 0,
     },
@@ -457,10 +537,12 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
  * verdict is "findings" iff anything survived (verified or
  * open-disagreement).
  *
- * A rostered peer with no round-1 output is a SILENT SEAT — closing over
- * one hides a reviewer that never answered, so it refuses (CONFIG_INVALID
- * naming the seats) unless the caller passes allowIncomplete, which closes
- * anyway and stamps the summary's incompleteSeats so provenance shows the
+ * A rostered peer with no round-1 output is a SILENT SEAT, and one whose
+ * round-1 exit was non-zero with no findings raised is a FAILED SEAT (#339)
+ * — closing over either hides a reviewer that never actually reviewed, so
+ * it refuses (CONFIG_INVALID naming each seat and its reason) unless the
+ * caller passes allowIncomplete, which closes anyway and stamps the
+ * summary's incompleteSeats (+ incompleteDetail) so provenance shows the
  * degradation was deliberate. allowIncomplete never waives unresolved
  * findings — those always block.
  */
@@ -479,14 +561,16 @@ export function runClose(projectDir: string, slug: string,
       "every finding must end verified, dead, or open-disagreement before close");
   }
 
-  const incompleteSeats = missingRound1(state);
-  if (incompleteSeats.length > 0 && opts?.allowIncomplete !== true) {
+  const incomplete = incompleteSeats(projectDir, s, state);
+  if (incomplete.length > 0 && opts?.allowIncomplete !== true) {
     throw new CairnError("CONFIG_INVALID",
-      `cannot close peers run '${s}' — rostered seat(s) never answered round 1: ${
-        incompleteSeats.join(", ")}`,
-      "record each seat's round-1 output first, or close with allowIncomplete: true "
-        + "to stamp the summary's incompleteSeats and accept the degraded coverage");
+      `cannot close peers run '${s}' — incomplete seat(s): ${
+        incomplete.map((i) => i.reason).join("; ")}`,
+      "re-run the seat and record its output again (a failed seat's stderr says why it died), "
+        + "or close with allowIncomplete: true to stamp the summary's incompleteSeats and "
+        + "accept the degraded coverage");
   }
+  const incompleteNames = incomplete.map((i) => i.peer);
 
   const closedAt = new Date().toISOString();
   state.meta.closedAt = closedAt;
@@ -514,6 +598,8 @@ export function runClose(projectDir: string, slug: string,
     peers: state.meta.peers,
     roundsRun: state.outputs.reduce((max, o) => Math.max(max, o.round), 0),
     closedAt,
-    ...(incompleteSeats.length > 0 ? { incompleteSeats } : {}),
+    ...(incomplete.length > 0
+      ? { incompleteSeats: incompleteNames, incompleteDetail: incomplete.map((i) => i.reason) }
+      : {}),
   };
 }
