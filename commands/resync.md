@@ -1,5 +1,5 @@
 ---
-description: "Detect out-of-band commits; refresh plan context (cairn — /cairn:help for the verb reference)"
+description: "Detect out-of-band commits; refresh plan context (/cairn:help)"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 

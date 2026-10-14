@@ -53,7 +53,7 @@ if (rows.length === 0) {
 for (const { verb, purpose, args } of rows) {
   const fm = [
     "---",
-    `description: ${JSON.stringify(`${purpose} (cairn — /cairn:help for the verb reference)`)}`,
+    `description: ${JSON.stringify(`${purpose} (/cairn:help)`)}`,
   ];
   if (args) fm.push(`argument-hint: ${JSON.stringify(args)}`);
   fm.push(`allowed-tools: ${JSON.stringify(ALLOWED_TOOLS)}`);

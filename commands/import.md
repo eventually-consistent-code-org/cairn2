@@ -1,5 +1,5 @@
 ---
-description: "Reverse-mirror a tracker epic/milestone/list into plan artifacts (cairn — /cairn:help for the verb reference)"
+description: "Reverse-mirror a tracker epic/milestone/list into plan artifacts (/cairn:help)"
 argument-hint: "<phase url, id, or name>"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

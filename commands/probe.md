@@ -1,5 +1,5 @@
 ---
-description: "Risk-ordered throwaway spike experiments with verdicts (cairn — /cairn:help for the verb reference)"
+description: "Risk-ordered throwaway spike experiments with verdicts (/cairn:help)"
 argument-hint: "\"<question>\" | (none = frontier) | --wrap [<id>]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

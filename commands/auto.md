@@ -1,5 +1,5 @@
 ---
-description: "Chained hands-off execution of remaining phases (opt-in) (cairn — /cairn:help for the verb reference)"
+description: "Chained hands-off execution of remaining phases (opt-in) (/cairn:help)"
 argument-hint: "[--batch [--budget <tokens|$usd>] [--phases <N,N,...>]]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

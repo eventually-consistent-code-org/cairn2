@@ -1,5 +1,5 @@
 ---
-description: "Portfolio board — every cairn project on this machine, staleness-flagged, cost rollup (cairn — /cairn:help for the verb reference)"
+description: "Portfolio board — every cairn project on this machine, staleness-flagged, cost rollup (/cairn:help)"
 argument-hint: "[<project>] | --refresh | forget <project>"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

@@ -1,5 +1,5 @@
 ---
-description: "Five-axis code review of a diff, branch, or phase (cairn — /cairn:help for the verb reference)"
+description: "Five-axis code review of a diff, branch, or phase (/cairn:help)"
 argument-hint: "[target] | --seat <name> [target] | --fix"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

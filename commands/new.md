@@ -1,5 +1,5 @@
 ---
-description: "Start here — new project: interview, plan artifacts, tracker mirror, issues (cairn — /cairn:help for the verb reference)"
+description: "Start here — new project: interview, plan artifacts, tracker mirror, issues (/cairn:help)"
 argument-hint: "[project name]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

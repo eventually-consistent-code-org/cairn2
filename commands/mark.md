@@ -1,5 +1,5 @@
 ---
-description: "Zero-friction capture — backlog/seed to tracker, note to memory (cairn — /cairn:help for the verb reference)"
+description: "Zero-friction capture — backlog/seed to tracker, note to memory (/cairn:help)"
 argument-hint: "\"<text>\" [--seed \"<trigger>\"] [--note]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

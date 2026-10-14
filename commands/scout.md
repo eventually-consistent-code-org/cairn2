@@ -1,5 +1,5 @@
 ---
-description: "Research a phase only — resumable RESEARCH.md checkpoints (cairn — /cairn:help for the verb reference)"
+description: "Research a phase only — resumable RESEARCH.md checkpoints (/cairn:help)"
 argument-hint: "<N> [<N> ...]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
