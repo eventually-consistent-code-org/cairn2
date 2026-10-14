@@ -1,5 +1,5 @@
 ---
-description: "Developer profile — calibrates how cairn talks to you (cairn — /cairn:help for the verb reference)"
+description: "Developer profile — calibrates how cairn talks to you (/cairn:help)"
 argument-hint: "(interview-lite)"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

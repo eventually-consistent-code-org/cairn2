@@ -1,5 +1,5 @@
 ---
-description: "Persistent context threads that survive /clear (cairn — /cairn:help for the verb reference)"
+description: "Persistent context threads that survive /clear (/cairn:help)"
 argument-hint: "\"<name>\" | (none = list open) | --wrap"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

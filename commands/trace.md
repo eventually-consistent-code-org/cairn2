@@ -1,5 +1,5 @@
 ---
-description: "Persistent debugging session — evidence→hypothesis→test, tracker-mirrored (cairn — /cairn:help for the verb reference)"
+description: "Persistent debugging session — evidence→hypothesis→test, tracker-mirrored (/cairn:help)"
 argument-hint: "[\"<bug>\" | <id> | close <id>]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

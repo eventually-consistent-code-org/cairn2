@@ -48,12 +48,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // deliberate, and a budget the tree already fails would just be noise
 // everyone learns to skip.
 //
-// Headroom is small on purpose. There is a known 438-token saving sitting
-// in the command descriptions (see issue #226): all 39 end with the same
-// "(cairn — /cairn:help for the verb reference)" suffix, which this guard
-// found on its first run. Spending that is a discoverability decision the
-// owner makes, not a tidy-up; when it happens, this budget comes down with
-// it.
+// Headroom is small on purpose. The guard's first run found a 438-token
+// saving in the command descriptions: all 39 ended with the same
+// "(cairn — /cairn:help for the verb reference)" suffix. The owner chose
+// to shorten it to "(/cairn:help)" rather than drop it (#226, phase 26) --
+// discoverability kept, most of the rent returned -- and the budget came
+// down with it (see the 2026-10-13 re-pin below).
 //
 // It jumped from 2300 to 13712 when tool schemas came inside the fence.
 // Nothing got worse that day; the guard simply stopped excluding 83% of
@@ -108,9 +108,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // Re-pinned DOWN to 13429 (2026-10-13, #329): the native-task mirror left
 // with its session-start advisory, 52 tokens of standing rent that warned
 // about a flag nobody sets for a mechanism that could not fire. Reading
-// 13391; same ~38 cushion. #226 (the command-description suffix) is the
-// next planned drop.
-const BUDGET_TOKENS = 13429;
+// 13391; same ~38 cushion.
+//
+// Re-pinned DOWN to 13145 (2026-10-13, #226): the 39 command descriptions
+// now end in "(/cairn:help)" instead of the 42-character suffix. Reading
+// 13107 (the #332 manifest field had meanwhile spent 18 of the cushion);
+// same ~38 cushion.
+const BUDGET_TOKENS = 13145;
 
 /** chars / 4 — see the note above on why this approximation is the right one. */
 const estimateTokens = (chars) => Math.ceil(chars / 4);

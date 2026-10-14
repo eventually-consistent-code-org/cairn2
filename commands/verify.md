@@ -1,5 +1,5 @@
 ---
-description: "Goal-backward phase check, drift clean, write VERIFICATION.md (cairn — /cairn:help for the verb reference)"
+description: "Goal-backward phase check, drift clean, write VERIFICATION.md (/cairn:help)"
 argument-hint: "<N>"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

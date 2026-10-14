@@ -1,5 +1,5 @@
 ---
-description: "Render this verb reference (cairn — /cairn:help for the verb reference)"
+description: "Render this verb reference (/cairn:help)"
 argument-hint: "[verb]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

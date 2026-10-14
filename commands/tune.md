@@ -1,5 +1,5 @@
 ---
-description: "Configure cairn.json — models, continuity, leak guard (cairn — /cairn:help for the verb reference)"
+description: "Configure cairn.json — models, continuity, leak guard (/cairn:help)"
 argument-hint: "[key] [value]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

@@ -1,5 +1,5 @@
 ---
-description: "Pause/resume session continuity (cairn — /cairn:help for the verb reference)"
+description: "Pause/resume session continuity (/cairn:help)"
 argument-hint: "[resume]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

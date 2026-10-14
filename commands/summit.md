@@ -1,5 +1,5 @@
 ---
-description: "Complete the milestone — verify gate, tracker close/release, archive, tag (cairn — /cairn:help for the verb reference)"
+description: "Complete the milestone — verify gate, tracker close/release, archive, tag (/cairn:help)"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 

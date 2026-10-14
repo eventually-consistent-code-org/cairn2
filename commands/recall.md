@@ -1,5 +1,5 @@
 ---
-description: "Search memory, scoped to the active context, with staleness flags (cairn — /cairn:help for the verb reference)"
+description: "Search memory, scoped to the active context, with staleness flags (/cairn:help)"
 argument-hint: "\"<query>\" [--phase N] [--issue <id>]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

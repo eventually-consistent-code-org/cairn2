@@ -1,5 +1,5 @@
 ---
-description: "Gate on drift-clean + no open issues in verified phases, then push (cairn — /cairn:help for the verb reference)"
+description: "Gate on drift-clean + no open issues in verified phases, then push (/cairn:help)"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 

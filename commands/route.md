@@ -1,5 +1,5 @@
 ---
-description: "Re-route the roadmap — insert/remove/edit phases (cairn — /cairn:help for the verb reference)"
+description: "Re-route the roadmap — insert/remove/edit phases (/cairn:help)"
 argument-hint: "insert|remove|edit <N> [\"name\"]"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

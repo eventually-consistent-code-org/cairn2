@@ -1,5 +1,5 @@
 ---
-description: "Freeform smart router — classify intent, dispatch the right verb (cairn — /cairn:help for the verb reference)"
+description: "Freeform smart router — classify intent, dispatch the right verb (/cairn:help)"
 argument-hint: "\"<request>\""
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
