@@ -47,7 +47,7 @@ executing that verb.
 | brief | Onboarding briefing from cards + plans | [--stdout] |
 | tune | Configure cairn.json — models, continuity, leak guard | [key] [value] |
 | trace | Persistent debugging session — evidence→hypothesis→test, tracker-mirrored | ["<bug>" \| <id> \| close <id>] |
-| audit | Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/sweep (whole-project rescan) | <mode> [target] \| --fix |
+| audit | Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/debt/sweep (whole-project rescan) | <mode> [target] \| --fix |
 | review | Five-axis code review of a diff, branch, or phase | [target] \| --seat <name> [target] \| --fix |
 | triage | Open-issue sweep against project conventions — report by default, --apply for the safe subset | [--stale-days N] \| --apply |
 | map | Project knowledge graph — build, query, diff, status | build \| "<question>" \| diff \| status |

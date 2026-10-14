@@ -41,7 +41,7 @@ enforces both.
 | `brief` | Onboarding briefing from cards + plans | `[--stdout]` | verbs/brief.md | live |
 | `tune` | Configure cairn.json — models, continuity, leak guard | `[key] [value]` | verbs/tune.md | live |
 | `trace` | Persistent debugging session — evidence→hypothesis→test, tracker-mirrored | `["<bug>" \| <id> \| close <id>]` | verbs/trace.md | live |
-| `audit` | Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/sweep (whole-project rescan) | `<mode> [target]` \| `--fix` | verbs/audit.md | live |
+| `audit` | Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/debt/sweep (whole-project rescan) | `<mode> [target]` \| `--fix` | verbs/audit.md | live |
 | `review` | Five-axis code review of a diff, branch, or phase | `[target]` \| `--seat <name> [target]` \| `--fix` | verbs/review.md | live |
 | `triage` | Open-issue sweep against project conventions — report by default, --apply for the safe subset | `[--stale-days N]` \| `--apply` | verbs/triage.md | live |
 | `map` | Project knowledge graph — build, query, diff, status | `build` \| `"<question>"` \| `diff` \| `status` | verbs/map.md | live |
