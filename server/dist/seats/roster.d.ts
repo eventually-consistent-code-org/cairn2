@@ -25,9 +25,10 @@ export interface Roster {
     seats: RosterSeat[];
     /** Roster-level advisories (e.g. an enabled name that matched nothing). */
     notes: string[];
-    /** cairn.json seats.dispatch, when set — what a verb's `inherit` dial
-     * resolves to (absent = off, the full-roster default). */
-    dispatch?: "auto" | "off";
+    /** What a verb's `inherit` dial resolves to: cairn.json seats.dispatch,
+     * or `auto` when unset (#345) -- the cheaper, reliable path is the
+     * default; `off` is the explicit opt-in for the full roster. */
+    dispatch: "auto" | "off";
 }
 /**
  * Resolves the merged seat roster for a project.

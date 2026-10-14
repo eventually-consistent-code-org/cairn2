@@ -114,10 +114,11 @@ export const ConfigSchema = z.object({
       enabled: z.array(z.string()).optional(),
       disabled: z.array(z.string()).optional(),
       // Project-level dispatch dial (phase 19): what a verb's `inherit`
-      // dial resolves to. "auto" = signal/yield selection picks the
-      // seats that fire; "off" (and absent — the default) = the full
-      // roster fires, today's behavior.
-      dispatch: z.enum(["auto", "off"]).optional(),
+      // dial resolves to. "auto" (the default since #345 -- absent here,
+      // or the whole block absent, resolves to it in the roster) =
+      // signal/yield selection picks the seats that fire; "off" is the
+      // explicit opt-in for the full roster on every pass.
+      dispatch: z.enum(["auto", "off"]).default("auto"),
     })
     .optional(),
   contextEconomy: z

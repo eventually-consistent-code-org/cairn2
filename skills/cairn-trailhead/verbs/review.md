@@ -50,8 +50,10 @@ roster puts it, same rules as every default. A seat disabled in
 likewise gets its roster note echoed as one line. Never silently shrink
 the panel — the record shows every seat, seated or not.
 
-**Dispatch — which seats fire this pass.** The dial defaults to `off`:
-the full panel fires, exactly as above. On `auto`, derive scope signals
+**Dispatch — which seats fire this pass.** The dial defaults to `auto`;
+`off` is the explicit opt-in that fires the full panel exactly as above
+on every pass (`"seats": { "dispatch": "off" }` in cairn.json). On
+`auto`, derive scope signals
 from the resolved diff per the standard vocabulary (`touches-auth`,
 `touches-server`, `touches-docs`, `touches-tests`, `touches-config`,
 `touches-ci`, `touches-scripts` from paths; `diff-small` under 50
@@ -66,7 +68,10 @@ the panel, never by the pass itself):
 a seat with ten or more dispatches and fewer than one surviving finding
 per ten gets gated on that evidence — never the security seat, never a
 dose-`full` seat. `inherit` follows cairn.json `seats.dispatch`
-(`seat_roster` returns it; absent means off). Every gated seat lands in
+(`seat_roster` returns the resolved value; absent means auto). A young
+project has no yield history yet — the store needs ten dispatches per
+seat before low-yield gating can act, so until then only the signal
+rule gates. Every gated seat lands in
 the record in ONE report line, never silently:
 "seats gated this pass: X (no matching signals), Y (low yield)".
 Custom signal names a project seat declares beyond the standard
