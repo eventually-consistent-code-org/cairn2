@@ -89,6 +89,7 @@ export const RunManifestSchema = z.object({
     }),
     answers: z.array(StagedAnswerSchema).optional(),
     status: z.enum(["staged", "running", "complete", "stopped"]),
+    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
     currentPhase: z.number().optional(),
 });
 // Internals
@@ -167,6 +168,7 @@ export function createRunManifest(projectDir, opts) {
         ceiling: opts.ceiling ?? null,
         pushAuth: { granted: false, scope: "manifest-phases" },
         ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
+        ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
         status: "staged",
     };
     writeManifestFile(path, state);

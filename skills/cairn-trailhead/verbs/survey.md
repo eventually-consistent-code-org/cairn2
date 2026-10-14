@@ -42,7 +42,9 @@ stages; NOTHING mutates before stage 2's gate, in any mode.
    `pending` section, in parallel. Route each agent's model by the WORK
    CLASS OF THE TOPIC per the cairn-planning rubric — enumerate/locate →
    haiku-tier, synthesis brief → sonnet-tier, architecture trade-off →
-   opus-tier; uncertain → inherit. Subagents return section content ONLY;
+   opus-tier; uncertain → inherit — and pass the rubric's `effort` for
+   that class (low/medium/high) on the same dispatch. Subagents return
+   section content ONLY;
    the main thread writes the section and flips its marker as EACH agent
    completes. A failed agent's section stays `pending` with a one-line
    failure note — the next run retries it.

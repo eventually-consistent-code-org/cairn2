@@ -112,6 +112,10 @@ export interface RunManifestState {
    * the run so the executor never has to ask mid-flight. */
   answers?: StagedAnswer[];
   status: RunStatus;
+  /** The Agent `effort` dial the run was staged under (#332), so
+   * estimate-vs-actual can tell a cheap run from a thorough one. Absent on
+   * manifests written before the dial existed. */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** The manifest phase in flight (#260), set by setCurrentPhase at each
    * phase start. Absent until the first phase starts — and on manifests
    * written before it existed, which the run guard reads as "no push". */
@@ -151,6 +155,7 @@ export const RunManifestSchema: z.ZodType<RunManifestState> = z.object({
   }),
   answers: z.array(StagedAnswerSchema).optional(),
   status: z.enum(["staged", "running", "complete", "stopped"]),
+  effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
   currentPhase: z.number().optional(),
 });
 
@@ -228,6 +233,7 @@ export function createRunManifest(
     phases: ManifestPhase[];
     ceiling?: { tokens?: number; usd?: number } | null;
     answers?: StagedAnswer[];
+    effort?: RunManifestState["effort"];
     createdAt?: string; // injectable for tests; wall clock otherwise
     baseDir?: string;
   },
@@ -259,6 +265,7 @@ export function createRunManifest(
     ceiling: opts.ceiling ?? null,
     pushAuth: { granted: false, scope: "manifest-phases" },
     ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
+    ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
     status: "staged",
   };
   writeManifestFile(path, state);

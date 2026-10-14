@@ -1175,6 +1175,7 @@ export function buildServer(deps) {
                 .optional(),
             status: z.enum(["staged", "running", "complete", "stopped"]).optional(),
             phase: z.number().optional(),
+            effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
         }),
     }, wrap((a) => {
         const d = dir();
@@ -1192,6 +1193,7 @@ export function buildServer(deps) {
                     phases: a.phases ?? [],
                     ceiling,
                     answers: a.answers,
+                    effort: a.effort,
                 });
             }
             case "read":

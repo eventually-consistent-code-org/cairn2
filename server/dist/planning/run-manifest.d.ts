@@ -76,6 +76,10 @@ export interface RunManifestState {
      * the run so the executor never has to ask mid-flight. */
     answers?: StagedAnswer[];
     status: RunStatus;
+    /** The Agent `effort` dial the run was staged under (#332), so
+     * estimate-vs-actual can tell a cheap run from a thorough one. Absent on
+     * manifests written before the dial existed. */
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
     /** The manifest phase in flight (#260), set by setCurrentPhase at each
      * phase start. Absent until the first phase starts — and on manifests
      * written before it existed, which the run guard reads as "no push". */
@@ -99,6 +103,7 @@ export declare function createRunManifest(projectDir: string, opts: {
         usd?: number;
     } | null;
     answers?: StagedAnswer[];
+    effort?: RunManifestState["effort"];
     createdAt?: string;
     baseDir?: string;
 }): RunManifestState;

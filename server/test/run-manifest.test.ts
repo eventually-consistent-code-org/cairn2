@@ -79,6 +79,20 @@ describe("createRunManifest / readRunManifest", () => {
     expect(read.status).toBe("staged");
   });
 
+  it("records the effort dial the run was staged under, and omits it when none was given (#332)", () => {
+    const { projectDir, baseDir } = setup();
+    const dialed = createRunManifest(projectDir, {
+      runId: "run-dial", phases: PHASES, effort: "high", createdAt: CREATED, baseDir,
+    });
+    expect(readRunManifest(projectDir, "run-dial", baseDir).effort).toBe("high");
+    expect(dialed.effort).toBe("high");
+    const plain = createRunManifest(projectDir, {
+      runId: "run-plain", phases: PHASES, createdAt: CREATED, baseDir,
+    });
+    expect("effort" in plain).toBe(false);
+    expect(readRunManifest(projectDir, "run-plain", baseDir).effort).toBeUndefined();
+  });
+
   it("read is pure — the file's bytes are identical before and after", () => {
     const { projectDir, baseDir } = setup();
     createRunManifest(projectDir, {
