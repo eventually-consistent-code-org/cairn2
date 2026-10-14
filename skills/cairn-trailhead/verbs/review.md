@@ -79,7 +79,8 @@ worth a line in the record ("no findings") — silence isn't the same as
 checked.
 
 **Anchored score, beside the verdict — never a gate.** Each seat also
-reports a 0-10 score on its own scale. At dispatch, quote the seat's
+reports a 0-10 score on its own scale. A seat is a judgment gate in the
+cairn-planning rubric: dispatch it at `effort: high`. At dispatch, quote the seat's
 anchors (`anchor_ten` / `anchor_five` / `anchor_zero`) and its honesty
 line verbatim from the definition file — defaults under
 `templates/seats/`, project seats under `.cairn/roles/` (`seat_roster`

@@ -15,9 +15,10 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
 2. Depth (flag > PLAN.md frontmatter `depth:` > cairn.json default > standard):
    - quick: no research; draft PLAN.md tasks directly.
    - standard: one research subagent for unknowns; write RESEARCH.md if material.
-   - deep: parallel research fan-out per the skill's model-routing rubric, then a
-     plan-checker pass over the draft (deep also convenes the challenge
-     round — step 4 — alongside that pass).
+   - deep: parallel research fan-out per the skill's model-routing rubric
+     (model and `effort` per topic's work class), then a plan-checker pass
+     over the draft at judgment-gate effort (deep also convenes the
+     challenge round — step 4 — alongside that pass).
    - When a map exists, research also consults `map_query` for the phase
      slice (`node: <phase-N id>` or a `label` match on the phase name,
      `depth: 2`) — dependencies and owners the graph already knows beat

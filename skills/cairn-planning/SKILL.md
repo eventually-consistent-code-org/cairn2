@@ -67,14 +67,26 @@ commit pair in the ledger, checked at verify.
 `inherit` = session model everywhere; explicit value pins everything; `auto`
 routes per work class:
 
-| work class | signals | routed model |
-|---|---|---|
-| mechanical | enumerate/locate/scrape | small/fast (haiku-tier) |
-| synthesis | research briefs, pattern analysis | session model (sonnet-tier) |
-| judgment gates | plan-checker, adversarial verify, architecture trade-offs | strongest available (opus-tier) |
+| work class | signals | routed model | effort |
+|---|---|---|---|
+| mechanical | enumerate/locate/scrape | small/fast (haiku-tier) | low |
+| synthesis | research briefs, pattern analysis | session model (sonnet-tier) | medium |
+| judgment gates | plan-checker, adversarial verify, architecture trade-offs | strongest available (opus-tier) | high |
 
 Blast radius rules: output that gates a lifecycle transition (verify/ship)
 routes UP, never down. Downgrade only mechanical work. Uncertain → inherit.
+
+The effort column is the Agent tool's `effort` dial (Claude Code 2.1.292+),
+passed on EVERY dispatch a verb makes — survey, scout, plan --deep, the
+review seats, work --wave — alongside the routed model; a harness without
+the dial ignores it. It moves with the work class, never with the model:
+a judgment gate on a session-tier model still runs at high. A headless run
+records the dial it was staged under in its run manifest (`effort`), so
+estimate-vs-actual can tell a cheap run from a thorough one.
+
+Never set `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`. It pins every workflow
+subagent to one model and flattens this rubric to a single row — the
+routing above is the mechanism, the variable is its off switch.
 
 The rubric governs ALL research fan-out — `scout`, `survey`, and
 `plan --deep` — not only deep mode. Research verbs dispatch one subagent

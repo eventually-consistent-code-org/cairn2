@@ -123,6 +123,7 @@ import {
   type ManifestPhase,
   type RunStatus,
   type StagedAnswer,
+  type RunManifestState,
 } from "./planning/run-manifest.js";
 import { writeBanner, bannerStats } from "./memory/banner.js";
 import {
@@ -1723,6 +1724,7 @@ export function buildServer(deps: {
           .optional(),
         status: z.enum(["staged", "running", "complete", "stopped"]).optional(),
         phase: z.number().optional(),
+        effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
       }),
     },
     wrap(
@@ -1735,6 +1737,7 @@ export function buildServer(deps: {
         answers?: StagedAnswer[];
         status?: RunStatus;
         phase?: number;
+        effort?: RunManifestState["effort"];
       }) => {
         const d = dir();
         switch (a.action) {
@@ -1752,6 +1755,7 @@ export function buildServer(deps: {
               phases: a.phases ?? [],
               ceiling,
               answers: a.answers,
+              effort: a.effort,
             });
           }
           case "read":

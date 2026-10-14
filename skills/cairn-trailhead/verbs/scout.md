@@ -26,7 +26,8 @@ end of this doc.
    `pending` section, in parallel, model routed by the WORK CLASS OF THE
    TOPIC per the cairn-planning research fan-out rubric (enumerate/locate
    → haiku-tier, synthesis brief → sonnet-tier, architecture trade-off →
-   opus-tier; uncertain → inherit). Subagents return section content ONLY;
+   opus-tier; uncertain → inherit), with the rubric's `effort` for that
+   class passed on the same dispatch. Subagents return section content ONLY;
    the main thread writes each section and flips its marker to `done` as
    EACH agent completes — a kill mid-run must lose at most the in-flight
    sections, never finished ones. A failed agent's section stays `pending`

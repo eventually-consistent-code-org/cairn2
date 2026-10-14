@@ -176,3 +176,33 @@ describe("rule coverage candidate cap (#207)", () => {
     expect(cov.candidates).toHaveLength(MAX_CANDIDATES);
   });
 });
+
+describe("free dials (#332)", () => {
+  it("the routing rubric carries an effort column and a rule against the workflow model override", () => {
+    const skill = read("skills/cairn-planning/SKILL.md");
+    expect(skill).toMatch(/\| work class \| signals \| routed model \| effort \|/);
+    expect(skill).toMatch(/\| mechanical \|.*\| low \|/);
+    expect(skill).toMatch(/\| synthesis \|.*\| medium \|/);
+    expect(skill).toMatch(/\| judgment gates \|.*\| high \|/);
+    expect(skill).toContain("Never set `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`");
+  });
+
+  it("every fan-out verb passes the effort dial on dispatch", () => {
+    for (const verb of ["survey", "scout", "plan", "review", "work"]) {
+      expect(read(`skills/cairn-trailhead/verbs/${verb}.md`), verb).toMatch(/`effort`|effort: high/);
+    }
+  });
+
+  it("both plugin agents declare their compaction window", () => {
+    for (const agent of ["agents/cairn-designer.md", "agents/cairn-uat.md"]) {
+      const front = read(agent).split("\n---")[0];
+      expect(front, agent).toMatch(/^autoCompactWindow: \d+$/m);
+    }
+  });
+
+  it("the runbook states the effort dial and the never-set variable", () => {
+    const runbook = read("docs/01-runbook.md");
+    expect(runbook).toContain("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL");
+    expect(runbook).toMatch(/`effort` dial/);
+  });
+});
