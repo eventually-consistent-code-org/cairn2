@@ -188,10 +188,13 @@ one-line lens, rubric categories, anchored 0-10 scale with an honesty
 line, a REQUIRED injection dose (minimal | standard | full,
 server-validated at load, ADR 0009), a convening stage (review | plan |
 any, default review, validated the same way, ADR 0013), scope signals,
-advisory model preference — with seven shipped defaults: five reproduce
+advisory model preference — with eight shipped defaults: five reproduce
 review's classic axes byte-identically until a project overrides them
-(ADR 0010), the interrogation seat convenes at plan time, and the ux
-seat joins review only when the diff touches UI files (`touches-ui`).
+(ADR 0010), the interrogation seat convenes at plan time, the ux seat
+joins review only when the diff touches UI files (`touches-ui`), and the
+lean seat — code that should not exist, after ponytail's ladder — joins
+when the diff is large or touches server code (`diff-large`,
+`touches-server`).
 
 - **Schema + roster** (`server/src/seats/schema.ts`, `roster.ts`) —
   flat-frontmatter seat files; project overrides by name from the

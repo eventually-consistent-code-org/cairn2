@@ -719,8 +719,9 @@ a "more interesting" target; a branch name = that branch against `main`; a
 phase number = the phase's ledgered commit ranges (read from the ledger, not
 guessed). The panel comes from the seat roster — with no project seats
 that's exactly the five default axes (correctness, clarity, architecture,
-security, tests) plus the signal-gated ux seat when the diff touches UI
-files, a project seat joins in roster order, and every seat
+security, tests) plus the signal-gated defaults — ux when the diff
+touches UI files, lean when it is large or touches server code — a
+project seat joins in roster order, and every seat
 reports an anchored 0-10 score beside the verdict that never gates
 anything; internal seats are framing lenses, `peers` stays the genuinely
 adversarial external council. A clean axis still gets a "no findings"

@@ -69,12 +69,14 @@ function makeProject(opts: {
   return d;
 }
 
-// Shipped-default roster order == filename order (the 01-..07- prefixes in
+// Shipped-default roster order == filename order (the 01-..08- prefixes in
 // templates/seats/ enforce it). The first five are review's axes in review's
 // order — the byte-identical promise (ADR 0010); the sixth (interrogation)
 // is the plan-stage seat and never joins the diff panel; the seventh (ux)
 // is review-stage but signal-gated on touches-ui, so under auto dispatch a
-// server-only diff still convenes exactly the five axes.
+// server-only diff still convenes the five axes without it; the eighth
+// (lean) is review-stage, gated on diff-large or touches-server, so it
+// joins a server diff and sits out a small docs-only one.
 const REVIEW_PANEL_NAMES = [
   "correctness",
   "clarity",
@@ -84,8 +86,8 @@ const REVIEW_PANEL_NAMES = [
 ];
 // The full review-stage roster: the five axes first, then the signal-gated
 // default seats.
-const REVIEW_STAGE_NAMES = [...REVIEW_PANEL_NAMES, "ux"];
-const DEFAULT_NAMES = [...REVIEW_PANEL_NAMES, "interrogation", "ux"];
+const REVIEW_STAGE_NAMES = [...REVIEW_PANEL_NAMES, "ux", "lean"];
+const DEFAULT_NAMES = [...REVIEW_PANEL_NAMES, "interrogation", "ux", "lean"];
 
 // Review's flow: stage-filter the roster FIRST, then dispatch — the panel
 // selectSeats sees is exactly the review-stage seats.
@@ -175,7 +177,7 @@ describe("seat schema (parseSeatDoc)", () => {
 });
 
 describe("seat roster (loadRoster)", () => {
-  it("no project seats, no seats block: the seven shipped defaults", () => {
+  it("no project seats, no seats block: the eight shipped defaults", () => {
     const roster = loadRoster(makeProject());
     expect(roster.seats.map((s) => s.name)).toEqual(DEFAULT_NAMES);
     expect(roster.seats.every((s) => s.valid && s.source === "default")).toBe(
@@ -209,7 +211,8 @@ describe("seat roster (loadRoster)", () => {
 
   it("ux ships as the seventh default: stage review, dose minimal, gated on touches-ui", () => {
     const roster = loadRoster(makeProject());
-    expect(roster.seats.at(-1)?.name).toBe("ux"); // after interrogation
+    const names = roster.seats.map((s) => s.name);
+    expect(names.indexOf("ux")).toBe(names.indexOf("interrogation") + 1);
     const seat = roster.seats.find((s) => s.name === "ux")?.seat;
     expect(seat).toBeDefined();
     expect(seat?.stage).toBe("review");
@@ -224,6 +227,27 @@ describe("seat roster (loadRoster)", () => {
     ]);
     // honesty line: unread means unscored
     expect(seat?.scale.honesty).toContain("unread means unscored");
+  });
+
+  it("lean ships as the eighth default: stage review, dose minimal, gated on diff-large or touches-server", () => {
+    const roster = loadRoster(makeProject());
+    expect(roster.seats.at(-1)?.name).toBe("lean"); // after ux — last
+    const seat = roster.seats.find((s) => s.name === "lean")?.seat;
+    expect(seat).toBeDefined();
+    expect(seat?.stage).toBe("review");
+    expect(seat?.dose).toBe("minimal");
+    // two gates: a server diff seats it, a small docs-only diff does not
+    expect(seat?.signals).toEqual(["diff-large", "touches-server"]);
+    expect(seat?.model).toBeUndefined();
+    expect(seat?.categories).toEqual([
+      "necessity",
+      "reuse",
+      "dependencies",
+      "abstraction",
+    ]);
+    // honesty line: "unused" / "already exists" needs the grep that proves it
+    expect(seat?.scale.honesty).toContain("grep that proves it");
+    expect(seat?.scale.honesty).toContain("unscored");
   });
 
   it("a project seat overrides the default by name, in place", () => {
@@ -268,6 +292,7 @@ describe("seat roster (loadRoster)", () => {
       "tests",
       "interrogation",
       "ux",
+      "lean",
     ]);
   });
 
@@ -304,7 +329,7 @@ describe("seat roster (loadRoster)", () => {
 });
 
 describe("stage filtering (seatsForStage)", () => {
-  it("review stage seats the five axes then ux; plan stage seats interrogation", () => {
+  it("review stage seats the five axes then ux then lean; plan stage seats interrogation", () => {
     const roster = loadRoster(makeProject());
     expect(seatsForStage(roster, "review").map((s) => s.name)).toEqual(
       REVIEW_STAGE_NAMES,
@@ -384,7 +409,7 @@ describe("seat_roster tool", () => {
     const roster = JSON.parse(
       (res.content as Array<{ text: string }>)[0].text,
     );
-    expect(roster.seats).toHaveLength(8); // seven defaults + the broken project seat
+    expect(roster.seats).toHaveLength(9); // eight defaults + the broken project seat
     const correctness = roster.seats.find(
       (s: { name: string }) => s.name === "correctness",
     );
@@ -411,6 +436,14 @@ describe("seat_roster tool", () => {
       stage: "review",
       signals: ["touches-ui"],
     });
+    const lean = roster.seats.find((s: { name: string }) => s.name === "lean");
+    expect(lean).toMatchObject({
+      source: "default",
+      valid: true,
+      dose: "minimal",
+      stage: "review",
+      signals: ["diff-large", "touches-server"],
+    });
     expect(correctness.lens).toContain("logic errors");
     expect(Array.isArray(correctness.categories)).toBe(true);
     expect(Array.isArray(correctness.signals)).toBe(true);
@@ -426,12 +459,12 @@ describe("seat_roster tool", () => {
   // project seats and no seats config block, the REVIEW-STAGE roster consumed
   // over MCP (stage review|any — review's panel filter) opens with review's
   // five axes, in review's order, with review's category coverage — and
-  // ONLY signal-gated default seats (ux, on touches-ui) sit after them, so a
-  // server-only diff under auto dispatch convenes exactly the five (ADR 0010,
-  // amendment 2026-10-14). The plan-stage interrogation seat rides the
-  // roster but never this panel. If this test moves, review's default
-  // behavior moved with it.
-  it("no-config review panel is review's five axes first, in order, then ux (byte-identical pin)", async () => {
+  // ONLY signal-gated default seats (ux on touches-ui, lean on diff-large or
+  // touches-server) sit after them, so the five always lead and every seat
+  // behind them has a gate (ADR 0010, amendment 2026-10-14). The plan-stage
+  // interrogation seat rides the roster but never this panel. If this test
+  // moves, review's default behavior moved with it.
+  it("no-config review panel is review's five axes first, in order, then ux, then lean (byte-identical pin)", async () => {
     const server = buildServer({
       projectDir: makeProject(),
       tracker: new FakeTracker(),
@@ -468,10 +501,10 @@ describe("seat_roster tool", () => {
       "security",
       "tests",
     ]);
-    // Then only the signal-gated defaults: ux, and nothing else. Any seat
-    // sitting here must declare at least one signal, or it would fire on
-    // every pass and break the unconfigured-projects promise.
-    expect(panel.slice(5).map((s) => s.name)).toEqual(["ux"]);
+    // Then only the signal-gated defaults: ux, then lean, and nothing else.
+    // Any seat sitting here must declare at least one signal, or it would
+    // fire on every pass and break the unconfigured-projects promise.
+    expect(panel.slice(5).map((s) => s.name)).toEqual(["ux", "lean"]);
     for (const s of panel.slice(5)) {
       expect(s.signals.length, `${s.name} must be signal-gated`).toBeGreaterThan(0);
     }
@@ -504,6 +537,12 @@ describe("seat_roster tool", () => {
       "accessibility",
       "responsiveness",
       "interaction",
+    ]);
+    expect(byName.lean).toEqual([
+      "necessity",
+      "reuse",
+      "dependencies",
+      "abstraction",
     ]);
     await client.close();
   });
@@ -807,7 +846,7 @@ describe("seat selection (selectSeats)", () => {
     expect(sel.effectiveDial).toBe("auto");
     expect(sel.fired.map((s) => s.name)).toEqual(["clarity"]);
     expect(sel.gated.map((g) => g.name)).toEqual([
-      "correctness", "architecture", "security", "tests", "ux",
+      "correctness", "architecture", "security", "tests", "ux", "lean",
     ]);
     for (const g of sel.gated) {
       expect(g.reason).toBe("no-matching-signals");
@@ -815,18 +854,51 @@ describe("seat selection (selectSeats)", () => {
     }
   });
 
-  it("auto: a server-code diff fires exactly the five axes; ux sits out on touches-ui", () => {
+  it("auto: a server-code diff fires the five axes plus lean; ux sits out on touches-ui", () => {
     const roster = reviewPanel(loadRoster(makeProject()));
     const signals = deriveSignals({
       files: ["server/src/a.ts"], insertions: 100, deletions: 100,
     });
+    expect(signals).toContain("touches-server");
+    expect(signals).not.toContain("diff-large"); // 200 lines — lean seats on touches-server alone
     const sel = selectSeats(roster, signals, { dial: "auto" });
-    // the ADR 0010 amendment, machine-checked: unconfigured projects with a
-    // server-only diff see the same five seats they always did
-    expect(sel.fired.map((s) => s.name)).toEqual(REVIEW_PANEL_NAMES);
+    // the ADR 0010 amendment, machine-checked: the five axes lead, in their
+    // order; lean joins behind them on touches-server; ux sits out
+    expect(sel.fired.map((s) => s.name)).toEqual([...REVIEW_PANEL_NAMES, "lean"]);
     expect(sel.gated).toEqual([
       expect.objectContaining({ name: "ux", reason: "no-matching-signals" }),
     ]);
+  });
+
+  it("auto: a small docs-only diff seats neither ux nor lean", () => {
+    const roster = reviewPanel(loadRoster(makeProject()));
+    const signals = deriveSignals({
+      files: ["docs/ARCHITECTURE.md", "README.md"], insertions: 12, deletions: 4,
+    });
+    expect(signals).not.toContain("touches-server");
+    expect(signals).not.toContain("diff-large");
+    expect(signals).not.toContain("touches-ui");
+    const sel = selectSeats(roster, signals, { dial: "auto" });
+    expect(sel.fired.map((s) => s.name)).not.toContain("ux");
+    expect(sel.fired.map((s) => s.name)).not.toContain("lean");
+    expect(sel.gated).toContainEqual(
+      expect.objectContaining({ name: "ux", reason: "no-matching-signals" }),
+    );
+    expect(sel.gated).toContainEqual(
+      expect.objectContaining({ name: "lean", reason: "no-matching-signals" }),
+    );
+  });
+
+  it("auto: a large diff seats lean on diff-large alone", () => {
+    const roster = reviewPanel(loadRoster(makeProject()));
+    const signals = deriveSignals({
+      files: ["docs/guide.md"], insertions: 400, deletions: 200,
+    });
+    expect(signals).toContain("diff-large");
+    expect(signals).not.toContain("touches-server");
+    const sel = selectSeats(roster, signals, { dial: "auto" });
+    expect(sel.fired.map((s) => s.name)).toContain("lean");
+    expect(sel.gated.map((g) => g.name)).not.toContain("lean");
   });
 
   it("auto: a diff that touches UI files seats ux alongside the axes it also fires", () => {
@@ -837,8 +909,11 @@ describe("seat selection (selectSeats)", () => {
     });
     expect(signals).toContain("touches-ui");
     const sel = selectSeats(roster, signals, { dial: "auto" });
-    expect(sel.fired.map((s) => s.name)).toContain("ux");
-    expect(sel.fired.at(-1)?.name).toBe("ux"); // roster order: after the axes
+    const fired = sel.fired.map((s) => s.name);
+    expect(fired).toContain("ux");
+    // roster order: ux after the axes, lean (src/ fires touches-server) last
+    expect(fired.indexOf("ux")).toBeGreaterThan(fired.indexOf("tests"));
+    expect(fired.at(-1)).toBe("lean");
     expect(sel.gated.map((g) => g.name)).not.toContain("ux");
   });
 
@@ -886,7 +961,7 @@ describe("seat selection (selectSeats)", () => {
     };
     const sel = selectSeats(roster, signals, { dial: "auto", yields });
     expect(sel.fired.map((s) => s.name)).toEqual([
-      "clarity", "architecture", "security", "tests",
+      "clarity", "architecture", "security", "tests", "lean",
     ]);
     expect(sel.gated).toEqual([
       expect.objectContaining({ name: "correctness", reason: "low-yield" }),
@@ -913,7 +988,8 @@ describe("seat selection (selectSeats)", () => {
     expect(sel.fired.map((s) => s.name)).toContain("security");
     expect(sel.fired.map((s) => s.name)).toContain("style");
     // nothing gated on YIELD — ux sits out here only because touches-ui
-    // did not fire, which is the signal rule, not the yield floor
+    // did not fire, which is the signal rule, not the yield floor; lean
+    // fires on touches-server
     expect(sel.gated.filter((g) => g.reason === "low-yield")).toEqual([]);
     expect(sel.gated.map((g) => g.name)).toEqual(["ux"]);
   });
