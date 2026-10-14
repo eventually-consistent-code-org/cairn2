@@ -35,6 +35,10 @@ import { YIELD_MIN_DISPATCHES, YIELD_GATE_RATE, yieldRate, } from "./yield.js";
 //   touches-ci      — .github/workflows, .gitlab-ci*, .circleci,
 //                     azure-pipelines*, Jenkinsfile, or a ci segment
 //   touches-scripts — scripts/bin/hooks segments, or .sh files
+//   touches-ui      — presentation-shaped files: .css/.scss/.less,
+//                     .tsx/.jsx, .vue/.svelte, .html — or a components,
+//                     ui, pages, views or layouts path segment. Gates
+//                     the ux seat; a server-only diff never fires it.
 //
 // Size-derived (insertions + deletions, strict bounds — a mid-size diff
 // between the two emits neither):
@@ -48,6 +52,10 @@ const DOCS_SEG = new Set(["docs", "doc"]);
 const TEST_SEG = new Set(["test", "tests", "__tests__", "spec"]);
 const SCRIPT_SEG = new Set(["scripts", "bin", "hooks"]);
 const CONFIG_EXT = new Set(["json", "yaml", "yml", "toml", "ini"]);
+const UI_EXT = new Set([
+    "css", "scss", "less", "tsx", "jsx", "vue", "svelte", "html",
+]);
+const UI_SEG = new Set(["components", "ui", "pages", "views", "layouts"]);
 // Seats never yield-gated by NAME — the conservative floor. Dose "full"
 // seats are exempt alongside these (see selectSeats): evidence prunes
 // convenience seats, never the safety-critical ones. A project exempts its
@@ -116,6 +124,16 @@ export function deriveSignals(diff) {
         return segments(p).some((s) => SCRIPT_SEG.has(s)) || p.endsWith(".sh");
     })) {
         out.add("touches-scripts");
+    }
+    // Presentation files by extension, or a UI-shaped folder anywhere in the
+    // path — the only way the ux seat gets a chair under auto dispatch.
+    if (anyPath(paths, (p) => {
+        const segs = segments(p);
+        const base = segs[segs.length - 1] ?? "";
+        const ext = base.includes(".") ? base.split(".").pop() : "";
+        return UI_EXT.has(ext) || segs.some((s) => UI_SEG.has(s));
+    })) {
+        out.add("touches-ui");
     }
     const total = Math.max(0, diff.insertions || 0) + Math.max(0, diff.deletions || 0);
     if (total < DIFF_SMALL_MAX)
