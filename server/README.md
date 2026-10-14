@@ -204,10 +204,12 @@ across projects that happen to share a basename.
 
 ### Resume flow
 
-1. A `PostToolUse` hook (throttled to ≤1 write/60s) and an unthrottled
-   `PreCompact` hook cover the gaps between tool calls; `SessionStart` cats
-   the handoff and, per `continuity.resume`, offers (`prompt`), auto-runs
-   (`auto`), or suppresses (`off`) the resume.
+1. A `PostToolUse` hook (throttled to ≤1 write/60s) covers the gaps
+   between tool calls; `SessionStart` cats the handoff and, per
+   `continuity.resume`, offers (`prompt`), auto-runs (`auto`), or
+   suppresses (`off`) the resume — on `startup` and `clear` only. A
+   session the platform restores itself (`compact`, `resume`, `fork`)
+   gets nothing (#328).
 2. `/cairn:waypoint` is the manual path: no argument pauses (prompts for
    `next_action`/`notes`, optionally offers a `wip(cairn):` commit);
    `/cairn:waypoint resume` resumes.
@@ -788,20 +790,19 @@ inside a provider's entry are dropped without a word, so a misspelled
 
 ## Hooks
 
-Four dependency-free, fire-and-forget Node scripts, registered in
+Dependency-free, fire-and-forget Node scripts, registered in
 `hooks/hooks.json` and run out of `hooks/scripts/`. Every hook targets
 <100ms and fails open — an internal error exits 0 rather than blocking work:
 
 | # | event | matcher | script | purpose |
 |---|---|---|---|---|
 | 1 | `PostToolUse` | `Edit\|Write\|Bash` | `posttooluse-breadcrumb.mjs` | Refresh the session handoff, throttled to ≤1 write/60s (see Session continuity above) |
-| 2 | `PreCompact` | — | `precompact-refresh.mjs` | Unthrottled handoff refresh before compaction discards context |
-| 3 | `SessionStart` | — | `sessionstart-continuity.mjs` | Cat the handoff + recall banner; offer/auto-run/suppress resume per `continuity.resume` |
-| 4 | `PreToolUse` | `Bash` | `pretooluse-leakguard.mjs` | Leak guard — scan a staged `git commit`'s diff for cairn-internal refs before it lands |
-| 5 | `PostToolUse` + `PostToolUseFailure` | `Edit\|Write\|Bash` | `posttooluse-observe.mjs` | Passive observation capture (tool, target, error flag) to `.cairn/observations/` — cairn projects only, capped, reviewed and cleared by `retro`, with its depth surfaced by `mem_stats` and the banner. A failed call never reaches `PostToolUse`; the `PostToolUseFailure` wiring is what makes the error flag real |
-| 6 | `Stop` | — | `stop-costtracker.mjs` | Cumulative session cost snapshot (tokens + approximate $ + report bytes) tagged with the active phase/issue, to `~/.cairn/metrics/`; `cost-report.mjs` rolls it up |
+| 2 | `SessionStart` | — | `sessionstart-continuity.mjs` | Cat the handoff + recall banner; offer/auto-run/suppress resume per `continuity.resume` — `startup` and `clear` only; restored sessions get nothing |
+| 3 | `PreToolUse` | `Bash` | `pretooluse-leakguard.mjs` | Leak guard — scan a staged `git commit`'s diff for cairn-internal refs before it lands |
+| 4 | `PostToolUse` + `PostToolUseFailure` | `Edit\|Write\|Bash` | `posttooluse-observe.mjs` | Passive observation capture (tool, target, error flag) to `.cairn/observations/` — cairn projects only, capped, reviewed and cleared by `retro`, with its depth surfaced by `mem_stats` and the banner. A failed call never reaches `PostToolUse`; the `PostToolUseFailure` wiring is what makes the error flag real |
+| 5 | `Stop` | — | `stop-costtracker.mjs` | Cumulative session cost snapshot (tokens + approximate $ + report bytes) tagged with the active phase/issue, to `~/.cairn/metrics/`; `cost-report.mjs` rolls it up |
 
-### Leak guard (hook #4)
+### Leak guard (hook #3)
 
 Fires only on `git commit` Bash calls (anything else exits 0 instantly).
 Scans `git diff --cached -U0` ADDED lines against the pattern set in
@@ -833,7 +834,7 @@ Accepted limitation (spec §Why): commits made outside Claude Code are
 unguarded — a git-hook installer is a possible later `tune` offering, out of
 scope here.
 
-### Report bytes (hook #6)
+### Report bytes (hook #5)
 
 Fan-out is not free: every subagent's report lands in the coordinator's
 context and stays there. Hook #6 measures how much, so the question "is

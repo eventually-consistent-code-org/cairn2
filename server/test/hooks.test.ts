@@ -12,7 +12,6 @@ import { createHash } from "node:crypto";
 // levels up from server/test.
 const scriptsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "hooks", "scripts");
 const BREADCRUMB = join(scriptsDir, "posttooluse-breadcrumb.mjs");
-const PRECOMPACT = join(scriptsDir, "precompact-refresh.mjs");
 const SESSIONSTART = join(scriptsDir, "sessionstart-continuity.mjs");
 const SCRIPTS = scriptsDir;
 const LEAKGUARD = join(SCRIPTS, "pretooluse-leakguard.mjs");
@@ -201,8 +200,12 @@ function backdateMtime(path: string, msAgo: number): void {
 }
 
 describe("hooks/scripts smoke check", () => {
-  it("all three scripts exist", () => {
-    for (const p of [BREADCRUMB, PRECOMPACT, SESSIONSTART]) expect(existsSync(p)).toBe(true);
+  it("both continuity scripts exist, and the PreCompact one is gone (#328)", () => {
+    for (const p of [BREADCRUMB, SESSIONSTART]) expect(existsSync(p)).toBe(true);
+    expect(existsSync(join(scriptsDir, "precompact-refresh.mjs"))).toBe(false);
+    const hooks = JSON.parse(readFileSync(join(scriptsDir, "..", "hooks.json"), "utf8"));
+    expect(hooks.hooks.PreCompact).toBeUndefined();
+    expect(hooks.description).not.toContain("PreCompact");
   });
 });
 
@@ -321,32 +324,6 @@ describe("posttooluse-breadcrumb", () => {
   });
 });
 
-describe("precompact-refresh", () => {
-  it("no-handoff dir: exits cleanly and creates no file at all", () => {
-    const proj = freshDir("cairn-hooks-proj-");
-    const home = freshDir("cairn-hooks-home-");
-    const stdout = runHook(PRECOMPACT, proj, home);
-    expect(stdout).toBe("");
-    expect(existsSync(join(home, ".cairn"))).toBe(false);
-  });
-
-  it("is unthrottled: writes even immediately after a fresh write", () => {
-    const proj = freshDir("cairn-hooks-proj-");
-    const home = freshDir("cairn-hooks-home-");
-    const path = writeHandoffFixture(home, proj, baseHandoff());
-    backdateMtime(path, 70_000);
-    runHook(BREADCRUMB, proj, home); // lands a write, refreshes mtime to "now"
-
-    const before = readFileSync(path, "utf8");
-    runHook(PRECOMPACT, proj, home); // must NOT be throttled by the fresh mtime
-    const after = readFileSync(path, "utf8");
-
-    expect(after).not.toBe(before);
-    expect(JSON.parse(after).source).toBe("precompact");
-    expect(JSON.parse(after).next_action).toBe("keep going"); // preserved verbatim
-  });
-});
-
 describe("sessionstart-continuity", () => {
   it("nothing present: emits no stdout", () => {
     const proj = freshDir("cairn-hooks-proj-");
@@ -438,6 +415,46 @@ describe("sessionstart-continuity", () => {
 
     const plainProj = freshDir("cairn-hooks-proj-");
     expect(runHook(SESSIONSTART, plainProj, home)).toBe("");
+  });
+
+  it("source gate (#328): startup and clear inject; compact, resume and fork stay silent", () => {
+    const proj = freshDir("cairn-hooks-proj-");
+    const home = freshDir("cairn-hooks-home-");
+    writeFileSync(join(proj, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    writeHandoffFixture(home, proj, baseHandoff({ next_action: "carry on from here" }));
+    const run = (source?: string) => runHook(SESSIONSTART, proj, home, { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" },
+      source === undefined ? "" : JSON.stringify({ hook_event_name: "SessionStart", source }));
+
+    for (const source of ["startup", "clear"]) {
+      const ctx: string = JSON.parse(run(source)).hookSpecificOutput.additionalContext;
+      expect(ctx, source).toContain("carry on from here");
+    }
+    for (const source of ["compact", "resume", "fork"]) expect(run(source), source).toBe("");
+    // No source at all (another harness's adapter, a bare run) keeps today's behaviour.
+    expect(JSON.parse(run()).hookSpecificOutput.additionalContext).toContain("carry on from here");
+  });
+
+  it("source gate: a restored session gets nothing at all -- banner and nudge included", () => {
+    const proj = freshDir("cairn-hooks-proj-");
+    const home = freshDir("cairn-hooks-home-");
+    writeFileSync(join(proj, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    const bannerPath = bannerPathFor(home, proj);
+    mkdirSync(dirname(bannerPath), { recursive: true });
+    writeFileSync(bannerPath, "## cairn recall index — proj\nsome banner content\n");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    writeFileSync(join(proj, ".cairn", "tracker-marker.json"),
+      JSON.stringify({ lastScan: "2020-01-01T00:00:00.000Z" }));
+    writeHandoffFixture(home, proj, baseHandoff());
+
+    const payload = JSON.stringify({ hook_event_name: "SessionStart", source: "compact" });
+    expect(runHook(SESSIONSTART, proj, home, {}, payload)).toBe("");
+    // ...while the same fixture on a fresh start says everything.
+    const fresh = runHook(SESSIONSTART, proj, home, {}, JSON.stringify({ source: "startup" }));
+    const ctx: string = JSON.parse(fresh).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain("some banner content");
+    expect(ctx).toContain("tracker delta unchecked");
   });
 
   it("includes the banner file verbatim when present, even with resume:off", () => {

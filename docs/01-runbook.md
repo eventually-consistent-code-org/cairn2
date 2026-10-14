@@ -1192,8 +1192,8 @@ resumes continuity (banner + handoff as `additional_context`), preToolUse
 runs the run guard and the harness guard (Shell and every MCP call through
 both, file writes through the harness guard; the entry fails closed), beforeShellExecution
 runs the leak guard (deny with the offending lines),
-afterShellExecution/afterFileEdit capture breadcrumbs + observations, and
-preCompact refreshes the handoff. OpenCode gets an `opencode.json` `mcp`
+afterShellExecution/afterFileEdit capture breadcrumbs + observations.
+OpenCode gets an `opencode.json` `mcp`
 entry plus `/cairn-plan|work|status|verify|ship` command files in
 `.opencode/commands/`; Zed gets a `context_servers.cairn` entry in
 `.zed/settings.json` and reads `AGENTS.md` natively.

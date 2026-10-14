@@ -97,7 +97,15 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // count header-comment prose the hook never injects (see section 3). The
 // corrected reading is 13746; the budget follows it with the same ~38
 // cushion, so a measurement fix never becomes room nobody paid for.
-const BUDGET_TOKENS = 13784;
+//
+// Re-pinned DOWN again to 13481 (2026-10-13, #342): the same section's
+// regex paired one string's closing quote with the next string's opening
+// quote and counted the code between them as prose -- 1923 characters
+// where the hook's real literals hold 596. Replaced by a string-state walk
+// that also sees the template literals the resume block is built from.
+// Corrected reading 13443; same ~38 cushion. The deletions of phase 26
+// (#328, #329) bring it down further and re-pin as they land.
+const BUDGET_TOKENS = 13481;
 
 /** chars / 4 — see the note above on why this approximation is the right one. */
 const estimateTokens = (chars) => Math.ceil(chars / 4);
@@ -159,7 +167,32 @@ if (existsSync(hookPath)) {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
   // String literals long enough to be prose rather than a key or a path.
-  for (const m of src.matchAll(/"((?:[^"\\]|\\.){40,})"/g)) injectionChars += m[1].length;
+  // Walked one character at a time with string state, not matched by a
+  // regex: a regex pairs one literal's closing quote with the next one's
+  // opening quote and counts the code in between as prose (#342) -- adding
+  // a short "utf8" shifted the whole pairing. Template literals count too;
+  // the resume block is built from them.
+  for (const body of stringLiterals(src)) if (body.length >= 40) injectionChars += body.length;
+}
+
+/** Every string literal body in a JS source (double, single, template quotes), escapes folded. */
+function stringLiterals(src) {
+  const bodies = [];
+  let i = 0;
+  while (i < src.length) {
+    const q = src[i];
+    if (q !== '"' && q !== "'" && q !== "`") { i++; continue; }
+    let j = i + 1;
+    let body = "";
+    while (j < src.length && src[j] !== q) {
+      if (src[j] === "\\") { body += src[j + 1] ?? ""; j += 2; continue; }
+      body += src[j];
+      j++;
+    }
+    bodies.push(body);
+    i = j + 1;
+  }
+  return bodies;
 }
 parts.push({ what: "SessionStart injected prose", chars: injectionChars });
 

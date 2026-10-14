@@ -2,8 +2,8 @@
 
 /**
  * Purpose: shared, dependency-free helpers for cairn's plugin hook scripts
- *   (posttooluse-breadcrumb, precompact-refresh, sessionstart-continuity,
- *   task-mirror-spool, task-mirror-worker).
+ *   (posttooluse-breadcrumb, sessionstart-continuity, task-mirror-spool,
+ *   task-mirror-worker).
  *   node: builtins only -- these scripts must never import server code, so
  *   the handoff/banner path scheme is recomputed here rather than reused
  *   from server/src/core/continuity.ts (which stays the source of truth).

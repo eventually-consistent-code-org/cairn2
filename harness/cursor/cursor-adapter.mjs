@@ -182,11 +182,6 @@ try {
     respond({});
   }
 
-  if (event === "preCompact") {
-    runScript("precompact-refresh.mjs", payload, projectDir);
-    respond({});
-  }
-
   // stop is deliberately unwired: the cost tracker reads Claude's transcript
   // JSONL for token usage, and Cursor's transcript format is not that.
   respond({});

@@ -4,13 +4,19 @@
  * Purpose: SessionStart hook -- inject the project's recall banner (if any)
  *   and a compact resume block (if a handoff exists and continuity.resume
  *   isn't "off") as additionalContext, so a new session picks up where the
- *   last one left off without the user re-explaining state. Also emits a
- *   one-line task-mirror advisory in cairn projects when
+ *   last one left off without the user re-explaining state. Reads the hook
+ *   payload's `source` and speaks only for `startup` and `clear`, the two
+ *   sessions that begin empty: `compact`, `resume` and `fork` are restored
+ *   by the platform itself and get nothing (#328). A payload with no source
+ *   (another harness's adapter, a bare run) counts as `startup`. Also emits
+ *   a one-line task-mirror advisory in cairn projects when
  *   CLAUDE_CODE_ENABLE_TODO_TOOLS isn't set (#107). Fire-and-forget:
  *   any error, or nothing to show, is a silent no-op.
  *
- * removeWhen: the platform persists working context across compaction
- *   and /clear natively.
+ * removeWhen: the platform persists working context across /clear and a
+ *   fresh start natively. The compaction half of this clause was met by
+ *   Claude Code 2.1.288-2.1.293 (the 2026-10-13 platform survey) and the
+ *   hook stopped speaking after compaction; the empty-session half remains.
  * Author(s): John Reed
  */
 
@@ -20,6 +26,18 @@ import {
   handoffPath, bannerPath, mtimeMs, readJson, resumeMode, humanizeAge, existsSync,
   readCairnConfig,
 } from "./lib.mjs";
+
+/** The hook payload, or {} when stdin is empty or not JSON. */
+function readStdin() {
+  try {
+    return JSON.parse(readFileSync(0, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+/** Sources whose conversation the platform restores itself -- nothing to inject. */
+const RESTORED = new Set(["compact", "resume", "fork"]);
 
 /** Compact resume block: phase, issue, current task, next_action, age. Phrasing depends on mode. */
 function buildResumeBlock(handoff, mode) {
@@ -41,6 +59,10 @@ function buildResumeBlock(handoff, mode) {
 }
 
 function main() {
+  // A restored session already holds everything below (#328).
+  const source = readStdin().source;
+  if (typeof source === "string" && RESTORED.has(source)) return;
+
   const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   const parts = [];
 
