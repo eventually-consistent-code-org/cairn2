@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
-import { peerList, peerRun, peerChildEnv, peerModel, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
+import { peerList, peerRun, peerChildEnv, peerModel, peerLab, labOfModel, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
 import { parseFindings } from "../src/peers/findings.js";
 import { runStart, runStatus, recordPeerOutput } from "../src/peers/state.js";
 
@@ -786,5 +786,42 @@ describe("copilot seat (#338)", () => {
     const seat = runStatus(d, "run").resumable.incompleteSeats[0];
     expect(seat).toMatchObject({ peer: "copilot", kind: "failed", exitCode: 1 });
     expect(seat.reason).toContain("not available");
+  });
+});
+
+
+// #341: convergence counts labs, not seats. The lab is a template fact for
+// fixed-model CLIs and a function of the pinned model for copilot; an
+// unpinned seat is `unknown`, which never completes a cluster.
+describe("labs, not seats (#341)", () => {
+  it("fixed-lab seats report their lab; opencode is unknown", () => {
+    const labs = Object.fromEntries(peerList(projectDir()).peers.map((p) => [p.provider, p.lab]));
+    expect(labs).toEqual({ codex: "openai", grok: "xai", antigravity: "google", opencode: "unknown", copilot: "openai" });
+  });
+
+  it("copilot's lab follows its pinned model: gpt → openai, gemini → google", () => {
+    expect(peerLab({ peers: {} }, "copilot")).toBe("openai");
+    expect(peerLab({ peers: { copilot: { model: "gemini-3.8-flash" } } }, "copilot")).toBe("google");
+    expect(peerLab({ peers: { copilot: { model: "gpt-5.4" } } }, "copilot")).toBe("openai");
+    expect(peerList(projectDir({ peers: { copilot: { model: "gemini-3.8-flash" } } }))
+      .peers.find((p) => p.provider === "copilot")?.lab).toBe("google");
+  });
+
+  it("labOfModel places the families and never guesses", () => {
+    expect(labOfModel("gpt-6.1-sol")).toBe("openai");
+    expect(labOfModel("o4-mini")).toBe("openai");
+    expect(labOfModel("codex-mini")).toBe("openai");
+    expect(labOfModel("gemini-3.7-flash")).toBe("google");
+    expect(labOfModel("claude-sonnet-5.5")).toBe("anthropic");
+    expect(labOfModel("grok-4")).toBe("xai");
+    expect(labOfModel("mystery-9")).toBe("unknown");
+  });
+
+  it("codex + gpt-pinned copilot + grok = 2 labs, not 3; + antigravity = 3", () => {
+    const cfg = { peers: {} };
+    const two = new Set(["codex", "copilot", "grok"].map((p) => peerLab(cfg, p as "codex")));
+    expect(two.size).toBe(2);
+    const three = new Set(["codex", "copilot", "grok", "antigravity"].map((p) => peerLab(cfg, p as "codex")));
+    expect(three.size).toBe(3);
   });
 });

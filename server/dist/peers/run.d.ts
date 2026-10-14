@@ -31,6 +31,23 @@ export interface PeerResult {
     truncatedInput: boolean;
     durationMs: number;
 }
+export declare const LABS: readonly ["openai", "xai", "google", "anthropic", "unknown"];
+export type Lab = (typeof LABS)[number];
+/**
+ * The lab behind a model id, from its family prefix. `claude-*` maps to
+ * anthropic so a caller can see WHY config load refuses it; anything the
+ * table cannot place is `unknown`, never guessed.
+ */
+export declare function labOfModel(model: string): Lab;
+/**
+ * The lab a seat speaks for (#341): the template's fixed lab, else the lab
+ * of its resolved model pin, else `unknown`.
+ */
+export declare function peerLab(cfg: {
+    peers?: Partial<Record<Provider, {
+        model?: string;
+    }>>;
+}, provider: Provider): Lab;
 /** The model id a seat runs with: the cairn.json pin, else the template default. */
 export declare function peerModel(cfg: {
     peers?: Partial<Record<Provider, {
@@ -71,6 +88,8 @@ export declare function peerList(projectDir: string): {
         execCapable: boolean;
         /** Present for seats whose CLI takes a model flag: the id the seat runs with (#338). */
         model?: string;
+        /** Who trained the model this seat speaks for (#341); convergence counts distinct labs. */
+        lab: Lab;
     }>;
     maxConcurrent: number;
 };

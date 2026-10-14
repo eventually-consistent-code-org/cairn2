@@ -98,15 +98,25 @@ export { PROVIDERS };
 // `model` is the one dynamic argv element besides the input: the flag and
 // the pinned default, with peers.<provider>.model in cairn.json as the
 // owner's override. Only seats whose CLI takes a model flag declare it.
+//
+// `lab` is who trained the model the seat speaks for (#341). Convergence
+// counts LABS, not seats: Copilot on a gpt-* pin plus codex is one lab
+// speaking through two harnesses, and the council's value is cross-vendor
+// judgement. A fixed lab is declared here; a model-pinned seat derives it
+// from the pinned id (peerLab); an unpinned seat is `unknown` and never
+// counts toward convergence on its own.
+export const LABS = ["openai", "xai", "google", "anthropic", "unknown"];
 const TEMPLATES = {
     codex: { argv: ["codex", "exec", "--skip-git-repo-check"], tail: ["-"],
-        inputVia: "stdin", scratchSandboxArgs: ["--sandbox", "read-only"], envDrop: [] },
+        inputVia: "stdin", scratchSandboxArgs: ["--sandbox", "read-only"], envDrop: [], lab: "openai" },
+    // opencode picks its model from its own config (#59) -- the lab is
+    // whatever the user pointed it at, which this layer cannot see.
     opencode: { argv: ["opencode", "run"], tail: [],
         inputVia: "argv", scratchSandboxArgs: [], envDrop: [] },
     antigravity: { argv: ["agy"], tail: ["-p"],
-        inputVia: "argv", scratchSandboxArgs: ["--sandbox"], envDrop: [] },
+        inputVia: "argv", scratchSandboxArgs: ["--sandbox"], envDrop: [], lab: "google" },
     grok: { argv: ["grok", "-p"], tail: [],
-        inputVia: "argv", scratchSandboxArgs: [], envDrop: [] },
+        inputVia: "argv", scratchSandboxArgs: [], envDrop: [], lab: "xai" },
     copilot: {
         argv: ["copilot", "-s", "--no-ask-user", "--no-auto-update", "--no-color",
             "--no-custom-instructions", "--disable-builtin-mcps", "--disable-mcp-server", "cairn",
@@ -118,6 +128,34 @@ const TEMPLATES = {
         model: { flag: "--model", default: "gpt-6.1-sol" },
     },
 };
+/**
+ * The lab behind a model id, from its family prefix. `claude-*` maps to
+ * anthropic so a caller can see WHY config load refuses it; anything the
+ * table cannot place is `unknown`, never guessed.
+ */
+export function labOfModel(model) {
+    const m = model.toLowerCase();
+    if (/^(gpt|o\d|codex)/.test(m))
+        return "openai";
+    if (/^gemini/.test(m))
+        return "google";
+    if (/^claude/.test(m))
+        return "anthropic";
+    if (/^grok/.test(m))
+        return "xai";
+    return "unknown";
+}
+/**
+ * The lab a seat speaks for (#341): the template's fixed lab, else the lab
+ * of its resolved model pin, else `unknown`.
+ */
+export function peerLab(cfg, provider) {
+    const t = TEMPLATES[provider];
+    if (t.lab)
+        return t.lab;
+    const model = peerModel(cfg, provider);
+    return model ? labOfModel(model) : "unknown";
+}
 /** The model id a seat runs with: the cairn.json pin, else the template default. */
 export function peerModel(cfg, provider) {
     const t = TEMPLATES[provider].model;
@@ -249,6 +287,7 @@ export function peerList(projectDir) {
             // Trust flag from config only (#67) — default untrusted, never probed.
             execCapable: peerCfg.execCapable ?? false,
             ...(TEMPLATES[provider].model ? { model: peerModel(cfg, provider) } : {}),
+            lab: peerLab(cfg, provider),
         };
     });
     return {

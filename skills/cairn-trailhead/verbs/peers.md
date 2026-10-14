@@ -224,7 +224,11 @@ mutates before that gate, in any mode.
    judge the `unparsed` pile too. No peers at all → the absent-peers
    rule below: cairn's own pass still writes the report.
 6. Converge: cluster near-duplicate claims across peers by topic. 3+
-   peers independently raising a claim = converged. An incomplete seat
+   distinct labs independently raising a claim = converged — count labs,
+   not seats (`peer_list` reports each seat's `lab`): codex and a
+   gpt-pinned copilot are one lab speaking through two harnesses, and an
+   `unknown` lab (an unpinned opencode) never completes a cluster on its
+   own. An incomplete seat
    — one that never answered, or exited non-zero with no findings
    (`status` names it with its stderr tail) — is outside that count, and
    `close` refuses over it unless `allowIncomplete` stamps it into the
