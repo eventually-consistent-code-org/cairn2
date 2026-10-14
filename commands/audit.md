@@ -1,5 +1,5 @@
 ---
-description: "Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/sweep (whole-project rescan) (/cairn:help)"
+description: "Cross-phase quality audits — uat/milestone/security[--surface]/ui/eval/validation/tests/plans/docs/simplify/memory/debt/sweep (whole-project rescan) (/cairn:help)"
 argument-hint: "<mode> [target] | --fix"
 allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---

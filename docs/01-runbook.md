@@ -698,7 +698,12 @@ for contract drift and unanchored thresholds, translated to plain language),
 — against the real codebase; drifted claims are findings), `security
 --surface` (the agent-config attack surface — `.claude/` hooks and
 settings, plugin manifests, MCP configs, permission allowlists, credential
-literals in tool configs — the layer code audits never see), `sweep`
+literals in tool configs — the layer code audits never see), `debt` (the
+in-code deferral markers — `shortcut:`, `TODO:`, `FIXME:`, `HACK:`, `XXX:`,
+the words in `audit.debt.markers` — grepped into one finding each, reported
+by default and filed as `cairn:shortcut` issues under `--apply`, one per
+marker whatever its severity, with vanished markers closed against the
+previous debt record), `sweep`
 (the whole-project rescan — every leg above in one pass, diffed against the
 last sweep; see "The sweep" in section 8). No target on a
 phase-scoped mode = the most recently active phase. Closing discipline,
@@ -1649,7 +1654,8 @@ usual confirm.
 
 It runs the existing modes as legs, in a fixed order: `security` and
 `security --surface` (rule-to-control coverage included), `tests`, `docs`,
-`plans`, `simplify`, `memory` (one "leg skipped" line in a project with no
+`plans`, `debt` (report shape only — filing stays behind `audit debt
+--apply`), `simplify`, `memory` (one "leg skipped" line in a project with no
 card store), and `milestone` last as the closing view, sunset sweep and
 all. Each leg closes exactly the way its mode always does — dedup, the
 refutation panel, its own record, survivors filed with `cairn:audit` plus
@@ -1784,6 +1790,7 @@ nothing.
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
 | `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
+| `audit.debt.markers` | non-empty string[] | `["shortcut", "TODO", "FIXME", "HACK", "XXX"]` | The comment words `audit debt` greps for (each followed by a colon). An override replaces the list, never merges; an empty list is refused at load |
 | `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
 | `leakGuard.extraPatterns` | string[] | `[]` | Additional regex patterns to guard against |

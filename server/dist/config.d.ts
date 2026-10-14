@@ -64,6 +64,11 @@ export declare const ConfigSchema: z.ZodObject<{
     drift: z.ZodPrefault<z.ZodObject<{
         staleDays: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strip>>;
+    audit: z.ZodPrefault<z.ZodObject<{
+        debt: z.ZodPrefault<z.ZodObject<{
+            markers: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
     peers: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
         codex: "codex";
         opencode: "opencode";

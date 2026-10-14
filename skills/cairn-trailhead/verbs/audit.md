@@ -24,6 +24,7 @@ same way: a record, then tracker issues for anything that matters.
 | `docs [scope]` | sweep README/docs claims against the codebase | read every claim a README or `docs/**` file makes about what's shipped (tool counts, verb lists, table shapes, file paths, commands) and check each one against the real codebase — `check-surface.mjs`'s numbers, `server/src/index.ts`'s registry, the actual files on disk. A claim that's drifted from what's actually there is a finding, same severity scale as every other mode. No `scope` means sweep every README + `docs/**` file; a `scope` narrows to one file or directory. |
 | `memory` | the card store's health | `mem_stats` returns the evidence under `cards`: cards that FAIL TO PARSE (the rot that matters — `mem_card_list` and recall skip them silently, so a corrupted card vanishes from every surface without announcing itself), provenance whose file is gone or whose commit no longer resolves, near-duplicate bodies, aged low-confidence cards, and counts by type and confidence. Score against the rubric below, report before editing, and propose edits with a diff and a why — never rewrite a card body (they are immutable; a correction is a NEW card). A malformed card is `important`: it is invisible rot. Broken provenance is `important` when the file is gone, `minor` when only the commit is unresolvable. Near-duplicates and aged cards are `minor` and route to retro's compaction rather than to a fix here. The card health block reads plain files and git, so it survives a broken index binding — if `indexUnavailable` appears alongside it, report that separately and carry on |
 | `simplify [phase]` | quality-only sweep over what recently changed | refine, never rewrite: the target is the files touched in the phase's ledgered commit ranges (no phase → the most recently active one); the clarity and architecture seats supply the eye — nesting that hides the happy path, redundant abstraction, misleading names, work in the wrong layer — and every finding names the exact behavior that must NOT change as its `failure_scenario` ("after the change, X still does Y"). Clarity over brevity; fewer lines is never the goal. Quality findings are `minor` unless the complexity demonstrably hides a defect (then it's a normal finding at its real severity). A BUG found mid-sweep is filed as a finding, never fixed in-band — `review` stays the bug hunt. `--fix` runs the staged-patch discipline over EVERY finding of the sweep (minors included — the sweep IS the apply), one patch per finding, `behavior_unchanged` the claim the verifier must actually run the tests to state |
+| `debt [scope]` | in-code deferral markers (`shortcut:`, `TODO:`, `FIXME:`, `HACK:`, `XXX:`) into the tracker | grep the repo (or `scope`) for a comment opener followed by one of the configured marker words and a colon — one finding per marker, dedup key in the first line of its detail, report by default; `--apply` files EVERY marker as a `cairn:shortcut` issue (the mode's one deliberate exception to "minors stay in the record"), updates the issue of a marker that moved, and closes the issue of a marker that vanished since the previous debt record — see **Debt** below |
 | `sweep [--fix]` | the whole project, every leg, against the last sweep | the full-project rescan: the legs below in order, each closing exactly as its own mode does, then ONE `sweep-<date>` manifest record whose server-computed delta says what is new, persisting, fixed, regressed, or unchecked since the previous sweep — see **Sweep** below |
 
 **Rule-to-control coverage (`security --surface`):** a "never" in
@@ -255,11 +256,15 @@ tracker filter shows everything a sweep raised.
    commit them before the next leg so every later leg judges one tree.
 3. `docs`
 4. `plans`
-5. `simplify`
-6. `memory` — a project with no card store (no `mem_stats`) gets one
+5. `debt` — report shape only: its record joins the leg index and its
+   markers the manifest union, but nothing is filed from inside a
+   sweep; the report names `audit debt --apply` as the follow-up when
+   the record holds markers.
+6. `simplify`
+7. `memory` — a project with no card store (no `mem_stats`) gets one
    line, "leg skipped: memory — no card store here", and the sweep
    carries on.
-7. `milestone` last — the closing view, sunset sweep included.
+8. `milestone` last — the closing view, sunset sweep included.
 
 Keep `{ scope, path }` from each leg's `audit_record` result — that is
 the leg index. A leg that stops on its own terms (simplify with no valid
@@ -329,6 +334,100 @@ The manifest still lists findings as their legs found them; a fix
 applied here reads as `fixed` in the NEXT sweep's delta once that leg
 re-runs under the same scope. `docs`' prose exception and `simplify`'s
 every-finding scope apply inside their own legs as usual.
+
+## Debt — in-code deferral markers become tracker issues
+
+A `shortcut:` or `TODO:` comment is a deferral written where only the
+next reader of that file will ever see it. Nothing else in cairn reads
+them: `mark` captures backlog from the conversation, `triage` sweeps the
+tracker, `sweep` runs every audit mode — none of them reaches into source
+for a "later" already written down. This mode does, and the tracker-first
+law says where it goes: the tracker, not a markdown ledger. Report by
+default; `--apply` files and closes — the same report-then-apply shape as
+`triage`. The grep and the `shortcut: <limit>, <when to upgrade>` form
+come from ponytail's debt skill (github.com/dietrichgebert/ponytail, MIT);
+the tracker destination is cairn's.
+
+**Scan.** From the repo root (or `scope`, a file or directory), one
+command, marker words from `audit.debt.markers` (`config_get`; default
+`shortcut`, `TODO`, `FIXME`, `HACK`, `XXX` — an override replaces the
+list, so substitute the configured words joined by `|` into the second
+group):
+
+`git grep --no-index --exclude-standard -nE '(//|#|/\*|\*|--|<!--) *(shortcut|TODO|FIXME|HACK|XXX):' -- <scope>`
+
+A comment opener, optional spaces, a marker word, a colon. Marker text is
+everything after the colon on that line, trimmed. Matching is
+case-sensitive on the configured words — a project that writes `todo:`
+adds it to the list rather than having `Shortcut:` in prose light up.
+
+**One finding per marker.** Title: the marker word and its text, as
+written. Detail, in this order:
+
+1. FIRST line, exactly: `marker: <repo-relative path> :: <normalised
+   text>` — the dedup key. Normalised = lowercased, whitespace collapsed
+   to one space, trailing punctuation dropped. The same text in two
+   files is two keys; the same key is one marker wherever its line
+   number lands. The key lives in the detail so `audit_record`'s schema
+   stays untouched.
+2. `<repo-relative path>:<line>`, then the five surrounding lines (two
+   above, the marker, two below) in a fenced block.
+3. For `shortcut:` markers, parse `shortcut: <limit>, <when to upgrade>`
+   at the first comma — `limit: <text>` and `trigger: <text>`. No comma,
+   or any other marker word: `trigger: none stated — nothing says when
+   this comes due`. A marker with no trigger is reported as such, never
+   invented one.
+
+`failure_scenario` is the deferral biting: for a marker with a trigger,
+"<trigger> arrives while <limit> is still in place"; without one, "the
+deferral never resurfaces — nothing outside this file knows it exists".
+
+Severity is `minor` by default. A `shortcut:` whose stated limit is
+already crossed — the comment says "fine up to three backends" and the
+repo has four — is `important`, with the limit quoted and the evidence it
+is crossed stated in the detail; that is judgment, say so, and it takes
+the one-lens refutation panel like any other important finding. The
+record (`audit_record(scope: "debt" or "debt-<scope>", verdict,
+findings)`) holds every marker whatever its severity.
+
+**Report (default).** Nothing reaches the tracker — not even an important
+finding; filing is `--apply`'s job, exactly as in `triage`. The summary
+is plain language: how many markers, how many with no trigger, any
+crossed limits first, then the keys new / moved / gone since the previous
+debt record.
+
+**`--apply`.** Files EVERY marker, regardless of severity. This is the
+mode's one deliberate exception to "minors stay in the record": the whole
+point is that the tracker, not the file, holds the deferral, so a minor
+`TODO:` becomes an issue here where it never would under any other mode.
+Per marker, `issue_create` with label `cairn:shortcut`, the title above,
+and a plain-language body: what the comment defers (one sentence from the
+marker text), the repo-relative `file:line`, the five surrounding lines,
+the limit and trigger (or "no upgrade trigger stated"), and
+`Important: …` as the literal first line when the limit is crossed.
+Repo-relative paths only — never an absolute path, never the planning
+directory — and leak-guard discipline on every body and comment.
+
+**Re-run matching.** Before writing this run's record, read the previous
+debt record (the most recent record of the same scope — the path
+`audit_record` returned last time; a record the same day supersedes, so
+read first, write second). Each prior finding carries its key and its
+`issue` id. Match keys:
+
+- same key → the same marker; if the line moved, `issue_update` the body
+  with the new `file:line`.
+- key gone, but a new key with the same normalised text in a different
+  file → the marker moved files; `issue_update` the body in place with
+  the new path, carry the issue id forward in this run's record.
+- key gone, no match → the marker is gone; `issue_close` with a comment
+  naming the removing commit — `git log -S "<marker text>" --oneline -1`
+  — in plain language ("the comment was removed in <short sha>
+  <subject>").
+- new key → a new issue, as above.
+
+Every finding in this run's record carries its `issue` id so the next run
+can match. `--fix` has no meaning here: the fix for a deferral is doing
+the deferred work, and that is `work` against the issue, not an audit.
 
 ## Paper trail
 

@@ -77,6 +77,25 @@ export const ConfigSchema = z.object({
     drift: z
         .object({ staleDays: z.number().int().min(1).default(5) })
         .prefault({}),
+    // In-code deferral markers (#355) — the words `audit debt` greps for, each
+    // followed by a colon. An override REPLACES the list, never merges with
+    // it, so a project that wants an extra word restates the defaults beside
+    // it. An empty list is refused: a debt scan with no words is a scan of
+    // nothing, and a silent no-op is worse than a one-line refusal. The
+    // default array is complete, so .default is right on `markers` (see the
+    // note above); the enclosing objects prefault like continuity does.
+    audit: z
+        .object({
+        debt: z
+            .object({
+            markers: z
+                .array(z.string().min(1, "a marker word must be non-empty"))
+                .min(1, "audit.debt.markers needs at least one marker word — an empty list scans for nothing")
+                .default(["shortcut", "TODO", "FIXME", "HACK", "XXX"]),
+        })
+            .prefault({}),
+    })
+        .prefault({}),
     // Per-provider peer CLI settings (Tier F2 #997) — absent provider or
     // absent field means enabled with defaults; unknown provider keys are
     // rejected by the enum-keyed record below.
