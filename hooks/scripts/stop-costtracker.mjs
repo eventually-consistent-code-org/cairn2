@@ -16,6 +16,15 @@
  *
  * removeWhen: the platform exposes per-session cumulative spend through
  *   an API cairn can read.
+ *
+ * Prices (#330): list price per model GENERATION, not per family name --
+ *   a 4.1-era Opus and a 5.5-era Opus differ 3.75x on input. A model id the
+ *   table cannot place is never priced as something else: its tokens count,
+ *   its dollars do not, and the row names it in `unpriced_models` so every
+ *   reader sees the gap instead of a confident number (ADR 0021). Rows
+ *   written before 2026-10-13 priced every Opus at $15/$75 and every
+ *   Sonnet-shaped id at $3/$15, so their est_cost_usd overstates 5.5-era
+ *   Opus spend ~3.75x and Sonnet ~1.5x; they are not rewritten.
  * Author(s): John Reed
  */
 
@@ -61,16 +70,47 @@ function zeroBands() {
   return Object.fromEntries(BANDS.map((b) => [b.name, 0]));
 }
 
-// $ per MTok, approximate list prices. Cache write ~1.25x input, read ~0.1x.
-// Unknown models price as sonnet -- the report labels everything approximate.
+// $ per MTok by family and generation, list prices as of 2026-10-13 (Claude
+// Code changelog 2.1.280-2.1.296 and the platform pricing table). `from` is
+// inclusive, `below` exclusive, on the id's major.minor read as a number.
+// cacheRead is the cache-read price as a multiple of input; cache writes
+// bill at ~1.25x input everywhere. Fable and Mythos share a tier.
 const PRICES = [
-  { match: /opus/i, in: 15, out: 75 },
-  { match: /haiku/i, in: 0.8, out: 4 },
-  { match: /sonnet|fable|mythos/i, in: 3, out: 15 },
+  { family: "opus", from: 5.5, below: 99, in: 4, out: 20, cacheRead: 0.05 },
+  { family: "opus", from: 4.5, below: 5.5, in: 5, out: 25, cacheRead: 0.1 },
+  { family: "opus", from: 0, below: 4.5, in: 15, out: 75, cacheRead: 0.1 },
+  { family: "sonnet", from: 5.5, below: 99, in: 2, out: 10, cacheRead: 0.05 },
+  { family: "sonnet", from: 5, below: 5.5, in: 2, out: 10, cacheRead: 0.1 },
+  { family: "sonnet", from: 0, below: 5, in: 3, out: 15, cacheRead: 0.1 },
+  { family: "haiku", from: 4, below: 99, in: 1, out: 5, cacheRead: 0.1 },
+  { family: "haiku", from: 0, below: 4, in: 0.8, out: 4, cacheRead: 0.1 },
+  { family: "fable", from: 5, below: 99, in: 10, out: 50, cacheRead: 0.025 },
+  { family: "mythos", from: 5, below: 99, in: 10, out: 50, cacheRead: 0.025 },
 ];
+const CACHE_WRITE = 1.25;
 
+/**
+ * Family and generation out of a model id, in either spelling the platform
+ * has used: `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001`,
+ * `claude-3-5-sonnet-20241022`. A trailing date is not a minor version.
+ */
+function parseModel(model) {
+  const m = /claude-(?:(\d+)-(\d+)-)?(opus|sonnet|haiku|fable|mythos)(?:-(\d+))?(?:-(\d+))?/i.exec(model ?? "");
+  if (!m) return null;
+  const family = m[3].toLowerCase();
+  const major = Number(m[1] ?? m[4] ?? NaN);
+  const minorRaw = m[1] ? m[2] : m[5];
+  const minor = minorRaw !== undefined && minorRaw.length < 3 ? Number(minorRaw) : 0;
+  if (!Number.isFinite(major)) return null;
+  return { family, version: major + minor / 10 };
+}
+
+/** The price row for a model id, or null when the table cannot place it. */
 function priceFor(model) {
-  return PRICES.find((p) => p.match.test(model ?? "")) ?? PRICES[2];
+  const parsed = parseModel(model);
+  if (!parsed) return null;
+  return PRICES.find((p) => p.family === parsed.family
+    && parsed.version >= p.from && parsed.version < p.below) ?? null;
 }
 
 function readStdin() {
@@ -111,6 +151,7 @@ function contentText(content) {
 function scanTranscript(transcriptPath) {
   const totals = {
     input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set(),
+    unpriced: new Set(),
     reportBytes: 0, reports: 0, reportTasks: 0, contextPeak: 0,
     // Context economy: the same forward pass, two extra running sums per
     // producer. Residency is tokens x turns-remaining, and
@@ -204,7 +245,14 @@ function scanTranscript(transcriptPath) {
         totals.output += outTok;
         totals.cacheWrite += cacheW;
         totals.cacheRead += cacheR;
-        totals.cost += (inTok * p.in + outTok * p.out + cacheW * p.in * 1.25 + cacheR * p.in * 0.1) / 1e6;
+        // An unplaceable id counts its tokens and names itself; it never
+        // borrows another model's price (#330).
+        if (p) {
+          totals.cost += (inTok * p.in + outTok * p.out
+            + cacheW * p.in * CACHE_WRITE + cacheR * p.in * p.cacheRead) / 1e6;
+        } else {
+          totals.unpriced.add(model);
+        }
         totals.models.add(model);
         // Every input token of this one request IS the context at that turn.
         // Its peak is the only honest denominator for "how much of the window
@@ -424,6 +472,9 @@ function main() {
     cache_write_tokens: totals.cacheWrite,
     cache_read_tokens: totals.cacheRead,
     est_cost_usd: Number(totals.cost.toFixed(4)),
+    // Model ids the price table could not place: their tokens are above,
+    // their dollars are not in est_cost_usd. Empty means every model priced.
+    unpriced_models: [...totals.unpriced].sort(),
     // #176 -- context this coordinator spent on subagent reports, and the
     // fan-out width that produced them. Measurement, not a budget.
     report_bytes: totals.reportBytes,

@@ -3042,6 +3042,77 @@ describe("stop-costtracker + cost-report", () => {
     rmSync(metrics, { force: true });
   });
 
+  /** One assistant turn of exactly 1M input + 1M output tokens: est_cost_usd == in + out list price. */
+  function millionTokenRun(proj: string, model: string, session: string,
+    extra: Record<string, number> = {}): Record<string, unknown> {
+    const transcript = join(proj, `${session}.jsonl`);
+    writeFileSync(transcript, JSON.stringify({ type: "assistant", message: { model,
+      usage: { input_tokens: 1_000_000, output_tokens: 1_000_000, ...extra } } }) + "\n");
+    const metrics = metricsPathFor(proj);
+    rmSync(metrics, { force: true });
+    const r = runHookRaw(COSTTRACKER, proj, JSON.stringify({ session_id: session, transcript_path: transcript }));
+    expect(r.status, r.stderr).toBe(0);
+    const row = JSON.parse(readFileSync(metrics, "utf8").trim());
+    rmSync(metrics, { force: true });
+    return row;
+  }
+
+  it("prices each model generation at its own list price (#330)", () => {
+    const proj = freshDir("cairn-cost-price-");
+    const expected: Array<[string, number]> = [
+      ["claude-opus-5-5", 24],          // $4 + $20 -- the regression pin
+      ["claude-opus-5", 30],            // $5 + $25
+      ["claude-opus-4-8", 30],
+      ["claude-opus-4-1-20250805", 90], // $15 + $75, the pre-4.5 Opus
+      ["claude-sonnet-5-5", 12],        // $2 + $10
+      ["claude-sonnet-4-6", 18],        // $3 + $15
+      ["claude-3-5-sonnet-20241022", 18],
+      ["claude-haiku-4-5-20251001", 6], // $1 + $5
+      ["claude-fable-5-1", 60],         // $10 + $50
+      ["claude-mythos-5-1", 60],
+    ];
+    for (const [model, usd] of expected) {
+      const row = millionTokenRun(proj, model, `s-${model}`);
+      expect(row.est_cost_usd, model).toBeCloseTo(usd, 4);
+      expect(row.unpriced_models, model).toEqual([]);
+    }
+  });
+
+  it("cache reads price per generation; cache writes at 1.25x input (#330)", () => {
+    const proj = freshDir("cairn-cost-cache-");
+    const opus = millionTokenRun(proj, "claude-opus-5-5", "s-cache-opus",
+      { cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 });
+    expect(opus.est_cost_usd).toBeCloseTo(24 + 0.2 + 5, 4);   // $0.20 read, $5 write
+    const fable = millionTokenRun(proj, "claude-fable-5-1", "s-cache-fable",
+      { cache_read_input_tokens: 1_000_000 });
+    expect(fable.est_cost_usd).toBeCloseTo(60 + 0.25, 4);     // $0.25 read
+  });
+
+  it("an id the table cannot place counts its tokens, prices nothing, and names itself (#330)", () => {
+    const proj = freshDir("cairn-cost-unknown-");
+    const row = millionTokenRun(proj, "claude-zeta-9", "s-unknown");
+    expect(row.input_tokens).toBe(1_000_000);
+    expect(row.est_cost_usd).toBe(0);
+    expect(row.unpriced_models).toEqual(["claude-zeta-9"]);
+    expect(row.models).toContain("claude-zeta-9");
+
+    // The report carries the gap rather than a confident total.
+    const transcript = join(proj, "s-unknown.jsonl");
+    rmSync(metricsPathFor(proj), { force: true });
+    runHookRaw(COSTTRACKER, proj, JSON.stringify({ session_id: "s-unknown", transcript_path: transcript }));
+    const rep = spawnSync(process.execPath, [COSTREPORT, "--json"], {
+      cwd: proj, env: { ...process.env, CLAUDE_PROJECT_DIR: proj }, encoding: "utf8",
+    });
+    const parsed = JSON.parse(rep.stdout);
+    expect(parsed.unpriced_sessions).toBe(1);
+    expect(parsed.unpriced_models).toEqual(["claude-zeta-9"]);
+    const human = spawnSync(process.execPath, [COSTREPORT], {
+      cwd: proj, env: { ...process.env, CLAUDE_PROJECT_DIR: proj }, encoding: "utf8",
+    });
+    expect(human.stdout).toContain("unpriced model");
+    rmSync(metricsPathFor(proj), { force: true });
+  });
+
   it("tags non-issue work by its open session kind, and bare-phase work as plan (#92)", () => {
     const proj = freshDir("cairn-cost-kind-");
     mkdirSync(join(proj, ".cairn", "state"), { recursive: true });
