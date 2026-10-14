@@ -1783,6 +1783,7 @@ nothing.
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
 | `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
+| `audit.debt.markers` | non-empty string[] | `["shortcut", "TODO", "FIXME", "HACK", "XXX"]` | The comment words `audit debt` greps for (each followed by a colon). An override replaces the list, never merges; an empty list is refused at load |
 | `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
 | `leakGuard.extraPatterns` | string[] | `[]` | Additional regex patterns to guard against |

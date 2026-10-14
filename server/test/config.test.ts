@@ -229,6 +229,42 @@ describe("ship config", () => {
   });
 });
 
+describe("audit.debt.markers (#355)", () => {
+  const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+  const DEFAULTS = ["shortcut", "TODO", "FIXME", "HACK", "XXX"];
+
+  // The words `audit debt` greps for. Ponytail's legacy word is deliberately
+  // not in the default list — cairn's marker vocabulary is its own.
+  it("audit absent → the default marker list is present", () => {
+    const cfg = loadConfig(writeTmpConfig(base));
+    expect(cfg.audit.debt.markers).toEqual(DEFAULTS);
+  });
+
+  it("an override REPLACES the default list — no merge", () => {
+    const dir = writeTmpConfig({ ...base, audit: { debt: { markers: ["shortcut", "ponytail"] } } });
+    expect(loadConfig(dir).audit.debt.markers).toEqual(["shortcut", "ponytail"]);
+  });
+
+  it("an empty list is refused with a one-line reason", () => {
+    const dir = writeTmpConfig({ ...base, audit: { debt: { markers: [] } } });
+    expect(() => loadConfig(dir)).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(() => loadConfig(dir)).toThrow(/audit\.debt\.markers.*at least one marker word/);
+  });
+
+  it("a non-string entry is refused", () => {
+    const dir = writeTmpConfig({ ...base, audit: { debt: { markers: ["TODO", 42] } } });
+    expect(() => loadConfig(dir)).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }));
+  });
+
+  it("an empty-string entry is refused", () => {
+    const dir = writeTmpConfig({ ...base, audit: { debt: { markers: ["TODO", ""] } } });
+    expect(() => loadConfig(dir)).toThrowError(
+      expect.objectContaining({ code: "CONFIG_INVALID" }));
+  });
+});
+
 describe("peers config", () => {
   const base = { tracker: { type: "github", config: { repo: "o/r" } } };
 
