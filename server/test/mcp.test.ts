@@ -1628,7 +1628,7 @@ describe("cairn MCP server", () => {
     ).toEqual([issue.json.id]);
   });
 
-  it("peer_list reports all four providers plus the fan-out budget, onPath false in the bare harness", async () => {
+  it("peer_list reports all five providers plus the fan-out budget, onPath false in the bare harness", async () => {
     const ORIGINAL_PATH = process.env.PATH;
     const emptyDir = mkdtempSync(join(tmpdir(), "cairn-mcp-empty-path-"));
     process.env.PATH = emptyDir;
@@ -1638,7 +1638,7 @@ describe("cairn MCP server", () => {
       // Wire shape (#75): {peers: [...], maxConcurrent} — the budget rides
       // along so council mode can batch its fan-out instead of dispatching
       // every seat at once.
-      expect(out.json.peers).toHaveLength(4);
+      expect(out.json.peers).toHaveLength(5);
       expect(
         out.json.peers.map((p: { provider: string }) => p.provider).sort(),
       ).toEqual([...PROVIDERS].sort());

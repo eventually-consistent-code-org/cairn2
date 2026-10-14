@@ -682,14 +682,15 @@ it documents any:
 | `opencode` | `opencode run <input>` | argv — `run [message..]` is positional | none documented — scratch cwd only |
 | `antigravity` | `agy -p <input>` | argv — the binary is `agy`; headless `-p` takes the prompt as its value and ignores piped stdin (verified live) | `--sandbox`, placed before `-p` |
 | `grok` | `grok -p <input>` | argv — grok's headless mode does not consume piped stdin (verified live, formerly CRN-76 on the retired Jira tracker) | none documented — scratch cwd only |
+| `copilot` | `copilot -s --no-ask-user --no-auto-update --no-color --no-custom-instructions --disable-builtin-mcps --disable-mcp-server cairn --max-ai-credits 30 --model <id> -p <input>` | argv — `-p` takes the prompt as its value, placed last; `-s` prints only the reply so the fence parser reads it (JSONL would escape the fences). `<id>` is `peers.copilot.model` or `gpt-6.1-sol`; a `claude-*` pin is refused at load. 30 is the CLI's credit floor (1.0.96 refuses less) | `--available-tools=view --allow-tool=view --disallow-temp-dir` — the last one is load-bearing: the scratch dir lives under the OS temp dir, and without it `view` reaches every sibling there |
 
 Input is NEVER shell-interpolated — `execFile` takes an argv array and
 resolves the binary via PATH itself; no shell ever parses any of it. For
 the stdin-mode peer (codex) caller-supplied content goes in via stdin;
-for argv-mode peers (grok, opencode, antigravity — their CLIs don't read
+for argv-mode peers (grok, opencode, antigravity, copilot — their CLIs don't read
 piped stdin) the capped input is the single final argv element, which is data
 to `execFile`, not command line to a shell. The child-process surface is
-exactly these four templates; there is no path from any tool argument to
+exactly these five templates; there is no path from any tool argument to
 a shell command string. The 200k default cap keeps argv-mode input well
 under ARG_MAX.
 

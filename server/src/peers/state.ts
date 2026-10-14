@@ -245,7 +245,7 @@ export function runStart(projectDir: string, slug: string, meta: {
     if (!PEER_NAME.test(peer)) {
       throw new CairnError("CONFIG_INVALID",
         `peer name '${peer}' is invalid`,
-        "peer names are lowercase [a-z0-9-], e.g. codex, opencode, antigravity, grok");
+        "peer names are lowercase [a-z0-9-], e.g. codex, opencode, antigravity, grok, copilot");
     }
   }
 

@@ -99,7 +99,7 @@ export function runStart(projectDir, slug, meta) {
     }
     for (const peer of meta.peers) {
         if (!PEER_NAME.test(peer)) {
-            throw new CairnError("CONFIG_INVALID", `peer name '${peer}' is invalid`, "peer names are lowercase [a-z0-9-], e.g. codex, opencode, antigravity, grok");
+            throw new CairnError("CONFIG_INVALID", `peer name '${peer}' is invalid`, "peer names are lowercase [a-z0-9-], e.g. codex, opencode, antigravity, grok, copilot");
         }
     }
     const dir = runDir(projectDir, s);

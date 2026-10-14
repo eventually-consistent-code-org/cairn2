@@ -6,5 +6,5 @@
  * Author(s): John Reed
  */
 
-export const PROVIDERS = ["codex", "opencode", "antigravity", "grok"] as const;
+export const PROVIDERS = ["codex", "opencode", "antigravity", "grok", "copilot"] as const;
 export type Provider = (typeof PROVIDERS)[number];
