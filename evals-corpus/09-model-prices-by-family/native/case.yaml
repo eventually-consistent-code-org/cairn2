@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: corpus-09-native
+tags: [review, corpus, capability]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 80
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep, Bash, Skill, ToolSearch, Agent, ReportFindings]
+  prompt: |-
+    /code-review corpus/09-model-prices-by-family high --max-findings all
+
+    The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (`git diff main...corpus/09-model-prices-by-family`). The workspace holds only the files that diff touches.

@@ -106,6 +106,21 @@ Results: `evals/results/<timestamp>/aggregate-result.json` is the same
 document `--json` prints — `cases[].arms.{with,without}[].graders[]`
 plus `aggregates`; camelCase, additive-only. `report.html` beside it.
 
+## The review corpus — a sibling suite
+
+`evals-corpus/` holds ADR 0012's own test (#334): eleven recorded
+defects, each a real fix commit reverted on top of itself as a local
+`corpus/NN-<slug>` branch, reviewed twice — by the five-seat panel
+(`/cairn:review`) and by the platform's `/code-review` at high effort
+with every finding kept. It is a sibling of this directory, not a
+child, because the harness discovers cases recursively and twenty-two
+review sessions must never ride the default run; select it with
+`--eval-dir evals-corpus`. Layout, ground truth, the recall and
+precision-proxy numbers and how to run each arm are in
+`evals-corpus/README.md`; `scripts/eval-corpus-score.mjs` reads the
+aggregate. Every corpus case is `capability`-tagged — the result
+informs ADR 0012's sunset decision and gates nothing.
+
 ## Two tiers — regression vs capability
 
 **Mixing capability and regression evals in one number produces wrong

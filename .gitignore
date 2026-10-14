@@ -8,3 +8,4 @@ evals/results/
 
 # superpowers SDD scratch (ledgers, briefs, review packages)
 .superpowers/
+evals-corpus/results/
