@@ -33,6 +33,39 @@ function spanMinutes(start: string, end: string): number | null {
   return Math.round((b - a) / 60_000);
 }
 
+/** The opening every claim comment carries -- the one phrase rung one keys
+ *  on. Composed here and parsed here (#343); no verb file spells it. */
+const CLAIM_OPENING = "Starting now.";
+
+/** What a claim carries besides the state change: the base commit the
+ *  ledger will need, and the context a reader wants before the work --
+ *  which wave/task this is and the bar it will be held to. */
+export interface ClaimInput {
+  baseCommit: string;
+  wave?: string;
+  task?: string;
+  verifyCommand?: string;
+}
+
+/**
+ * The claim comment, composed server-side so its first line is always the
+ * one `isClaimComment` recognises. The verify command is quoted back before
+ * the work so the bar is visible up front, not negotiated after; the base
+ * commit sits on its own line as a short ref.
+ */
+export function composeClaimComment(c: ClaimInput): string {
+  const wave = c.wave?.trim();
+  const task = c.task?.trim();
+  const context = wave && task ? `Wave ${wave}: ${task}`
+    : wave ? `Wave ${wave}` : task ?? "";
+  const head = context ? `${CLAIM_OPENING} ${context.replace(/\.$/, "")}.` : CLAIM_OPENING;
+  const verify = c.verifyCommand?.trim();
+  const base = c.baseCommit.trim();
+  const short = /^[0-9a-f]{7,40}$/i.test(base) ? base.slice(0, 7) : base;
+  return [head, ...(verify ? [`Declared verify: \`${verify}\``] : []), `Base: ${short}`]
+    .join("\n\n");
+}
+
 /**
  * Whether a comment is the work verb's claim comment -- the one posted the
  * moment an issue is picked up, whose timestamp starts the clock on rung one.

@@ -8,7 +8,8 @@ import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
 import {
-  claimCommentTime, gitSpan, isClaimComment, measureAtClose, measuredText,
+  claimCommentTime, composeClaimComment, gitSpan, isClaimComment, measureAtClose,
+  measuredText,
 } from "../src/planning/duration.js";
 
 // The work verb's real claim comment opens this way -- every issue in this
@@ -21,6 +22,18 @@ const at = (min: number) => new Date(Date.parse(T0) + min * 60_000).toISOString(
 describe("isClaimComment", () => {
   it("recognises the work verb's claim comment", () => {
     expect(isClaimComment(CLAIM)).toBe(true);
+  });
+
+  it("recognises every shape the server itself composes (#343)", () => {
+    expect(isClaimComment(composeClaimComment({ baseCommit: "a1b2c3d4e5f6" }))).toBe(true);
+    expect(isClaimComment(composeClaimComment({
+      baseCommit: "a1b2c3d4e5f6", wave: "2", task: "the adapter", verifyCommand: "npm test",
+    }))).toBe(true);
+    // one phrase, one place: the composer and the parser agree by construction
+    expect(composeClaimComment({ baseCommit: "a1b2c3d4e5f6", task: "the adapter." }))
+      .toBe("Starting now. the adapter.\n\nBase: a1b2c3d");
+    // a non-hex base (a tag, a branch) is quoted back whole, never truncated
+    expect(composeClaimComment({ baseCommit: "v2.8.3" })).toBe("Starting now.\n\nBase: v2.8.3");
   });
 
   it("does not mistake progress, close, or evidence comments for a claim", () => {
@@ -153,6 +166,23 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       .toBe("evidence: `npm test` → 1 passed\nmeasured: ~12m (claim comment to close)");
     const line = (await call("ledger_append", append(made.json.id))).json.line;
     expect(line).toContain("actuals wall=12m:claim_comment claimed=128m");
+  });
+
+  it("rung one from the server-composed claim: one issue_update call starts the clock (#343)", async () => {
+    const tracker = new FakeTracker();
+    const { call, advance } = await harness(tracker);
+    const made = await call("issue_create", { title: "claimed by the server" });
+    const wip = await call("issue_update", {
+      id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6", wave: "1", task: "first task" },
+    });
+    expect(wip.json.claimCommented).toBe(true);
+    advance(12);
+    const closed = await call("issue_close", {
+      id: made.json.id, evidence: { command: "npm test", result: "1 passed" },
+    });
+    expect(closed.json.measured).toEqual({ minutes: 12, source: "claim_comment" });
+    const line = (await call("ledger_append", append(made.json.id))).json.line;
+    expect(line).toContain("actuals wall=12m:claim_comment");
   });
 
   it("rung two on a backend that cannot list comments, and it says which", async () => {

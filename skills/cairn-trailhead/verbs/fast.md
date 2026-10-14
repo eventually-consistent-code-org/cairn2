@@ -21,8 +21,9 @@ tracker-first: every change is visible where the team looks.
 ## Paper trail
 
 Every tracker state transition this verb makes carries a comment — claim
-(opening "Starting now. <one line of intent>" -- that exact opening is what
-the server reads as the start of the clock), close (what shipped, evidence;
+(the `claim` block on `issue_update`: pass `baseCommit` and a one-line
+`task`; the server composes the comment and starts the clock from it, so
+never post a claim by hand), close (what shipped, evidence;
 `issue_close` measures the duration itself and posts it, so compute none),
 or parked (why, what remains). Milestone progress
 comments where the work is long enough to have milestones; batch small

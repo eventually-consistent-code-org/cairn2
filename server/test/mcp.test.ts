@@ -16,6 +16,7 @@ import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import type { Phase } from "../src/tracker/types.js";
 import { handoffPath } from "../src/core/continuity.js";
+import { readClaim } from "../src/planning/close-receipt.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { listSessions } from "../src/sessions/store.js";
 import { PROVIDERS } from "../src/peers/run.js";
@@ -663,6 +664,67 @@ describe("cairn MCP server", () => {
     });
     expect(wip.json.assignee).toBe("owner");
     expect(wip.json.autoAssigned).toBeUndefined();
+  });
+
+  // The claim block (#343): one call does what work.md step 4 used to spell
+  // out as two -- state, then a comment whose first line had to open with
+  // exactly the phrase the duration ladder parses. The phrase now lives in
+  // the server; the test pins the whole composed text so a drift in the
+  // opening would fail here before it silently cost a rung.
+  it("issue_update with a claim block sets in_progress, posts the composed claim comment, and starts the clock (#343)", async () => {
+    const made = await call("issue_create", { title: "claim block" });
+    const wip = await call("issue_update", {
+      id: made.json.id,
+      claim: {
+        baseCommit: "a1b2c3d4e5f6a7b8",
+        wave: "3",
+        task: "the claim block on issue_update",
+        verifyCommand: "cd server && npx vitest run test/mcp.test.ts",
+      },
+    });
+    expect(wip.json.state).toBe("in_progress");
+    expect(wip.json.autoAssigned).toBe(true);
+    expect(wip.json.claimCommented).toBe(true);
+    expect(wip.json).not.toHaveProperty("claimCommentError");
+    expect(Number.isNaN(Date.parse(wip.json.claimAt))).toBe(false);
+    // the claim stamp the close will read on rung two is the one returned
+    expect(readClaim(projectDir, made.json.id)).toBe(wip.json.claimAt);
+    const comments = fakeTracker.comments(made.json.id).map((c) => c.text);
+    expect(comments).toEqual([
+      "Starting now. Wave 3: the claim block on issue_update.\n\n"
+        + "Declared verify: `cd server && npx vitest run test/mcp.test.ts`\n\n"
+        + "Base: a1b2c3d",
+    ]);
+  });
+
+  it("a minimal claim (base commit only) still opens with the phrase rung one reads", async () => {
+    const made = await call("issue_create", { title: "bare claim" });
+    const wip = await call("issue_update", {
+      id: made.json.id, state: "in_progress", claim: { baseCommit: "deadbeef" },
+    });
+    expect(wip.json.state).toBe("in_progress");
+    expect(fakeTracker.comments(made.json.id).map((c) => c.text))
+      .toEqual(["Starting now.\n\nBase: deadbee"]);
+  });
+
+  it("a claim naming any state but in_progress is refused, not guessed at", async () => {
+    const made = await call("issue_create", { title: "contradiction" });
+    const res = await call("issue_update", {
+      id: made.json.id, state: "closed", claim: { baseCommit: "deadbeef" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.json.code).toBe("PRECONDITION_FAILED");
+    expect(res.json.nextAction).toContain("in_progress");
+    expect((await call("issue_get", { id: made.json.id })).json.state).toBe("open");
+    expect(fakeTracker.comments(made.json.id)).toEqual([]);
+  });
+
+  it("issue_update without a claim block posts nothing and reports no claimAt", async () => {
+    const made = await call("issue_create", { title: "plain transition" });
+    const wip = await call("issue_update", { id: made.json.id, state: "in_progress" });
+    expect(wip.json).not.toHaveProperty("claimAt");
+    expect(wip.json).not.toHaveProperty("claimCommented");
+    expect(fakeTracker.comments(made.json.id)).toEqual([]);
   });
 
   it("issue_link → issue_links → issue_unlink roundtrip", async () => {

@@ -80,7 +80,9 @@ import { estimatePhaseTokens, issueEstimate, metricsSegments } from "./planning/
 import {
   clearClaim, readClaim, recordClaim, writeReceipt, type WorklogOutcome,
 } from "./planning/close-receipt.js";
-import { measureAtClose, measuredText } from "./planning/duration.js";
+import {
+  composeClaimComment, measureAtClose, measuredText, type ClaimInput,
+} from "./planning/duration.js";
 import { snapshotNote, trackerDelta } from "./planning/tracker-delta.js";
 import {
   MemoryIndex,
@@ -563,11 +565,9 @@ export function buildServer(deps: {
     "issue_update",
     {
       description:
-        "Update an issue (title/body/state/labels/assignee/estimate/phase). " +
-        "`phase` re-parents it: cairn phase number ('14', '1.5' -- matches " +
-        "the 'Phase N: <name>' title) or tracker phase id ('id:<raw>' if " +
-        "numeric); backends that can't re-parent skip " +
-        "it and the result says so via phaseSkipped",
+        "Update an issue. `claim` picks it up: in_progress, claim comment " +
+        "posted here, clock started; returns claimAt. `phase`: cairn number " +
+        "('14', '1.5') or 'id:<raw>'; phaseSkipped when the backend can't re-parent",
       inputSchema: z.object({
         id: z.string(),
         title: z.string().optional(),
@@ -578,6 +578,12 @@ export function buildServer(deps: {
         phase: z.string().optional(),
         estimatePoints: z.number().positive().optional(),
         estimateMinutes: z.number().int().positive().optional(),
+        claim: z.object({
+          baseCommit: z.string().min(1),
+          wave: z.string().optional(),
+          task: z.string().optional(),
+          verifyCommand: z.string().optional(),
+        }).optional(),
       }),
     },
     wrap(
@@ -591,9 +597,23 @@ export function buildServer(deps: {
         phase?: string;
         estimatePoints?: number;
         estimateMinutes?: number;
+        claim?: ClaimInput;
       }) => {
         const d = dir();
-        const { id, phase: phaseParam, estimatePoints, estimateMinutes, ...rest } = a;
+        const { id, phase: phaseParam, estimatePoints, estimateMinutes, claim, ...rest } = a;
+        // A claim IS the in_progress transition (#343): the state may be
+        // left off, but naming any other state alongside it is a
+        // contradiction the server refuses rather than guesses at.
+        if (claim) {
+          if (rest.state === undefined) rest.state = "in_progress";
+          else if (rest.state !== "in_progress") {
+            throw new CairnError(
+              "PRECONDITION_FAILED",
+              `a claim moves the issue to in_progress, not ${rest.state}`,
+              "drop `state` or set it to in_progress when passing `claim`",
+            );
+          }
+        }
         const wantsEstimate =
           estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
@@ -636,8 +656,24 @@ export function buildServer(deps: {
         // Rung two of the duration ladder (#232): the server was there when
         // the issue went in progress, so it keeps the time. First claim
         // wins; recordClaim never throws.
+        const claimAt = now().toISOString();
         if (patch.state !== undefined && issue.category === "in_progress") {
-          recordClaim(d, id, now().toISOString());
+          recordClaim(d, id, claimAt);
+        }
+        // The claim comment (#343): composed and posted here so its first
+        // line is the one rung one keys on -- the sequence state → comment
+        // was known before any result was seen, so code owns it. Posted
+        // AFTER the state change and best-effort: a comment that fails
+        // still leaves rung two (the stamp above) to measure from.
+        let claimCommented = false;
+        let claimCommentError: string | undefined;
+        if (claim) {
+          try {
+            await tracker.commentIssue(id, composeClaimComment(claim));
+            claimCommented = true;
+          } catch (e) {
+            claimCommentError = e instanceof Error ? e.message : String(e);
+          }
         }
         snapshotNote(d, issue);
         refreshHandoff({ source: "tool", issue: id }, d);
@@ -658,6 +694,8 @@ export function buildServer(deps: {
         return {
           ...issue,
           ...(autoAssigned ? { autoAssigned: true } : {}),
+          ...(claim ? { claimAt, claimCommented } : {}),
+          ...(claimCommentError ? { claimCommentError } : {}),
           ...(estimateSkipped ? { estimateSkipped } : {}),
           ...(phaseSkipped ? { phaseSkipped } : {}),
         };
@@ -835,10 +873,9 @@ export function buildServer(deps: {
     "issue_close",
     {
       description:
-        "Close an issue. The server measures the duration itself (claim comment, else the claim " +
-        "it saw; result `measured` names the rung) — `timeSpentMinutes` is only the caller's claim, " +
-        "kept beside it. Optional typed close evidence `{ command, result }` is posted with the " +
-        "measured line as one standardized comment before the close",
+        "Close an issue. Duration is measured server-side (`measured` names the rung); " +
+        "`timeSpentMinutes` is only the caller's claim. " +
+        "Evidence `{ command, result }` posts with the measured line as one comment before the close",
       inputSchema: z.object({
         id: z.string(),
         timeSpentMinutes: z.number().int().positive().optional(),

@@ -188,10 +188,12 @@ Execute the phase. The per-issue lifecycle, in vibe mode:
 2. For each issue in order: fetch it, skip closed ones. If it's assigned to
    someone who isn't you (checked against `user.handle` when set), say so and
    skip unless you override.
-3. Before starting: record the current commit as the issue's base and the
-   time as its start. Move the issue to `in_progress` (with your handle as
-   assignee when configured) and post a claim comment — starting now, which
-   wave and task, base commit as a short ref. Then set the active context.
+3. Before starting: record the current commit as the issue's base. One
+   `issue_update` call with a `claim` block (base commit, wave, task, the
+   declared verify command) moves the issue to `in_progress` (with your
+   handle as assignee when configured), posts the claim comment the
+   duration ladder reads, and starts the clock. Then set the active
+   context.
 4. Do the work. Progress comments land at real milestones only — a subtask
    done, a blocker hit, a trace spun off; several small steps batch into one
    comment. Tracker noise is a failure mode, not diligence. No silent state
