@@ -135,11 +135,7 @@ export function loadRoster(projectDir, rootDir = DEFAULT_ROOT_DIR) {
         const disabled = new Set(config.disabled);
         seats = seats.filter((e) => !(e.valid && disabled.has(e.name)));
     }
-    return {
-        seats,
-        notes,
-        ...(config?.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
-    };
+    return { seats, notes, dispatch: config?.dispatch ?? "auto" };
 }
 // Stage filtering
 /**

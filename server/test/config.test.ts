@@ -54,6 +54,17 @@ describe("loadConfig", () => {
     expect(loadConfig(d).memory.tokenThreshold).toBe(50000);
   });
 
+  it("seats.dispatch defaults to auto inside a seats block; off is kept when stated (#345)", () => {
+    const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+    expect(loadConfig(writeTmpConfig({ ...base, seats: {} })).seats?.dispatch).toBe("auto");
+    expect(loadConfig(writeTmpConfig({ ...base, seats: { enabled: ["correctness"] } }))
+      .seats?.dispatch).toBe("auto");
+    expect(loadConfig(writeTmpConfig({ ...base, seats: { dispatch: "off" } }))
+      .seats?.dispatch).toBe("off");
+    // no seats block: the config stays silent and the roster resolves auto
+    expect(loadConfig(writeTmpConfig(base)).seats).toBeUndefined();
+  });
+
   it("user is optional and absent by default", () => {
     const d = dir();
     writeFileSync(join(d, "cairn.json"),

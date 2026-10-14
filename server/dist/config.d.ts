@@ -80,7 +80,7 @@ export declare const ConfigSchema: z.ZodObject<{
     seats: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodOptional<z.ZodArray<z.ZodString>>;
         disabled: z.ZodOptional<z.ZodArray<z.ZodString>>;
-        dispatch: z.ZodOptional<z.ZodEnum<{
+        dispatch: z.ZodDefault<z.ZodEnum<{
             auto: "auto";
             off: "off";
         }>>;

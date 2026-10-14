@@ -1951,8 +1951,8 @@ export function buildServer(deps) {
             "review's diff panel seats stage review|any; plan-stage seats convene at plan time only), " +
             "signals, source: default|project, valid, note?}; a " +
             "seat file that fails validation is skipped with a note, never the roster. Also carries " +
-            "`dispatch` (cairn.json seats.dispatch, when set) — what a verb's inherit dial resolves to " +
-            "for signal→seat selection (absent = off, full roster fires). Internal seats are " +
+            "`dispatch` — what a verb's inherit dial resolves to for signal→seat selection: " +
+            "cairn.json seats.dispatch, else auto (off = full roster fires). Internal seats are " +
             "framing lenses — cheap, same-model; peers remain the genuinely adversarial external council",
         inputSchema: z.object({}),
     }, wrap(() => {
@@ -1969,7 +1969,7 @@ export function buildServer(deps) {
                 valid: s.valid,
                 note: s.note,
             })),
-            ...(roster.dispatch !== undefined ? { dispatch: roster.dispatch } : {}),
+            dispatch: roster.dispatch,
             ...(roster.notes.length > 0 ? { notes: roster.notes } : {}),
         };
     }));

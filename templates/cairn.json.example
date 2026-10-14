@@ -38,7 +38,7 @@
     "extraPatterns": []
   },
   "_seats": {
-    "$comment": "Optional seat roster control — copy to `seats` to enable. Absent block = every shipped default seat enabled (today's behavior). `enabled` picks AND orders the roster by seat name; `disabled` removes names. `dispatch` is the project dispatch dial a verb's inherit resolves to: \"auto\" = diff-derived signals pick which seats fire (a seat declaring no signals always fires; low-yield seats gate on evidence — never security or dose-full seats), \"off\" (and absent, the default) = the full roster fires. Definitions are files, never config: project seats in .cairn/roles/*.md override the shipped defaults (templates/seats/) by name. Internal seats are framing lenses — cheap, same-model; peers remain the genuinely adversarial external council.",
+    "$comment": "Optional seat roster control — copy to `seats` to enable. Absent block = every shipped default seat enabled (today's behavior). `enabled` picks AND orders the roster by seat name; `disabled` removes names. `dispatch` is the project dispatch dial a verb's inherit resolves to: \"auto\" (the default when absent) = diff-derived signals pick which seats fire (a seat declaring no signals always fires; low-yield seats gate on evidence once a seat has ten dispatches of history — never security or dose-full seats), \"off\" = the full roster fires on every pass, the explicit opt-in. Definitions are files, never config: project seats in .cairn/roles/*.md override the shipped defaults (templates/seats/) by name. Internal seats are framing lenses — cheap, same-model; peers remain the genuinely adversarial external council.",
     "enabled": ["correctness", "clarity", "architecture", "security", "tests"],
     "disabled": [],
     "dispatch": "off"

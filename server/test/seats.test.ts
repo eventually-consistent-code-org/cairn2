@@ -743,16 +743,18 @@ describe("seat selection (selectSeats)", () => {
     expect(sel.gated).toHaveLength(REVIEW_PANEL_NAMES.length);
   });
 
-  it("inherit follows cairn.json seats.dispatch; absent resolves to off", () => {
-    const auto = loadRoster(makeProject({ seats: { dispatch: "auto" } }));
-    expect(auto.dispatch).toBe("auto");
-    expect(selectSeats(auto, [], { dial: "inherit" }).effectiveDial).toBe("auto");
+  it("inherit follows cairn.json seats.dispatch; absent resolves to auto, off is the opt-in (#345)", () => {
+    const off = loadRoster(makeProject({ seats: { dispatch: "off" } }));
+    expect(off.dispatch).toBe("off");
+    const full = selectSeats(off, [], { dial: "inherit" });
+    expect(full.effectiveDial).toBe("off");
+    expect(full.fired.map((s) => s.name)).toEqual(DEFAULT_NAMES);
 
-    const unset = loadRoster(makeProject());
-    expect(unset.dispatch).toBeUndefined();
-    const sel = selectSeats(unset, [], { dial: "inherit" });
-    expect(sel.effectiveDial).toBe("off");
-    expect(sel.fired.map((s) => s.name)).toEqual(DEFAULT_NAMES);
+    // no seats block at all, and a seats block with no dispatch key: both auto
+    for (const unset of [loadRoster(makeProject()), loadRoster(makeProject({ seats: {} }))]) {
+      expect(unset.dispatch).toBe("auto");
+      expect(selectSeats(unset, [], { dial: "inherit" }).effectiveDial).toBe("auto");
+    }
   });
 
   it("auto: low-yield seat gates on evidence, with the explicit note", () => {
@@ -952,9 +954,9 @@ describe("seats dispatch config", () => {
     }
   });
 
-  it("seat_roster carries dispatch over MCP when set, omits it otherwise", async () => {
+  it("seat_roster carries the resolved dispatch over MCP: off when stated, auto when unset (#345)", async () => {
     const server = buildServer({
-      projectDir: makeProject({ seats: { dispatch: "auto" } }),
+      projectDir: makeProject({ seats: { dispatch: "off" } }),
       tracker: new FakeTracker(),
       fetchLatestVersion: async () => "9.9.9",
     });
@@ -963,7 +965,7 @@ describe("seats dispatch config", () => {
     await Promise.all([server.connect(st), client.connect(ct)]);
     const res = await client.callTool({ name: "seat_roster", arguments: {} });
     const roster = JSON.parse((res.content as Array<{ text: string }>)[0].text);
-    expect(roster.dispatch).toBe("auto");
+    expect(roster.dispatch).toBe("off");
     await client.close();
 
     const server2 = buildServer({
@@ -978,7 +980,8 @@ describe("seats dispatch config", () => {
     const roster2 = JSON.parse(
       (res2.content as Array<{ text: string }>)[0].text,
     );
-    expect(roster2.dispatch).toBeUndefined();
+    // unset is not silence any more: the verb reads the resolved default
+    expect(roster2.dispatch).toBe("auto");
     await client2.close();
   });
 
