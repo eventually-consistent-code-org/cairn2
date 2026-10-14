@@ -808,7 +808,7 @@ external AI CLIs (codex, opencode, antigravity, grok, copilot — five seats, fo
 opinion on top of cairn's judgment, never a replacement. **A peer saying
 something doesn't make it true**: every peer finding is verified against the
 actual code (or plan) before it goes anywhere near the tracker. Bare
-`peers`: detection status per provider (on PATH, enabled, input cap) — zero
+`peers`: detection status per provider (on PATH, enabled, lab, input cap) — zero
 peers is a normal result, not a warning. `peers review`: cairn's own
 five-axis review runs FIRST, in full; the outbound content is leak-scanned
 (a hit BLOCKS that send until you decide — redact and retry, or skip that

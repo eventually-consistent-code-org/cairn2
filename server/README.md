@@ -694,6 +694,16 @@ exactly these five templates; there is no path from any tool argument to
 a shell command string. The 200k default cap keeps argv-mode input well
 under ARG_MAX.
 
+### Labs, not seats (#341)
+
+`peer_list` reports a `lab` per seat — who trained the model it speaks
+for: codex `openai`, grok `xai`, antigravity `google`, copilot from its
+pinned model id (`gpt-*` → openai, `gemini-*` → google; a `claude-*` pin
+is refused at load), opencode `unknown` because it picks its model from
+its own config. The peers verb's convergence bar is three DISTINCT labs
+raising a claim, not three seats: Copilot on a gpt pin plus codex is one
+lab speaking twice. Five seats, four labs.
+
 ### Containment (a scratch dir by default)
 
 A peer never runs inside the project unless you've said it may. By
