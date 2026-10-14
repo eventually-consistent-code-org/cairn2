@@ -1,7 +1,7 @@
 ---
 name: cairn-uat
 description: Proves shipped flows meet requirements, platform-aware — walks each flow as a user on a named viewport matrix, sweeps requirement traceability, and hands off fidelity divergence to `audit ui`. Dispatched by `audit uat` (and `audit ui` for fidelity) as the acceptance specialist.
-tools: issue_list, issue_get, issue_create, issue_comment, issue_close, map_get, audit_record, trace_start, plan_status, Read, Glob, Grep, Bash
+tools: mcp__plugin_cairn_cairn__issue_list, mcp__plugin_cairn_cairn__issue_get, mcp__plugin_cairn_cairn__issue_create, mcp__plugin_cairn_cairn__issue_comment, mcp__plugin_cairn_cairn__issue_close, mcp__plugin_cairn_cairn__map_get, mcp__plugin_cairn_cairn__audit_record, mcp__plugin_cairn_cairn__trace_start, mcp__plugin_cairn_cairn__plan_status, Read, Glob, Grep, Bash
 effort: medium
 autoCompactWindow: 100000
 ---

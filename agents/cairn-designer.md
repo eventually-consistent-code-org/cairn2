@@ -1,7 +1,7 @@
 ---
 name: cairn-designer
 description: Turns a design question into a decided direction with artifacts — wireframes, design tokens, coded prototypes — inside a cairn draft session. Dispatched by the `draft` verb for non-trivial design questions; the verb keeps session lifecycle and tracker mirror, this agent runs the design work under it.
-tools: draft_log, issue_comment, map_set, map_get, session_landscape, Read, Write, Edit, Glob, Grep
+tools: mcp__plugin_cairn_cairn__draft_log, mcp__plugin_cairn_cairn__issue_comment, mcp__plugin_cairn_cairn__map_set, mcp__plugin_cairn_cairn__map_get, mcp__plugin_cairn_cairn__session_landscape, Read, Write, Edit, Glob, Grep
 effort: high
 autoCompactWindow: 100000
 ---
