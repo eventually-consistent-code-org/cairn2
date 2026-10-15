@@ -122,16 +122,12 @@ export const ConfigSchema = z.object({
                     message: `'${model}' is a Claude model — the ${provider} seat may not run the adjudicator's own family; pin an OpenAI or Google model id instead`,
                 });
             }
-            else if (model && /^auto$/i.test(model)) {
-                // "auto" lets the CLI pick, and Copilot's documented default pick
-                // is a Claude model -- so it is not a pin at all (verified live
-                // 2026-10-14: `--model auto` runs, every catalog id did not).
-                ctx.addIssue({
-                    code: "custom",
-                    path: [provider, "model"],
-                    message: `'auto' is not a pin — the ${provider} seat must name one non-Claude model id, because auto may route to the adjudicator's own family`,
-                });
-            }
+            // "auto" is accepted as a pin since 2026-10-14 (#395, owner call):
+            // on a plan that serves no catalog id it is the only value that
+            // runs. It is not a lab, though -- Copilot's documented auto pick
+            // is a Claude model -- so labOfModel("auto") reads `unknown` and
+            // an auto-pinned seat never completes a convergence cluster on its
+            // own (ADR 0022, amendment). The claude-* refusal above stands.
         }
     })
         .optional(),

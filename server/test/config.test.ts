@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, writeConfigPatch } from "../src/config.js";
 import { CairnError } from "../src/errors.js";
+import { labOfModel, peerLab } from "../src/peers/run.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "cairn-"));
 
@@ -345,10 +346,12 @@ describe("peers model pin (#338)", () => {
     expect(() => loadConfig(dir)).toThrow(/copilot\.model: 'claude-sonnet-5.5' is a Claude model/);
   });
 
-  it("'auto' is refused as a pin -- the CLI's auto pick may be a Claude model", () => {
+  it("'auto' is accepted as a pin (#395) and reads as an unknown lab, never a voice in the count", () => {
     const dir = writeTmpConfig({ ...base, peers: { copilot: { model: "auto" } } });
-    expect(() => loadConfig(dir)).toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
-    expect(() => loadConfig(dir)).toThrow(/not a pin/);
+    const cfg = loadConfig(dir);
+    expect(cfg.peers?.copilot?.model).toBe("auto");
+    expect(labOfModel("auto")).toBe("unknown");
+    expect(peerLab(cfg, "copilot")).toBe("unknown");
   });
 
   it("an empty model string is rejected; absent is fine", () => {

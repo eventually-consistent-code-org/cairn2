@@ -34,8 +34,8 @@ default is a seat whose lab is decided by the vendor.
 - **A model-pinned seat's model is the owner's pin, never the call's and
   never the vendor's default.** The template carries a default; the
   project configuration may override it; the call cannot. Config load
-  refuses a pin to the adjudicator's family and refuses `auto`, because
-  `auto` is not a pin.
+  refuses a pin to the adjudicator's family and refused `auto`, because
+  `auto` is not a pin (amended 2026-10-14, below).
 - **The copy says what the count says.** Five seats, four labs. Never
   "five vendors".
 
@@ -63,3 +63,16 @@ incomplete, not clean).
 - Convergence arithmetic lives in the verb's prose, not the state store,
   which holds no cluster math today. If the store ever counts, it counts
   labs.
+
+## Amendment 2026-10-14
+
+`auto` is accepted as the Copilot model pin. Reason: a plan that serves no
+catalog model id answers "not available" to every pin and runs only
+`auto`, so the refusal left the seat permanently incomplete on such a plan.
+What does not change: a `claude-*` pin is still refused, the template
+default is still a named non-Claude id, and `auto` is still not a lab —
+the lab table reads it as `unknown`, so an auto-pinned seat contributes
+findings and never completes a convergence cluster on its own, which is
+the count's existing rule for any unplaceable model. Pin a served id as
+soon as the plan has one; the stopgap costs a voice in the lab count, not
+a finding.
