@@ -10,6 +10,7 @@ for work items; git owns prose.
 <!-- docs: done -->
 
 
+
 The boundaries below are not only described here — `server/test/architecture.test.ts`
 asserts them on every run, so this section and the code cannot drift apart
 quietly. Four rules hold today:
@@ -101,7 +102,11 @@ reason.
 - `trace/` — debugging-session records (evidence → hypothesis → test →
   verdict).
 - `audit/` — audit records: single-writer, date-scoped, immutable
-  history.
+  history. The debt mode's marker words are a configuration key
+  (`audit.debt.markers`, default list, override replaces, empty
+  refused); its dedup key rides in each finding's detail, so the record
+  schema did not move. ADR 0024 — removeWhen: the tracker or platform
+  turns source deferral markers into tracked items on its own.
 - `map/` — the project knowledge graph (build, query, diff).
 - `peers/` — external-CLI peer review and council runs (roster of
   five seats: codex, opencode, antigravity, grok, copilot; fixed-argv
@@ -183,6 +188,7 @@ pure and unit-tested without HTTP.
 ## Seats subsystem (v7)
 <!-- docs: done -->
 
+
 Named, reusable review viewpoints as data (v7). One Zod schema — name,
 one-line lens, rubric categories, anchored 0-10 scale with an honesty
 line, a REQUIRED injection dose (minimal | standard | full,
@@ -194,7 +200,10 @@ review's classic axes byte-identically until a project overrides them
 joins review only when the diff touches UI files (`touches-ui`), and the
 lean seat — code that should not exist, after ponytail's ladder — joins
 when the diff is large or touches server code (`diff-large`,
-`touches-server`).
+`touches-server`). Both borrowed bars are paraphrased, attributed seat
+records; nothing upstream is vendored. ADR 0023 — removeWhen: the
+platform composes a user-installed skill into an agent at load, or the
+upstream bar ships in a format seats load directly.
 
 - **Schema + roster** (`server/src/seats/schema.ts`, `roster.ts`) —
   flat-frontmatter seat files; project overrides by name from the

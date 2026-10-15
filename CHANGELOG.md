@@ -1,5 +1,81 @@
 # Changelog
 
+## Unreleased — the ux seat (phase 27, 2026-10-14)
+
+Cairn gains a UI/UX acceptance bar in its own vocabulary, borrowed by
+reference from zeeshani42's `ui-ux-designer` skill (MIT) and never
+vendored: the design agent reads an installed copy at its hi-fi stage, a
+seventh review seat judges whether a diff ships its states or only
+describes them, and `audit ui` holds a phase that declared no UI criteria
+to four rendered states. A second read, of dietrichgebert's ponytail
+(MIT), brings an eighth seat that asks whether code should exist at all
+and an audit mode that turns in-code deferral markers into tracker
+issues. Every borrowing file names the skill, the repo and the license
+and paraphrases; nothing upstream lands in the plugin. Surface flat; the
+one resident cost is a word in the audit command's blurb.
+
+Tool count holds at 87. Suite 2170 → 2207. Footprint 13137 → 13138 of a
+13145 pin. Default seats 6 → 8.
+
+### seats
+
+- `ux` is the seventh default seat: minimal dose, review stage, gated on
+  a new `touches-ui` scope signal (css, scss, less, tsx, jsx, vue,
+  svelte, html, or a components / ui / pages / views / layouts path
+  segment; a server-only diff never fires it). Its lens is render, don't
+  describe — the four states, focus rings and tab order, contrast,
+  breakpoints that reflow — and a state that exists only in the PR body
+  is the finding. Unread render or source means unscored.
+- `lean` is the eighth: minimal dose, review stage, gated on `diff-large`
+  or `touches-server`. It asks the one question the other seats take as
+  given — should this code exist — down ponytail's ladder (need, already
+  in the codebase, standard library or platform, installed dependency,
+  one readable line, minimum code). Findings are priced as the cost of
+  the extra code, never as line count; the never-cut floor (trust-boundary
+  validation, data-loss handling, security, accessibility, anything the
+  user asked for) is stated in the seat. Lean asks necessity; `audit
+  simplify` keeps asking clarity.
+- The byte-identical fold of the first five seats is amended, not broken:
+  the roster may grow by signal-gated default seats, the five stay first
+  and unchanged, and the regression pin now checks that ordering plus the
+  signal gating of every seat after them. Under the default dispatch a
+  server-only diff convenes the five plus `lean`; a docs-only diff
+  convenes neither addition.
+
+### agents
+
+- The design agent carries a hi-fi acceptance bar: at the prototype stage
+  it looks for an installed `ui-ux-designer` skill under the project then
+  the user skills root, reads it (never invokes it — its tool list is
+  unchanged), skips the skill's five-question gate because every answer
+  already lives in a session artifact, and holds each variant to the
+  skill's silent checklist — four rendered states, visible focus, a
+  reduced-motion alternative, real breakpoints. A described-not-rendered
+  state becomes a note, never a pick. Absent skill: one note, identical
+  behaviour.
+- The acceptance-testing agent checks the same four states when its walk
+  reaches a screen and hands a missing one to `audit ui`.
+
+### audit
+
+- `ui` applies a floor when a phase declared no UI criteria: every shipped
+  screen or component renders Default, Loading, Empty and Error as views
+  (one file with a visible state toggle counts), one important finding
+  per missing state. A declared bar is never overridden; breakpoints stay
+  the `ux` seat's concern.
+- `debt [scope]` is a new mode: one documented grep for a comment opener
+  followed by a configured marker word and a colon (`shortcut`, `TODO`,
+  `FIXME`, `HACK`, `XXX` by default; `audit.debt.markers` in cairn.json
+  replaces the list, an empty list is refused). One finding per marker
+  with a dedup key as the first line of its detail, the `shortcut:
+  <limit>, <when to upgrade>` form parsed and a missing trigger reported
+  rather than invented. Report by default; `--apply` files every marker
+  as a `cairn:shortcut` issue — the mode's one deliberate exception to
+  minors staying in the record — updates the issue of a marker that moved
+  and closes the issue of one that vanished. `audit sweep` runs it as leg
+  five, report shape only. A fixture pair and a test run the documented
+  grep as written.
+
 ## Unreleased — the fifth seat (phase 26.5, 2026-10-14)
 
 GitHub Copilot CLI joins the peers council as the fifth seat, and the
