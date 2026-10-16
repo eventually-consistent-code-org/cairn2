@@ -40,16 +40,33 @@ export declare function receiptsDir(projectDir: string): string;
 /** Writes the receipt. Returns false instead of throwing on any failure --
  *  the close has already happened and must report success regardless. */
 export declare function writeReceipt(projectDir: string, receipt: CloseReceipt): boolean;
+/** What the claim stamp holds: when the server saw the issue go in
+ *  progress and, when the claim carried one, the commit the work starts
+ *  from (#369) -- the close fold reads it back so the ledger append never
+ *  has to be told. `baseCommit` is absent on stamps written by a bare
+ *  state change and on stamps from before it was recorded. */
+export interface ClaimRecord {
+    issueId: string;
+    at: string;
+    baseCommit?: string;
+}
 /**
  * Rung two's evidence: the moment this server moved the issue to in
- * progress. The FIRST claim wins -- a re-claim after a parked stretch is
- * still the same piece of work, and cycle time runs from its start. Never
- * throws; a claim must not fail because instrumentation could not write.
+ * progress, with the base commit beside it when the claim named one. The
+ * FIRST claim wins -- a re-claim after a parked stretch is still the same
+ * piece of work, and cycle time (and the commit range) run from its start.
+ * Never throws; a claim must not fail because instrumentation could not
+ * write.
  */
-export declare function recordClaim(projectDir: string, issueId: string, at: string): boolean;
-/** The claim stamp, without consuming it; null when absent or unreadable.
- *  The close reads it BEFORE closing and clears it only once the close
- *  succeeded -- a close that throws must leave the clock where it was. */
+export declare function recordClaim(projectDir: string, issueId: string, at: string, baseCommit?: string): boolean;
+/** The whole claim stamp, without consuming it; null when absent or
+ *  unreadable. Tolerant of the older two-field shape: a stamp with no
+ *  baseCommit still parses, it just carries none. */
+export declare function readClaimRecord(projectDir: string, issueId: string): ClaimRecord | null;
+/** The claim stamp's time alone, without consuming it; null when absent or
+ *  unreadable. The close reads it BEFORE closing and clears it only once
+ *  the close succeeded -- a close that throws must leave the clock where
+ *  it was. */
 export declare function readClaim(projectDir: string, issueId: string): string | null;
 export declare function clearClaim(projectDir: string, issueId: string): void;
 /**

@@ -107,35 +107,65 @@ function isReceipt(v: unknown, issueId: string): v is CloseReceipt {
     && typeof r.worklog === "string";
 }
 
+/** What the claim stamp holds: when the server saw the issue go in
+ *  progress and, when the claim carried one, the commit the work starts
+ *  from (#369) -- the close fold reads it back so the ledger append never
+ *  has to be told. `baseCommit` is absent on stamps written by a bare
+ *  state change and on stamps from before it was recorded. */
+export interface ClaimRecord {
+  issueId: string;
+  at: string;
+  baseCommit?: string;
+}
+
 /**
  * Rung two's evidence: the moment this server moved the issue to in
- * progress. The FIRST claim wins -- a re-claim after a parked stretch is
- * still the same piece of work, and cycle time runs from its start. Never
- * throws; a claim must not fail because instrumentation could not write.
+ * progress, with the base commit beside it when the claim named one. The
+ * FIRST claim wins -- a re-claim after a parked stretch is still the same
+ * piece of work, and cycle time (and the commit range) run from its start.
+ * Never throws; a claim must not fail because instrumentation could not
+ * write.
  */
-export function recordClaim(projectDir: string, issueId: string, at: string): boolean {
+export function recordClaim(projectDir: string, issueId: string, at: string,
+  baseCommit?: string): boolean {
   try {
     ensureDir(projectDir);
     const path = receiptPath(projectDir, issueId, "claim");
     if (existsSync(path)) return true;
-    writeFileSync(path, JSON.stringify({ issueId, at }) + "\n");
+    const record: ClaimRecord = { issueId, at, ...(baseCommit ? { baseCommit } : {}) };
+    writeFileSync(path, JSON.stringify(record) + "\n");
     return true;
   } catch {
     return false;
   }
 }
 
-/** The claim stamp, without consuming it; null when absent or unreadable.
- *  The close reads it BEFORE closing and clears it only once the close
- *  succeeded -- a close that throws must leave the clock where it was. */
-export function readClaim(projectDir: string, issueId: string): string | null {
+/** The whole claim stamp, without consuming it; null when absent or
+ *  unreadable. Tolerant of the older two-field shape: a stamp with no
+ *  baseCommit still parses, it just carries none. */
+export function readClaimRecord(projectDir: string, issueId: string): ClaimRecord | null {
   try {
     const raw = readFileSync(receiptPath(projectDir, issueId, "claim"), "utf8");
-    const at = (JSON.parse(raw) as { at?: unknown }).at;
-    return typeof at === "string" && !Number.isNaN(Date.parse(at)) ? at : null;
+    const r = JSON.parse(raw) as Record<string, unknown>;
+    const at = r.at;
+    if (typeof at !== "string" || Number.isNaN(Date.parse(at))) return null;
+    const baseCommit = typeof r.baseCommit === "string" && r.baseCommit ? r.baseCommit : undefined;
+    return {
+      issueId: typeof r.issueId === "string" ? r.issueId : issueId,
+      at,
+      ...(baseCommit ? { baseCommit } : {}),
+    };
   } catch {
     return null;
   }
+}
+
+/** The claim stamp's time alone, without consuming it; null when absent or
+ *  unreadable. The close reads it BEFORE closing and clears it only once
+ *  the close succeeded -- a close that throws must leave the clock where
+ *  it was. */
+export function readClaim(projectDir: string, issueId: string): string | null {
+  return readClaimRecord(projectDir, issueId)?.at ?? null;
 }
 
 export function clearClaim(projectDir: string, issueId: string): void {

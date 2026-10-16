@@ -63,35 +63,53 @@ function isReceipt(v, issueId) {
 }
 /**
  * Rung two's evidence: the moment this server moved the issue to in
- * progress. The FIRST claim wins -- a re-claim after a parked stretch is
- * still the same piece of work, and cycle time runs from its start. Never
- * throws; a claim must not fail because instrumentation could not write.
+ * progress, with the base commit beside it when the claim named one. The
+ * FIRST claim wins -- a re-claim after a parked stretch is still the same
+ * piece of work, and cycle time (and the commit range) run from its start.
+ * Never throws; a claim must not fail because instrumentation could not
+ * write.
  */
-export function recordClaim(projectDir, issueId, at) {
+export function recordClaim(projectDir, issueId, at, baseCommit) {
     try {
         ensureDir(projectDir);
         const path = receiptPath(projectDir, issueId, "claim");
         if (existsSync(path))
             return true;
-        writeFileSync(path, JSON.stringify({ issueId, at }) + "\n");
+        const record = { issueId, at, ...(baseCommit ? { baseCommit } : {}) };
+        writeFileSync(path, JSON.stringify(record) + "\n");
         return true;
     }
     catch {
         return false;
     }
 }
-/** The claim stamp, without consuming it; null when absent or unreadable.
- *  The close reads it BEFORE closing and clears it only once the close
- *  succeeded -- a close that throws must leave the clock where it was. */
-export function readClaim(projectDir, issueId) {
+/** The whole claim stamp, without consuming it; null when absent or
+ *  unreadable. Tolerant of the older two-field shape: a stamp with no
+ *  baseCommit still parses, it just carries none. */
+export function readClaimRecord(projectDir, issueId) {
     try {
         const raw = readFileSync(receiptPath(projectDir, issueId, "claim"), "utf8");
-        const at = JSON.parse(raw).at;
-        return typeof at === "string" && !Number.isNaN(Date.parse(at)) ? at : null;
+        const r = JSON.parse(raw);
+        const at = r.at;
+        if (typeof at !== "string" || Number.isNaN(Date.parse(at)))
+            return null;
+        const baseCommit = typeof r.baseCommit === "string" && r.baseCommit ? r.baseCommit : undefined;
+        return {
+            issueId: typeof r.issueId === "string" ? r.issueId : issueId,
+            at,
+            ...(baseCommit ? { baseCommit } : {}),
+        };
     }
     catch {
         return null;
     }
+}
+/** The claim stamp's time alone, without consuming it; null when absent or
+ *  unreadable. The close reads it BEFORE closing and clears it only once
+ *  the close succeeded -- a close that throws must leave the clock where
+ *  it was. */
+export function readClaim(projectDir, issueId) {
+    return readClaimRecord(projectDir, issueId)?.at ?? null;
 }
 export function clearClaim(projectDir, issueId) {
     try {

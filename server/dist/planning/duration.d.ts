@@ -2,20 +2,35 @@ import type { IssueComment } from "../tracker/types.js";
 import type { Measured } from "./close-receipt.js";
 /** What a claim carries besides the state change: the base commit the
  *  ledger will need, and the context a reader wants before the work --
- *  which wave/task this is and the bar it will be held to. */
+ *  which wave/task this is and the bar it will be held to. The base
+ *  commit is optional on the way in (#369): the server reads HEAD itself
+ *  when it is left off, so no verb has to shell out just to feed it. */
 export interface ClaimInput {
-    baseCommit: string;
+    baseCommit?: string;
     wave?: string;
     task?: string;
     verifyCommand?: string;
 }
+/** A claim after the server has settled its base commit -- the shape the
+ *  comment composer and the receipt both take. */
+export type ResolvedClaim = ClaimInput & {
+    baseCommit: string;
+};
+/**
+ * HEAD of the project's repository, or null when git cannot answer (no
+ * repository, no commits yet, no git on PATH). Null rather than a throw,
+ * like every function here; the caller decides whether a missing base is
+ * an error (a claim with nothing to measure the ledger from is) or a
+ * shrug (a stamp that simply carries no commit).
+ */
+export declare function headCommit(projectDir: string): string | null;
 /**
  * The claim comment, composed server-side so its first line is always the
  * one `isClaimComment` recognises. The verify command is quoted back before
  * the work so the bar is visible up front, not negotiated after; the base
  * commit sits on its own line as a short ref.
  */
-export declare function composeClaimComment(c: ClaimInput): string;
+export declare function composeClaimComment(c: ResolvedClaim): string;
 /**
  * Whether a comment is the work verb's claim comment -- the one posted the
  * moment an issue is picked up, whose timestamp starts the clock on rung one.

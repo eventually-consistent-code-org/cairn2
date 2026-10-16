@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -8,9 +8,10 @@ import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
 import {
-  claimCommentTime, composeClaimComment, gitSpan, isClaimComment, measureAtClose,
-  measuredText,
+  claimCommentTime, composeClaimComment, gitSpan, headCommit, isClaimComment,
+  measureAtClose, measuredText,
 } from "../src/planning/duration.js";
+import { readClaim, readClaimRecord, receiptsDir } from "../src/planning/close-receipt.js";
 
 // The work verb's real claim comment opens this way -- every issue in this
 // repo since phase 21 was claimed with it, so it is the shape rung one must
@@ -123,12 +124,23 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
     async logWork(_id: string, minutes: number): Promise<void> { this.logged.push(minutes); }
   }
 
-  const harness = async (tracker: FakeTracker) => {
+  // The project dir is a bare temp folder -- no git -- unless `git` is asked
+  // for, in which case it is a repository with one commit so HEAD resolves.
+  const harness = async (tracker: FakeTracker, opts: { git?: boolean } = {}) => {
     const projectDir = mkdtempSync(join(tmpdir(), "cairn-measure-"));
     writeFileSync(join(projectDir, "cairn.json"),
       JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     scaffoldProject(projectDir, "P");
     scaffoldPhase(projectDir, 1, "Core");
+    if (opts.git) {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: projectDir, encoding: "utf8" }).trim();
+      git("init", "-q");
+      git("config", "user.email", "t@t");
+      git("config", "user.name", "t");
+      git("add", "cairn.json");
+      execFileSync("git", ["commit", "-qm", "base", "--no-gpg-sign"], { cwd: projectDir });
+    }
     let clock = Date.parse(T0);
     const now = () => new Date(clock);
     tracker.now = now;
@@ -141,7 +153,7 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       const text = (res.content as Array<{ type: string; text: string }>)[0].text;
       return { ...res, json: JSON.parse(text) };
     };
-    return { call, advance: (min: number) => { clock += min * 60_000; } };
+    return { call, projectDir, advance: (min: number) => { clock += min * 60_000; } };
   };
   const append = (id: string) => ({
     phaseDir: "01-core", taskRef: id, summary: "s",
@@ -228,5 +240,143 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
     const closed = await call("issue_close", { id: made.json.id, timeSpentMinutes: 90 });
     expect(closed.json.worklogLogged).toBe(true);
     expect(tracker.logged).toEqual([11]);
+  });
+
+  // Claim block, round two (#369): the server resolves the base commit and
+  // keeps it in the receipt; issue_create takes the same block.
+  describe("the base commit is the server's to resolve (#369)", () => {
+    const sha40 = /^[0-9a-f]{40}$/;
+
+    it("issue_update with no baseCommit resolves HEAD and reports it", async () => {
+      const tracker = new FakeTracker();
+      const { call, projectDir } = await harness(tracker, { git: true });
+      const head = headCommit(projectDir)!;
+      expect(head).toMatch(sha40);
+      const made = await call("issue_create", { title: "resolved" });
+      const wip = await call("issue_update", {
+        id: made.json.id, claim: { wave: "1", task: "the resolver" },
+      });
+      expect(wip.isError).toBeFalsy();
+      expect(wip.json.baseCommit).toBe(head);
+      expect(wip.json.claimCommented).toBe(true);
+      expect(wip.json.claimAt).toBe(T0);
+      // the comment carries the short ref of the commit the server read
+      expect(tracker.comments(made.json.id).at(-1)!.text)
+        .toBe(`Starting now. Wave 1: the resolver.\n\nBase: ${head.slice(0, 7)}`);
+    });
+
+    it("the receipt carries baseCommit beside the time; the old shape still parses", async () => {
+      const { call, projectDir } = await harness(new FakeTracker(), { git: true });
+      const head = headCommit(projectDir)!;
+      const made = await call("issue_create", { title: "receipted" });
+      await call("issue_update", { id: made.json.id, claim: { task: "receipt" } });
+      expect(readClaimRecord(projectDir, made.json.id))
+        .toEqual({ issueId: made.json.id, at: T0, baseCommit: head });
+      expect(readClaim(projectDir, made.json.id)).toBe(T0);
+      // a stamp from before #369 -- two fields, no commit -- is not a corrupt stamp
+      writeFileSync(join(receiptsDir(projectDir), "OLD-1.claim.json"),
+        JSON.stringify({ issueId: "OLD-1", at: T0 }) + "\n");
+      expect(readClaimRecord(projectDir, "OLD-1")).toEqual({ issueId: "OLD-1", at: T0 });
+      expect(readClaim(projectDir, "OLD-1")).toBe(T0);
+    });
+
+    it("an explicit baseCommit still wins over HEAD", async () => {
+      const { call, projectDir } = await harness(new FakeTracker(), { git: true });
+      const made = await call("issue_create", { title: "explicit" });
+      const wip = await call("issue_update", {
+        id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6" },
+      });
+      expect(wip.json.baseCommit).toBe("a1b2c3d4e5f6");
+      expect(readClaimRecord(projectDir, made.json.id)!.baseCommit).toBe("a1b2c3d4e5f6");
+    });
+
+    it("a bare in_progress transition stamps the time and no commit", async () => {
+      const { call, projectDir } = await harness(new FakeTracker(), { git: true });
+      const made = await call("issue_create", { title: "bare" });
+      await call("issue_update", { id: made.json.id, state: "in_progress" });
+      expect(readClaimRecord(projectDir, made.json.id)).toEqual({ issueId: made.json.id, at: T0 });
+    });
+
+    it("no git and no baseCommit: a typed refusal, before any tracker write", async () => {
+      const tracker = new FakeTracker();
+      const { call } = await harness(tracker);
+      const made = await call("issue_create", { title: "no git" });
+      const res = await call("issue_update", { id: made.json.id, claim: { task: "x" } });
+      expect(res.isError).toBe(true);
+      expect(res.json.code).toBe("PRECONDITION_FAILED");
+      expect(res.json.message).toMatch(/no git HEAD/);
+      expect(res.json.nextAction).toMatch(/claim\.baseCommit/);
+      // nothing moved: still open, no claim comment
+      expect((await call("issue_get", { id: made.json.id })).json.category).toBe("open");
+      expect(tracker.comments(made.json.id)).toEqual([]);
+      // the explicit form keeps working without git
+      const wip = await call("issue_update", {
+        id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6", task: "x" },
+      });
+      expect(wip.json.baseCommit).toBe("a1b2c3d4e5f6");
+    });
+
+    it("issue_create with a claim creates and claims in one call", async () => {
+      const tracker = new FakeTracker();
+      const { call, projectDir, advance } = await harness(tracker, { git: true });
+      const head = headCommit(projectDir)!;
+      const made = await call("issue_create", {
+        title: "one call", labels: ["fast"],
+        claim: { wave: "1", task: "create and claim", verifyCommand: "npm test" },
+      });
+      expect(made.isError).toBeFalsy();
+      expect(made.json.category).toBe("in_progress");
+      expect(made.json.labels).toEqual(["fast"]);
+      expect(made.json.claimAt).toBe(T0);
+      expect(made.json.baseCommit).toBe(head);
+      expect(made.json.claimCommented).toBe(true);
+      // the same composed comment the update path posts
+      expect(tracker.comments(made.json.id).map((c) => c.text)).toEqual([
+        "Starting now. Wave 1: create and claim.\n\nDeclared verify: `npm test`\n\n"
+        + `Base: ${head.slice(0, 7)}`,
+      ]);
+      // the same receipt
+      expect(readClaimRecord(projectDir, made.json.id))
+        .toEqual({ issueId: made.json.id, at: T0, baseCommit: head });
+      // and the same clock: rung one measures from the create-and-claim
+      advance(12);
+      const closed = await call("issue_close", {
+        id: made.json.id, evidence: { command: "npm test", result: "1 passed" },
+      });
+      expect(closed.json.measured).toEqual({ minutes: 12, source: "claim_comment" });
+    });
+
+    it("issue_create with a claim and no git is refused before the issue exists", async () => {
+      const tracker = new FakeTracker();
+      const { call } = await harness(tracker);
+      const res = await call("issue_create", { title: "orphan?", claim: { task: "x" } });
+      expect(res.isError).toBe(true);
+      expect(res.json.code).toBe("PRECONDITION_FAILED");
+      expect((await call("issue_list", {})).json).toEqual([]);
+    });
+
+    it("issue_create without a claim is unchanged: open, no stamp, no comment", async () => {
+      const tracker = new FakeTracker();
+      const { call, projectDir } = await harness(tracker, { git: true });
+      const made = await call("issue_create", { title: "plain" });
+      expect(made.json.category).toBe("open");
+      expect(made.json.claimAt).toBeUndefined();
+      expect(made.json.baseCommit).toBeUndefined();
+      expect(readClaimRecord(projectDir, made.json.id)).toBeNull();
+      expect(tracker.comments(made.json.id)).toEqual([]);
+    });
+
+    it("headCommit is null outside a repository, never a throw", () => {
+      expect(headCommit(mkdtempSync(join(tmpdir(), "cairn-nogit-")))).toBeNull();
+    });
+
+    it("the claim file on disk is the shape the close fold will read", async () => {
+      const { call, projectDir } = await harness(new FakeTracker(), { git: true });
+      const made = await call("issue_create", { title: "on disk", claim: {} });
+      const raw = readFileSync(join(receiptsDir(projectDir), `${made.json.id}.claim.json`), "utf8");
+      expect(JSON.parse(raw)).toEqual({
+        issueId: made.json.id, at: T0, baseCommit: headCommit(projectDir),
+      });
+    });
   });
 });

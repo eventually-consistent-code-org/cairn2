@@ -33,7 +33,7 @@ import { docsDriftReport } from "./planning/docs-drift.js";
 import { distillManifest } from "./planning/distill-manifest.js";
 import { estimatePhaseTokens, issueEstimate, metricsSegments } from "./planning/token-estimate.js";
 import { clearClaim, readClaim, recordClaim, writeReceipt, } from "./planning/close-receipt.js";
-import { composeClaimComment, measureAtClose, measuredText, } from "./planning/duration.js";
+import { composeClaimComment, headCommit, measureAtClose, measuredText, } from "./planning/duration.js";
 import { snapshotNote, trackerDelta } from "./planning/tracker-delta.js";
 import { MemoryIndex, indexDbPath, } from "./memory/index-store.js";
 import { probeNativeBindings, } from "./memory/native.js";
@@ -308,14 +308,71 @@ export function buildServer(deps) {
         description: "Context rent rollup: per-turn average, bands, residency, prefix",
         inputSchema: z.object({}),
     }, wrap(() => contextMeterReport(dir())));
+    // The claim block, shared by issue_create and issue_update (#369) so the
+    // two paths cannot drift. Three pieces, each in one place:
+    //   resolveClaim  -- settles the base commit: the caller's when given,
+    //                    else HEAD of the project dir (the server already runs
+    //                    git for the duration ladder's third rung; no verb
+    //                    should shell out just to feed it back). No git and no
+    //                    explicit base is the one typed refusal, raised BEFORE
+    //                    any tracker write so a refused claim leaves nothing
+    //                    half-done behind it.
+    //   claimAssignee -- best-effort attribution; identity failures never
+    //                    block the claim.
+    //   stampClaim    -- rung two's receipt (#232), now carrying the base
+    //                    commit beside the time so the close fold can hand the
+    //                    ledger its range, then the composed claim comment
+    //                    (#343), posted AFTER the state change and best-effort:
+    //                    a comment that fails still leaves the stamp to
+    //                    measure from.
+    // baseCommit carries no min(1): an empty string is "left off" and falls
+    // through to HEAD like an absent one (resolveClaim trims before looking).
+    const ClaimSchema = z.object({
+        baseCommit: z.string().optional(),
+        wave: z.string().optional(),
+        task: z.string().optional(),
+        verifyCommand: z.string().optional(),
+    });
+    const resolveClaim = (d, claim) => {
+        const explicit = claim.baseCommit?.trim();
+        if (explicit)
+            return { ...claim, baseCommit: explicit };
+        const head = headCommit(d);
+        if (head)
+            return { ...claim, baseCommit: head };
+        throw new CairnError("PRECONDITION_FAILED", "claim.baseCommit was left off and the project dir has no git HEAD to read it from", "pass claim.baseCommit explicitly (the commit the work starts from), or run cairn inside the repository");
+    };
+    const claimAssignee = async (d, tracker, id) => {
+        try {
+            const current = await tracker.getIssue(id);
+            if (current.assignee)
+                return undefined;
+            return loadConfig(d).user?.handle ?? (await tracker.resolveSelf?.()) ?? undefined;
+        }
+        catch {
+            return undefined; /* claim proceeds unassigned */
+        }
+    };
+    const stampClaim = async (d, tracker, issue, claimAt, claim) => {
+        // First claim wins; recordClaim never throws. A bare in_progress
+        // transition (no claim block) still stamps the time, just no commit.
+        if (issue.category === "in_progress")
+            recordClaim(d, issue.id, claimAt, claim?.baseCommit);
+        if (!claim)
+            return {};
+        try {
+            await tracker.commentIssue(issue.id, composeClaimComment(claim));
+            return { claimCommented: true };
+        }
+        catch (e) {
+            return { claimCommented: false, claimCommentError: e instanceof Error ? e.message : String(e) };
+        }
+    };
     server.registerTool("issue_create", {
         annotations: { readOnlyHint: false, destructiveHint: false },
-        description: "Create an issue in the configured tracker. `phase`: cairn phase " +
-            "number ('14', '1.5' -- matches the 'Phase N: <name>' title) or " +
-            "tracker phase id ('id:<raw>' if numeric). Estimates " +
-            "(story points / original minutes) land in the backend's native " +
-            "fields where supported; elsewhere they're skipped and the result " +
-            "says so via estimateSkipped",
+        description: "Create an issue. `phase`: cairn number ('14', '1.5') or 'id:<raw>'. " +
+            "Estimates land in native fields where supported, else " +
+            "estimateSkipped says why. `claim` also picks it up, as issue_update does",
         inputSchema: z.object({
             title: z.string(),
             body: z.string().optional(),
@@ -323,10 +380,14 @@ export function buildServer(deps) {
             phase: z.string().optional(),
             estimatePoints: z.number().positive().optional(),
             estimateMinutes: z.number().int().positive().optional(),
+            claim: ClaimSchema.optional(),
         }),
     }, wrap(async (a) => {
         const d = dir();
-        const { estimatePoints, estimateMinutes, ...input } = a;
+        const { estimatePoints, estimateMinutes, claim, ...input } = a;
+        // Resolved before the create: a refused claim must not leave an
+        // orphan issue behind for the caller to find and re-create.
+        const resolved = claim ? resolveClaim(d, claim) : undefined;
         const wantsEstimate = estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
         // phase is a cairn phase number (by title) or a raw id (#138, #271)
@@ -337,7 +398,31 @@ export function buildServer(deps) {
             ? { points: estimatePoints, minutes: estimateMinutes }
             : undefined;
         const result = await tracker.createIssue({ ...input, phase, estimate });
-        const { estimateSkipped: partialSkip, ...issue } = result;
+        const { estimateSkipped: partialSkip, ...created } = result;
+        let issue = created;
+        // Create-and-claim (#369): the same in_progress transition, receipt
+        // and comment issue_update makes, on the issue just created. The
+        // issue exists by now, so a claim that fails here is reported
+        // beside it (claimError) rather than thrown as if nothing was made.
+        let autoAssigned = false;
+        let claimAt;
+        let stamped = {};
+        let claimError;
+        if (resolved) {
+            try {
+                const who = await claimAssignee(d, tracker, issue.id);
+                issue = await tracker.updateIssue(issue.id, {
+                    state: "in_progress", ...(who ? { assignee: who } : {}),
+                });
+                autoAssigned = who !== undefined;
+                claimAt = now().toISOString();
+                stamped = await stampClaim(d, tracker, issue, claimAt, resolved);
+                refreshHandoff({ source: "tool", issue: issue.id }, d);
+            }
+            catch (e) {
+                claimError = e instanceof Error ? e.message : String(e);
+            }
+        }
         snapshotNote(d, issue);
         // mirrors the worklogError note on issue_close -- a silently dropped
         // estimate reads as a bug, so say why it never reached the backend.
@@ -348,7 +433,16 @@ export function buildServer(deps) {
         const estimateSkipped = wantsEstimate && !tracker.capabilities.hasEstimates
             ? "backend has no estimate support; fold points/minutes into the issue body"
             : partialSkip;
-        return { ...issue, ...(estimateSkipped ? { estimateSkipped } : {}) };
+        return {
+            ...issue,
+            ...(autoAssigned ? { autoAssigned: true } : {}),
+            ...(resolved && claimAt
+                ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
+                : {}),
+            ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
+            ...(claimError ? { claimError } : {}),
+            ...(estimateSkipped ? { estimateSkipped } : {}),
+        };
     }));
     server.registerTool("issue_get", {
         annotations: { readOnlyHint: true },
@@ -357,9 +451,10 @@ export function buildServer(deps) {
     }, wrap(async (a) => (await getTracker()).getIssue(a.id)));
     server.registerTool("issue_update", {
         annotations: { readOnlyHint: false, destructiveHint: false },
-        description: "Update an issue. `claim` picks it up: in_progress, claim comment " +
-            "posted here, clock started; returns claimAt. `phase`: cairn number " +
-            "('14', '1.5') or 'id:<raw>'; phaseSkipped when the backend can't re-parent",
+        description: "Update an issue. `claim` picks it up: in_progress, claim comment, " +
+            "clock started, base commit from HEAD unless given; returns claimAt, " +
+            "baseCommit. `phase`: cairn number ('14', '1.5') or 'id:<raw>'; " +
+            "phaseSkipped when the backend can't re-parent",
         inputSchema: z.object({
             id: z.string(),
             title: z.string().optional(),
@@ -370,12 +465,7 @@ export function buildServer(deps) {
             phase: z.string().optional(),
             estimatePoints: z.number().positive().optional(),
             estimateMinutes: z.number().int().positive().optional(),
-            claim: z.object({
-                baseCommit: z.string().min(1),
-                wave: z.string().optional(),
-                task: z.string().optional(),
-                verifyCommand: z.string().optional(),
-            }).optional(),
+            claim: ClaimSchema.optional(),
         }),
     }, wrap(async (a) => {
         const d = dir();
@@ -390,6 +480,8 @@ export function buildServer(deps) {
                 throw new CairnError("PRECONDITION_FAILED", `a claim moves the issue to in_progress, not ${rest.state}`, "drop `state` or set it to in_progress when passing `claim`");
             }
         }
+        // Base commit settled before any tracker write (#369).
+        const resolved = claim ? resolveClaim(d, claim) : undefined;
         const wantsEstimate = estimatePoints !== undefined || estimateMinutes !== undefined;
         const tracker = await getTracker(d);
         const canRephase = tracker.capabilities.hasPhaseReassign;
@@ -409,45 +501,26 @@ export function buildServer(deps) {
         let autoAssigned = false;
         if (patch.state === "in_progress" && patch.assignee === undefined) {
             // best-effort claim attribution — identity failures never block the claim
-            try {
-                const current = await tracker.getIssue(id);
-                if (!current.assignee) {
-                    const who = loadConfig(d).user?.handle ?? (await tracker.resolveSelf?.());
-                    if (who) {
-                        patch.assignee = who;
-                        autoAssigned = true;
-                    }
-                }
-            }
-            catch {
-                /* claim proceeds unassigned */
+            const who = await claimAssignee(d, tracker, id);
+            if (who) {
+                patch.assignee = who;
+                autoAssigned = true;
             }
         }
         const result = await tracker.updateIssue(id, patch);
         const { estimateSkipped: partialSkip, ...issue } = result;
-        // Rung two of the duration ladder (#232): the server was there when
-        // the issue went in progress, so it keeps the time. First claim
-        // wins; recordClaim never throws.
+        // Rung two of the duration ladder (#232) and the claim comment
+        // (#343), both owned by stampClaim: the server was there when the
+        // issue went in progress, so it keeps the time (and the base
+        // commit); the comment's first line is the one rung one keys on --
+        // the sequence state → comment was known before any result was
+        // seen, so code owns it. Only a call that set the state stamps:
+        // a title edit on an issue that went in progress out-of-band is
+        // not a claim.
         const claimAt = now().toISOString();
-        if (patch.state !== undefined && issue.category === "in_progress") {
-            recordClaim(d, id, claimAt);
-        }
-        // The claim comment (#343): composed and posted here so its first
-        // line is the one rung one keys on -- the sequence state → comment
-        // was known before any result was seen, so code owns it. Posted
-        // AFTER the state change and best-effort: a comment that fails
-        // still leaves rung two (the stamp above) to measure from.
-        let claimCommented = false;
-        let claimCommentError;
-        if (claim) {
-            try {
-                await tracker.commentIssue(id, composeClaimComment(claim));
-                claimCommented = true;
-            }
-            catch (e) {
-                claimCommentError = e instanceof Error ? e.message : String(e);
-            }
-        }
+        const stamped = patch.state !== undefined
+            ? await stampClaim(d, tracker, issue, claimAt, resolved)
+            : {};
         snapshotNote(d, issue);
         refreshHandoff({ source: "tool", issue: id }, d);
         // mirrors the worklogError note on issue_close -- a silently dropped
@@ -465,8 +538,10 @@ export function buildServer(deps) {
         return {
             ...issue,
             ...(autoAssigned ? { autoAssigned: true } : {}),
-            ...(claim ? { claimAt, claimCommented } : {}),
-            ...(claimCommentError ? { claimCommentError } : {}),
+            ...(resolved
+                ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
+                : {}),
+            ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
             ...(estimateSkipped ? { estimateSkipped } : {}),
             ...(phaseSkipped ? { phaseSkipped } : {}),
         };

@@ -32,6 +32,22 @@ function spanMinutes(start, end) {
  *  on. Composed here and parsed here (#343); no verb file spells it. */
 const CLAIM_OPENING = "Starting now.";
 /**
+ * HEAD of the project's repository, or null when git cannot answer (no
+ * repository, no commits yet, no git on PATH). Null rather than a throw,
+ * like every function here; the caller decides whether a missing base is
+ * an error (a claim with nothing to measure the ledger from is) or a
+ * shrug (a stamp that simply carries no commit).
+ */
+export function headCommit(projectDir) {
+    try {
+        const out = execFileSync("git", ["-C", projectDir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+        return /^[0-9a-f]{40}$/i.test(out) ? out : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
  * The claim comment, composed server-side so its first line is always the
  * one `isClaimComment` recognises. The verify command is quoted back before
  * the work so the bar is visible up front, not negotiated after; the base

@@ -39,12 +39,35 @@ const CLAIM_OPENING = "Starting now.";
 
 /** What a claim carries besides the state change: the base commit the
  *  ledger will need, and the context a reader wants before the work --
- *  which wave/task this is and the bar it will be held to. */
+ *  which wave/task this is and the bar it will be held to. The base
+ *  commit is optional on the way in (#369): the server reads HEAD itself
+ *  when it is left off, so no verb has to shell out just to feed it. */
 export interface ClaimInput {
-  baseCommit: string;
+  baseCommit?: string;
   wave?: string;
   task?: string;
   verifyCommand?: string;
+}
+
+/** A claim after the server has settled its base commit -- the shape the
+ *  comment composer and the receipt both take. */
+export type ResolvedClaim = ClaimInput & { baseCommit: string };
+
+/**
+ * HEAD of the project's repository, or null when git cannot answer (no
+ * repository, no commits yet, no git on PATH). Null rather than a throw,
+ * like every function here; the caller decides whether a missing base is
+ * an error (a claim with nothing to measure the ledger from is) or a
+ * shrug (a stamp that simply carries no commit).
+ */
+export function headCommit(projectDir: string): string | null {
+  try {
+    const out = execFileSync("git", ["-C", projectDir, "rev-parse", "HEAD"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return /^[0-9a-f]{40}$/i.test(out) ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -53,7 +76,7 @@ export interface ClaimInput {
  * the work so the bar is visible up front, not negotiated after; the base
  * commit sits on its own line as a short ref.
  */
-export function composeClaimComment(c: ClaimInput): string {
+export function composeClaimComment(c: ResolvedClaim): string {
   const wave = c.wave?.trim();
   const task = c.task?.trim();
   const context = wave && task ? `Wave ${wave}: ${task}`
