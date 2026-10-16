@@ -26,7 +26,7 @@ can't survive a crash.
 In Claude Code:
 
 ```
-/plugin marketplace add eventually-consistent-code/cairn2
+/plugin marketplace add eventually-consistent-code-org/cairn2
 /plugin install cairn@cairn-dev
 ```
 

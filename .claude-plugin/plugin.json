@@ -6,8 +6,8 @@
     "name": "eventually-consistent-code",
     "url": "https://github.com/eventually-consistent-code"
   },
-  "homepage": "https://github.com/eventually-consistent-code/cairn2",
-  "repository": "https://github.com/eventually-consistent-code/cairn2",
+  "homepage": "https://github.com/eventually-consistent-code-org/cairn2",
+  "repository": "https://github.com/eventually-consistent-code-org/cairn2",
   "license": "MIT",
   "keywords": [
     "claude-code",
