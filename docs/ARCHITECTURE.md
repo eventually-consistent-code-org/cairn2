@@ -7,6 +7,7 @@ drift math, staleness checks. External work trackers are the source of truth
 for work items; git owns prose.
 
 ## Axioms
+<!-- docs: done -->
 
 Cairn's standing rules — the guards, the ADRs, the shared rules every
 verb inherits — are derivations, not reactions. Each names the clause

@@ -248,8 +248,9 @@ describe("axioms (#356)", () => {
     expect(shared).toContain("### Axioms");
     expect(clauseNumbers(shared)).toEqual(clauseNumbers(block));
     for (const title of clauseTitles) expect(shared, title).toContain(`**${title}**`);
-    // The plumbing paragraph is ARCHITECTURE.md's alone.
+    // The plumbing paragraph and the docs writer's marker are ARCHITECTURE.md's alone.
     expect(shared).not.toContain("### Deriving from them");
+    expect(shared).not.toContain("<!-- docs:");
   });
 
   it("the shared rules carry the claims rule, in the skill and in the spine (#394)", () => {

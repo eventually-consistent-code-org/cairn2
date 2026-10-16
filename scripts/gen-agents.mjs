@@ -109,8 +109,12 @@ if (axiomsAt < 0) {
 }
 const axiomsFrom = archMd.slice(axiomsAt + 1);
 const axiomsEnd = axiomsFrom.indexOf("\n##", "## Axioms\n".length);
+// The docs writer's marker under the heading (every ## section in
+// ARCHITECTURE.md carries one, docs-sections.test.ts) is that file's
+// plumbing, not prose; it does not travel.
 const axioms = (axiomsEnd < 0 ? axiomsFrom : axiomsFrom.slice(0, axiomsEnd)).trim()
-  .replace(/^## Axioms/, "### Axioms");
+  .replace(/^## Axioms/, "### Axioms")
+  .replace(/^<!-- docs:.*-->\n/m, "");
 if (!/^\d+\. \*\*/m.test(axioms)) {
   console.error("gen-agents: '## Axioms' section carries no numbered clauses");
   process.exit(1);
