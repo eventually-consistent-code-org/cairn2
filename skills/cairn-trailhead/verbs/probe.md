@@ -15,8 +15,9 @@ feature build: the artifact is disposable, the verdict is not.
    already open for this question (the guard fires), don't start a
    duplicate: re-read `.cairn/probe/<id>.md` and resume from the last
    entry instead.
-2. Mirror comment #1 via `issue_comment`: "Investigation started: <plain
-   summary>" — no jargon, no file paths, just what's being checked and why.
+2. Mirror comment #1 via `issue_comment`: one plain sentence that the
+   investigation has started and what it checks — no jargon, no file
+   paths, just what's being checked and why.
 3. Experiment loop, run HIGHEST-UNCERTAINTY FIRST — the question most
    likely to kill the whole approach gets tested before anything that only
    refines it:

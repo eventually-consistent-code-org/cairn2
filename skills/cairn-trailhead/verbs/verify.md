@@ -69,9 +69,10 @@ Verify the given phase per the `cairn-planning` skill.
    verification leaves the row alone: nothing about a failure is
    verified.
 7. Report pass/fail and next step (`/cairn:ship` or the fixes needed).
-8. FAILED verification routes to `trace` — MANDATORY (#726): open a trace
-   (`trace_start` with the failure as the description), log the failing
-   output as the first `evidence`, and continue there. Never patch-and-
-   rerun inline. Proven-obvious ≤3-line causes may take trace's fast lane —
-   still traced, still mirrored, still closed on a logged repro (the
-   failing command + output as the trace's first `test` entry).
+8. FAILED verification routes to `trace` — MANDATORY (#726): one call,
+   `trace_start(description: <the failure>, evidence: <the failing
+   output>)` — the evidence is the first entry and the started comment
+   posts itself — then continue there. Never patch-and-rerun inline.
+   Proven-obvious ≤3-line causes may take trace's fast lane — still
+   traced, still mirrored, still closed on a logged repro (the failing
+   command + output as the trace's first `test` entry).
