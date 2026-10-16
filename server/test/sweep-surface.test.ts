@@ -251,6 +251,14 @@ describe("axioms (#356)", () => {
     // The plumbing paragraph is ARCHITECTURE.md's alone.
     expect(shared).not.toContain("### Deriving from them");
   });
+
+  it("the shared rules carry the claims rule, in the skill and in the spine (#394)", () => {
+    const title = "**A sentence is not a mechanism.**";
+    const skill = read("skills/cairn-trailhead/SKILL.md");
+    expect(skill.slice(skill.indexOf("## Shared rules"))).toContain(title);
+    const spine = read("harness/AGENTS-cairn.md");
+    expect(spine.slice(spine.indexOf("## Shared rules"))).toContain(title);
+  });
 });
 
 describe("free dials (#332)", () => {

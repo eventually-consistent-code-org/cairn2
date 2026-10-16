@@ -165,4 +165,15 @@ nothing; the prohibitions follow from them, in the guards.
   edits, and obvious implementations stay automatic; the bar is "would a
   peer have wanted a say," not "is this a decision." Vibe mode (default):
   unchanged — judgment calls resolve silently.
+- **A sentence is not a mechanism.** Every modal sentence — *never*,
+  *always*, *only*, *must not*, *imports no*, *is committed*, *no longer* —
+  is one of three things, said in the same change: asserted by a named test
+  or guard, measured as a runtime field the reader sees, or a dated claim; a
+  third party's behavior is always the third. A new check is not done until
+  it was made red once and the way recorded — an empty match is a failure,
+  never a pass. Anything that produces context has readers; list them by
+  role, machine, harness and model — the one with nothing is usually the
+  builder. Anything injected by name must be fetchable by that handle today;
+  carry the source when affordable. Every re-graded field records when it
+  changed. `audit docs` reports the bare ones (#393).
 <!-- cairn:end -->
