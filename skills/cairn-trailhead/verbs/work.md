@@ -108,13 +108,11 @@ pairing overlay applies:
    - `.filter(Boolean)` on collected results — the documented contract
      resolves failed thunks to `null`; keep the filter even though
      schema'd failures usually arrive as values.
-   - The moment dispatch returns, record the run id in BOTH places so it
-     survives /clear: `continuity_checkpoint(source: "tool", notes:
-     "wave <N> run <id>")` AND `outlook_emit(tracker: {open, inProgress,
-     blocked, nextVerb: "work <N> --wave — resume run <id>", asOf})`.
-     The checkpoint source enum is exactly `tool`, `posttooluse`,
-     `precompact`, `waypoint` — a wave dispatch is a `tool` checkpoint,
-     and the wave identity rides in `notes`, never in the source.
+   - The moment dispatch returns, one call records the run id where it
+     survives /clear — the handoff AND the portfolio board:
+     `continuity_checkpoint(wave: { phase: <N>, runId: <id> })`. The
+     server composes the handoff notes and the board's resume line from
+     that pair and emits the outlook snapshot in the same call.
    - Re-entry on an interrupted wave: resume with `resumeFromRunId: <id>`
      instead of redispatching — unchanged agent-call prefixes replay from
      cache, so completed workers are free and only unfinished ones run.
