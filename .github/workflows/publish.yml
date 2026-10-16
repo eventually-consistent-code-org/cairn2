@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   publish:
+    # Stays on a GitHub-hosted runner on purpose: npm trusted publishing
+    # supports GitHub-hosted runners only (docs.npmjs.com/trusted-publishers,
+    # read 2026-10-16: "Self-hosted runners are not currently supported").
     runs-on: ubuntu-latest
     environment: npm-publish # matches the trusted-publisher registration on npmjs.com
     steps:
