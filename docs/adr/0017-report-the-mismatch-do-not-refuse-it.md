@@ -3,6 +3,7 @@
 Date: 2026-09-20. Status: accepted.
 
 removeWhen: the model's own judgment of whether recorded evidence satisfies a declared check agrees with human verification across a milestone, so the side-by-side reading at verification can be delegated. Until then the mismatch is reported, not refused.
+derives: axiom 4 (recorded-run); axiom 2 (mechanism-vs-judgment)
 
 ## Context
 

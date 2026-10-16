@@ -3,6 +3,7 @@
 Date: 2026-09-20. Status: accepted.
 
 removeWhen: never — a guard that cannot fail is decoration whoever writes it. The open gap it names closes when the declared-verification gate resolves each command to real tests; the principle stays.
+derives: axiom 4 (recorded-run)
 
 ## Context
 

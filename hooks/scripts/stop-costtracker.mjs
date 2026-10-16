@@ -29,6 +29,7 @@
  *   written before 2026-10-13 priced every Opus at $15/$75 and every
  *   Sonnet-shaped id at $3/$15, so their est_cost_usd overstates 5.5-era
  *   Opus spend ~3.75x and Sonnet ~1.5x; they are not rewritten.
+ * derives: axiom 4 (recorded-run); axiom 1 (tracker-truth)
  * Author(s): John Reed
  */
 

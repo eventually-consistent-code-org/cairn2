@@ -3,6 +3,7 @@
 Status: accepted (v2, 2026-07-24)
 
 removeWhen: every supported wiki product accepts markdown on its publish API and renders it faithfully, so no adapter needs a converter.
+derives: axiom 2 (mechanism-vs-judgment)
 
 ## Context
 

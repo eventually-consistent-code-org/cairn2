@@ -14,6 +14,7 @@
  *   (2.1.222) confines edits and Bash to the native worktree. Still open:
  *   the fallback worktree path, default-branch pushes in auto mode
  *   (allowed by default), the other harnesses.
+ * derives: axiom 5 (owner-ground); axiom 4 (recorded-run)
  * Author(s): John Reed
  */
 

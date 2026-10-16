@@ -177,6 +177,82 @@ describe("rule coverage candidate cap (#207)", () => {
   });
 });
 
+describe("axioms (#356)", () => {
+  // Pinned on purpose, like the tool count: a clause added or dropped without
+  // moving this number fails here. Later issues cite the clauses by number, so
+  // the numbering is stable and an edit to it is a decision someone records.
+  const AXIOM_COUNT = 6;
+
+  const arch = read("docs/ARCHITECTURE.md");
+  const at = arch.indexOf("\n## Axioms\n");
+  const next = at < 0 ? -1 : arch.indexOf("\n##", at + "\n## Axioms\n".length);
+  const block = at < 0 ? "" : arch.slice(at, next < 0 ? undefined : next);
+  const clauseNumbers = (text: string) => [...text.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
+  const clauseTitles = [...block.matchAll(/^\d+\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
+
+  const adrs = readdirSync(join(ROOT, "docs/adr")).filter((f) => /^00\d\d-.*\.md$/.test(f));
+  const hooks = [
+    "pretooluse-runguard", "pretooluse-harnessguard", "pretooluse-leakguard",
+    "posttooluse-loopcheck", "posttooluse-observe", "stop-costtracker",
+    "sessionstart-continuity", "posttooluse-breadcrumb",
+  ].map((h) => `hooks/scripts/${h}.mjs`);
+  /** The first block comment of a hook script -- its header. */
+  const header = (rel: string) => /\/\*\*[\s\S]*?\*\//.exec(read(rel))?.[0] ?? "";
+  const derivesLine = (text: string) => /^\s*(?:\*\s*)?derives:\s*(.+)$/m.exec(text)?.[1];
+  const cited = (line: string) => [...line.matchAll(/\baxiom\s+(\d+)\b/g)].map((m) => Number(m[1]));
+
+  it(`ARCHITECTURE.md opens with exactly ${AXIOM_COUNT} numbered axioms`, () => {
+    expect(at).toBeGreaterThan(-1);
+    expect(clauseNumbers(block)).toEqual(Array.from({ length: AXIOM_COUNT }, (_, i) => i + 1));
+    expect(clauseTitles).toHaveLength(AXIOM_COUNT);
+  });
+
+  it("every ADR carries derives: directly after its removeWhen: line", () => {
+    expect(adrs.length).toBeGreaterThan(0);
+    const missing = adrs.filter((f) => {
+      const lines = read(`docs/adr/${f}`).split("\n");
+      const i = lines.findIndex((l) => l.startsWith("removeWhen:"));
+      return i < 0 || !/^derives: \S/.test(lines[i + 1] ?? "");
+    });
+    expect(missing).toEqual([]);
+  });
+
+  it("every hook script header carries derives:", () => {
+    const missing = hooks.filter((h) => !existsSync(join(ROOT, h)) || !derivesLine(header(h)));
+    expect(missing).toEqual([]);
+  });
+
+  it("every derives: line names an existing axiom, or says convention and why", () => {
+    const bad: string[] = [];
+    for (const f of [...adrs.map((a) => `docs/adr/${a}`), ...hooks]) {
+      const line = derivesLine(f.startsWith("hooks/") ? header(f) : read(f)) ?? "";
+      const nums = cited(line);
+      const convention = /^convention\s+[—-]\s+\S/.test(line);
+      if (convention ? nums.length > 0 : nums.length === 0) bad.push(`${f}: ${line}`);
+      if (nums.some((n) => n < 1 || n > AXIOM_COUNT)) bad.push(`${f}: ${line}`);
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it("every axiom is cited at least once, by an ADR or a hook", () => {
+    const seen = new Set<number>();
+    for (const f of adrs) for (const n of cited(derivesLine(read(`docs/adr/${f}`)) ?? "")) seen.add(n);
+    for (const h of hooks) for (const n of cited(derivesLine(header(h)) ?? "")) seen.add(n);
+    const uncited = Array.from({ length: AXIOM_COUNT }, (_, i) => i + 1).filter((n) => !seen.has(n));
+    expect(uncited).toEqual([]);
+  });
+
+  it("the harness spine carries the same axioms under Shared rules", () => {
+    const spine = read("harness/AGENTS-cairn.md");
+    const shared = spine.slice(spine.indexOf("## Shared rules"));
+    expect(shared).toContain("### Axioms");
+    expect(clauseNumbers(shared)).toEqual(clauseNumbers(block));
+    for (const title of clauseTitles) expect(shared, title).toContain(`**${title}**`);
+    // The plumbing paragraph is ARCHITECTURE.md's alone.
+    expect(shared).not.toContain("### Deriving from them");
+  });
+});
+
 describe("free dials (#332)", () => {
   it("the routing rubric carries an effort column and a rule against the workflow model override", () => {
     const skill = read("skills/cairn-planning/SKILL.md");

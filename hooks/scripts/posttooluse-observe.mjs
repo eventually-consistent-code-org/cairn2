@@ -20,6 +20,7 @@
  *   (#324): a PostToolUseFailure with is_interrupt true is the owner hitting
  *   Escape, not the tool failing -- that row keeps error: false and carries
  *   interrupted: true instead, so retro never reads a cancellation as churn.
+ * derives: axiom 4 (recorded-run)
  * Author(s): John Reed
  */
 

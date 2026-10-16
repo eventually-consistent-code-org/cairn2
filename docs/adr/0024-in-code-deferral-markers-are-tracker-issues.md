@@ -3,6 +3,7 @@
 Date: 2026-10-14. Status: accepted.
 
 removeWhen: the tracker or the platform turns source deferral markers into tracked items on its own (a native TODO-to-issue sync the project has enabled), so cairn's grep, dedup key and re-run matching duplicate a mechanism the team already looks at.
+derives: axiom 1 (tracker-truth)
 
 ## Context
 

@@ -3,6 +3,7 @@
 Date: 2026-10-14. Status: accepted.
 
 removeWhen: the peers roster is composed by lab at dispatch time — one seat per lab, chosen from whatever CLIs are on the machine — so the count is structural and no seat can speak for a lab already seated; or every seated CLI exposes the model it will run before the run, so the lab needs no pin to be known.
+derives: axiom 4 (recorded-run); axiom 5 (owner-ground)
 
 ## Context
 

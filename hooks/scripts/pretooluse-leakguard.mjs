@@ -16,6 +16,7 @@
  * removeWhen: never for the scan itself; this hook can retire if the
  *   platform offers a pre-commit content policy cairn can register
  *   patterns with.
+ * derives: axiom 1 (tracker-truth)
  * Author(s): John Reed
  */
 

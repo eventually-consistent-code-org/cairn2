@@ -3,6 +3,7 @@
 Status: accepted (v2, 2026-07-24)
 
 removeWhen: the team space stops organizing work as one top-level folder per project. This mirrors a house convention, not a model or platform limit.
+derives: convention — a wiki layout choice mirroring the space convention; no clause decides where pages sit
 
 ## Context
 

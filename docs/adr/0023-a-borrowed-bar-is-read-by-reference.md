@@ -3,6 +3,7 @@
 Date: 2026-10-14. Status: accepted.
 
 removeWhen: the platform lets a plugin declare a soft dependency on a user-installed skill and compose it into an agent at load — then the agent's look-for-and-read step retires and the seat records stay; or the upstream bar is published as a format seats can load directly, so paraphrase stops being the integration.
+derives: axiom 6 (surface-is-rent)
 
 ## Context
 

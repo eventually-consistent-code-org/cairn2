@@ -3,6 +3,7 @@
 Date: 2026-09-11. Status: accepted.
 
 removeWhen: the server-validated dose can go once models reliably size a viewpoint brief themselves, shown by minimal and full doses of the same seat producing equivalent findings across a milestone. Seats-as-data itself is permanent.
+derives: axiom 2 (mechanism-vs-judgment)
 
 ## Context
 

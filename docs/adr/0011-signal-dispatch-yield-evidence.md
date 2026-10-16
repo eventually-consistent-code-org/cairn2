@@ -3,6 +3,7 @@
 Date: 2026-09-11. Status: accepted.
 
 removeWhen: running the full panel on every diff costs little enough in tokens and time that gating saves nothing worth the risk of muting a seat; then the dial stays at off and the yield gate can be retired.
+derives: axiom 2 (mechanism-vs-judgment); axiom 4 (recorded-run)
 
 ## Context
 

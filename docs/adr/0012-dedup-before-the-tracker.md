@@ -3,6 +3,7 @@
 Date: 2026-09-11. Status: accepted.
 
 removeWhen: one call can produce the whole panel's findings already merged, matching this engine's output on a recorded corpus. While seats run independently, the duplicates are structural and dedup stays.
+derives: axiom 1 (tracker-truth)
 
 ## Context
 

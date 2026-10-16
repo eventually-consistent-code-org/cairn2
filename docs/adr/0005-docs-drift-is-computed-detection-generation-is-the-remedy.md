@@ -3,6 +3,7 @@
 Date: 2026-09-01. Status: accepted.
 
 removeWhen: never for detection — a deterministic staleness signal stays cheap and useful at any model strength. The ship-time generation step can go once the model keeps changelog and docs current unprompted, shown by a milestone where the drift report flags nothing with generation switched off.
+derives: axiom 2 (mechanism-vs-judgment); axiom 4 (recorded-run)
 
 ## Context
 

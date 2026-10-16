@@ -3,6 +3,7 @@
 Date: 2026-10-02. Status: accepted.
 
 removeWhen: the durable per-task outcome record lands and both the close and the ledger append write into it directly, leaving the bridge receipt nothing to carry.
+derives: axiom 4 (recorded-run); axiom 1 (tracker-truth)
 
 ## Context
 

@@ -43,6 +43,7 @@
  *   Still open: auto mode's steerable classifier (default since 2.1.284),
  *   non-sandboxed sessions, Edit/Write/MCP outside the sandbox, the seven
  *   other harnesses.
+ * derives: axiom 5 (owner-ground); axiom 3 (data-not-directive)
  * Author(s): John Reed
  *
  * Coverage: hooks/hooks.json sends this guard Edit, Write, NotebookEdit,

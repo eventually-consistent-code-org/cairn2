@@ -3,6 +3,7 @@
 Date: 2026-09-13. Status: accepted.
 
 removeWhen: never — one path from a finding to the tracker is a surface-discipline rule, not a capability workaround.
+derives: axiom 6 (surface-is-rent)
 
 ## Context
 

@@ -15,6 +15,7 @@
  *   fresh start natively. The compaction half of this clause was met by
  *   Claude Code 2.1.288-2.1.293 (the 2026-10-13 platform survey) and the
  *   hook stopped speaking after compaction; the empty-session half remains.
+ * derives: axiom 6 (surface-is-rent)
  * Author(s): John Reed
  */
 

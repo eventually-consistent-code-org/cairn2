@@ -19,6 +19,7 @@
  *
  * removeWhen: the platform detects and surfaces repeated identical tool
  *   calls itself.
+ * derives: axiom 2 (mechanism-vs-judgment)
  * Author(s): John Reed
  */
 

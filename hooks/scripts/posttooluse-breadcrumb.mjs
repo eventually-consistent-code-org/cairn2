@@ -8,6 +8,7 @@
  *   since PostToolUse can fire many times a minute. Fire-and-forget: any
  *   error, or no handoff to patch, is a silent no-op -- a hook must never be
  *   visible to the user or block their session.
+ * derives: axiom 4 (recorded-run)
  * Author(s): John Reed
  */
 
