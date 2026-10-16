@@ -8,7 +8,7 @@ and what happens when a claim is wrong…
 
 **Maintenance contract:** this is a standing page, not launch copy.
 Every competitor row carries a *last verified* date. If a row is stale
-or wrong, [open an issue](https://github.com/eventually-consistent-code/cairn2/issues)
+or wrong, [open an issue](https://github.com/eventually-consistent-code-org/cairn2/issues)
 — a corrected row with a fresh date beats a flattering one. We never
 repeat a competitor's unverifiable marketing claims, and we expect the
 same courtesy.
@@ -86,7 +86,7 @@ inside them — the installer wires Cursor explicitly. *2026-09-10.*
 ## Try it
 
 ```
-/plugin marketplace add eventually-consistent-code/cairn2
+/plugin marketplace add eventually-consistent-code-org/cairn2
 /plugin install cairn
 ```
 

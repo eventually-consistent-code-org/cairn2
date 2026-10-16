@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pushes to main run on the Little-CI fleet (persistent self-hosted
+    # arm64 runners, org-scoped). Pull requests stay on GitHub-hosted
+    # runners: this repo is public, and PR code from a fork must never
+    # execute on a persistent runner.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'little-ci' }}
     steps:
       - uses: actions/checkout@v4
         with:

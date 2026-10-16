@@ -13,7 +13,7 @@ Most people want one of these installs instead of this package directly:
 
 Running it directly: `npx -y @eventually-consistent/cairn-server` — expects
 a `cairn.json` in the project directory (`CLAUDE_PROJECT_DIR` or cwd); see
-the [quickstart](https://github.com/eventually-consistent-code/cairn2/blob/main/docs/00-quickstart.md).
+the [quickstart](https://github.com/eventually-consistent-code-org/cairn2/blob/main/docs/00-quickstart.md).
 
 Everything below is the developer reference. Design spec:
 `docs/superpowers/specs/2026-07-12-cairn-2-design.md`.

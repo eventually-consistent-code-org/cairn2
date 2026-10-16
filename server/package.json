@@ -23,7 +23,7 @@
   "homepage": "https://www.eventually-consistent.io/projects/cairn/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eventually-consistent-code/cairn2.git",
+    "url": "git+https://github.com/eventually-consistent-code-org/cairn2.git",
     "directory": "server"
   },
   "scripts": {

@@ -9,7 +9,7 @@ cairn itself. This page is the full, unflattering record: every number,
 every degradation, every finding that died under scrutiny, and the one
 recommendation the tool argued against and lost. The raw run record
 lives in the repo's planning history; the tracker arc is public
-(issues [#70](https://github.com/eventually-consistent-code/cairn2/issues/70)–[#76](https://github.com/eventually-consistent-code/cairn2/issues/76)).
+(issues [#70](https://github.com/eventually-consistent-code-org/cairn2/issues/70)–[#76](https://github.com/eventually-consistent-code-org/cairn2/issues/76)).
 
 ## The setup
 
@@ -104,7 +104,7 @@ tracked work alongside the rest.
 ## What shipped
 
 All six dispositions were approved on 2026-08-12 and landed as issues
-[#71](https://github.com/eventually-consistent-code/cairn2/issues/71)–[#76](https://github.com/eventually-consistent-code/cairn2/issues/76)
+[#71](https://github.com/eventually-consistent-code-org/cairn2/issues/71)–[#76](https://github.com/eventually-consistent-code-org/cairn2/issues/76)
 in a follow-up phase, verified and closed the next day: the ten code
 defects fixed with tests, the human-first error renderer, the
 positioning realignment, the peer scratch-directory containment, the
@@ -122,7 +122,7 @@ where the tool lost the argument. That's what this page is…
 Run it on your own project:
 
 ```
-/plugin marketplace add eventually-consistent-code/cairn2
+/plugin marketplace add eventually-consistent-code-org/cairn2
 /plugin install cairn
 ```
 

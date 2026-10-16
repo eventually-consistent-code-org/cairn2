@@ -49,7 +49,11 @@ concurrency:
 
 jobs:
   behavioral-evals:
-    runs-on: ubuntu-latest
+    # Nightly, dispatch and push runs go to the Little-CI fleet (persistent
+    # self-hosted arm64 runners, org-scoped). Pull requests stay on
+    # GitHub-hosted runners: public repo, fork PR code never lands on a
+    # persistent runner.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'little-ci' }}
     # Allowed to fail by design — see the header comment. The step's own
     # exit code (1 below threshold, 2 cost ceiling) still shows in the log
     # and the artifact carries the per-case scores.

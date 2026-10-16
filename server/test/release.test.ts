@@ -41,7 +41,7 @@ function marketplaceJson(source: unknown): string {
 }
 
 function pinned(ref: string): unknown {
-  return { source: "github", repo: "eventually-consistent-code/cairn2", ref };
+  return { source: "github", repo: "eventually-consistent-code-org/cairn2", ref };
 }
 
 /** Build a throwaway repo: three version files + marketplace pin + CHANGELOG. */

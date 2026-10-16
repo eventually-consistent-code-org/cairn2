@@ -137,7 +137,7 @@ public, with the numbers attached.
 Run it on your own project:
 
 ```
-/plugin marketplace add eventually-consistent-code/cairn2
+/plugin marketplace add eventually-consistent-code-org/cairn2
 /plugin install cairn
 ```
 
