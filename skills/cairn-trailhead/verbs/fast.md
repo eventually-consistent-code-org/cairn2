@@ -10,7 +10,10 @@ tracker-first: every change is visible where the team looks.
 1. Guardrail first: if the change plausibly touches >3 files or needs
    design judgment, STOP and suggest `/cairn:plan` — before creating
    anything.
-2. `issue_create(title: <change>, labels: ["fast"])`.
+2. `issue_create(title: <change>, labels: ["fast"], claim: { task: <one
+   line> })` — one call creates the issue and picks it up: in_progress,
+   claim comment composed and posted by the server, clock started, base
+   commit read from HEAD; it returns `claimAt` and `baseCommit`.
 3. Make the change. The moment it grows past 3 files: stop, report, leave
    the issue open with a note, suggest `/cairn:plan`.
 4. Tests relevant to the touched files pass → ONE atomic commit

@@ -129,18 +129,20 @@ pairing overlay applies:
    assigned to someone who is not you (compare against `user.handle` in
    cairn.json, only when it's set there — if unset, there are no ownership
    checks), say so and skip unless the user overrides.
-4. Before starting an issue: record `git rev-parse HEAD` as this issue's
-   `baseCommit` (it feeds the ledger in step 7). Then ONE call claims it:
-   `issue_update(id, claim: { baseCommit, wave, task, verifyCommand })` —
-   the server moves it to in_progress (assignee from `user.handle` when
-   set, so teammates see who holds it), composes and posts the claim
-   comment, and starts the clock; it returns `claimAt`. Fill the block
-   with which wave and PLAN.md task this is and the task's declared
-   `verify:` command (quoted back before the work, so the bar is visible
-   up front, not negotiated after it); the server adds the base commit as
-   a short ref. `task` and `wave` are plain language (leak-guard
-   discipline, same as `trace`) — never post a separate claim comment,
-   the server's is the one the measurement reads.
+4. Before starting an issue, ONE call claims it:
+   `issue_update(id, claim: { wave, task, verifyCommand })` — the server
+   moves it to in_progress (assignee from `user.handle` when set, so
+   teammates see who holds it), reads HEAD as the issue's base commit,
+   composes and posts the claim comment, and starts the clock; it
+   returns `claimAt` and `baseCommit` (keep the latter — it feeds the
+   ledger in step 7). Fill the block with which wave and PLAN.md task
+   this is and the task's declared `verify:` command (quoted back before
+   the work, so the bar is visible up front, not negotiated after it);
+   the server adds the base commit as a short ref. Pass `baseCommit` in
+   the block only when the work starts from a commit other than HEAD.
+   `task` and `wave` are plain language (leak-guard discipline, same as
+   `trace`) — never post a separate claim comment, the server's is the
+   one the measurement reads.
    Then `context_set(phase: <N>, issueId: id)`.
 5. Do the work the issue + PLAN.md describe. Track in-session with TaskCreate
    where the harness offers it (newer models ship the task tools default
