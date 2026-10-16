@@ -4,10 +4,34 @@ export declare function bannerPath(projectDir: string): string;
 /** The Stop hook's cumulative cost log (stop-costtracker.mjs writes it; the
  *  token estimator reads it). Scheme mirrored in hooks/scripts/lib.mjs. */
 export declare function metricsPath(projectDir: string): string;
+/** The one definition of who wrote a handoff -- the MCP input schema in
+ *  index.ts imports this rather than restating it (#370 collapsed the copy). */
+export declare const HandoffSourceEnum: z.ZodEnum<{
+    tool: "tool";
+    posttooluse: "posttooluse";
+    precompact: "precompact";
+    waypoint: "waypoint";
+}>;
+export type HandoffSource = z.infer<typeof HandoffSourceEnum>;
+/**
+ * A wave dispatch, as the Workflow path in work.md hands it over (#370):
+ * the phase the wave belongs to and the run id the harness returned. The
+ * server composes every string that carries the id from this one pair,
+ * so the handoff notes and the outlook nextVerb can never disagree.
+ */
+export interface WaveRef {
+    phase: number;
+    runId: string;
+}
+/** The handoff `notes` line for a wave checkpoint. */
+export declare function waveNotes(wave: WaveRef): string;
+/** The outlook `nextVerb` for a wave checkpoint -- what a fresh session
+ *  types to pick the run up where it stopped. */
+export declare function waveNextVerb(wave: WaveRef): string;
 export interface Handoff {
     version: 1;
     created: string;
-    source: "tool" | "posttooluse" | "precompact" | "waypoint";
+    source: HandoffSource;
     project: string;
     phase?: {
         number: number;

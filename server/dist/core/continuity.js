@@ -27,10 +27,22 @@ export function metricsPath(projectDir) {
     const { base, hash } = pathHash(projectDir);
     return join(homedir(), ".cairn", "metrics", `${base}-${hash}.jsonl`);
 }
+/** The one definition of who wrote a handoff -- the MCP input schema in
+ *  index.ts imports this rather than restating it (#370 collapsed the copy). */
+export const HandoffSourceEnum = z.enum(["tool", "posttooluse", "precompact", "waypoint"]);
+/** The handoff `notes` line for a wave checkpoint. */
+export function waveNotes(wave) {
+    return `wave ${wave.phase} run ${wave.runId}`;
+}
+/** The outlook `nextVerb` for a wave checkpoint -- what a fresh session
+ *  types to pick the run up where it stopped. */
+export function waveNextVerb(wave) {
+    return `work ${wave.phase} --wave — resume run ${wave.runId}`;
+}
 export const HandoffSchema = z.object({
     version: z.literal(1),
     created: z.string(),
-    source: z.enum(["tool", "posttooluse", "precompact", "waypoint"]),
+    source: HandoffSourceEnum,
     project: z.string(),
     // Widened for decimal phase numbers -- same rule 1 as
     // isValidPhaseNumber: integers 1..99, or N.1-N.9 with N=1..98.

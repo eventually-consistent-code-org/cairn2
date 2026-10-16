@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { type Handoff, type WaveRef } from "./continuity.js";
 /**
  * The outlook snapshot (#55/#88): a compact, machine-readable "where this
  * project stands" written as a side effect of state-changing tool calls.
@@ -42,18 +43,50 @@ export declare function outlookMirrorPath(projectDir: string, home?: string): st
 /** The in-repo copy -- travels with the project, diffable when committed. */
 export declare function outlookLocalPath(projectDir: string): string;
 /**
+ * The tracker block a wave checkpoint composes server-side (#370). The
+ * server has no network at emit time, so the counts it "already can"
+ * derive are the ones the previous snapshot carried; a project with no
+ * prior block gets zeros. asOf is this emit, nextVerb is the resume line.
+ */
+export declare function waveTracker(previous: OutlookTracker | undefined, wave: WaveRef, now?: string): OutlookTracker;
+/**
  * Derives a fresh snapshot and dual-writes it (in-repo + machine mirror),
  * both atomic. Mirrors writeHandoff's guards: unregistered projects skip
- * silently (CONFIG_MISSING), and the previous snapshot's verb-supplied
- * `tracker` block carries forward unless this emit brings a newer one --
- * the outlook cousin of the handoff's monotonic-richness rule.
+ * silently (CONFIG_MISSING, returns null), and the previous snapshot's
+ * verb-supplied `tracker` block carries forward unless this emit brings a
+ * newer one -- the outlook cousin of the handoff's monotonic-richness rule.
+ * A `wave` patch composes that newer block itself (waveTracker).
  *
  * Callers treat this as fire-and-forget; the refreshHandoff wrapper (and
- * any other call site) swallows what this throws.
+ * any other call site) swallows what this throws. The written snapshot
+ * comes back for the one caller that reports it (waveCheckpoint).
  */
 export declare function emitOutlook(projectDir: string, patch?: {
     tracker?: OutlookTracker;
-}, home?: string): void;
+    wave?: WaveRef;
+}, home?: string): OutlookSnapshot | null;
+export interface WaveCheckpointResult {
+    handoff: Handoff | null;
+    stale: boolean;
+    outlook: {
+        emitted: boolean;
+        tracker?: OutlookTracker;
+        error?: string;
+    };
+}
+/**
+ * The wave fold (#370): one call writes the handoff AND emits the outlook
+ * snapshot, both carrying the same run id, so a wave can never be
+ * resumable from the handoff yet invisible on the board (or the reverse).
+ * The server composes both strings from the one WaveRef; a caller's own
+ * notes ride behind the composed line. Source is always "tool" -- a wave
+ * dispatch is a tool checkpoint and the wave identity lives in notes.
+ *
+ * Fail-open on the outlook half: the handoff is the resume path and must
+ * land; a broken snapshot never blocks it and comes back as emitted:false
+ * with the reason, so the caller reads a measurement, not a claim.
+ */
+export declare function waveCheckpoint(projectDir: string, patch: Partial<Handoff>, wave: WaveRef, home?: string): WaveCheckpointResult;
 /** Reads a project's mirror snapshot; corrupt or missing reads as null. */
 export declare function readOutlook(projectDir: string, home?: string): OutlookSnapshot | null;
 export interface OutlookCard {

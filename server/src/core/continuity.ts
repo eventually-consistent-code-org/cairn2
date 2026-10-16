@@ -35,10 +35,37 @@ export function metricsPath(projectDir: string): string {
   return join(homedir(), ".cairn", "metrics", `${base}-${hash}.jsonl`);
 }
 
+/** The one definition of who wrote a handoff -- the MCP input schema in
+ *  index.ts imports this rather than restating it (#370 collapsed the copy). */
+export const HandoffSourceEnum = z.enum(["tool", "posttooluse", "precompact", "waypoint"]);
+export type HandoffSource = z.infer<typeof HandoffSourceEnum>;
+
+/**
+ * A wave dispatch, as the Workflow path in work.md hands it over (#370):
+ * the phase the wave belongs to and the run id the harness returned. The
+ * server composes every string that carries the id from this one pair,
+ * so the handoff notes and the outlook nextVerb can never disagree.
+ */
+export interface WaveRef {
+  phase: number;
+  runId: string;
+}
+
+/** The handoff `notes` line for a wave checkpoint. */
+export function waveNotes(wave: WaveRef): string {
+  return `wave ${wave.phase} run ${wave.runId}`;
+}
+
+/** The outlook `nextVerb` for a wave checkpoint -- what a fresh session
+ *  types to pick the run up where it stopped. */
+export function waveNextVerb(wave: WaveRef): string {
+  return `work ${wave.phase} --wave — resume run ${wave.runId}`;
+}
+
 export interface Handoff {
   version: 1;
   created: string;
-  source: "tool" | "posttooluse" | "precompact" | "waypoint";
+  source: HandoffSource;
   project: string;
   phase?: { number: number; slug: string };
   issue?: string;
@@ -57,7 +84,7 @@ export interface Handoff {
 export const HandoffSchema: z.ZodType<Handoff> = z.object({
   version: z.literal(1),
   created: z.string(),
-  source: z.enum(["tool", "posttooluse", "precompact", "waypoint"]),
+  source: HandoffSourceEnum,
   project: z.string(),
   // Widened for decimal phase numbers -- same rule 1 as
   // isValidPhaseNumber: integers 1..99, or N.1-N.9 with N=1..98.

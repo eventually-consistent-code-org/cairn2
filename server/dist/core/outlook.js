@@ -10,6 +10,7 @@ import { projectStatus } from "../planning/status.js";
 import { sessionLandscape } from "../sessions/store.js";
 import { metricsSegments } from "./metrics.js";
 import { readRegistry } from "./registry.js";
+import { readHandoff, writeHandoff, waveNotes, waveNextVerb, } from "./continuity.js";
 export const OutlookSnapshotSchema = z.object({
     version: z.literal(1),
     ts: z.string(),
@@ -77,14 +78,31 @@ function gitHead(projectDir) {
     }
 }
 /**
+ * The tracker block a wave checkpoint composes server-side (#370). The
+ * server has no network at emit time, so the counts it "already can"
+ * derive are the ones the previous snapshot carried; a project with no
+ * prior block gets zeros. asOf is this emit, nextVerb is the resume line.
+ */
+export function waveTracker(previous, wave, now = new Date().toISOString()) {
+    return {
+        open: previous?.open ?? 0,
+        inProgress: previous?.inProgress ?? 0,
+        blocked: previous?.blocked ?? 0,
+        nextVerb: waveNextVerb(wave),
+        asOf: now,
+    };
+}
+/**
  * Derives a fresh snapshot and dual-writes it (in-repo + machine mirror),
  * both atomic. Mirrors writeHandoff's guards: unregistered projects skip
- * silently (CONFIG_MISSING), and the previous snapshot's verb-supplied
- * `tracker` block carries forward unless this emit brings a newer one --
- * the outlook cousin of the handoff's monotonic-richness rule.
+ * silently (CONFIG_MISSING, returns null), and the previous snapshot's
+ * verb-supplied `tracker` block carries forward unless this emit brings a
+ * newer one -- the outlook cousin of the handoff's monotonic-richness rule.
+ * A `wave` patch composes that newer block itself (waveTracker).
  *
  * Callers treat this as fire-and-forget; the refreshHandoff wrapper (and
- * any other call site) swallows what this throws.
+ * any other call site) swallows what this throws. The written snapshot
+ * comes back for the one caller that reports it (waveCheckpoint).
  */
 export function emitOutlook(projectDir, patch, home) {
     try {
@@ -92,7 +110,7 @@ export function emitOutlook(projectDir, patch, home) {
     }
     catch (e) {
         if (e instanceof CairnError && e.code === "CONFIG_MISSING")
-            return;
+            return null;
         throw e;
     }
     const abs = resolve(projectDir);
@@ -114,10 +132,41 @@ export function emitOutlook(projectDir, patch, home) {
             issueCount: p.issues.length,
         })),
         sessions: landscape.openByKind,
-        tracker: patch?.tracker ?? previous?.tracker,
+        tracker: patch?.wave
+            ? waveTracker(previous?.tracker, patch.wave)
+            : patch?.tracker ?? previous?.tracker,
     };
     atomicWrite(mirror, snapshot);
     atomicWrite(outlookLocalPath(projectDir), snapshot);
+    return snapshot;
+}
+/**
+ * The wave fold (#370): one call writes the handoff AND emits the outlook
+ * snapshot, both carrying the same run id, so a wave can never be
+ * resumable from the handoff yet invisible on the board (or the reverse).
+ * The server composes both strings from the one WaveRef; a caller's own
+ * notes ride behind the composed line. Source is always "tool" -- a wave
+ * dispatch is a tool checkpoint and the wave identity lives in notes.
+ *
+ * Fail-open on the outlook half: the handoff is the resume path and must
+ * land; a broken snapshot never blocks it and comes back as emitted:false
+ * with the reason, so the caller reads a measurement, not a claim.
+ */
+export function waveCheckpoint(projectDir, patch, wave, home) {
+    const composed = waveNotes(wave);
+    const own = patch.notes?.trim() ?? "";
+    const notes = own === "" ? composed : `${composed} — ${own}`;
+    writeHandoff(projectDir, { ...patch, notes, source: "tool" });
+    const read = readHandoff(projectDir);
+    let outlook;
+    try {
+        const snapshot = emitOutlook(projectDir, { wave }, home);
+        outlook = snapshot ? { emitted: true, tracker: snapshot.tracker } : { emitted: false };
+    }
+    catch (e) {
+        outlook = { emitted: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    return { handoff: read?.handoff ?? null, stale: read?.stale ?? false, outlook };
 }
 /** Reads a project's mirror snapshot; corrupt or missing reads as null. */
 export function readOutlook(projectDir, home) {

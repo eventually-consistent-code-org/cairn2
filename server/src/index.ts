@@ -25,7 +25,7 @@ import {
   readRegistry,
   registerProject,
 } from "./core/registry.js";
-import { emitOutlook, outlookAggregate } from "./core/outlook.js";
+import { emitOutlook, outlookAggregate, waveCheckpoint } from "./core/outlook.js";
 import type { OutlookTracker } from "./core/outlook.js";
 import { makeTracker } from "./tracker/registry.js";
 import { CachedTracker } from "./tracker/cached.js";
@@ -104,6 +104,7 @@ import {
 import { checkCardStaleness } from "./memory/staleness.js";
 import {
   readHandoff, writeHandoff, clearHandoff, metricsPath, validateArtifacts,
+  HandoffSourceEnum,
 } from "./core/continuity.js";
 import { summarise, sessionSpans, type MetricsRow } from "./context/meter.js";
 import { thresholdDrift, type ThresholdDrift } from "./context/threshold.js";
@@ -182,12 +183,7 @@ import {
 
 // Widened (CRN-26): canonical three or a backend-defined custom state name.
 const StateEnum = z.string().min(1);
-const HandoffSourceEnum = z.enum([
-  "tool",
-  "posttooluse",
-  "precompact",
-  "waypoint",
-]);
+// HandoffSourceEnum lives in core/continuity.ts (one definition, #370).
 // Phase numbers are widened to accept decimals (integers 1..99, or exactly
 // one fractional digit .1-.9 with integer part 1..98 -- lets a phase slot in
 // (1.5) between 1 and 2 without renumbering the roadmap). Deliberately NOT a
@@ -1652,7 +1648,7 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Write/refresh the session handoff (checkpoint) for this project",
+        "Write/refresh the session handoff; wave {phase, runId} also emits the outlook snapshot",
       inputSchema: z.object({
         source: HandoffSourceEnum.optional(),
         phase: HandoffPhaseRefSchema.optional(),
@@ -1677,9 +1673,13 @@ export function buildServer(deps: {
           requirements: z.string().default(""),
           skills: z.array(z.string()).default([]),
         }).optional(),
+        wave: z.object({ phase: z.number(), runId: z.string() }).optional(),
       }),
     },
-    wrap((a: Partial<Handoff> & { artifacts?: Partial<CheckpointArtifacts> }) => {
+    wrap((a: Partial<Handoff> & {
+      artifacts?: Partial<CheckpointArtifacts>;
+      wave?: { phase: number; runId: string };
+    }) => {
       // writeHandoff doesn't independently validate -- unlike phaseDirName/
       // ensurePhase, there's no downstream CairnError to catch a bad phase
       // number here, so check explicitly before it ever reaches disk.
@@ -1694,6 +1694,17 @@ export function buildServer(deps: {
       // behaviour -- but a caller that passes some must pass enough.
       if (a.artifacts) validateArtifacts(a.artifacts);
       const d = dir();
+      // The wave fold (#370): a wave dispatch checkpoints the handoff AND
+      // emits the outlook snapshot in this one call, both strings composed
+      // server-side from {phase, runId}. Without `wave`, the plain path
+      // below is byte for byte what it was.
+      if (a.wave) {
+        const { wave, ...patch } = a;
+        if (!isValidPhaseNumber(wave.phase)) {
+          throw new CairnError("CONFIG_INVALID", PHASE_NUMBER_ERROR(wave.phase));
+        }
+        return waveCheckpoint(d, patch, wave);
+      }
       writeHandoff(d, { ...a, source: a.source ?? "tool" });
       return readHandoff(d);
     }),
@@ -2740,11 +2751,9 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Explicit outlook snapshot emit for lifecycle gates (verify/ship/summit). " +
-        "Re-derives the local snapshot and optionally attaches a verb-supplied tracker block " +
-        "(open/inProgress/blocked counts, nextVerb, asOf) that carries forward through later " +
-        "plain emits. Ship/summit call this BEFORE continuity_clear — the snapshot outlives " +
-        "the handoff",
+        "Outlook snapshot emit for lifecycle gates (verify/ship/summit); a tracker block " +
+        "passed here carries forward through later plain emits. Call BEFORE " +
+        "continuity_clear — the snapshot outlives the handoff",
       inputSchema: z.object({
         tracker: z
           .object({

@@ -6,7 +6,9 @@ import { join } from "node:path";
 import {
   OutlookSnapshotSchema, emitOutlook, metricsPathFor, outlookAggregate,
   outlookArtifactPath, outlookLocalPath, outlookMirrorPath, readOutlook,
+  waveCheckpoint, waveTracker,
 } from "../src/core/outlook.js";
+import { handoffPath, readHandoff } from "../src/core/continuity.js";
 
 const dirs: string[] = [];
 const dir = (prefix = "cairn-outlook-") => {
@@ -303,5 +305,114 @@ describe("readOutlook", () => {
     mkdirSync(join(home, ".cairn", "outlook"), { recursive: true });
     writeFileSync(mirror, "not json");
     expect(readOutlook(proj, home)).toBeNull();
+  });
+});
+
+describe("wave checkpoint (#370)", () => {
+  // waveCheckpoint writes a real handoff under ~/.cairn/handoff keyed by the
+  // temp project's hash -- same cleanup discipline as continuity.test.ts.
+  const cleanupHandoffPaths: string[] = [];
+  afterEach(() => {
+    for (const p of cleanupHandoffPaths.splice(0)) rmSync(p, { force: true });
+  });
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  it("waveTracker: zeros when nothing is known, previous counts when they are, resume line always", () => {
+    const wave = { phase: 28, runId: "wf_b4c7d847" };
+    expect(waveTracker(undefined, wave, "2026-10-15T00:00:00.000Z")).toEqual({
+      open: 0, inProgress: 0, blocked: 0,
+      nextVerb: "work 28 --wave — resume run wf_b4c7d847",
+      asOf: "2026-10-15T00:00:00.000Z",
+    });
+    const previous = { open: 4, inProgress: 2, blocked: 1, nextVerb: "work 28", asOf: "2026-10-01" };
+    expect(waveTracker(previous, wave, "2026-10-15T00:00:00.000Z")).toEqual({
+      open: 4, inProgress: 2, blocked: 1,
+      nextVerb: "work 28 --wave — resume run wf_b4c7d847",
+      asOf: "2026-10-15T00:00:00.000Z",
+    });
+  });
+
+  it("emitOutlook with wave writes the composed tracker block and returns the snapshot it wrote", () => {
+    const home = dir();
+    const proj = project();
+    const returned = emitOutlook(proj, { wave: { phase: 28, runId: "wf_b4c7d847" } }, home);
+    const written = readOutlook(proj, home)!;
+    expect(returned).toEqual(written);
+    expect(written.tracker).toMatchObject({
+      open: 0, inProgress: 0, blocked: 0,
+      nextVerb: "work 28 --wave — resume run wf_b4c7d847",
+    });
+    expect(written.tracker?.asOf).toMatch(ISO);
+
+    // a later plain emit carries the wave block forward, as any tracker block
+    emitOutlook(proj, undefined, home);
+    expect(readOutlook(proj, home)?.tracker).toEqual(written.tracker);
+  });
+
+  it("one waveCheckpoint call yields handoff notes and outlook nextVerb both carrying the run id", () => {
+    const home = dir();
+    const proj = project();
+    cleanupHandoffPaths.push(handoffPath(proj));
+
+    const result = waveCheckpoint(
+      proj,
+      { next_action: "watch the run", notes: "eight workers" },
+      { phase: 28, runId: "wf_b4c7d847" },
+      home,
+    );
+
+    // handoff half: composed line first, the caller's own notes behind it
+    expect(result.handoff?.notes).toBe("wave 28 run wf_b4c7d847 — eight workers");
+    expect(result.handoff?.source).toBe("tool");
+    expect(result.handoff?.next_action).toBe("watch the run");
+    expect(result.stale).toBe(false);
+    // outlook half: emitted, resume line carries the same id
+    expect(result.outlook).toEqual({
+      emitted: true,
+      tracker: expect.objectContaining({
+        open: 0, inProgress: 0, blocked: 0,
+        nextVerb: "work 28 --wave — resume run wf_b4c7d847",
+      }),
+    });
+    // both landed on disk, and the two ids are literally the same string
+    const onDiskHandoff = readHandoff(proj)!.handoff;
+    const onDiskOutlook = readOutlook(proj, home)!;
+    const idFromNotes = onDiskHandoff.notes.match(/run (\S+)/)![1];
+    expect(onDiskOutlook.tracker!.nextVerb!.endsWith(`resume run ${idFromNotes}`)).toBe(true);
+  });
+
+  it("waveCheckpoint with no caller notes writes the bare composed line", () => {
+    const home = dir();
+    const proj = project();
+    cleanupHandoffPaths.push(handoffPath(proj));
+    const result = waveCheckpoint(proj, {}, { phase: 2, runId: "r-2" }, home);
+    expect(result.handoff?.notes).toBe("wave 2 run r-2");
+    expect(result.outlook.tracker?.nextVerb).toBe("work 2 --wave — resume run r-2");
+  });
+
+  it("waveCheckpoint on an unregistered directory writes nothing and does not throw", () => {
+    const home = dir();
+    const plain = dir("cairn-outlook-plain-");
+    cleanupHandoffPaths.push(handoffPath(plain));
+    const result = waveCheckpoint(plain, {}, { phase: 2, runId: "r-2" }, home);
+    expect(result).toEqual({ handoff: null, stale: false, outlook: { emitted: false } });
+    expect(existsSync(outlookMirrorPath(plain, home))).toBe(false);
+    expect(existsSync(handoffPath(plain))).toBe(false);
+  });
+
+  it("omitting wave leaves today's behavior byte for byte: a plain emit reproduces the previous snapshot save its timestamp", () => {
+    const home = dir();
+    const proj = project();
+    emitOutlook(proj, { tracker: { open: 4, nextVerb: "work 2", asOf: "2026-08-14" } }, home);
+    const before = readFileSync(outlookMirrorPath(proj, home), "utf8");
+
+    const returned = emitOutlook(proj, undefined, home);
+    const after = readFileSync(outlookMirrorPath(proj, home), "utf8");
+
+    const stripTs = (s: string) => s.replace(/"ts": "[^"]+"/, '"ts": "<ts>"');
+    expect(stripTs(after)).toBe(stripTs(before));
+    // and the returned snapshot is exactly the bytes written
+    expect(JSON.stringify(returned, null, 2) + "\n").toBe(after);
+    expect(readFileSync(outlookLocalPath(proj), "utf8")).toBe(after);
   });
 });

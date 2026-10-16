@@ -5,7 +5,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
-  handoffPath, bannerPath, HandoffSchema, readHandoff, writeHandoff, clearHandoff,
+  handoffPath, bannerPath, HandoffSchema, HandoffSourceEnum, readHandoff, writeHandoff,
+  clearHandoff, waveNotes, waveNextVerb,
 } from "../src/core/continuity.js";
 import { indexDbPath } from "../src/memory/index-store.js";
 import { CairnError } from "../src/errors.js";
@@ -320,5 +321,49 @@ describe("clearHandoff", () => {
     expect(clearHandoff(d)).toBe(true);
     expect(readHandoff(d)).toBeNull();
     expect(clearHandoff(d)).toBe(false); // idempotent second call
+  });
+});
+
+describe("HandoffSourceEnum and the wave strings (#370)", () => {
+  const minimal = {
+    version: 1,
+    created: "2026-07-01T00:00:00.000Z",
+    project: "cairn2-a0",
+    task: { current: "", title: "" },
+    tasks_completed: [],
+    tasks_remaining: [],
+    blockers: [],
+    decisions_in_flight: [],
+    uncommitted_files: [],
+    next_action: "",
+    notes: "",
+    partial: false,
+  };
+
+  it("is the one definition: HandoffSchema's source accepts exactly its four values", () => {
+    expect(HandoffSourceEnum.options).toEqual(["tool", "posttooluse", "precompact", "waypoint"]);
+    for (const source of HandoffSourceEnum.options) {
+      expect(HandoffSchema.safeParse({ ...minimal, source }).success).toBe(true);
+    }
+    // "auto" is what a verb might reach for; it is not a source and never was.
+    expect(HandoffSchema.safeParse({ ...minimal, source: "auto" }).success).toBe(false);
+  });
+
+  it("waveNotes and waveNextVerb are composed from the same {phase, runId}", () => {
+    const wave = { phase: 28, runId: "wf_b4c7d847" };
+    expect(waveNotes(wave)).toBe("wave 28 run wf_b4c7d847");
+    expect(waveNextVerb(wave)).toBe("work 28 --wave — resume run wf_b4c7d847");
+    // decimal phases ride through unchanged
+    expect(waveNotes({ phase: 1.5, runId: "r" })).toBe("wave 1.5 run r");
+  });
+
+  it("a wave checkpoint written through writeHandoff reads back with the run id in notes", () => {
+    const d = registered();
+    cleanupHandoffPaths.push(handoffPath(d));
+    const wave = { phase: 28, runId: "wf_b4c7d847" };
+    writeHandoff(d, { source: "tool", notes: waveNotes(wave) });
+    const result = readHandoff(d)!;
+    expect(result.handoff.notes).toBe("wave 28 run wf_b4c7d847");
+    expect(result.handoff.source).toBe("tool");
   });
 });
