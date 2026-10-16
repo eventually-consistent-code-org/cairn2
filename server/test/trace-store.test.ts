@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  startTrace, appendTrace, listTraces, closeTrace, traceId,
+  startTrace, appendTrace, listTraces, closeTrace, traceId, traceIssue, traceProvenance,
 } from "../src/trace/store.js";
 
 describe("trace store", () => {
@@ -107,6 +107,72 @@ describe("trace store", () => {
       appendTrace(dir, id, "test", "experiment that disproves h");
       appendTrace(dir, id, "verdict", "v");
       expect(closeTrace(dir, id, "r").repro).toBe("repro: cmd → failing output");
+    });
+  });
+
+  describe("trace tools own their mirror (#367)", () => {
+    it("start with evidence seeds the first entry; without it the file is frontmatter + title only", () => {
+      const seeded = startTrace(dir, "seeded", "GH-20", "npm test → FAIL: expected 1, got 0");
+      const raw = readFileSync(seeded.path, "utf8");
+      expect(raw).toContain("## evidence — ");
+      expect(raw.trimEnd().endsWith("npm test → FAIL: expected 1, got 0")).toBe(true);
+      expect(listTraces(dir, "open").find((t) => t.id === seeded.id)!.entryCounts.evidence).toBe(1);
+
+      const bare = startTrace(dir, "bare", "GH-21");
+      const bareRaw = readFileSync(bare.path, "utf8");
+      expect(bareRaw).not.toContain("## ");
+      expect(bareRaw.trimEnd().endsWith("# Trace: bare")).toBe(true);
+      // whitespace-only evidence is no evidence
+      const blank = startTrace(dir, "blank", "GH-22", "   ");
+      expect(readFileSync(blank.path, "utf8")).not.toContain("## evidence");
+    });
+
+    it("traceIssue resolves an open trace's issue and null otherwise", () => {
+      const { id } = startTrace(dir, "lookup", "GH-30");
+      expect(traceIssue(dir, id)).toBe("GH-30");
+      expect(traceIssue(dir, "trace-00000000")).toBeNull();
+      appendTrace(dir, id, "evidence", "e");
+      appendTrace(dir, id, "test", "t");
+      appendTrace(dir, id, "verdict", "v");
+      closeTrace(dir, id, "r");
+      expect(traceIssue(dir, id)).toBeNull();
+    });
+
+    it("provenance pairs each named file with the same-entry commit, else the last commit named", () => {
+      const prov = traceProvenance([
+        { kind: "evidence", text: "fails in server/src/index.ts:2134 past 64KB (port 3000, 20261015 run)" },
+        { kind: "hypothesis", text: "maybe hooks/scripts/ghost.mjs at deadbeef1" },
+        { kind: "test", text: "node scripts/repro.mjs → RangeError" },
+        { kind: "verdict", text: "off-by-one in server/src/trace/store.ts; fixed in abc1234d, see trace-0badf00d" },
+      ]);
+      expect(prov).toEqual([
+        { file: "server/src/index.ts", commit: "abc1234d" },
+        { file: "scripts/repro.mjs", commit: "abc1234d" },
+        { file: "server/src/trace/store.ts", commit: "abc1234d" },
+      ]);
+    });
+
+    it("provenance is empty when no entry names a commit; plain numbers and trace ids are not shas", () => {
+      expect(traceProvenance([
+        { kind: "evidence", text: "server/src/index.ts breaks at 65536 bytes on 20261015" },
+        { kind: "verdict", text: "fixed; see trace-abcdef12" },
+      ])).toEqual([]);
+    });
+
+    it("provenance dedupes a file named twice against the same commit", () => {
+      expect(traceProvenance([
+        { kind: "evidence", text: "server/src/a.ts" },
+        { kind: "test", text: "server/src/a.ts again" },
+        { kind: "verdict", text: "fixed in 1a2b3c4d5e" },
+      ])).toEqual([{ file: "server/src/a.ts", commit: "1a2b3c4d5e" }]);
+    });
+
+    it("close returns the provenance its entries name", () => {
+      const { id } = startTrace(dir, "b8", "GH-8");
+      appendTrace(dir, id, "evidence", "server/src/x.ts throws");
+      appendTrace(dir, id, "test", "npm test → FAIL");
+      appendTrace(dir, id, "verdict", "fixed in cafe0001");
+      expect(closeTrace(dir, id, "r").provenance).toEqual([{ file: "server/src/x.ts", commit: "cafe0001" }]);
     });
   });
 });

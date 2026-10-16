@@ -135,6 +135,7 @@ import {
   appendTrace,
   listTraces,
   closeTrace,
+  traceIssue,
 } from "./trace/store.js";
 import {
   KIND_SPECS,
@@ -2228,27 +2229,34 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: false },
       description:
-        "Open a persistent debugging session (.cairn/trace/<id>.md). Creates the tracker " +
-        "bug issue (label cairn:bug) when no issueId is given. Survives /clear by construction",
+        "Open a trace: creates the cairn:bug issue unless issueId is given, posts the started " +
+        "comment; evidence is the first entry",
       inputSchema: z.object({
         description: z.string(),
         issueId: z.string().optional(),
+        evidence: z.string().optional(),
       }),
     },
-    wrap(async (a: { description: string; issueId?: string }) => {
+    wrap(async (a: { description: string; issueId?: string; evidence?: string }) => {
       const d = dir();
+      const tracker = await getTracker(d);
       let issueId = a.issueId;
       if (!issueId) {
-        const issue = await (
-          await getTracker(d)
-        ).createIssue({
+        const issue = await tracker.createIssue({
           title: a.description,
           labels: ["cairn:bug"],
         });
         snapshotNote(d, issue);
         issueId = issue.id;
       }
-      const { id } = startTrace(d, a.description, issueId);
+      const { id } = startTrace(d, a.description, issueId, a.evidence);
+      try {
+        // Mirror comment #1 rides the start (#367): the content is fixed by the
+        // description, so the server composes it — the verb no longer asks for it.
+        await tracker.commentIssue(issueId, `Investigation started: ${a.description}`);
+      } catch {
+        // best-effort mirror; the trace file is the state change that matters
+      }
       refreshHandoff({ source: "tool", issue: issueId }, d);
       return { id, issue: issueId };
     }),
@@ -2259,23 +2267,39 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: false },
       description:
-        "Append a typed entry (evidence|hypothesis|test|verdict) to an open trace — append-only",
+        "Append an entry to an open trace, append-only; mirror posts it as the cause-identified comment",
       inputSchema: z.object({
         id: z.string(),
         kind: z.enum(["evidence", "hypothesis", "test", "verdict"]),
         text: z.string().min(1),
+        mirror: z.enum(["cause-identified"]).optional(),
       }),
     },
     wrap(
-      (a: {
+      async (a: {
         id: string;
         kind: "evidence" | "hypothesis" | "test" | "verdict";
         text: string;
+        mirror?: "cause-identified";
       }) => {
         const d = dir();
         const out = appendTrace(d, a.id, a.kind, a.text);
         refreshHandoff({ source: "tool" }, d);
-        return out;
+        if (a.mirror !== "cause-identified") return out;
+        // Mirror comment #2 (#367): the model decides WHEN the hypothesis is
+        // confirmed; the server composes the comment from the entry it just
+        // logged. Best-effort — `mirrored` reports whether it landed.
+        let mirrored = false;
+        const issue = traceIssue(d, a.id);
+        if (issue) {
+          try {
+            await (await getTracker(d)).commentIssue(issue, `Cause identified: ${a.text}`);
+            mirrored = true;
+          } catch {
+            // the entry is on disk; the mirror is the best-effort part
+          }
+        }
+        return { ...out, mirrored };
       },
     ),
   );
@@ -2285,7 +2309,7 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: true },
       description:
-        "List trace sessions (open and/or resolved) with entry counts",
+        "List traces with entry counts",
       inputSchema: z.object({
         status: z.enum(["open", "resolved"]).optional(),
       }),
@@ -2298,14 +2322,17 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: true },
       description:
-        "Resolve a trace: requires >=1 evidence entry, >=1 test entry (the first test is the repro: " +
-        "command + observed failing output), and a verdict entry; archives the session, comments the " +
-        "resolution plus the repro on the bug issue and closes it",
-      inputSchema: z.object({ id: z.string(), resolution: z.string() }),
+        "Resolve a trace (needs evidence, a repro test, a verdict): archives it, mirrors and closes " +
+        "the issue; card.body writes the gotcha card",
+      inputSchema: z.object({
+        id: z.string(),
+        resolution: z.string(),
+        card: z.object({ body: z.string().min(1) }).optional(),
+      }),
     },
-    wrap(async (a: { id: string; resolution: string }) => {
+    wrap(async (a: { id: string; resolution: string; card?: { body: string } }) => {
       const d = dir();
-      const out = closeTrace(d, a.id, a.resolution);
+      const { provenance, ...out } = closeTrace(d, a.id, a.resolution);
       let issueClosed = false;
       if (out.issue) {
         const tracker = await getTracker(d);
@@ -2321,7 +2348,25 @@ export function buildServer(deps: {
         snapshotNote(d, closed);
         issueClosed = true;
       }
-      return { ...out, issueClosed };
+      if (!a.card) return { ...out, issueClosed };
+      // The gotcha card rides the close (#367): a closed trace is a proven
+      // cause, which is what confidence high means. Provenance is what the
+      // trace's own evidence/test/verdict entries named — never guessed.
+      // Fail-open: a card the schema refuses never undoes a close that landed.
+      try {
+        const card = createCard(d, {
+          type: "gotcha", body: a.card.body, confidence: "high",
+          ...(out.issue ? { scopeIssue: out.issue } : {}),
+          provenance,
+        });
+        writeBanner(d);
+        return { ...out, issueClosed, cardId: card.id, provenance };
+      } catch (e) {
+        return {
+          ...out, issueClosed, cardId: null, provenance,
+          cardError: e instanceof Error ? e.message : String(e),
+        };
+      }
     }),
   );
 
