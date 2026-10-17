@@ -5,7 +5,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,9 +154,15 @@ describe("eval-verdicts", () => {
 
 describe("eval-verdicts over the live suite (#209)", () => {
   const ROOT = join(dirname(SCRIPT), "..");
+  // The suite lives on the orphan branch `evals-archive` (#403), checked out
+  // beside the repo root (`git worktree add evals-archive evals-archive`,
+  // gitignored) or wherever CAIRN_EVALS_ARCHIVE points. Without it this
+  // agreement check skips — the table in docs/EVALS.md is still the doc.
+  const ARCHIVE = process.env.CAIRN_EVALS_ARCHIVE ?? join(ROOT, "evals-archive");
+  const SUITE = join(ARCHIVE, "evals");
 
-  it("every evals/ case loads with exactly one tier, and docs/EVALS.md's per-case table agrees", () => {
-    const names = readdirSync(join(ROOT, "evals"), { withFileTypes: true })
+  it.skipIf(!existsSync(SUITE))("every archived evals/ case loads with exactly one tier, and docs/EVALS.md's per-case table agrees", () => {
+    const names = readdirSync(SUITE, { withFileTypes: true })
       .filter((d) => d.isDirectory() && /^\d\d-/.test(d.name)).map((d) => d.name).sort();
     expect(names.length).toBeGreaterThan(0);
 
@@ -166,7 +172,7 @@ describe("eval-verdicts over the live suite (#209)", () => {
     const results = mkdtempSync(join(tmpdir(), "cairn-eval-verdicts-"));
     dirs.push(results);
     writeFileSync(join(results, "aggregate-result.json"), JSON.stringify({
-      suite: { root: ROOT },
+      suite: { root: ARCHIVE },
       cases: names.map((name) => ({ name, dir: `evals/${name}`, promptMarkdown: "---\nname: x\n---\n",
         arms: { with: [{ passed: true, graders: [] }], without: [] } })),
     }));

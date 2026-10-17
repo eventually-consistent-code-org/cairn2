@@ -3,9 +3,8 @@ node_modules/
 .cairn/
 /cairn.json
 
-# behavioral eval suite results (claude plugin eval) -- regenerated every run
-evals/results/
-
 # superpowers SDD scratch (ledgers, briefs, review packages)
 .superpowers/
-evals-corpus/results/
+
+# local checkout of the evals-archive branch (eval suite, review corpus, planning history)
+/evals-archive/

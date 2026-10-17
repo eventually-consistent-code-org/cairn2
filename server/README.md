@@ -16,7 +16,8 @@ a `cairn.json` in the project directory (`CLAUDE_PROJECT_DIR` or cwd); see
 the [quickstart](https://github.com/eventually-consistent-code-org/cairn2/blob/main/docs/00-quickstart.md).
 
 Everything below is the developer reference. Design spec:
-`docs/superpowers/specs/2026-07-12-cairn-2-design.md`.
+[`docs/superpowers/specs/2026-07-12-cairn-2-design.md`](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-12-cairn-2-design.md)
+on the `evals-archive` branch (the planning history is not on `main`, #403).
 
 87 tools total across planning, memory, continuity, collaboration, milestones, config, sessions (trace, probe, draft, thread), audits (plan_check, audit_record), the project knowledge graph (map_set, map_get, map_query), workspace/board (workspace_list, workspace_focus, workspace_status, board_get, board_update), peers (peer_list, peer_run, peer_state), tracker-delta ingest (plan_tracker_delta), issue links + dependency graph (issue_link, issue_unlink, issue_links, graph_report), local-tracker promotion (tracker_migrate), and docs publishing and drift (docs_publish, docs_status, docs_drift), issue attachments (issue_attach), active context (context_get, context_set, context_meter), issues and phases (issue_create, issue_get, issue_list, phase_create, phase_list), memory compaction (mem_compact), headless-run budgeting (budget_check, token_estimate, run_manifest), seat roster (seat_roster), config probe (config_probe), portfolio outlook (outlook_emit, outlook_get, outlook_refresh, outlook_forget), research checkpoints (research_sections), and distill (distill_manifest).
 

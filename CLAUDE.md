@@ -66,6 +66,11 @@ Env (no `.env.example`): `CLAUDE_PROJECT_DIR`, `GITHUB_TOKEN`,
   external-CLI gated) — skip counts vary by machine; the passed count
   is the stable baseline. `server/drills/` holds 29 hand-run
   live-credential scripts outside vitest.
+- Eval material and planning history are NOT on main: the orphan branch
+  `evals-archive` holds `evals/`, `evals-corpus/` and `docs/superpowers/`
+  (#403). `git worktree add evals-archive evals-archive` (gitignored)
+  puts them at `evals-archive/`; the corpus generator and the live-suite
+  test look there (or `$CAIRN_EVALS_ARCHIVE`) and skip/fail loud without it.
 - Conventional commits. Git author uses the repo-local
   eventually-consistent-code noreply identity — never a personal email.
 

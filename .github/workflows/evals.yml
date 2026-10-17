@@ -1,5 +1,8 @@
 # Behavioral eval lane — ADVISORY. Runs the `claude plugin eval` suite
 # (docs/EVALS.md) nightly and whenever the plugin's prose surfaces change.
+# The cases themselves live on the orphan branch `evals-archive` (#403):
+# the shipped tree carries the plugin alone, so this lane checks the
+# archive out beside it and puts the suite where the harness looks.
 # It never blocks a merge: a stochastic lane earns a blocking threshold only
 # after its variance baseline exists (phase 22 constraint). The threshold
 # starts at 0.7 and rises toward 1.0 as green nights accumulate.
@@ -20,6 +23,8 @@
 #                             contact and never written into the repo.
 name: evals
 
+# An edit to the cases lands on evals-archive, not main, so it reaches the
+# lane through the nightly run or a manual dispatch — never a path filter.
 on:
   schedule:
     - cron: "17 6 * * *"          # nightly, 06:17 UTC
@@ -29,14 +34,12 @@ on:
     paths:
       - "skills/**"
       - "commands/**"
-      - "evals/**"
       - ".claude-plugin/**"
       - ".github/workflows/evals.yml"
   pull_request:
     paths:
       - "skills/**"
       - "commands/**"
-      - "evals/**"
       - ".claude-plugin/**"
       - ".github/workflows/evals.yml"
 
@@ -61,6 +64,19 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      # The suite lives on `evals-archive` (#403). Check it out beside the
+      # plugin, copy evals/ into place, then drop the checkout so the plugin
+      # root carries exactly what it did when evals/ was tracked on main —
+      # every path below is unchanged.
+      - uses: actions/checkout@v4
+        with:
+          ref: evals-archive
+          path: evals-archive
+      - name: place the eval suite
+        run: |
+          cp -R evals-archive/evals evals
+          rm -rf evals-archive
+          ls evals
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -69,6 +85,8 @@ jobs:
       # builds (npm `latest` 2.1.278 reported "unknown command 'eval'" on
       # 2026-09-20). Bump deliberately, after a green local run on the new
       # version.
+      # CI-only: this installs the CLI on the runner. The plugin never runs
+      # it — nothing shipped at the marketplace ref fetches or executes code.
       - name: install claude code
         run: |
           npm install -g @anthropic-ai/claude-code@2.1.267

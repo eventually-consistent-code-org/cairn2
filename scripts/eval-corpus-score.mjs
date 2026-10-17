@@ -10,7 +10,8 @@
 //   recall     -- share of (item, run) pairs whose `k-NN` grader passed,
 //                 over the items that have one (the control has none).
 //                 One case per item per arm, named corpus-NN-seats /
-//                 corpus-NN-native (evals-corpus/README.md).
+//                 corpus-NN-native (evals-corpus/README.md, on the
+//                 evals-archive branch since #403).
 //   precision  -- pass rate of the `precision` grader, an LLM judge that
 //                 fails a run raising any finding that is not a real
 //                 defect in its diff. A proxy, stated as one: the

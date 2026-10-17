@@ -2,7 +2,10 @@
 
 // Review-corpus case generator (issue #334). Writes one self-contained
 // eval case per corpus item per arm under evals-corpus/ from
-// evals-corpus/corpus.json:
+// evals-corpus/corpus.json -- both on the orphan branch `evals-archive`
+// (#403), checked out beside this repo's root as evals-archive/ or wherever
+// CAIRN_EVALS_ARCHIVE points. The fixtures come from THIS repo's git
+// history; the cases land in THAT checkout.
 //
 //   evals-corpus/NN-<slug>/seats/    case.yaml (prompt: /cairn:review corpus/NN-<slug>)
 //   evals-corpus/NN-<slug>/native/   case.yaml (prompt: /code-review corpus/NN-<slug> high --max-findings all)
@@ -29,7 +32,7 @@
 // Author(s): John Reed
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,9 +40,12 @@ import { fileURLToPath } from "node:url";
 // Constants
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DIR = join(ROOT, "evals-corpus");
+// The evals-archive checkout: `git worktree add evals-archive evals-archive`
+// from the repo root (gitignored), or CAIRN_EVALS_ARCHIVE for another path.
+const ARCHIVE = process.env.CAIRN_EVALS_ARCHIVE ?? join(ROOT, "evals-archive");
+const DIR = join(ARCHIVE, "evals-corpus");
 const CORPUS = join(DIR, "corpus.json");
-const MOCKS_SRC = join(ROOT, "evals", "mocks");
+const MOCKS_SRC = join(ARCHIVE, "evals", "mocks");
 const MOCKS_DST = join(DIR, "mocks");
 // Left out of every fixture: tests (the branch reintroduces the bug, not the
 // absence of its proof) and the count-carrying docs a fix refreshes in
@@ -170,6 +176,14 @@ function fixture(item) {
 }
 
 function main() {
+  // Fail loud: the corpus is not on main any more, so a missing checkout is
+  // the usual first run, not a broken repo.
+  if (!existsSync(CORPUS)) {
+    console.error(`no corpus at ${CORPUS} -- check the evals-archive branch out first:\n`
+      + "  git worktree add evals-archive evals-archive\n"
+      + "or point CAIRN_EVALS_ARCHIVE at an existing checkout.");
+    process.exit(2);
+  }
   const { items } = JSON.parse(readFileSync(CORPUS, "utf8"));
   console.log("generating corpus cases...");
   for (const entry of readdirSync(DIR)) {
