@@ -23,11 +23,26 @@ export function make(config: z.infer<typeof configSchema>, fetchImpl?: FetchLike
   return new GitHubTracker(config, fetchImpl);
 }
 
-export function resolveGithubToken(): string {
-  const env = process.env.GITHUB_TOKEN;
-  if (env) return env;
+/** Shells out to `gh auth token`; throws when gh is missing or logged out. */
+function ghAuthToken(): string {
+  return execFileSync("gh", ["auth", "token"], { encoding: "utf8" }).trim();
+}
+
+// Token resolution order: GITHUB_TOKEN, then `gh auth token`. An empty or
+// whitespace-only GITHUB_TOKEN counts as unset — the Claude Code plugin
+// manifest substitutes an unfilled `${user_config.github_token}` as "" (not a
+// dropped key; verified on v2.1.302, 2026-10-17), so without this the gh
+// fallback would never run for plugin users who leave the option blank.
+// Both parameters are injectable for tests only; the default keeps the literal
+// `process.env.GITHUB_TOKEN` spelling the leak-patterns guard scans for (#340).
+export function resolveGithubToken(
+  fromEnv: string | undefined = process.env.GITHUB_TOKEN,
+  gh: () => string = ghAuthToken,
+): string {
+  const token = fromEnv?.trim();
+  if (token) return token;
   try {
-    return execFileSync("gh", ["auth", "token"], { encoding: "utf8" }).trim();
+    return gh();
   } catch {
     throw new CairnError("AUTH_MISSING", "no GitHub credentials",
       "export GITHUB_TOKEN or run: gh auth login");
