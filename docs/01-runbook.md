@@ -100,8 +100,11 @@ decision, which stops for you).
   depth to it — advisory only, never a change to what a verb decides.
 - **Shell is scoped.** A command shim's `allowed-tools` pre-approves the
   cairn MCP tools, the file tools, and only the read-only git family
-  (`git status|log|diff|rev-parse|describe|branch|worktree`) — never a bare
-  `Bash`. Anything a verb runs beyond that (a `node
+  (`git status|log|diff|rev-parse|describe` and `git worktree list`) —
+  never a bare `Bash`, and never an unscoped `git worktree` or `git
+  branch`: the entries are prefixes, so those would pre-approve `worktree
+  remove --force` and `branch -D` (#414). The run guard refuses a forced
+  worktree remove in every session, the same way it refuses `reset --hard`. Anything a verb runs beyond that (a `node
   "$CLAUDE_PLUGIN_ROOT/hooks/scripts/..."` report, `git apply`, `git
   revert`, `claude plugin ...`, a project's own `npm test`) prompts once per
   session under Claude Code's ordinary per-command approval, the first

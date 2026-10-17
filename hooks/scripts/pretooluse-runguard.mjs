@@ -25,7 +25,8 @@
  *   no undo (the table in destructive(): hard reset; force, mirror and
  *   prune pushes, or one deleting the default branch; forced or whole-tree
  *   checkout/restore; a discarding switch; clean; stash clear; reflog
- *   expire), options shortened as git allows (--har is --hard, #296). Their
+ *   expire; a forced worktree remove, #414), options shortened as git
+ *   allows (--har is --hard, #296). Their
  *   everyday neighbours stay allowed. Escape: CAIRN_ALLOW_DESTRUCTIVE_GIT=1
  *   -- for the session, or as the leading assignment of the one command
  *   (honoured, never taught: refusals name only the owner's ways, #262).
@@ -1251,6 +1252,16 @@ function destructive(inv, at) {
         longs: ["--dry-run", "--exclude"], valued: ["--exclude"] });
       return on.get("--dry-run") === true ? null
         : ["`git clean`", "it deletes untracked files, which git never had a copy of."];
+    }
+
+    case "worktree": {
+      // `remove --force` deletes a linked worktree together with its
+      // uncommitted and untracked files (#414, security-27-5). A plain
+      // remove refuses a dirty tree on its own; list, add, prune and the
+      // rest stay allowed.
+      if (args[0] !== "remove") return null;
+      const { flags } = readArgs(args.slice(1), { alias: { f: "--force" }, longs: ["--force"] });
+      return flags.has("--force") ? ["`git worktree remove --force`", discards] : null;
     }
 
     case "stash":

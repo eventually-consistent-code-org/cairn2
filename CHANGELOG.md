@@ -19,11 +19,16 @@ pin. Default seats 8.
 ### directory review (phase 27.5)
 
 - Every command shim's `allowed-tools` pre-approves only the read-only
-  git family (status, log, diff, rev-parse, describe, branch, worktree)
+  git family (status, log, diff, rev-parse, describe, worktree list)
   instead of bare `Bash`; anything that writes prompts once per session.
   One generator line changed, 39 shims regenerated, and a sweep-surface
   test now fails on any shim that regains bare Bash, `Bash(*)` or an
-  interpreter/runner wildcard (#400).
+  interpreter/runner wildcard (#400). The phase's own security audit then
+  caught the first cut pre-approving `git worktree` and `git branch` as
+  prefixes — which covers `worktree remove --force` and `branch -D` — so
+  the family narrowed to `worktree list` and dropped `branch` (no verb
+  uses it), and the run guard now refuses a forced worktree remove in
+  every session, red-first test included (#414).
 - `evals/`, `evals-corpus/` and `docs/superpowers/` leave the tree the
   marketplace ships. They live on the orphan branch `evals-archive`
   (byte-identical to the split point, with a README); CI checks it out

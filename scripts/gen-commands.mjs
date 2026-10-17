@@ -22,11 +22,15 @@ const SENTINEL = "\u0001"; // stand-in for escaped pipes while cell-splitting
 // run without asking for as long as a verb was active — the portal holds
 // that as ALLOWED_TOOLS_BROAD. What stays pre-approved is the read-only
 // git family the verbs lean on for orientation (status, log, diff,
-// rev-parse, describe, branch, worktree). Anything that writes or runs
-// code — commit, push, reset, checkout, merge, npm, npx, node — falls back
-// to the harness's own per-call approval, which is the point. Never put a
-// bare `Bash`, `Bash(*)`, or an interpreter/runner wildcard such as
-// `Bash(node:*)` back in this list: sweep-surface.test.ts fails on it.
+// rev-parse, describe, worktree list). Anything that writes or runs
+// code — commit, push, reset, checkout, merge, worktree add/remove, npm,
+// npx, node — falls back to the harness's own per-call approval, which is
+// the point. The entries are prefixes: `Bash(git worktree:*)` would also
+// pre-approve `worktree remove --force`, and no verb runs `git branch` at
+// all, so neither is here (#414, security-27-5). Never put a bare `Bash`,
+// `Bash(*)`, an interpreter/runner wildcard such as `Bash(node:*)`, or an
+// unscoped `git worktree`/`git branch` back in this list:
+// sweep-surface.test.ts fails on it.
 // Write and Edit stay (ALLOWED_TOOLS_UNSCOPED_WRITE is a note, not a hold).
 const ALLOWED_TOOLS = [
   "mcp__plugin_cairn_cairn__*",
@@ -35,8 +39,7 @@ const ALLOWED_TOOLS = [
   "Bash(git diff:*)",
   "Bash(git rev-parse:*)",
   "Bash(git describe:*)",
-  "Bash(git branch:*)",
-  "Bash(git worktree:*)",
+  "Bash(git worktree list:*)",
   "Read", "Write", "Edit", "Glob", "Grep", "ToolSearch", "Task", "AskUserQuestion",
 ].join(", ");
 

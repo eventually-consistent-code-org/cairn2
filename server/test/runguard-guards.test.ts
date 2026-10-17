@@ -2313,3 +2313,32 @@ describe("run guard: a heredoc body is data, and the substitutions it runs are c
     expect(guard(proj, home, "cat <<< 'never git reset --hard'").status).toBe(0);
   });
 });
+
+describe("run guard: forced worktree remove refused in every session (#414)", () => {
+  it("refuses git worktree remove --force, naming the owner's ways to approve", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git worktree remove --force .claude/worktrees/x",
+      "git worktree remove -f wt",
+      "git -C . worktree remove --force wt",
+      "cd x && git worktree remove --force wt",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("a plain remove (git refuses a dirty tree itself), list, add, prune and branch -D pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git worktree remove wt",
+      "git worktree list",
+      "git worktree add --detach /tmp/wt HEAD",
+      "git worktree prune",
+      "git branch -D feature-x",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+});

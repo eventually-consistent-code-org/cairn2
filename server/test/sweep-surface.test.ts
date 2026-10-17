@@ -321,8 +321,8 @@ describe("command shim allowed-tools (#400)", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("every shim pre-approves exactly the read-only git family", () => {
-    const expected = ["status", "log", "diff", "rev-parse", "describe", "branch", "worktree"]
+  it("every shim pre-approves exactly the read-only git family (#414: worktree list only, no branch)", () => {
+    const expected = ["status", "log", "diff", "rev-parse", "describe", "worktree list"]
       .map((sub) => `Bash(git ${sub}:*)`);
     for (const f of shims) {
       const bash = allowedTools(f).filter((t) => t.startsWith("Bash"));

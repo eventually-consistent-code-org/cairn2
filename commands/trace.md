@@ -1,7 +1,7 @@
 ---
 description: "Persistent debugging session — evidence→hypothesis→test, tracker-mirrored (/cairn:help)"
 argument-hint: "[\"<bug>\" | <id> | close <id>]"
-allowed-tools: "mcp__plugin_cairn_cairn__*, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git rev-parse:*), Bash(git describe:*), Bash(git branch:*), Bash(git worktree:*), Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+allowed-tools: "mcp__plugin_cairn_cairn__*, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git rev-parse:*), Bash(git describe:*), Bash(git worktree list:*), Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 
 Execute the cairn verb `trace`:
