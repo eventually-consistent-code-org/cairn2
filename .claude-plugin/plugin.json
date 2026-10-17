@@ -1,7 +1,7 @@
 {
   "name": "cairn",
   "version": "2.8.3",
-  "description": "cairn 2.0 \u2014 converged work management: tracker-truth planning, provenance-checked memory, and a per-verb /cairn:<verb> surface, backed by a typed MCP server.",
+  "description": "cairn 2.0 — converged work management: tracker-truth planning, provenance-checked memory, and a per-verb /cairn:<verb> surface, backed by a typed MCP server.",
   "author": {
     "name": "eventually-consistent-code",
     "url": "https://github.com/eventually-consistent-code"
@@ -9,6 +9,7 @@
   "homepage": "https://github.com/eventually-consistent-code-org/cairn2",
   "repository": "https://github.com/eventually-consistent-code-org/cairn2",
   "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "keywords": [
     "claude-code",
     "cairn",
@@ -16,5 +17,13 @@
     "memory",
     "issue-tracker",
     "workflow"
-  ]
+  ],
+  "userConfig": {
+    "github_token": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "Personal access token with repo (issues) scope for the GitHub tracker. Leave empty to use the GITHUB_TOKEN environment variable or gh auth.",
+      "sensitive": true
+    }
+  }
 }

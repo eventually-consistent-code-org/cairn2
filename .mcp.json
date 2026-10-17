@@ -3,7 +3,10 @@
     "cairn": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/server/dist/index.js"],
-      "env": { "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}" }
+      "env": {
+        "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
+        "GITHUB_TOKEN": "${user_config.github_token}"
+      }
     }
   }
 }
