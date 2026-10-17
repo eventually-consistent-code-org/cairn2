@@ -105,6 +105,20 @@ dispatched by existing verbs, zero new tools or verbs.
 | `cairn-designer` | Turns a design question into a decided direction with artifacts — wireframes, design tokens (`themes/default.css` + `tokens.json`, always both), coded prototypes — inside a `draft` session, recording `implements`/`decided-in` map edges as it goes | `draft` (non-trivial design questions) |
 | `cairn-uat` | Proves shipped flows meet requirements, platform-aware — walks each flow as a user on a named viewport matrix, sweeps requirement traceability via map edges, hands fidelity divergence off to `audit ui` | `audit uat` (acceptance walks), `audit ui` (fidelity checks) |
 
+## Install
+
+In Claude Code 2.1.275 or later, one step:
+
+```
+/plugin install cairn --marketplace eventually-consistent-code-org/cairn2
+```
+
+The marketplace entry pins a release tag, so the install (and `claude
+plugin update`) fetches a released tree, never `main` — see
+[Dev mode vs installed plugin](#dev-mode-vs-installed-plugin-release-integrity-83).
+Then the [quickstart](docs/00-quickstart.md): credentials, `cairn.json`,
+first phase.
+
 ## Beyond Claude Code
 
 The server speaks plain MCP over stdio and the verbs are markdown — cairn

@@ -1,5 +1,6 @@
 {
   "name": "cairn-dev",
+  "description": "cairn — converged work management for AI coding agents: tracker-truth planning, provenance-checked memory, session continuity, one /cairn:<verb> surface.",
   "owner": {
     "name": "eventually-consistent-code",
     "url": "https://github.com/eventually-consistent-code"
