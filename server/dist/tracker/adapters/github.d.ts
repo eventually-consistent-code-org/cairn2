@@ -5,7 +5,7 @@ export declare const configSchema: z.ZodObject<{
     repo: z.ZodString;
 }, z.core.$strip>;
 export declare function make(config: z.infer<typeof configSchema>, fetchImpl?: FetchLike): Tracker;
-export declare function resolveGithubToken(): string;
+export declare function resolveGithubToken(fromEnv?: string | undefined, gh?: () => string): string;
 export declare class GitHubTracker implements Tracker {
     private readonly cfg;
     private readonly fetchImpl;

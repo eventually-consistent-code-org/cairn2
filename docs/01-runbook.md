@@ -988,6 +988,16 @@ Auth: `GITHUB_TOKEN`, or an existing `gh auth login`. Phases map to
 milestones. Assignee writes: supported. Issue listing paginates up to 1000
 items.
 
+Claude Code plugin installs can hand the token over as a plugin option
+instead: the manifest declares `github_token` (sensitive), so `/plugin
+configure cairn` or the `/config` panel prompts for it, the value lands in
+the platform's secure credential store rather than `settings.json`, and
+Claude Code substitutes it into the server's `GITHUB_TOKEN` at launch. Leave
+the option blank and the server sees an empty `GITHUB_TOKEN`, which it treats
+exactly like an unset one — the environment variable and `gh auth` fallback
+still apply. Other harnesses and `cairn-setup` installs never see plugin
+options; they keep setting the environment variable.
+
 ### GitLab
 
 ```json

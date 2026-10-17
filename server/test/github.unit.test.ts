@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { GitHubTracker } from "../src/tracker/adapters/github.js";
+import { GitHubTracker, resolveGithubToken } from "../src/tracker/adapters/github.js";
 import type { FetchLike } from "../src/tracker/http.js";
 
 /** Records requests; replies from a queue of canned responses. */
@@ -182,6 +182,32 @@ describe("GitHubTracker identity", () => {
     expect(await t.resolveSelf!()).toBe("octo-dev");
     expect(await t.resolveSelf!()).toBe("octo-dev");
     expect(calls.filter((c) => c.url.endsWith("/user")).length).toBe(1);
+  });
+});
+
+describe("resolveGithubToken (#402)", () => {
+  it("returns GITHUB_TOKEN when set, without consulting gh", () => {
+    const gh = vi.fn(() => "gh-tok");
+    expect(resolveGithubToken("env-tok", gh)).toBe("env-tok");
+    expect(gh).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty GITHUB_TOKEN exactly like unset and falls back to gh", () => {
+    // The plugin manifest substitutes an unfilled ${user_config.github_token}
+    // as "" — the key is present with an empty value, not dropped.
+    const gh = vi.fn(() => "gh-tok");
+    expect(resolveGithubToken("", gh)).toBe("gh-tok");
+    expect(resolveGithubToken(undefined, gh)).toBe("gh-tok");
+    expect(gh).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a whitespace-only GITHUB_TOKEN as unset too", () => {
+    expect(resolveGithubToken("  \n", () => "gh-tok")).toBe("gh-tok");
+  });
+
+  it("throws AUTH_MISSING when GITHUB_TOKEN is empty and gh has no token", () => {
+    const gh = () => { throw new Error("not logged in"); };
+    expect(() => resolveGithubToken("", gh)).toThrowError(/no GitHub credentials/);
   });
 });
 
