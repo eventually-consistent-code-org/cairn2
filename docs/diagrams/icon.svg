@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cairn listing icon — source of truth for .claude-plugin/icon.png.
+  A cairn: five stacked stones, largest at the bottom, each nudged a
+  little off-center the way a real pile is, on a slate rounded square.
+  No text, no fonts, no gradients, no transforms, no strokes — kept to
+  the subset ImageMagick's built-in SVG renderer draws faithfully, so
+  the PNG below comes out the same on any machine.
+  Palette: slate #1f2933; stones #d9c9a8 / #b8a07e / #8c7558.
+  Re-render:
+    magick docs/diagrams/icon.svg -background none -resize 1024x1024 .claude-plugin/icon.png
+    magick .claude-plugin/icon.png -strip .claude-plugin/icon.png
+  Author(s): John Reed
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="200" ry="200" fill="#1f2933"/>
+
+  <!-- ground shadow, so the pile sits on something -->
+  <ellipse cx="512" cy="862" rx="330" ry="28" fill="#161d25"/>
+
+  <!-- stones, bottom to top; a sliver of slate between each keeps them legible at 64px -->
+  <ellipse cx="512" cy="770" rx="290" ry="90" fill="#8c7558"/>
+  <ellipse cx="498" cy="590" rx="222" ry="76" fill="#b8a07e"/>
+  <ellipse cx="524" cy="438" rx="168" ry="62" fill="#d9c9a8"/>
+  <ellipse cx="504" cy="310" rx="120" ry="52" fill="#b8a07e"/>
+  <ellipse cx="518" cy="206" rx="76" ry="40" fill="#d9c9a8"/>
+</svg>
