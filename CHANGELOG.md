@@ -1,6 +1,57 @@
 # Changelog
 
-## Unreleased — the ux seat (phase 27, 2026-10-14)
+## v2.9.0 — the directory review (2026-10-17)
+
+The plugin-directory submission of 2.8.3 came back with three policy
+holds and nine warnings. This release clears everything that was ours to
+clear and ships the two phases that had been waiting above 2.8.3 in this
+file (the fifth seat, the ux seat). The shipped tree is 1081 → 628
+tracked files; the command shims stop pre-approving arbitrary shell; the
+GitHub token becomes a plugin option; the listing gets an icon. The one
+hold that remains — dependencies install from a lockfile — stays with the
+reviewer on purpose: a probe showed the dependency-free bundle the portal
+suggests cannot meet its 256 KiB per-file ceiling while zod 4 and the MCP
+server package are what they are.
+
+Tool count holds at 87. Suite 2207 → 2256. Footprint 13145 of a 13145
+pin. Default seats 8.
+
+### directory review (phase 27.5)
+
+- Every command shim's `allowed-tools` pre-approves only the read-only
+  git family (status, log, diff, rev-parse, describe, branch, worktree)
+  instead of bare `Bash`; anything that writes prompts once per session.
+  One generator line changed, 39 shims regenerated, and a sweep-surface
+  test now fails on any shim that regains bare Bash, `Bash(*)` or an
+  interpreter/runner wildcard (#400).
+- `evals/`, `evals-corpus/` and `docs/superpowers/` leave the tree the
+  marketplace ships. They live on the orphan branch `evals-archive`
+  (byte-identical to the split point, with a README); CI checks it out
+  explicitly, the corpus generator and the live-suite test read it there
+  (or `$CAIRN_EVALS_ARCHIVE`) and fail loud or skip cleanly without it.
+  The three architecture diagrams are re-exported under 200 KB each. The
+  README carries the marketplace install line the validator asks for
+  (#403).
+- `.claude-plugin/icon.png`: a 1024×1024 cairn mark, with its SVG source
+  beside the diagrams, named by the manifest's `icon` field. The portal
+  fixes a listing's icon at its first save or submission, so the image
+  may only change on a re-listing (#401).
+- The GitHub tracker token is a sensitive plugin option (`github_token`)
+  substituted into the server's `GITHUB_TOKEN`; an empty value — what an
+  unset option becomes, verified on Claude Code 2.1.302 — is treated as
+  unset, so the environment variable and `gh auth` fallbacks hold for
+  cairn-setup harnesses and for plugin users who leave it blank. Other
+  trackers' token env keys are unchanged: vendor-own credentials the
+  reviewer confirms (#402).
+- Probe, verdict no-go: `node:sqlite` drops in behind the memory store's
+  seam in two files, but no split of the bundle gets every chunk under
+  the portal's 256 KiB line while zod 4 is 320 KiB minified on its own.
+  The lockfile hold stays with the reviewer; the standalone sqlite port
+  is recommended for phase 30 (#404).
+- Version surfaces bumped and the plugin resubmitted for review (#405).
+
+
+### the ux seat (phase 27, 2026-10-14)
 
 Cairn gains a UI/UX acceptance bar in its own vocabulary, borrowed by
 reference from zeeshani42's `ui-ux-designer` skill (MIT) and never
@@ -17,7 +68,7 @@ one resident cost is a word in the audit command's blurb.
 Tool count holds at 87. Suite 2170 → 2207. Footprint 13137 → 13138 of a
 13145 pin. Default seats 6 → 8.
 
-### seats
+#### seats
 
 - `ux` is the seventh default seat: minimal dose, review stage, gated on
   a new `touches-ui` scope signal (css, scss, less, tsx, jsx, vue,
@@ -42,7 +93,7 @@ Tool count holds at 87. Suite 2170 → 2207. Footprint 13137 → 13138 of a
   server-only diff convenes the five plus `lean`; a docs-only diff
   convenes neither addition.
 
-### agents
+#### agents
 
 - The design agent carries a hi-fi acceptance bar: at the prototype stage
   it looks for an installed `ui-ux-designer` skill under the project then
@@ -56,7 +107,7 @@ Tool count holds at 87. Suite 2170 → 2207. Footprint 13137 → 13138 of a
 - The acceptance-testing agent checks the same four states when its walk
   reaches a screen and hands a missing one to `audit ui`.
 
-### audit
+#### audit
 
 - `ui` applies a floor when a phase declared no UI criteria: every shipped
   screen or component renders Default, Loading, Empty and Error as views
@@ -76,7 +127,7 @@ Tool count holds at 87. Suite 2170 → 2207. Footprint 13137 → 13138 of a
   five, report shape only. A fixture pair and a test run the documented
   grep as written.
 
-## Unreleased — the fifth seat (phase 26.5, 2026-10-14)
+### the fifth seat (phase 26.5, 2026-10-14)
 
 GitHub Copilot CLI joins the peers council as the fifth seat, and the
 council's own arithmetic changes with it: convergence now counts distinct
@@ -92,7 +143,7 @@ along, one of them a live-confirmed breakage.
 Tool count holds at 87. Suite 2130 → 2170. Footprint 13108 → 13137 of a
 13145 pin.
 
-### peers
+#### peers
 
 - `copilot` is a provider. Its template runs the CLI contained by a flag
   set — no questions, no auto-update, no custom instructions, no built-in
@@ -128,7 +179,7 @@ Tool count holds at 87. Suite 2130 → 2170. Footprint 13108 → 13137 of a
   seat that spoke and then died keeps its findings; a clean exit with
   nothing to say is still clean.
 
-### agents
+#### agents
 
 - Both plugin agents name cairn's tools by full MCP id. Claude Code 2.1.299
   resolves an agent's tool list against the named MCP server only, so the
@@ -137,7 +188,7 @@ Tool count holds at 87. Suite 2130 → 2170. Footprint 13108 → 13137 of a
   A test holds every entry to a registered tool; a headless run of the
   plugin proved both agents see their tools again.
 
-### evals
+#### evals
 
 - The review-corpus scorer counts a run with no grader results as errored,
   per arm and per case, keeps it out of both rates, says how many runs
@@ -145,7 +196,7 @@ Tool count holds at 87. Suite 2130 → 2170. Footprint 13108 → 13137 of a
   run zero and fails the suite; the scorer now agrees instead of hiding
   the run. The corpus arms keep the subagent tool enabled on purpose.
 
-### context
+#### context
 
 - The compaction sunset line names idle compaction (2.1.299) as a second
   main-session trigger the drift report cannot observe; the remaining gap

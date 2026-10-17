@@ -13,7 +13,7 @@ or wrong, [open an issue](https://github.com/eventually-consistent-code-org/cair
 repeat a competitor's unverifiable marketing claims, and we expect the
 same courtesy.
 
-Cairn's column reflects version <!-- auto:version -->2.8.3<!-- /auto:version -->:
+Cairn's column reflects version <!-- auto:version -->2.9.0<!-- /auto:version -->:
 <!-- auto:verb-count -->39<!-- /auto:verb-count --> verbs,
 <!-- auto:tool-count -->87<!-- /auto:tool-count --> typed MCP tools, 2124
 passing tests, <!-- auto:tracker-count -->8<!-- /auto:tracker-count --> tracker
