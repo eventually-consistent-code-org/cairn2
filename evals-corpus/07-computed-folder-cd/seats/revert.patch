@@ -1,0 +1,39 @@
+diff --git a/hooks/scripts/pretooluse-harnessguard.mjs b/hooks/scripts/pretooluse-harnessguard.mjs
+index 1f63507..cd957de 100644
+--- a/hooks/scripts/pretooluse-harnessguard.mjs
++++ b/hooks/scripts/pretooluse-harnessguard.mjs
+@@ -63,9 +63,8 @@
+  *   tar -C value is read like a cd target (#318): ~, $HOME and $PWD spelled
+  *   out, a variable it can't read refused the same way. A write target a
+  *   substitution computes the folder of is judged there when the guard
+- *   knows the folder -- `$(pwd)/x` is the shell's, from every folder a cd
+- *   before it can reach, `$(git rev-parse --show-toplevel)/x` the repo
+- *   root above each of those (#321) -- and refused otherwise.
++ *   knows the folder -- `$(pwd)/x` is the shell's, `$(git rev-parse
++ *   --show-toplevel)/x` the repo root's (#321) -- and refused otherwise.
+  *   Substitutions nest SUBSTITUTION_DEPTH levels deep; a line nested
+  *   deeper is refused unread (#321). A command
+  *   that plants a whole tree is judged by where it lands, like a mkdir of
+@@ -2083,20 +2082,9 @@ function expandGlob(base, pattern) {
+ // (#321): the shell's own folder, as $PWD is, or the repo root above it.
+ const COMPUTED_DIR = /^(?:\$\((pwd(?: -[LP])?|git rev-parse --show-toplevel)\)|`(pwd(?: -[LP])?|git rev-parse --show-toplevel)`)(?=\/|$)/;
+ 
+-/**
+- * `raw` with a leading `$(pwd)` or `$(git rev-parse --show-toplevel)`
+- * spelled out from `shell`, the folder the shell is in -- one candidate at
+- * a time, so after `cd hooks` the pwd is hooks, and after a cd the guard
+- * lost it stays LOST. The repo root is the one above that candidate, and
+- * LOST where no .git is above it: git would fail, and the path is then
+- * whatever the shell makes of an empty expansion.
+- */
++/** `raw` with a leading `$(pwd)` or `$(git rev-parse --show-toplevel)` spelled out from `shell`, the shell's folder. */
+ function computedDir(raw, shell) {
+-  return raw.replace(COMPUTED_DIR, (m, a, b) => {
+-    if ((a ?? b).startsWith("pwd")) return shell;
+-    const root = gitRoot(shell);
+-    return existsSync(join(root, ".git")) ? root : LOST;
+-  });
++  return raw.replace(COMPUTED_DIR, (m, a, b) => ((a ?? b).startsWith("pwd") ? shell : gitRoot(shell)));
+ }
+ 
+ /**

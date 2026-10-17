@@ -1,0 +1,1 @@
+{"hasProject":true,"hasRoadmap":true,"phases":[{"number":21,"dir":"21-the-refutation","name":"the refutation","hasContext":true,"hasResearch":true,"hasPlan":true,"hasVerification":true,"issues":["194","195"]},{"number":22,"dir":"22-the-drill","name":"the drill","hasContext":true,"hasResearch":true,"hasPlan":true,"hasVerification":false,"issues":["201","202"]}]}

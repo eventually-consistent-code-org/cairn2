@@ -1,0 +1,1 @@
+{"path":".cairn/audit/{{input.scope}}-2026-10-14.md","recorded":true,"verdict":"{{input.verdict}}","findings":"as submitted","note":"eval mock: the record was accepted exactly as sent; no server-side quorum ran, so the surviving set is the findings you submitted -- file from those"}
