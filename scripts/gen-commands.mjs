@@ -15,10 +15,30 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SENTINEL = "\u0001"; // stand-in for escaped pipes while cell-splitting
 
 // Every cairn verb drives the same tool families: the cairn MCP server plus
-// the core file/exec/agent tools its subroutines lean on. One shared line for
+// the core file/agent tools its subroutines lean on. One shared line for
 // all shims — per-verb variance isn't worth the maintenance surface today.
-const ALLOWED_TOOLS =
-  "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion";
+//
+// Shell is scoped, not bare (#400). A bare `Bash` here let any shell line
+// run without asking for as long as a verb was active — the portal holds
+// that as ALLOWED_TOOLS_BROAD. What stays pre-approved is the read-only
+// git family the verbs lean on for orientation (status, log, diff,
+// rev-parse, describe, branch, worktree). Anything that writes or runs
+// code — commit, push, reset, checkout, merge, npm, npx, node — falls back
+// to the harness's own per-call approval, which is the point. Never put a
+// bare `Bash`, `Bash(*)`, or an interpreter/runner wildcard such as
+// `Bash(node:*)` back in this list: sweep-surface.test.ts fails on it.
+// Write and Edit stay (ALLOWED_TOOLS_UNSCOPED_WRITE is a note, not a hold).
+const ALLOWED_TOOLS = [
+  "mcp__plugin_cairn_cairn__*",
+  "Bash(git status:*)",
+  "Bash(git log:*)",
+  "Bash(git diff:*)",
+  "Bash(git rev-parse:*)",
+  "Bash(git describe:*)",
+  "Bash(git branch:*)",
+  "Bash(git worktree:*)",
+  "Read", "Write", "Edit", "Glob", "Grep", "ToolSearch", "Task", "AskUserQuestion",
+].join(", ");
 
 console.log("generating command shims...");
 

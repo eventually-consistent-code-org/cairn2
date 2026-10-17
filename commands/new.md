@@ -1,7 +1,7 @@
 ---
 description: "Start here — new project: interview, plan artifacts, tracker mirror, issues (/cairn:help)"
 argument-hint: "[project name]"
-allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+allowed-tools: "mcp__plugin_cairn_cairn__*, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git rev-parse:*), Bash(git describe:*), Bash(git branch:*), Bash(git worktree:*), Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 
 Execute the cairn verb `new`:

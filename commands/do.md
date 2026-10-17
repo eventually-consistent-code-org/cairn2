@@ -1,7 +1,7 @@
 ---
 description: "Freeform smart router — classify intent, dispatch the right verb (/cairn:help)"
 argument-hint: "\"<request>\""
-allowed-tools: "mcp__plugin_cairn_cairn__*, Bash, Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
+allowed-tools: "mcp__plugin_cairn_cairn__*, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git rev-parse:*), Bash(git describe:*), Bash(git branch:*), Bash(git worktree:*), Read, Write, Edit, Glob, Grep, ToolSearch, Task, AskUserQuestion"
 ---
 
 Execute the cairn verb `do`:

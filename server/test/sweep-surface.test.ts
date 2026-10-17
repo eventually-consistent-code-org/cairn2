@@ -291,3 +291,42 @@ describe("free dials (#332)", () => {
     expect(runbook).toMatch(/`effort` dial/);
   });
 });
+
+describe("command shim allowed-tools (#400)", () => {
+  // The portal holds a bare `Bash` in a command's allowed-tools as
+  // ALLOWED_TOOLS_BROAD: any shell line runs unasked while the verb is
+  // active. Every shim is generated from one constant in
+  // scripts/gen-commands.mjs, so one slip there lands in all 39 at once.
+  const shims = readdirSync(join(ROOT, "commands")).filter((f) => f.endsWith(".md"));
+
+  const allowedTools = (file: string): string[] => {
+    const m = /^allowed-tools:\s*(.+)$/m.exec(read(`commands/${file}`));
+    if (!m) return [];
+    let raw = m[1].trim();
+    if (raw.startsWith('"')) raw = JSON.parse(raw);
+    return raw.split(",").map((t) => t.trim()).filter(Boolean);
+  };
+
+  // Bare Bash, the catch-all, and any interpreter or runner left wide open —
+  // `Bash(node:*)` is `Bash` with extra steps.
+  const BROAD = /^Bash(\(\*\))?$|^Bash\((node|npx|npm|sh|bash|zsh|python3?|curl|wget)(:\*)?\)$/;
+
+  it("there are shims to check", () => {
+    expect(shims.length).toBeGreaterThan(0);
+  });
+
+  it("no shim carries bare Bash, Bash(*) or an interpreter/runner wildcard", () => {
+    const offenders = shims.flatMap((f) =>
+      allowedTools(f).filter((t) => BROAD.test(t)).map((t) => `commands/${f}: ${t}`));
+    expect(offenders).toEqual([]);
+  });
+
+  it("every shim pre-approves exactly the read-only git family", () => {
+    const expected = ["status", "log", "diff", "rev-parse", "describe", "branch", "worktree"]
+      .map((sub) => `Bash(git ${sub}:*)`);
+    for (const f of shims) {
+      const bash = allowedTools(f).filter((t) => t.startsWith("Bash"));
+      expect(bash, `commands/${f}`).toEqual(expected);
+    }
+  });
+});
