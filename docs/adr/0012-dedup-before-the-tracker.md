@@ -42,7 +42,9 @@ The clause above is now testable: Claude Code ships one call that
 returns a verified, deduplicated finding set (`/code-review` with
 effort levels and `--max-findings all` since 2.1.288, a verify pass,
 per-finding failure scenarios). The recorded corpus exists at
-`evals-corpus/` — eleven real fix commits, each carried into a
+`evals-corpus/` on the `evals-archive` branch (off `main` since #403;
+`git worktree add evals-archive evals-archive` puts it at
+`evals-archive/evals-corpus/`) — eleven real fix commits, each carried into a
 scaffolded workspace as the files it touched plus its own reversal on a
 `corpus/NN-<slug>` branch, so the diff under review is the defect at the
 point in history where it lived, plus one clean control —
@@ -50,7 +52,7 @@ with two arms over it: the shipped five-seat panel with dedup and
 refutation, and the native call. Recall is the share of runs naming the
 known defect at its file; precision is the pass rate of a judge that
 fails any invented finding (a proxy — the harness keeps no transcript).
-Method and commands: `evals-corpus/README.md`;
+Method and commands: `evals-corpus/README.md` there;
 `scripts/eval-corpus-score.mjs` prints the two numbers per arm.
 
 Decision rule, written before the run: native matches or beats the

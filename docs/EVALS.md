@@ -28,6 +28,16 @@ judgment claim added to a guard is a false pin: move it here.
 
 ## Layout
 
+The suite is not on `main`. It lives on the orphan branch
+[`evals-archive`](https://github.com/eventually-consistent-code-org/cairn2/tree/evals-archive) (#403): the
+marketplace ref ships the plugin alone, and four hundred-odd case and
+fixture files were holding it for review. Check the branch out beside
+the repo root — `git worktree add evals-archive evals-archive`
+(gitignored) — and the tree below sits at `evals-archive/evals/`. The
+corpus generator and the live-suite test in `server/test` look there,
+or wherever `CAIRN_EVALS_ARCHIVE` points; the test skips when the
+checkout is absent.
+
 ```
 evals/
   01-do-confirms-before-mutating/   prompt.md + graders/*.md
@@ -64,12 +74,14 @@ the deterministic backstop for the config-file subset.
 
 ## Running it
 
-Always the **path** form, from the repo root:
+Always the **path** form, from the repo root, with `--eval-dir`
+naming the archive checkout (the default `evals/` no longer exists on
+`main`):
 
 ```bash
-claude plugin eval . --json --no-publish --max-cost-usd 3
-claude plugin eval . --case '05-*' --runs 1 --max-cost-usd 1   # one case, one run
-claude plugin eval . --tag trigger --max-cost-usd 2            # the trigger-rate set (#202)
+claude plugin eval . --eval-dir evals-archive/evals --json --no-publish --max-cost-usd 3
+claude plugin eval . --eval-dir evals-archive/evals --case '05-*' --runs 1 --max-cost-usd 1   # one case, one run
+claude plugin eval . --eval-dir evals-archive/evals --tag trigger --max-cost-usd 2            # the trigger-rate set (#202)
 ```
 
 Never `claude plugin eval cairn@cairn-dev`: the marketplace checkout
@@ -102,22 +114,26 @@ Exit codes: 0 every case ≥ `--threshold` (default 1.0); 1 below
 threshold / load error / no cases / gate closed; 2 partial (cost
 ceiling or auth); 130/143 interrupted.
 
-Results: `evals/results/<timestamp>/aggregate-result.json` is the same
+Results: `results/<timestamp>/aggregate-result.json` under the eval
+dir (`evals/results/ci/` in CI, which copies the suite into place) is the same
 document `--json` prints — `cases[].arms.{with,without}[].graders[]`
 plus `aggregates`; camelCase, additive-only. `report.html` beside it.
 
 ## The review corpus — a sibling suite
 
-`evals-corpus/` holds ADR 0012's own test (#334): eleven recorded
+`evals-corpus/`, beside `evals/` on the `evals-archive` branch, holds
+ADR 0012's own test (#334): eleven recorded
 defects, each a real fix commit reverted on top of itself as a local
 `corpus/NN-<slug>` branch, reviewed twice — by the five-seat panel
 (`/cairn:review`) and by the platform's `/code-review` at high effort
 with every finding kept. It is a sibling of this directory, not a
 child, because the harness discovers cases recursively and twenty-two
 review sessions must never ride the default run; select it with
-`--eval-dir evals-corpus`. Layout, ground truth, the recall and
+`--eval-dir evals-archive/evals-corpus`. Layout, ground truth, the recall and
 precision-proxy numbers and how to run each arm are in
-`evals-corpus/README.md`; `scripts/eval-corpus-score.mjs` reads the
+`evals-corpus/README.md` there; `scripts/eval-corpus-cases.mjs`
+regenerates the cases into the checkout from this repo's git history,
+and `scripts/eval-corpus-score.mjs` reads the
 aggregate. Every corpus case is `capability`-tagged — the result
 informs ADR 0012's sunset decision and gates nothing.
 
@@ -161,12 +177,12 @@ The harness itself still scores one mean, so the semantics live in a
 post-processor that reads the same `aggregate-result.json`:
 
 ```bash
-node scripts/eval-verdicts.mjs evals/results            # newest timestamped run
-node scripts/eval-verdicts.mjs evals/results/ci --json  # one run dir, machine-readable
+node scripts/eval-verdicts.mjs evals-archive/evals/results   # newest timestamped local run
+node scripts/eval-verdicts.mjs evals/results/ci --json       # one run dir (the CI layout), machine-readable
 ```
 
 A directory argument means that directory's `aggregate-result.json`,
-or, for a parent like `evals/results`, the newest timestamped subdir
+or, for a parent like `evals-archive/evals/results`, the newest timestamped subdir
 holding one. `--json` prints `{ source, cases: [{ case, tier, runs,
 passed, verdict, gate, gateOk }], gateOk }` (runs and passed count the
 with-plugin arm); without it, a table plus a one-line summary. Exit 0
@@ -247,7 +263,13 @@ variable: obtain it through your Anthropic contact.
 
 An allowed-to-fail workflow (`.github/workflows/evals.yml`) runs the
 suite nightly (06:17 UTC), on manual dispatch, and on changes under
-`skills/**`, `commands/**`, `evals/**`, `.claude-plugin/**`. It uploads
+`skills/**`, `commands/**`, `.claude-plugin/**`. It checks the
+`evals-archive` branch out beside the plugin, copies its `evals/` into
+place and drops the checkout, so the run reads exactly as it did when
+the suite was tracked on `main`; an edit to a case lands on the archive
+branch and reaches the lane through the nightly run or a dispatch. The
+`npm install -g @anthropic-ai/claude-code@<pin>` step is CI-only — it
+puts the CLI on the runner; nothing the plugin ships runs it. It uploads
 `evals/results/**` (aggregate JSON + report) as a 14-day artifact and
 NEVER blocks a merge — `continue-on-error: true`; a stochastic lane
 earns a blocking threshold only after its variance baseline exists.
