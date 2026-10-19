@@ -165,38 +165,22 @@ pairing overlay applies:
 6. On completion: run the task's declared `verify:` command — that run IS
    the close evidence. It disagreeing with the declaration is a finding,
    not a formality: either the declaration was wrong (say so and why) or
-   the work is not done. `ledger_append` returns `declaredVerify` and
-   `evidenceCitesDeclared` so the mismatch is visible; it never refuses,
-   because a shorthand declaration and the real command line rarely match
-   character for character. Then, **with tests passing**: post the close
-   comment first —
-   `issue_comment(id, ...)`: what shipped in plain language, the commit
-   range as short refs on their own line, the test evidence (suite name +
-   pass count). Do NOT compute a time spent: you have no reliable sense
-   of elapsed time, and self-reports measured 6x-14x high. When the cost
-   log has rows for this issue
-   (`node "$CLAUDE_PLUGIN_ROOT/hooks/scripts/cost-report.mjs" --issue <id>`
-   returns > 0), add "agent cost: ~$X (approximate)".
-   Then `issue_close(id, evidence: { command, result })` — `evidence` is
-   the SAME run that justified the close, as data: `command` = the suite
-   or shell line you ran, `result` = what it showed ("1408 passed"). The
-   tool measures the duration itself (claim comment, else the claim it
-   saw, else — at `ledger_append` — the commit range) and posts it with
-   the evidence as one standard comment before the state change; quote
-   its `measured` result when you report the close. `timeSpentMinutes`
-   is optional and is stored only as a claim beside the measurement,
-   never in place of it; backends with worklog support log the measured
-   minutes. On stopping early: leave in_progress
-   and post a parked comment — why it stopped, what remains.
-7. On `issue_close`: `ledger_append(phaseDir: <NN-slug>, taskRef: id, summary:
-   <one line — what shipped>, baseCommit: <HEAD when this issue started>,
-   headCommit: <HEAD now>, issueId: id, closedDate: <today, YYYY-MM-DD>,
-   redCommit: <RED sha — TDD tasks only>, greenCommit: <GREEN sha — TDD
-   tasks only>, evidence: <the same { command, result }>)` — the durable,
-   git-committed record that the task landed. The server REFUSES a line
-   with no evidence: an issue that genuinely had nothing to run (docs
-   only, plan text only) passes `evidenceWaived: "<why>"` instead — a
-   written reason, never a silent skip. `verify` fails the phase on a
-   ledger line carrying neither.
+   the work is not done. Then, **with tests passing**, ONE call closes it:
+   `issue_close(id, summary: <one line, plain language — what shipped>,
+   evidence: { command, result }, ledger: { redCommit, greenCommit }
+   — TDD tasks only)`. `evidence` is the SAME run, as data (`result` =
+   what it showed, "1408 passed"). The server posts the close comment
+   (summary, commit range, evidence, measured duration, agent cost),
+   closes, then appends the ledger line: base from the claim, HEAD,
+   today, phase dir from the active context (`ledger.phaseDir`
+   overrides). Quote its `measured` and `ledger.line`; `ledger` also
+   reports `declaredVerify` / `evidenceCitesDeclared`, never refusing a
+   shorthand mismatch. Never compute a time spent: self-reports measured
+   6x-14x high. On stopping early: leave in_progress and post a parked
+   comment — why it stopped, what remains.
+7. Nothing to run (docs or plan text only): `issue_close(id)` with no
+   summary, then `ledger_append` with `evidenceWaived: "<why>"` and the
+   claim's base commit — a written reason, never a silent skip. `verify`
+   fails the phase on a ledger line carrying neither.
 8. After the last issue: `context_set(issueId: null)` and suggest
    `/cairn:verify <N>`.
