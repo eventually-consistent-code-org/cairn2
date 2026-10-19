@@ -47,6 +47,44 @@ export interface DistillManifest {
     skipped: string[];
 }
 /**
+ * A closure line as the ledger gates read it: the distill entry plus where
+ * it sits and which gate segments it carries. distillManifest strips these
+ * back off, so its result shape never moves.
+ */
+export interface ParsedClosure extends DistillLedgerEntry {
+    /** 1-indexed LEDGER.md line. */
+    line: number;
+    /** Carries a `tdd <red>..<green>` segment. */
+    tdd: boolean;
+    /** Carries an `evidence <cmd> => <result>` or `waived <reason>` segment. */
+    closeEvidence: boolean;
+    /** Superseded closures only: the evidence line that corrected it. */
+    supersededBy?: number;
+}
+/** An evidence-only line plus where it sits. */
+export interface ParsedEvidence extends DistillEvidenceEntry {
+    line: number;
+}
+export interface ParsedLedger {
+    entries: ParsedClosure[];
+    evidence: ParsedEvidence[];
+    superseded: ParsedClosure[];
+    skipped: string[];
+    range: {
+        base: string;
+        head: string;
+    } | null;
+}
+/**
+ * Parse one phase dir's LEDGER.md -- the one ledger reader that
+ * distill_manifest and plan_check's ledger gates share.
+ *
+ * :param base: the phase directory (live or archived) holding LEDGER.md
+ * :returns standing closures, evidence lines, superseded closures, skip
+ *   notes and the union commit range -- all empty when there is no ledger
+ */
+export declare function parseLedger(base: string): ParsedLedger;
+/**
  * Assemble the distill manifest for one phase: its PLAN.md issues, its
  * LEDGER.md entries (each carrying the commit range the task landed as), and
  * the union commit range those entries span. Pure filesystem reads -- no git,

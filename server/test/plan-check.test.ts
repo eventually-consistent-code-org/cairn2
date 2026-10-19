@@ -266,6 +266,92 @@ describe("planCheck — declared verification (phase 24.5)", () => {
   });
 });
 
+describe("planCheck — ledger gates (#366)", () => {
+  // Phase 28: past the evidence gate, so nothing here is exempt unless a
+  // test says so. Tasks declare verify and CONTEXT.md carries the block, so
+  // only the ledger gates can speak.
+  const LEDGER_PLAN = `---\nissues: [7, 8]\ntdd: [7]\n---\n# Phase 28\n\n## Tasks\n`
+    + "- #7 red first `verify: npm test`\n- #8 docs `verify: npm test`\n";
+  const HEAD = ["# Phase 28 — Ledger", "", "<!-- append-only -->", ""]; // entries start at line 5
+  const close = (id: string, seg: { tdd?: boolean; ev?: boolean; waived?: boolean } = {}) =>
+    `- [x] T${id} — did ${id} — commits aaaaaaa..bbbbbbb — `
+    + (seg.tdd ? "tdd ccccccc..ddddddd — " : "")
+    + (seg.ev ? "evidence npm test => 3 passed — " : "")
+    + (seg.waived ? "waived docs only — " : "")
+    + `${id} closed 2026-10-18`;
+  const fixUp = (id: string) => `- [ ] T${id} — wrong close — commits aaaaaaa..bbbbbbb — evidence for ${id} 2026-10-18`;
+  const setup = (phaseDir: string, entries: string[], verified = false) => {
+    const dir = fresh();
+    plan(dir, phaseDir, LEDGER_PLAN);
+    context(dir, phaseDir, GOOD_BLOCK);
+    const base = join(dir, ".cairn", "plans", "phases", phaseDir);
+    writeFileSync(join(base, "LEDGER.md"), [...HEAD, ...entries, ""].join("\n"));
+    if (verified) writeFileSync(join(base, "VERIFICATION.md"), "# done\n");
+    return dir;
+  };
+
+  it("a clean ledger reports nothing", () => {
+    const dir = setup("28-x", [close("7", { tdd: true, ev: true }), close("8", { waived: true })]);
+    expect(planCheck(dir, 28).findings).toEqual([]);
+  });
+
+  it("tdd-missing: a tdd: id whose closing line has no red..green pair, on that line", () => {
+    const dir = setup("28-x", [close("7", { ev: true }), close("8", { waived: true })]);
+    const { findings } = planCheck(dir, 28);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ type: "tdd-missing", line: 5 });
+    expect(findings[0].plan).toContain("28-x/LEDGER.md");
+    expect(findings[0].detail).toContain("#7");
+  });
+
+  it("evidence-missing: a closing line with neither evidence nor waived, on that line", () => {
+    const dir = setup("28-x", [close("7", { tdd: true, ev: true }), close("8")]);
+    const { findings } = planCheck(dir, 28);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ type: "evidence-missing", line: 6 });
+    expect(findings[0].plan).toContain("28-x/LEDGER.md");
+    expect(findings[0].detail).toContain("#8");
+  });
+
+  it("closure-superseded: a closure a later evidence-only line corrected, naming both lines; a fresh close clears it", () => {
+    const lines = [close("7", { tdd: true, ev: true }), close("8", { waived: true }), fixUp("8")];
+    const { findings } = planCheck(setup("28-x", lines), 28);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      type: "closure-superseded", line: 6, counterpart: { line: 7 },
+    });
+    expect(findings[0].plan).toContain("28-x/LEDGER.md");
+    expect(findings[0].detail).toContain("#8");
+    expect(planCheck(setup("28-x", [...lines, close("8", { waived: true })]), 28).findings).toEqual([]);
+  });
+
+  it("an id with no closing line is reported on the PLAN.md frontmatter that declared it; no ledger yet reports nothing", () => {
+    const { findings } = planCheck(setup("28-x", [close("8", { waived: true })]), 28);
+    expect(findings.map((f) => [f.type, f.line])).toEqual([["evidence-missing", 2], ["tdd-missing", 3]]);
+    expect(findings.every((f) => f.plan.endsWith("28-x/PLAN.md") && f.detail.includes("#7"))).toBe(true);
+    // Plan time: the phase has no LEDGER.md, so no gate has anything to read.
+    const planning = fresh();
+    plan(planning, "28-x", LEDGER_PLAN);
+    context(planning, "28-x", GOOD_BLOCK);
+    expect(planCheck(planning, 28).findings).toEqual([]);
+  });
+
+  it("the pre-phase-23 exemption: a verified phase numbered 23 or below owes no evidence segment, nothing else is spared", () => {
+    const bare = [close("7", { tdd: true }), close("8")];
+    expect(planCheck(setup("22-old", bare, true), 22).findings).toEqual([]);
+    expect(planCheck(setup("23-gate", bare, true), 23).findings).toEqual([]);
+    // Unverified: held to it whatever its number.
+    expect(planCheck(setup("22-old", bare), 22).findings.map((f) => f.type))
+      .toEqual(["evidence-missing", "evidence-missing"]);
+    // Verified past the gate: still held to it.
+    expect(planCheck(setup("24-new", bare, true), 24).findings.map((f) => f.type))
+      .toEqual(["evidence-missing", "evidence-missing"]);
+    // The tdd gate has no exemption.
+    expect(planCheck(setup("22-old", [close("7"), close("8")], true), 22).findings.map((f) => f.type))
+      .toEqual(["tdd-missing"]);
+  });
+});
+
 describe("planCheck — determinism", () => {
   it("multi-producer drift onto one consumer is deterministically ordered", () => {
     const dir = fresh();

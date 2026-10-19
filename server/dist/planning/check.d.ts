@@ -8,8 +8,14 @@ export interface PlanFinding {
      * missing-verify (phase 24.5): a task line in a planned, non-quick,
      * unverified PLAN.md that never says how it will be proved. Criteria
      * written after the fact are chosen to fit what happened.
+     * tdd-missing / evidence-missing / closure-superseded (#366): the
+     * LEDGER.md gates verify holds a phase to -- a `tdd:` id whose closing
+     * line has no red..green pair, a planned issue whose closing line has
+     * neither evidence nor a waiver, a closure an evidence-only line for the
+     * same task later corrected. Anchored on the ledger line, or on the
+     * PLAN.md frontmatter that declared the id when no closing line exists.
      */
-    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify";
+    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded";
     plan: string;
     line: number;
     detail: string;
@@ -46,6 +52,15 @@ export declare function judgeApproaches(lines: string[]): {
     line: number;
     detail: string;
 } | null;
+/**
+ * The pre-phase-23 exemption, stated once. The close-evidence gate shipped
+ * in phase 23, so a phase numbered 23 or below that is already verified
+ * closed its issues before the gate existed (phase 23's own lines
+ * included), and the ledger is append-only, so those lines can never grow
+ * the segment: exempt. An unverified phase is held to the gate whatever its
+ * number. The tdd and superseded gates have no exemption.
+ */
+export declare const EVIDENCE_GATE_SHIPPED = 23;
 export declare function planCheck(projectDir: string, phase?: number): {
     findings: PlanFinding[];
     scanned: number;

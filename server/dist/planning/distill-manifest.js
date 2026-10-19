@@ -29,9 +29,12 @@ import { projectStatus } from "./status.js";
 const EVIDENCE_LINE_RE = new RegExp("^- \\[ \\] (.+?) — (.+?) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
     + "(?:tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
     + "(?:(?:evidence|waived) [^—]*? — )?(?:note [^—]*? — )?evidence for (.+?) (.+)$");
+// The closure pattern also captures its two gate segments (groups 5 and 6)
+// so plan_check's ledger gates read the same parse distill does -- one
+// grammar, one parser.
 const LEDGER_LINE_RE = new RegExp("^- \\[x\\] (.+?) — (.+?) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
-    + "(?:tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
-    + "(?:(?:evidence|waived) [^—]*? — )?(?:actuals [^—]*? — )?(.+?) closed (.+)$");
+    + "(tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
+    + "((?:evidence|waived) [^—]*? — )?(?:actuals [^—]*? — )?(.+?) closed (.+)$");
 // Live phases win; among archived copies (a number can recur across
 // milestones) the newest vN wins -- that's the copy summit archived last.
 function resolvePhase(projectDir, phaseNumber) {
@@ -73,7 +76,15 @@ function planIssuesAt(base) {
         return [];
     return parsePlanDoc(readFileSync(path, "utf8")).frontmatter.issues;
 }
-function parseLedger(base) {
+/**
+ * Parse one phase dir's LEDGER.md -- the one ledger reader that
+ * distill_manifest and plan_check's ledger gates share.
+ *
+ * :param base: the phase directory (live or archived) holding LEDGER.md
+ * :returns standing closures, evidence lines, superseded closures, skip
+ *   notes and the union commit range -- all empty when there is no ledger
+ */
+export function parseLedger(base) {
     const entries = [];
     const evidence = [];
     const superseded = [];
@@ -94,15 +105,17 @@ function parseLedger(base) {
         if (ev) {
             evidence.push({
                 taskRef: ev[1], summary: ev[2], baseCommit: ev[3], headCommit: ev[4],
-                issueId: ev[5], loggedDate: ev[6],
+                issueId: ev[5], loggedDate: ev[6], line: i + 1,
             });
             extend(ev[3], ev[4]);
             // A closure EARLIER in the file for the same taskRef was wrong: the
             // evidence line is the correction, so that closure stops standing.
             // (A closure written AFTER this line is a real later close and stays.)
             for (let j = entries.length - 1; j >= 0; j--) {
-                if (entries[j].taskRef === ev[1])
-                    superseded.push(...entries.splice(j, 1));
+                if (entries[j].taskRef !== ev[1])
+                    continue;
+                const [gone] = entries.splice(j, 1);
+                superseded.push({ ...gone, supersededBy: i + 1 });
             }
             continue;
         }
@@ -114,12 +127,17 @@ function parseLedger(base) {
         }
         entries.push({
             taskRef: m[1], summary: m[2], baseCommit: m[3], headCommit: m[4],
-            issueId: m[5], closedDate: m[6],
+            issueId: m[7], closedDate: m[8],
+            line: i + 1, tdd: m[5] !== undefined, closeEvidence: m[6] !== undefined,
         });
         extend(m[3], m[4]);
     }
     return { entries, evidence, superseded, skipped, range };
 }
+// Back to the published shapes: the gate fields are plan_check's, and the
+// manifest's result must not grow them.
+const asEntry = ({ taskRef, summary, baseCommit, headCommit, issueId, closedDate }) => ({ taskRef, summary, baseCommit, headCommit, issueId, closedDate });
+const asEvidence = ({ taskRef, summary, baseCommit, headCommit, issueId, loggedDate }) => ({ taskRef, summary, baseCommit, headCommit, issueId, loggedDate });
 /**
  * Assemble the distill manifest for one phase: its PLAN.md issues, its
  * LEDGER.md entries (each carrying the commit range the task landed as), and
@@ -144,9 +162,9 @@ export function distillManifest(projectDir, phaseNumber) {
             dir: phase.dir, archived: phase.archived,
         },
         issues: planIssuesAt(phase.base),
-        ledgerEntries: entries,
-        evidenceEntries: evidence,
-        superseded,
+        ledgerEntries: entries.map(asEntry),
+        evidenceEntries: evidence.map(asEvidence),
+        superseded: superseded.map(asEntry),
         commitRange: range,
         skipped,
     };
