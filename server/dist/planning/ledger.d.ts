@@ -44,6 +44,17 @@ export type LedgerKind = "close" | "evidence";
  */
 export declare function declaredVerifyFor(projectDir: string, phaseDir: string, issueId: string): string | null;
 /**
+ * Every refusal appendLedger can raise -- the phase dir exists, the entry is
+ * well formed -- with nothing written and nothing consumed. appendLedger runs
+ * it first; the close fold (#365) runs it BEFORE the tracker close too, so a
+ * ledger line that would be refused refuses the whole call while the issue
+ * is still open, instead of leaving a close with no line behind it.
+ */
+export declare function checkLedgerEntry(projectDir: string, phaseDir: string, entry: LedgerEntryInput): {
+    number: number;
+    name: string;
+};
+/**
  * Appends one formatted line to a phase's LEDGER.md, creating the file (with
  * header) on first append. Never rewrites existing content -- append-only,
  * so the ledger stays a trustworthy record even if a session crashes

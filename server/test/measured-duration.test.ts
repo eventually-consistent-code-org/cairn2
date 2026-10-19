@@ -1,16 +1,18 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
 import {
-  claimCommentTime, composeClaimComment, gitSpan, headCommit, isClaimComment,
-  measureAtClose, measuredText,
+  claimCommentTime, closeEvidenceText, composeClaimComment, composeCloseComment, gitSpan,
+  headCommit, isClaimComment, measureAtClose, measuredText,
 } from "../src/planning/duration.js";
+import { metricsPath } from "../src/core/continuity.js";
+import { issueCostUsd } from "../src/core/metrics.js";
 import { readClaim, readClaimRecord, receiptsDir } from "../src/planning/close-receipt.js";
 
 // The work verb's real claim comment opens this way -- every issue in this
@@ -378,5 +380,185 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
         issueId: made.json.id, at: T0, baseCommit: headCommit(projectDir),
       });
     });
+  });
+
+  describe("the close fold: issue_close(summary) writes the comment and the ledger line (#365)", () => {
+    // The cost line reads the metrics log under ~/.cairn, so HOME is a temp
+    // folder for this block -- a fixture log, and no real one touched.
+    let savedHome: string | undefined;
+    beforeAll(() => {
+      savedHome = process.env.HOME;
+      process.env.HOME = mkdtempSync(join(tmpdir(), "cairn-fold-home-"));
+    });
+    afterAll(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    });
+
+    const EVIDENCE = { command: "npm test", result: "1 passed" };
+    // A claimed issue in a repository, one commit of work past its base,
+    // twelve minutes on the clock, phase 1 active.
+    const claimed = async (tracker = new FakeTracker()) => {
+      const h = await harness(tracker, { git: true });
+      const base = headCommit(h.projectDir)!;
+      const made = await h.call("issue_create", { title: "fold", claim: { wave: "2", task: "fold" } });
+      writeFileSync(join(h.projectDir, "work.txt"), "done\n");
+      execFileSync("git", ["add", "work.txt"], { cwd: h.projectDir });
+      execFileSync("git", ["commit", "-qm", "work", "--no-gpg-sign"], { cwd: h.projectDir });
+      const head = headCommit(h.projectDir)!;
+      await h.call("context_set", { phase: 1, issueId: made.json.id });
+      h.advance(12);
+      return { ...h, tracker, id: made.json.id as string, base, head };
+    };
+    const ledgerFile = (projectDir: string) =>
+      join(projectDir, ".cairn", "plans", "phases", "01-core", "LEDGER.md");
+
+    it("composes the close comment: summary, range, evidence + measured, agent cost", async () => {
+      const { call, tracker, id, base, head, projectDir } = await claimed();
+      const log = metricsPath(projectDir);
+      mkdirSync(dirname(log), { recursive: true });
+      writeFileSync(log, [
+        { session_id: "s1", issue: id, est_cost_usd: 0.5 },
+        { session_id: "s1", issue: id, est_cost_usd: 1.25 }, // cumulative: replaces, never adds
+        { session_id: "s2", issue: `#${id}`, est_cost_usd: 0.5 },
+        { session_id: "s3", issue: "elsewhere", est_cost_usd: 9 },
+      ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+      const closed = await call("issue_close", { id, summary: "Close fold shipped", evidence: EVIDENCE });
+      expect(closed.isError).toBeFalsy();
+      expect(closed.json.category).toBe("closed");
+      expect(tracker.comments(id).at(-1)!.text).toBe(
+        "Close fold shipped\n\n"
+        + `Commits: ${base.slice(0, 7)}..${head.slice(0, 7)}\n\n`
+        + "evidence: `npm test` → 1 passed\n"
+        + "measured: ~12m (claim comment to close)\n"
+        + "agent cost: ~$1.75 (approximate)");
+      // one comment for the close, beside the claim's -- not two
+      expect(tracker.comments(id)).toHaveLength(2);
+    });
+
+    it("appends the ledger line in the same call, carrying the receipt's measured segment", async () => {
+      const { call, id, base, head, projectDir } = await claimed();
+      const closed = await call("issue_close", { id, summary: "Close fold shipped", evidence: EVIDENCE });
+      const line = `- [x] ${id} — Close fold shipped — commits ${base.slice(0, 7)}..${head.slice(0, 7)} — `
+        + "evidence npm test => 1 passed — "
+        + "actuals wall=12m:claim_comment claimed=none est=none worklog=not_requested — "
+        + `${id} closed 2026-10-01`;
+      expect(closed.json.ledger.line).toBe(line);
+      expect(closed.json.ledger.line).not.toContain("degraded");
+      expect(closed.json.ledger.degraded).toBeUndefined();
+      expect(closed.json.ledger.measured).toEqual({ minutes: 12, source: "claim_comment" });
+      expect(readFileSync(ledgerFile(projectDir), "utf8").trimEnd().split("\n").at(-1)).toBe(line);
+      // no cost rows for this issue: no agent-cost line, never a $0.00 one
+      expect(closed.json.ledgerError).toBeUndefined();
+    });
+
+    it("an explicit phaseDir and the tdd pair reach the line", async () => {
+      const { call, id } = await claimed();
+      const closed = await call("issue_close", {
+        id, summary: "tdd task", evidence: EVIDENCE,
+        ledger: { phaseDir: "01-core", redCommit: "1111111aaaa", greenCommit: "2222222bbbb" },
+      });
+      expect(closed.json.ledger.line).toContain(" — tdd 1111111..2222222 — evidence npm test");
+    });
+
+    it("a close without summary behaves exactly as today: one evidence comment, no ledger line", async () => {
+      const { call, tracker, id, projectDir } = await claimed();
+      const closed = await call("issue_close", { id, evidence: EVIDENCE });
+      expect(closed.isError).toBeFalsy();
+      expect(tracker.comments(id).at(-1)!.text)
+        .toBe("evidence: `npm test` → 1 passed\nmeasured: ~12m (claim comment to close)");
+      expect(closed.json.ledger).toBeUndefined();
+      expect(closed.json.receiptWritten).toBe(true);
+      expect(existsSync(ledgerFile(projectDir))).toBe(false);
+      // the receipt waits for the hand-made append, as it always has
+      const appended = await call("ledger_append", append(id));
+      expect(appended.json.line).toContain("actuals wall=12m:claim_comment claimed=none");
+    });
+
+    // Every refusal lands while the issue is still open: no comment, no
+    // close, no line, the claim clock where it was.
+    const refusedBeforeClose = async (
+      args: Record<string, unknown>, code: string, setup?: (h: Awaited<ReturnType<typeof claimed>>) => Promise<void>,
+    ) => {
+      const h = await claimed();
+      await setup?.(h);
+      const before = h.tracker.comments(h.id).length;
+      const res = await h.call("issue_close", { id: h.id, ...args });
+      expect(res.isError).toBe(true);
+      expect(res.json.code).toBe(code);
+      expect((await h.call("issue_get", { id: h.id })).json.category).toBe("in_progress");
+      expect(h.tracker.comments(h.id)).toHaveLength(before);
+      expect(existsSync(ledgerFile(h.projectDir))).toBe(false);
+      expect(readClaim(h.projectDir, h.id)).toBe(T0);
+      return res;
+    };
+
+    it("summary without evidence is refused before the close", async () => {
+      await refusedBeforeClose({ summary: "no proof" }, "PRECONDITION_FAILED");
+    });
+
+    it("a ledger block without summary is refused before the close", async () => {
+      await refusedBeforeClose({ evidence: EVIDENCE, ledger: { phaseDir: "01-core" } }, "CONFIG_INVALID");
+    });
+
+    it("half a tdd pair is the ledger's own refusal, raised before the close", async () => {
+      await refusedBeforeClose(
+        { summary: "s", evidence: EVIDENCE, ledger: { redCommit: "1111111" } }, "CONFIG_INVALID");
+    });
+
+    it("an unknown phase dir is refused before the close", async () => {
+      await refusedBeforeClose(
+        { summary: "s", evidence: EVIDENCE, ledger: { phaseDir: "09-nowhere" } }, "NOT_FOUND");
+    });
+
+    it("no phaseDir and no active phase is refused before the close", async () => {
+      await refusedBeforeClose({ summary: "s", evidence: EVIDENCE }, "PRECONDITION_FAILED",
+        async (h) => { await h.call("context_set", { phase: null }); });
+    });
+
+    it("a claim with no recorded base commit is refused, never guessed", async () => {
+      const tracker = new FakeTracker();
+      const h = await harness(tracker, { git: true });
+      const made = await h.call("issue_create", { title: "bare" });
+      await h.call("issue_update", { id: made.json.id, state: "in_progress" }); // no claim block
+      await h.call("context_set", { phase: 1 });
+      const res = await h.call("issue_close", { id: made.json.id, summary: "s", evidence: EVIDENCE });
+      expect(res.isError).toBe(true);
+      expect(res.json.code).toBe("PRECONDITION_FAILED");
+      expect(res.json.message).toContain("base commit");
+      expect((await h.call("issue_get", { id: made.json.id })).json.category).toBe("in_progress");
+    });
+  });
+});
+
+describe("composeCloseComment and issueCostUsd (#365)", () => {
+  const measured = { minutes: 12, source: "claim_comment" as const };
+  it("short refs for shas, no cost line at zero", () => {
+    expect(composeCloseComment({
+      summary: "  shipped  ", baseCommit: "a1b2c3d4e5f6a1b2", headCommit: "d4e5f6a1b2c3d4e5",
+      evidence: { command: " npm test ", result: " 3 passed " }, measured, costUsd: 0,
+    })).toBe("shipped\n\nCommits: a1b2c3d..d4e5f6a\n\n"
+      + "evidence: `npm test` → 3 passed\nmeasured: ~12m (claim comment to close)");
+  });
+
+  it("the no-summary block is the same evidence + measured text the close always posted", () => {
+    expect(closeEvidenceText(measured, { command: "npm test", result: "1 passed" }))
+      .toBe("evidence: `npm test` → 1 passed\nmeasured: ~12m (claim comment to close)");
+    expect(closeEvidenceText({ minutes: null, source: "none" })).toBe(measuredText({ minutes: null, source: "none" }));
+  });
+
+  it("latest row per session across segments, # ignored, absent log is 0", () => {
+    const d = mkdtempSync(join(tmpdir(), "cairn-cost-"));
+    const live = join(d, "p-abc.jsonl");
+    expect(issueCostUsd(live, "7")).toBe(0);
+    writeFileSync(join(d, "p-abc.20261001T000000Z.jsonl"),
+      JSON.stringify({ session_id: "s1", issue: "7", est_cost_usd: 1 }) + "\n");
+    writeFileSync(live, [
+      JSON.stringify({ session_id: "s1", issue: "7", est_cost_usd: 2 }),
+      "{ corrupt",
+      JSON.stringify({ session_id: "s2", issue: "#7", est_cost_usd: 0.25 }),
+      JSON.stringify({ issue: "7", est_cost_usd: 100 }), // unattributable -- skipped
+    ].join("\n") + "\n");
+    expect(issueCostUsd(live, "#7")).toBe(2.25);
   });
 });

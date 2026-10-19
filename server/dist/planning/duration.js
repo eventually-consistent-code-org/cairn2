@@ -141,3 +141,35 @@ export function measuredText(m) {
         ? "measured: not derivable at close (the ledger append takes it from the commit range)"
         : `measured: ~${m.minutes}m (${RUNG_TEXT[m.source]})`;
 }
+/**
+ * The evidence + measured block every close posts (phase 23, #232): one
+ * standard line per fact, the same shape on every backend. A close with no
+ * evidence posts the measured line alone.
+ */
+export function closeEvidenceText(measured, evidence) {
+    const line = measuredText(measured);
+    return evidence
+        ? `evidence: \`${evidence.command.trim()}\` → ${evidence.result.trim()}\n${line}`
+        : line;
+}
+/** A sha as the short ref a reader scans for; anything else as given. */
+function shortRef(commit) {
+    const c = commit.trim();
+    return /^[0-9a-f]{7,40}$/i.test(c) ? c.slice(0, 7) : c;
+}
+/**
+ * The close comment, composed server-side when issue_close carries a
+ * summary (#365) -- the mirror of composeClaimComment. What shipped first,
+ * the commit range as short refs on its own line, then the standard
+ * evidence + measured block, then the agent-cost line when the cost log has
+ * spend for this issue (never a zero line: no rows means no line). No time
+ * spent of the agent's own: the measured line is the duration.
+ */
+export function composeCloseComment(c) {
+    const cost = c.costUsd > 0 ? [`agent cost: ~$${c.costUsd.toFixed(2)} (approximate)`] : [];
+    return [
+        c.summary.trim(),
+        `Commits: ${shortRef(c.baseCommit)}..${shortRef(c.headCommit)}`,
+        [closeEvidenceText(c.measured, c.evidence), ...cost].join("\n"),
+    ].join("\n\n");
+}

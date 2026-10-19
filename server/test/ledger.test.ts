@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffoldProject, scaffoldPhase } from "../src/planning/artifacts.js";
-import { appendLedger, declaredVerifyFor } from "../src/planning/ledger.js";
+import { appendLedger, checkLedgerEntry, declaredVerifyFor } from "../src/planning/ledger.js";
 import { CairnError } from "../src/errors.js";
 import {
   actualsSegment, receiptsDir, takeReceipt, writeReceipt, type CloseReceipt,
@@ -268,6 +268,23 @@ describe("close receipt consumed at append (#233)", () => {
       "— actuals wall=none claimed=128m est=2pt:body,90m:body worklog=unsupported — PROJ-105 closed");
     expect(r.degraded).toBeUndefined();
     expect(existsSync(receiptFile(d, "PROJ-105"))).toBe(false);
+  });
+
+  it("checkLedgerEntry raises every append refusal with nothing written or consumed (#365)", () => {
+    const { d, phaseDir } = phase();
+    writeReceipt(d, receipt("PROJ-105"));
+    const refusal = (fn: () => unknown) => {
+      try { fn(); } catch (e) { return (e as CairnError).code; }
+      return "accepted";
+    };
+    expect(refusal(() => checkLedgerEntry(d, "09-nowhere", entry))).toBe("NOT_FOUND");
+    expect(refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, redCommit: "abc1234" })))
+      .toBe("CONFIG_INVALID");
+    expect(refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, evidence: undefined })))
+      .toBe("PRECONDITION_FAILED");
+    expect(checkLedgerEntry(d, phaseDir, entry)).toMatchObject({ number: 3 });
+    expect(existsSync(receiptFile(d, "PROJ-105"))).toBe(true);
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
   });
 
   it("a refused append leaves the receipt for the retry", () => {

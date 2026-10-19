@@ -62,3 +62,31 @@ export declare function measureAtClose(input: {
 export declare function gitSpan(projectDir: string, base: string, head: string): Measured;
 /** The close comment's line: the number, always with where it came from. */
 export declare function measuredText(m: Measured): string;
+/**
+ * The evidence + measured block every close posts (phase 23, #232): one
+ * standard line per fact, the same shape on every backend. A close with no
+ * evidence posts the measured line alone.
+ */
+export declare function closeEvidenceText(measured: Measured, evidence?: {
+    command: string;
+    result: string;
+}): string;
+/**
+ * The close comment, composed server-side when issue_close carries a
+ * summary (#365) -- the mirror of composeClaimComment. What shipped first,
+ * the commit range as short refs on its own line, then the standard
+ * evidence + measured block, then the agent-cost line when the cost log has
+ * spend for this issue (never a zero line: no rows means no line). No time
+ * spent of the agent's own: the measured line is the duration.
+ */
+export declare function composeCloseComment(c: {
+    summary: string;
+    baseCommit: string;
+    headCommit: string;
+    evidence: {
+        command: string;
+        result: string;
+    };
+    measured: Measured;
+    costUsd: number;
+}): string;

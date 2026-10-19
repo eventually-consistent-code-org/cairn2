@@ -211,6 +211,25 @@ function ledgerHeader(phase: { number: number; name: string }): string {
 }
 
 /**
+ * Every refusal appendLedger can raise -- the phase dir exists, the entry is
+ * well formed -- with nothing written and nothing consumed. appendLedger runs
+ * it first; the close fold (#365) runs it BEFORE the tracker close too, so a
+ * ledger line that would be refused refuses the whole call while the issue
+ * is still open, instead of leaving a close with no line behind it.
+ */
+export function checkLedgerEntry(projectDir: string, phaseDir: string,
+  entry: LedgerEntryInput): { number: number; name: string } {
+  const phase = projectStatus(projectDir).phases.find((p) => p.dir === phaseDir);
+  if (!phase) {
+    throw new CairnError("NOT_FOUND",
+      `no phase dir '${phaseDir}' found under .cairn/plans/phases`,
+      "run plan_scaffold_phase (or plan_status to list known phases), then retry ledger_append");
+  }
+  validateEntry(entry);
+  return phase;
+}
+
+/**
  * Appends one formatted line to a phase's LEDGER.md, creating the file (with
  * header) on first append. Never rewrites existing content -- append-only,
  * so the ledger stays a trustworthy record even if a session crashes
@@ -229,15 +248,8 @@ export function appendLedger(projectDir: string, phaseDir: string,
     /** Whether the evidence run cites that declaration. Reported, never enforced. */
     evidenceCitesDeclared?: boolean;
   } {
-  const phase = projectStatus(projectDir).phases.find((p) => p.dir === phaseDir);
-  if (!phase) {
-    throw new CairnError("NOT_FOUND",
-      `no phase dir '${phaseDir}' found under .cairn/plans/phases`,
-      "run plan_scaffold_phase (or plan_status to list known phases), then retry ledger_append");
-  }
-
+  const phase = checkLedgerEntry(projectDir, phaseDir, entry);
   const path = join(plansRoot(projectDir), "phases", phaseDir, "LEDGER.md");
-  validateEntry(entry);
   const span = () => gitSpan(projectDir, sanitize(entry.baseCommit), sanitize(entry.headCommit));
   let line: string;
   let wall: Measured;

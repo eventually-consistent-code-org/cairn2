@@ -28,3 +28,20 @@
  * :returns: absolute paths, oldest segment first, always including `current`
  */
 export declare function metricsSegments(current: string): string[];
+/**
+ * Approximate agent spend for one issue, in USD -- the number
+ * `hooks/scripts/cost-report.mjs --issue <id>` prints, read from the same
+ * rows the same way, so the close fold (#365) can put it on the close
+ * comment without a verb shelling out for it.
+ *
+ * Rows are cumulative per session, so the LATEST row per session_id across
+ * every segment wins (a later one replaces, never adds); the issue's cost is
+ * the sum of those winners naming it. A leading "#" is ignored on both
+ * sides, so "365" and "#365" meet. Never throws: no log, a pruned segment
+ * or a corrupt line all read as nothing, and nothing is 0.
+ *
+ * :param current: path to the live segment (the canonical name)
+ * :param issueId: the issue the spend is attributed to
+ * :returns: summed est_cost_usd, 0 when no row names the issue
+ */
+export declare function issueCostUsd(current: string, issueId: string): number;

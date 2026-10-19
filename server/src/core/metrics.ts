@@ -18,7 +18,7 @@
  * it there and this must follow.
  */
 
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 /**
@@ -44,4 +44,50 @@ export function metricsSegments(current: string): string[] {
     .filter((n) => n !== `${stem}.jsonl` && n.startsWith(`${stem}.`) && n.endsWith(".jsonl"))
     .sort();
   return [...closed.map((n) => join(dir, n)), current];
+}
+
+/**
+ * Approximate agent spend for one issue, in USD -- the number
+ * `hooks/scripts/cost-report.mjs --issue <id>` prints, read from the same
+ * rows the same way, so the close fold (#365) can put it on the close
+ * comment without a verb shelling out for it.
+ *
+ * Rows are cumulative per session, so the LATEST row per session_id across
+ * every segment wins (a later one replaces, never adds); the issue's cost is
+ * the sum of those winners naming it. A leading "#" is ignored on both
+ * sides, so "365" and "#365" meet. Never throws: no log, a pruned segment
+ * or a corrupt line all read as nothing, and nothing is 0.
+ *
+ * :param current: path to the live segment (the canonical name)
+ * :param issueId: the issue the spend is attributed to
+ * :returns: summed est_cost_usd, 0 when no row names the issue
+ */
+export function issueCostUsd(current: string, issueId: string): number {
+  const key = (v: unknown) => String(v).trim().replace(/^#/, "");
+  const want = key(issueId);
+  const bySession = new Map<string, { issue?: unknown; est_cost_usd?: unknown }>();
+  for (const segment of metricsSegments(current)) {
+    let raw: string;
+    try {
+      raw = readFileSync(segment, "utf8");
+    } catch {
+      continue; // pruned or never written -- not an error
+    }
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line);
+        if (typeof row?.session_id === "string") bySession.set(row.session_id, row);
+      } catch {
+        // corrupt line -- skip, never guess
+      }
+    }
+  }
+  let usd = 0;
+  for (const r of bySession.values()) {
+    if (r.issue === undefined || r.issue === null || key(r.issue) !== want) continue;
+    const n = Number(r.est_cost_usd ?? 0);
+    if (Number.isFinite(n)) usd += n;
+  }
+  return usd;
 }

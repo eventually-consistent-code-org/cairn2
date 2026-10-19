@@ -32,8 +32,9 @@ import { resyncReport } from "./planning/resync.js";
 import { docsDriftReport } from "./planning/docs-drift.js";
 import { distillManifest } from "./planning/distill-manifest.js";
 import { estimatePhaseTokens, issueEstimate, metricsSegments } from "./planning/token-estimate.js";
-import { clearClaim, readClaim, recordClaim, writeReceipt, } from "./planning/close-receipt.js";
-import { composeClaimComment, headCommit, measureAtClose, measuredText, } from "./planning/duration.js";
+import { clearClaim, readClaimRecord, recordClaim, writeReceipt, } from "./planning/close-receipt.js";
+import { closeEvidenceText, composeClaimComment, composeCloseComment, headCommit, measureAtClose, } from "./planning/duration.js";
+import { issueCostUsd } from "./core/metrics.js";
 import { snapshotNote, trackerDelta } from "./planning/tracker-delta.js";
 import { MemoryIndex, indexDbPath, } from "./memory/index-store.js";
 import { probeNativeBindings, } from "./memory/native.js";
@@ -44,7 +45,7 @@ import { summarise, sessionSpans } from "./context/meter.js";
 import { thresholdDrift } from "./context/threshold.js";
 import { registerPlanResources } from "./core/resources.js";
 import { installedVersions } from "./core/versions.js";
-import { appendLedger } from "./planning/ledger.js";
+import { appendLedger, checkLedgerEntry } from "./planning/ledger.js";
 import { checkBudget, openRunLedger, recordBoundary, refreshSpend, } from "./planning/budget-ledger.js";
 import { createRunManifest, grantPushAuth, readRunManifestWithPath, setCurrentPhase, setRunStatus, } from "./planning/run-manifest.js";
 import { writeBanner, bannerStats } from "./memory/banner.js";
@@ -660,23 +661,81 @@ export function buildServer(deps) {
         const recordPath = finalizeMigration(storeDir, a.targetType, result);
         return { ...result, record: recordPath };
     }));
+    // The close side of the claim fold (#365), the mirror of resolveClaim:
+    // settles every fact the ledger line needs from what the server already
+    // holds -- the base commit the claim receipt recorded (#369), HEAD, the
+    // server's own date, and the phase dir from the active context when the
+    // caller names none -- then runs the ledger's own refusals against the
+    // finished entry. Throws a typed refusal on anything missing; the caller
+    // runs it before any tracker write. taskRef is the issue id, as the work
+    // verb has always passed it.
+    const closeFold = (d, id, summary, evidence, block, baseCommit, closedAt) => {
+        if (!evidence) {
+            throw new CairnError("PRECONDITION_FAILED", "summary folds the ledger line, and a ledger line needs the close evidence", "pass evidence { command, result } from the verify run; a close with nothing to run "
+                + "goes without summary, then ledger_append with evidenceWaived");
+        }
+        let phaseDir = block?.phaseDir?.trim();
+        if (!phaseDir) {
+            const active = getCtx(d).get().phase;
+            phaseDir = active === undefined
+                ? undefined : projectStatus(d).phases.find((p) => p.number === active)?.dir;
+        }
+        if (!phaseDir) {
+            throw new CairnError("PRECONDITION_FAILED", "no phase dir for the ledger line: none passed and the active context names no scaffolded phase", "pass ledger.phaseDir (NN-slug), or context_set(phase: N) first");
+        }
+        if (!baseCommit) {
+            throw new CairnError("PRECONDITION_FAILED", `no base commit recorded for ${id}: it was not claimed with a claim block on this machine`, "close without summary, then ledger_append with the baseCommit the work started from");
+        }
+        const head = headCommit(d);
+        if (!head) {
+            throw new CairnError("PRECONDITION_FAILED", "the project dir has no git HEAD to close the ledger range on", "run cairn inside the repository, or close without summary and ledger_append by hand");
+        }
+        const entry = {
+            taskRef: id, summary, baseCommit, headCommit: head, issueId: id,
+            closedDate: closedAt.slice(0, 10), evidence,
+            ...(block?.redCommit !== undefined ? { redCommit: block.redCommit } : {}),
+            ...(block?.greenCommit !== undefined ? { greenCommit: block.greenCommit } : {}),
+        };
+        checkLedgerEntry(d, phaseDir, entry);
+        const parsed = parsePhaseDirName(phaseDir);
+        return {
+            phaseDir, entry,
+            ...(parsed ? { phaseRef: { number: parsed.number, slug: parsed.slug } } : {}),
+        };
+    };
     server.registerTool("issue_close", {
         annotations: { readOnlyHint: false, destructiveHint: true },
-        description: "Close an issue. Duration is measured server-side (`measured` names the rung); " +
-            "`timeSpentMinutes` is only the caller's claim. " +
-            "Evidence `{ command, result }` posts with the measured line as one comment before the close",
+        description: "Close an issue; duration is measured (`timeSpentMinutes` is a claim). " +
+            "`summary` also writes the close comment and ledger line",
         inputSchema: z.object({
             id: z.string(),
             timeSpentMinutes: z.number().int().positive().optional(),
             evidence: z.object({ command: z.string().min(1), result: z.string().min(1) }).optional(),
+            summary: z.string().optional(),
+            ledger: z.object({
+                phaseDir: z.string().optional(),
+                redCommit: z.string().optional(),
+                greenCommit: z.string().optional(),
+            }).optional(),
         }),
     }, wrap(async (a) => {
         const d = dir();
+        const claimRecord = readClaimRecord(d, a.id);
+        const closedAt = now().toISOString();
+        // The ledger fold (#365): with a summary the close also writes the
+        // ledger line, so every fact the line needs is settled HERE, before
+        // any tracker write -- a fold that would be refused refuses while the
+        // issue is still open, never as a close with no line behind it.
+        const fold = a.summary?.trim()
+            ? closeFold(d, a.id, a.summary, a.evidence, a.ledger, claimRecord?.baseCommit, closedAt)
+            : undefined;
+        if (!fold && a.ledger) {
+            throw new CairnError("CONFIG_INVALID", "the ledger block only rides with a summary", "pass summary (one line: what shipped) to fold the ledger line, or drop the ledger block");
+        }
         const tracker = await getTracker(d);
         // Measured duration (#232), rungs one and two. Comment enumeration is
         // optional on the SPI; a backend without it, or a listing that fails,
         // just starts the ladder one rung down.
-        const closedAt = now().toISOString();
         let comments;
         if (tracker.listComments) {
             try {
@@ -687,19 +746,24 @@ export function buildServer(deps) {
             }
         }
         const { claimedAt, ...measured } = measureAtClose({
-            comments, observedClaimAt: readClaim(d, a.id), closedAt,
+            comments, observedClaimAt: claimRecord?.at ?? null, closedAt,
         });
-        const measuredLine = measuredText(measured);
         // Typed close evidence (phase 23): one standard line, same shape on
         // every backend, posted before the state change so the close reads
         // "here is what proved it" in order. The measured duration rides in
-        // the same comment -- one comment per close, not two. Best-effort —
-        // the close is the state change that matters.
+        // the same comment -- one comment per close, not two. With a summary
+        // the whole close comment is composed here (#365): what shipped, the
+        // range, this same block, the agent cost. Best-effort -- the close is
+        // the state change that matters.
         let evidenceCommented = false;
         try {
-            await tracker.commentIssue(a.id, a.evidence
-                ? `evidence: \`${a.evidence.command.trim()}\` → ${a.evidence.result.trim()}\n${measuredLine}`
-                : measuredLine);
+            await tracker.commentIssue(a.id, fold
+                ? composeCloseComment({
+                    summary: fold.entry.summary, baseCommit: fold.entry.baseCommit,
+                    headCommit: fold.entry.headCommit, evidence: fold.entry.evidence,
+                    measured, costUsd: issueCostUsd(metricsPath(d), a.id),
+                })
+                : closeEvidenceText(measured, a.evidence));
             if (a.evidence)
                 evidenceCommented = true;
         }
@@ -757,7 +821,25 @@ export function buildServer(deps) {
             },
             worklog,
         });
-        refreshHandoff({ source: "tool", issue: a.id }, d);
+        // The ledger line, AFTER the receipt it consumes (#365): the close
+        // writes the receipt and the append takes it, so the order that once
+        // lived as a prose rule in work.md is now just the order of these
+        // lines. Same appendLedger as ledger_append -- one write path. Every
+        // refusal it can raise was checked before the close; what is left is
+        // a write failure, reported beside a close that did happen.
+        let ledger;
+        let ledgerError;
+        if (fold) {
+            try {
+                ledger = appendLedger(d, fold.phaseDir, fold.entry);
+            }
+            catch (e) {
+                ledgerError = e instanceof Error ? e.message : String(e);
+            }
+        }
+        refreshHandoff({
+            source: "tool", issue: a.id, ...(fold?.phaseRef ? { phase: fold.phaseRef } : {}),
+        }, d);
         return {
             ...result,
             worklogLogged,
@@ -766,6 +848,8 @@ export function buildServer(deps) {
             measured,
             claimedMinutes: a.timeSpentMinutes ?? null,
             receiptWritten,
+            ...(ledger ? { ledger } : {}),
+            ...(ledgerError ? { ledgerError } : {}),
         };
     }));
     server.registerTool("issue_list", {
@@ -1217,10 +1301,10 @@ export function buildServer(deps) {
     }, wrap(() => ({ cleared: clearHandoff(dir()) })));
     server.registerTool("ledger_append", {
         annotations: { readOnlyHint: false, destructiveHint: false },
-        description: "Append a verified-task line to a phase's LEDGER.md (append-only). Requires typed evidence " +
-            "`{ command, result }` or an `evidenceWaived` reason (docs/planning-only); neither is refused, " +
-            "and verify fails a phase whose lines carry neither. kind \"evidence\" logs evidence with no " +
-            "closure claim; one for the same taskRef supersedes a mistaken closure line",
+        description: "Append-only LEDGER.md line, for evidence or closes outside issue_close(summary). " +
+            "Needs evidence `{ command, result }` or an `evidenceWaived` reason (docs/planning-only), " +
+            "else refused. kind \"evidence\" claims no closure and supersedes its taskRef's earlier " +
+            "closure line",
         inputSchema: z.object({
             phaseDir: z.string(),
             taskRef: z.string(),
