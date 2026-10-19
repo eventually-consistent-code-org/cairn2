@@ -1,0 +1,1526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Eval report — cairn v2.9.0</title>
+</head>
+<body>
+<style>
+:root{--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#6b6a64;--hairline:rgba(11,11,11,.10);--grid:#e1e0d9;--inset:rgba(11,11,11,.04);--accent:#2a78d6;--base-fill:#6b6a64;--delta-good:#006300;--good:#067d06;--warning:#8a6100;--critical:#d03b3b;
+  color-scheme:light dark;
+}
+@media (prefers-color-scheme:dark){:root{--plane:#0d0d0d;--surface:#1a1a19;--ink:#ffffff;--ink-2:#c3c2b7;--ink-3:#898781;--hairline:rgba(255,255,255,.10);--grid:#2c2c2a;--inset:rgba(255,255,255,.05);--accent:#3987e5;--base-fill:#898781;--delta-good:#0ca30c;--good:#0ca30c;--warning:#fab219;--critical:#e06c6c;color-scheme:dark}}
+:root[data-theme="dark"]{--plane:#0d0d0d;--surface:#1a1a19;--ink:#ffffff;--ink-2:#c3c2b7;--ink-3:#898781;--hairline:rgba(255,255,255,.10);--grid:#2c2c2a;--inset:rgba(255,255,255,.05);--accent:#3987e5;--base-fill:#898781;--delta-good:#0ca30c;--good:#0ca30c;--warning:#fab219;--critical:#e06c6c;color-scheme:dark}
+:root[data-theme="light"]{--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#6b6a64;--hairline:rgba(11,11,11,.10);--grid:#e1e0d9;--inset:rgba(11,11,11,.04);--accent:#2a78d6;--base-fill:#6b6a64;--delta-good:#006300;--good:#067d06;--warning:#8a6100;--critical:#d03b3b;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-text-size-adjust:100%}
+.wrap{max-width:880px;margin:0 auto;padding:40px 24px 64px;display:flex;flex-direction:column;gap:20px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+header h1{margin:2px 0 0;font-size:24px;font-weight:600;line-height:1.25;text-wrap:balance}
+.meta{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;color:var(--ink-2);font-size:13px}
+.meta .num{font-variant-numeric:tabular-nums lining-nums}
+.banner{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:8px;
+  border:1px solid var(--hairline);background:var(--surface);font-size:13px}
+.banner .chip-warn{color:var(--warning);font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--surface);border:1px solid var(--hairline);border-radius:10px;padding:14px 16px;
+  display:flex;flex-direction:column;gap:4px}
+.tile .label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.tile .value{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums lining-nums;line-height:1.1}
+.tile.hero .value{font-family:Georgia,"Times New Roman",serif;font-weight:400;font-size:48px}
+.tile .sub{font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.tile .value.delta-pos{color:var(--delta-good)}
+.tile .value.delta-neg{color:var(--critical)}
+.toolbar{display:flex;gap:8px;justify-content:flex-end}
+.toolbar button{font:12px system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink-2);
+  background:var(--surface);border:1px solid var(--hairline);border-radius:6px;padding:4px 10px;cursor:pointer}
+.toolbar button:hover{color:var(--ink)}
+.toolbar button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.case{background:var(--surface);border:1px solid var(--hairline);border-radius:10px;padding:18px 20px;
+  display:flex;flex-direction:column;gap:10px}
+.case-regressed{border-left:3px solid var(--critical)}
+.verdict{margin:6px 0 0;font-size:15px}
+.verdict .delta{font-size:15px}
+.flag{font-size:11px;font-weight:600;color:var(--warning);white-space:nowrap}
+.star{color:var(--warning);font-size:.45em;vertical-align:super;line-height:0;cursor:help}
+.legend summary{cursor:pointer;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2)}
+.legend-list{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:5px;font-size:13px;color:var(--ink-2)}
+.case-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.case-head h2{margin:0;font-size:16px;font-weight:600}
+.case-head .spacer{flex:1}
+.case-score{font-size:15px;font-weight:600}
+.mono{font:12px "SF Mono",ui-monospace,Menlo,Consolas,monospace}
+.num{font-variant-numeric:tabular-nums lining-nums}
+.muted{color:var(--ink-3);font-size:12px}
+.meter{display:inline-block;position:relative;width:120px;height:6px;border-radius:4px;background:var(--grid);
+  vertical-align:middle}
+.meter>span{display:block;height:100%;border-radius:4px;max-width:100%}
+.meter .tick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink-3);border-radius:1px}
+.m-accent>span{background:var(--accent)}
+.m-base>span{background:var(--base-fill)}
+.delta{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+.delta-pos{color:var(--delta-good)}
+.delta-neg{color:var(--critical)}
+.delta-zero{color:var(--ink-3)}
+details.section{border-top:1px solid var(--grid);padding-top:10px}
+details.section>summary{cursor:pointer;font-size:12px;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--ink-2);list-style-position:outside;margin-left:2px}
+details.section>summary:hover{color:var(--ink)}
+details.section[open]>summary{margin-bottom:8px}
+.md{display:flex;flex-direction:column;gap:8px;background:var(--inset);border-radius:8px;
+  padding:12px 14px;overflow-wrap:break-word}
+.md>:first-child{margin-top:0}
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:4px 0 0;font-size:1em;font-weight:600;line-height:1.3}
+.md p,.md ul,.md ol,.md blockquote,.md table,.md pre,.md hr{margin:0}
+.md ul,.md ol{display:flex;flex-direction:column;gap:4px;padding-left:20px}
+.md blockquote{border-left:2px solid var(--hairline);padding-left:10px;color:var(--ink-2)}
+.md :not(pre)>code{background:var(--inset);padding:1px 4px;border-radius:4px;
+  font:.92em "SF Mono",ui-monospace,Menlo,Consolas,monospace}
+.md pre{background:var(--inset);border:1px solid var(--hairline);padding:10px 12px;border-radius:6px;
+  overflow-x:auto;font:12px/1.5 "SF Mono",ui-monospace,Menlo,Consolas,monospace}
+.md pre code{background:none;padding:0;font:inherit}
+.md table{width:100%;border-collapse:collapse}
+.md th,.md td{padding:5px 8px;text-align:left;vertical-align:top;border-bottom:1px solid var(--grid)}
+.md th{font-weight:600;color:var(--ink-2)}
+.md a{color:var(--accent);text-decoration:none}
+.md a:hover{text-decoration:underline}
+.grader-def{display:flex;flex-direction:column;gap:6px;padding:8px 0}
+.grader-def+.grader-def{border-top:1px solid var(--grid)}
+.grader-def-head{display:flex;align-items:baseline;gap:8px}
+.grader-name{font:13px "SF Mono",ui-monospace,Menlo,Consolas,monospace;font-weight:600}
+.badge{font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2);
+  border:1px solid var(--hairline);border-radius:999px;padding:1px 8px}
+.config{display:flex;flex-direction:column;gap:2px;background:var(--inset);border-radius:8px;padding:10px 14px}
+.config code{font:12px "SF Mono",ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.arm{display:flex;flex-direction:column;gap:8px;padding:6px 0}
+.arm+.arm{border-top:1px dashed var(--grid);margin-top:4px;padding-top:12px}
+.arm-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.arm-label{font-size:13px;font-weight:600}
+.run{border:1px solid var(--grid);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.run-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.run-title{font-size:12px;font-weight:600;color:var(--ink-2)}
+.run-error .explanation{color:var(--ink-2)}
+.note{font-size:12px;color:var(--ink-2)}
+.graders{display:flex;flex-direction:column;gap:4px}
+details.grader{border-radius:6px}
+details.grader>summary{cursor:pointer;display:flex;align-items:baseline;gap:8px;padding:3px 4px;
+  border-radius:6px;list-style:none}
+details.grader>summary::-webkit-details-marker{display:none}
+details.grader>summary::before{content:'▸';font-size:10px;color:var(--ink-3);flex:none;
+  transition:transform .12s ease}
+details.grader[open]>summary::before{transform:rotate(90deg)}
+details.grader>summary:hover{background:var(--inset)}
+details.grader>summary:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.grader-body{padding:6px 8px 8px 24px;display:flex;flex-direction:column;gap:6px}
+.chip{font-size:11px;font-weight:600;border-radius:999px;padding:1px 8px;white-space:nowrap}
+.chip-pass{color:var(--good);border:1px solid currentColor}
+.chip-fail{color:var(--critical);border:1px solid currentColor}
+.chip.chip-warn{color:var(--warning);border:1px solid currentColor}
+.explanation{margin:0;font-size:13px;color:var(--ink-2);white-space:pre-wrap;overflow-wrap:break-word}
+.kv{display:flex;gap:8px;font-size:12px;color:var(--ink-3)}
+.votes{font-variant-numeric:tabular-nums;letter-spacing:.1em}
+pre.evidence{margin:0;background:var(--inset);border:1px solid var(--hairline);border-radius:6px;
+  padding:8px 10px;overflow-x:auto;max-height:320px;
+  font:12px/1.5 "SF Mono",ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:break-word}
+footer{color:var(--ink-3);font-size:12px;text-align:center;padding-top:8px}
+@media (prefers-reduced-motion:no-preference){
+  details.grader>summary,.toolbar button{transition:background .12s ease,color .12s ease}
+}
+@media (prefers-reduced-motion:reduce){
+  details.grader>summary::before{transition:none}
+}
+@media print{
+  :root,:root[data-theme="dark"],:root[data-theme="light"]{--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#6b6a64;--hairline:rgba(11,11,11,.10);--grid:#e1e0d9;--inset:rgba(11,11,11,.04);--accent:#2a78d6;--base-fill:#6b6a64;--delta-good:#006300;--good:#067d06;--warning:#8a6100;--critical:#d03b3b;color-scheme:light}
+  body{background:#fff}
+  .toolbar{display:none}
+  .case,.run,.grader-def{break-inside:avoid}
+  pre.evidence{max-height:none}
+}
+</style>
+<div class="wrap">
+<header>
+<div class="eyebrow">Plugin eval report</div>
+<h1>cairn v2.9.0</h1>
+
+<div class="meta">
+<span class="mono">.</span>
+<span>Claude Code v2.1.303</span>
+<span class="num">2026-10-19 04:08 UTC</span>
+<span class="num">5m 40s</span>
+<span class="num">$2.07</span>
+<span class="num">11 runs</span>
+<span class="num">2 in flight</span>
+
+
+<span>judge default</span>
+<span class="num">threshold 100%</span>
+<span>filtered: --case corpus-*-default</span>
+</div>
+</header>
+
+<section class="tiles">
+<div class="tile hero"><span class="label">Suite score</span><span class="value">50%</span><span class="sub">mean of per-case scores</span></div>
+
+<div class="tile"><span class="label">Cases</span><span class="value num">11</span><span class="sub">2 of 11 ≥ 100% threshold</span></div>
+<div class="tile"><span class="label">Perfect runs</span><span class="value num">18.2%</span><span class="sub">runs where every grader passed</span></div>
+</section>
+<details class="section legend">
+<summary>How to read this report</summary>
+<ul class="legend-list">
+<li>A run's score is the weighted fraction of its graders that passed; a "perfect" run passed every grader.</li>
+<li>A case's score is the mean of its runs; a case passes when its score is at or above the 100% threshold (the tick on each case bar).</li>
+<li>The suite score is the mean of the per-case scores.</li>
+<li>Judge votes are independent samples of the LLM judge; the majority decides pass or fail.</li>
+<li><strong>No baseline arm was run</strong> (ablation off) — this report shows absolute scores only and cannot say whether the plugin caused them. Re-run with <code>--ablation with-without</code> to measure the plugin’s effect.</li>
+
+</ul>
+</details>
+<div class="toolbar"><button type="button" data-act="expand">Expand all</button><button type="button" data-act="collapse">Collapse all</button></div>
+<article class="case" id="case-1">
+<div class="case-head">
+<h2>corpus-01-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/01-footprint-literal-scan/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.21 · 04:08:34 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-01</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The commit undoes the #342 fix. It puts back the regex string scan that the #342 note says over-counted hook prose by about 3x (1923 characters counted where the real strings hold 596). It also raises the budget by 303 tokens. Together these let the footprint check pass while actual growth goes unnoticed. I didn&apos;t execute the script, so the numbers come from the deleted comment, not from a fresh run.
+
+6 findings, most severe first:
+
+1. `scripts/check-footprint.mjs:162`: The character-by-character string walker is replaced with `src.matchAll(/&quot;((?:[^&quot;\\]|\\.){40,})&quot;/g)`, which brings back the #342 bug: the regex can treat one string&apos;s closing quote as the next string&apos;s opening quote and count the code in between as prose.
+
+   Failure scenario: Hook source like `readFileSync(p, &quot;utf8&quot;); ... emit(&quot;long advisory text…&quot;)`: the match at `&quot;utf8` fails at 4 characters, the engine moves on, then starts again at the closing `&quot;` of &quot;utf8&quot; and captures `); ... emit(` plus everything up to the next quote as a 40+ character &apos;literal&apos;. Per the deleted note this gave 1923 characters where the real literals hold 596, so SessionStart rent is over-counted about 3x, and any new short string such as &quot;utf8&quot; changes the pairing and the total.
+
+2. `scripts/check-footprint.mjs:100`: BUDGET_TOKENS goes from 13481 to 13784 (+303) with no paid-for feature behind it, which breaks the script&apos;s own rule (line 292: &apos;Raising BUDGET_TOKENS to make this pass is the failure, not the fix&apos;).
+
+   Failure scenario: The corrected reading was 13443 with a ~38 cushion. At 13784 roughly 340 tokens of real growth (new tools, schema fields, prose) pass the guard silently. The header says eight fields cost 135 tokens, so about two such additions can now land without a failure.
+
+3. `scripts/check-footprint.mjs:162`: The new regex only matches double-quoted literals, so single-quoted strings and template literals (which, per the deleted comment, the resume block is built from) are no longer measured.
+
+   Failure scenario: An advisory written as `const msg = `Resume: ...long prose...`` or with single quotes adds 0 to injectionChars. Moving hook prose from double quotes to backticks makes its cost disappear from the guard, so real injected rent goes uncounted.
+
+4. `scripts/check-footprint.mjs:162`: In the regex, `[^&quot;\\]` also matches newlines, so a mis-paired match can run across many lines of code, making the over-count much larger.
+
+   Failure scenario: A short string at the end of one statement followed by many lines of code before the next double quote: everything between those quotes, across lines, is counted as injected prose and inflates the total by hundreds of characters.
+
+5. `scripts/check-footprint.mjs:96`: The #342 re-pin history is deleted, so the comment no longer matches the code: the remaining note says 13784 was a &apos;DOWN&apos; re-pin for a measurement fix, but the code now ships the regex that #342 found to be broken.
+
+   Failure scenario: A later maintainer reads the comments, sees no record of the quote-pairing defect or the 13443 reading, and treats the inflated 13784 as legitimate. The pending phase-26 re-pins (#328, #329) mentioned in the deleted text lose their baseline.
+
+6. `scripts/check-footprint.mjs:158`: The fix is at the wrong level: the comment-stripping above (lines 162-168 on main) and the new regex both still treat JS source as plain text, so the regex scan stays fragile; the walker it replaces at least tracked string state.
+
+   Failure scenario: A trailing comment such as `foo(); // don&apos;t &quot;x&quot;` or a `/*` inside a string like &quot;**/*.md&quot; changes which quotes the regex pairs, so the measured rent shifts with unrelated edits. Keeping the string-state walker (or using a real tokenizer) avoids these special cases.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The commit undoes the #342 fix. It puts back the regex string scan that the #342 note says over-counted hook prose by about 3x (1923 characters counted where the real strings hold 596). It also raises the budget by 303 tokens. Together these let the footprint check pass while actual growth goes unnoticed. I didn&apos;t execute the script, so the numbers come from the deleted comment, not from a fresh run.
+
+6 findings, most severe first:
+
+1. `scripts/check-footprint.mjs:162`: The character-by-character string walker is replaced with `src.matchAll(/&quot;((?:[^&quot;\\]|\\.){40,})&quot;/g)`, which brings back the #342 bug: the regex can treat one string&apos;s closing quote as the next string&apos;s opening quote and count the code in between as prose.
+
+   Failure scenario: Hook source like `readFileSync(p, &quot;utf8&quot;); ... emit(&quot;long advisory text…&quot;)`: the match at `&quot;utf8` fails at 4 characters, the engine moves on, then starts again at the closing `&quot;` of &quot;utf8&quot; and captures `); ... emit(` plus everything up to the next quote as a 40+ character &apos;literal&apos;. Per the deleted note this gave 1923 characters where the real literals hold 596, so SessionStart rent is over-counted about 3x, and any new short string such as &quot;utf8&quot; changes the pairing and the total.
+
+2. `scripts/check-footprint.mjs:100`: BUDGET_TOKENS goes from 13481 to 13784 (+303) with no paid-for feature behind it, which breaks the script&apos;s own rule (line 292: &apos;Raising BUDGET_TOKENS to make this pass is the failure, not the fix&apos;).
+
+   Failure scenario: The corrected reading was 13443 with a ~38 cushion. At 13784 roughly 340 tokens of real growth (new tools, schema fields, prose) pass the guard silently. The header says eight fields cost 135 tokens, so about two such additions can now land without a failure.
+
+3. `scripts/check-footprint.mjs:162`: The new regex only matches double-quoted literals, so single-quoted strings and template literals (which, per the deleted comment, the resume block is built from) are no longer measured.
+
+   Failure scenario: An advisory written as `const msg = `Resume: ...long prose...`` or with single quotes adds 0 to injectionChars. Moving hook prose from double quotes to backticks makes its cost disappear from the guard, so real injected rent goes uncounted.
+
+4. `scripts/check-footprint.mjs:162`: In the regex, `[^&quot;\\]` also matches newlines, so a mis-paired match can run across many lines of code, making the over-count much larger.
+
+   Failure scenario: A short string at the end of one statement followed by many lines of code before the next double quote: everything between those quotes, across lines, is counted as injected prose and inflates the total by hundreds of characters.
+
+5. `scripts/check-footprint.mjs:96`: The #342 re-pin history is deleted, so the comment no longer matches the code: the remaining note says 13784 was a &apos;DOWN&apos; re-pin for a measurement fix, but the code now ships the regex that #342 found to be broken.
+
+   Failure scenario: A later maintainer reads the comments, sees no record of the quote-pairing defect or the 13443 reading, and treats the inflated 13784 as legitimate. The pending phase-26 re-pins (#328, #329) mentioned in the deleted text lose their baseline.
+
+6. `scripts/check-footprint.mjs:158`: The fix is at the wrong level: the comment-stripping above (lines 162-168 on main) and the new regex both still treat JS source as plain text, so the regex scan stays fragile; the walker it replaces at least tracked string state.
+
+   Failure scenario: A trailing comment such as `foo(); // don&apos;t &quot;x&quot;` or a `/*` inside a string like &quot;**/*.md&quot; changes which quotes the regex pairs, so the measured rent shifts with unrelated edits. Keeping the string-state walker (or using a real tokenizer) avoids these special cases.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/01-footprint-literal-scan high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/01-footprint-literal-scan</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-01</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/01-footprint-literal-scan against main raised, as a finding, this defect: the string-literal measure pairs one literal's closing quote with the next literal's opening quote, so the code between two short strings is counted as injected prose (in scripts/check-footprint.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/01-footprint-literal-scan against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the string-literal measure pairs one literal's closing quote with the next literal's opening quote, so the code between two short strings is counted as injected prose (in scripts/check-footprint.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-2">
+<div class="case-head">
+<h2>corpus-02-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/02-interrupt-is-not-error/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.17 · 04:08:34 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-02</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">Seven findings on the one commit in `corpus/02-interrupt-is-not-error`. The diff deletes the #324 handling: a tool call the owner cancels with Escape was kept as `error: false` and tagged `interrupted: true`. The top two findings come from that deletion. Findings 3–7 are older issues in unchanged lines of the same function. No CLAUDE.md applies to the changed file, so there are no conventions findings.
+
+7 findings, most severe first:
+
+1. `hooks/scripts/posttooluse-observe.mjs:49`: Removing the `interrupted(payload)` short-circuit from `errored()` means a PostToolUseFailure with `is_interrupt: true` (the owner pressing Escape) is now recorded as `error: true`, which brings back the #324 bug.
+
+   Failure scenario: The owner presses Escape during a long Bash or Edit call. Claude Code sends PostToolUseFailure with `is_interrupt: true`, line 49 returns true, and the row is written with `error: true`. Retro then counts the cancellation as an error-&gt;fix churn signal and may propose bogus candidate cards about &apos;repeated failures&apos; on that file or command.
+
+2. `hooks/scripts/posttooluse-observe.mjs:73`: The `if (interrupted(payload)) row.interrupted = true;` line was deleted, so rows no longer carry an `interrupted` flag and nothing downstream can tell a cancellation from a real failure.
+
+   Failure scenario: Any reader of observations.jsonl that checks `row.interrupted` (retro&apos;s churn filter, from the #324 contract) never sees it again. Interrupted calls look exactly like real tool failures, and the information cannot be recovered from the log.
+
+3. `hooks/scripts/posttooluse-observe.mjs:50`: The fallback heuristic `typeof payload.error === &apos;string&apos; &amp;&amp; tool_response == null` also catches interrupt payloads from harnesses that don&apos;t set `hook_event_name`, so even a fix that only guards line 49 would leave interrupts marked as errors.
+
+   Failure scenario: A harness or adapter sends an interrupt payload with an `error` string (&apos;interrupted by user&apos;), `is_interrupt: true`, no `tool_response`, and no `hook_event_name`. Line 50 returns true and the cancellation is still logged as an error. Only an interrupt check at the top of `errored()` covers both paths.
+
+4. `hooks/scripts/posttooluse-observe.mjs:12`: The header comment drops the #324 exception but still calls `is_interrupt` part of the payload and says every PostToolUseFailure is `error: true`, which now writes down the regressed behavior as if it were intended.
+
+   Failure scenario: A maintainer reads the header, decides interrupt-as-error is by design, and closes or ignores #324 regressions. Restoring the documented contract and its rationale is how a future &apos;cleanup&apos; would be stopped from silently reverting the fix again.
+
+5. `hooks/scripts/posttooluse-observe.mjs:78`: The retention guard reads and splits the whole observations file after every append, so each hook run does O(file) work on a hot path that fires on every Edit, Write and Bash call.
+
+   Failure scenario: With up to 2000 lines in the log, every tool call reads, parses and splits about 2000 JSON lines synchronously before the hook exits, adding latency to every tool call. Checking the file size with `statSync` first, or only trimming every N appends, would avoid the full read in the common case.
+
+6. `hooks/scripts/posttooluse-observe.mjs:80`: The read-then-`writeFileSync` truncation is not atomic and races with concurrent hook processes, so rows can be lost or the file corrupted.
+
+   Failure scenario: Parallel tool calls (several Bash calls at once) fire concurrent hooks. Hook A reads 2001 lines while hook B appends a row, then A rewrites the file with the last 1000 lines and B&apos;s row disappears. If the writes interleave, the file can hold a partial line that breaks JSON parsing for retro. Writing to a temp file and renaming it over the log would avoid this.
+
+7. `hooks/scripts/posttooluse-observe.mjs:42`: `targetOf` cuts commands to their first 80 characters with no redaction, so secrets in the command head (tokens, passwords in env assignments) are written to the observations log.
+
+   Failure scenario: Running `GITHUB_TOKEN=ghp_xxx gh api ...` puts the token in .cairn/observations/observations.jsonl. If .cairn is committed or shared, the token leaks. The header calls this label &apos;leak-safe&apos;, but it isn&apos;t.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">Seven findings on the one commit in `corpus/02-interrupt-is-not-error`. The diff deletes the #324 handling: a tool call the owner cancels with Escape was kept as `error: false` and tagged `interrupted: true`. The top two findings come from that deletion. Findings 3–7 are older issues in unchanged lines of the same function. No CLAUDE.md applies to the changed file, so there are no conventions findings.
+
+7 findings, most severe first:
+
+1. `hooks/scripts/posttooluse-observe.mjs:49`: Removing the `interrupted(payload)` short-circuit from `errored()` means a PostToolUseFailure with `is_interrupt: true` (the owner pressing Escape) is now recorded as `error: true`, which brings back the #324 bug.
+
+   Failure scenario: The owner presses Escape during a long Bash or Edit call. Claude Code sends PostToolUseFailure with `is_interrupt: true`, line 49 returns true, and the row is written with `error: true`. Retro then counts the cancellation as an error-&gt;fix churn signal and may propose bogus candidate cards about &apos;repeated failures&apos; on that file or command.
+
+2. `hooks/scripts/posttooluse-observe.mjs:73`: The `if (interrupted(payload)) row.interrupted = true;` line was deleted, so rows no longer carry an `interrupted` flag and nothing downstream can tell a cancellation from a real failure.
+
+   Failure scenario: Any reader of observations.jsonl that checks `row.interrupted` (retro&apos;s churn filter, from the #324 contract) never sees it again. Interrupted calls look exactly like real tool failures, and the information cannot be recovered from the log.
+
+3. `hooks/scripts/posttooluse-observe.mjs:50`: The fallback heuristic `typeof payload.error === &apos;string&apos; &amp;&amp; tool_response == null` also catches interrupt payloads from harnesses that don&apos;t set `hook_event_name`, so even a fix that only guards line 49 would leave interrupts marked as errors.
+
+   Failure scenario: A harness or adapter sends an interrupt payload with an `error` string (&apos;interrupted by user&apos;), `is_interrupt: true`, no `tool_response`, and no `hook_event_name`. Line 50 returns true and the cancellation is still logged as an error. Only an interrupt check at the top of `errored()` covers both paths.
+
+4. `hooks/scripts/posttooluse-observe.mjs:12`: The header comment drops the #324 exception but still calls `is_interrupt` part of the payload and says every PostToolUseFailure is `error: true`, which now writes down the regressed behavior as if it were intended.
+
+   Failure scenario: A maintainer reads the header, decides interrupt-as-error is by design, and closes or ignores #324 regressions. Restoring the documented contract and its rationale is how a future &apos;cleanup&apos; would be stopped from silently reverting the fix again.
+
+5. `hooks/scripts/posttooluse-observe.mjs:78`: The retention guard reads and splits the whole observations file after every append, so each hook run does O(file) work on a hot path that fires on every Edit, Write and Bash call.
+
+   Failure scenario: With up to 2000 lines in the log, every tool call reads, parses and splits about 2000 JSON lines synchronously before the hook exits, adding latency to every tool call. Checking the file size with `statSync` first, or only trimming every N appends, would avoid the full read in the common case.
+
+6. `hooks/scripts/posttooluse-observe.mjs:80`: The read-then-`writeFileSync` truncation is not atomic and races with concurrent hook processes, so rows can be lost or the file corrupted.
+
+   Failure scenario: Parallel tool calls (several Bash calls at once) fire concurrent hooks. Hook A reads 2001 lines while hook B appends a row, then A rewrites the file with the last 1000 lines and B&apos;s row disappears. If the writes interleave, the file can hold a partial line that breaks JSON parsing for retro. Writing to a temp file and renaming it over the log would avoid this.
+
+7. `hooks/scripts/posttooluse-observe.mjs:42`: `targetOf` cuts commands to their first 80 characters with no redaction, so secrets in the command head (tokens, passwords in env assignments) are written to the observations log.
+
+   Failure scenario: Running `GITHUB_TOKEN=ghp_xxx gh api ...` puts the token in .cairn/observations/observations.jsonl. If .cairn is committed or shared, the token leaks. The header calls this label &apos;leak-safe&apos;, but it isn&apos;t.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/02-interrupt-is-not-error high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/02-interrupt-is-not-error</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-02</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/02-interrupt-is-not-error against main raised, as a finding, this defect: an interrupted (cancelled) tool call is recorded as an error row in the observation buffer instead of a cancellation (in hooks/scripts/posttooluse-observe.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/02-interrupt-is-not-error against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: an interrupted (cancelled) tool call is recorded as an error row in the observation buffer instead of a cancellation (in hooks/scripts/posttooluse-observe.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-3">
+<div class="case-head">
+<h2>corpus-03-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/03-failed-call-reaches-buffer/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.15 · 04:09:21 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-03</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff removes failed-call capture entirely, so the observation log&apos;s `error` flag becomes dead code again (always `false`) under Claude Code. That is a regression of #323. No CLAUDE.md applies to these files, so the conventions angle returned nothing.
+
+8 findings, most severe first:
+
+1. `hooks/hooks.json:57`: Removing the PostToolUseFailure registration means failed Edit/Write/Bash calls are never observed, because Claude Code sends a failed call only as PostToolUseFailure and never as PostToolUse.
+
+   Failure scenario: A Bash command exits non-zero or an Edit fails to match. Claude Code fires PostToolUseFailure, but no hook is registered for it, so posttooluse-observe.mjs never runs. observations.jsonl gets no row for the failure, and retro&apos;s error-&gt;fix churn detection sees zero errors.
+
+2. `hooks/scripts/posttooluse-observe.mjs:39`: errored() no longer returns true for hook_event_name === &apos;PostToolUseFailure&apos;, so even if that event is wired again, every failure row is written as error:false.
+
+   Failure scenario: A PostToolUseFailure payload has an `error` string and `is_interrupt` but no tool_response. The function sees resp == null and returns false, so a failed call is recorded as a success.
+
+3. `hooks/scripts/posttooluse-observe.mjs:40`: The fallback `typeof payload.error === &apos;string&apos; &amp;&amp; payload.tool_response == null` was removed and `resp == null` now returns false, so any payload with only an error string is classified as not errored.
+
+   Failure scenario: A harness or adapter delivers a failure as {error: &apos;boom&apos;} with no tool_response. errored() returns false and the observation row shows error:false.
+
+4. `hooks/scripts/posttooluse-observe.mjs:41`: Under Claude Code, the only error checks left (tool_response.is_error, success===false, a non-zero exit_code) are fields that successful PostToolUse payloads don&apos;t carry, so the error flag is effectively always false (the &apos;dead flag&apos; bug from #323 comes back).
+
+   Failure scenario: Every row Claude Code writes to observations.jsonl has error:false. Retro&apos;s candidate-card review never finds repeated-error hotspots, so that whole feature silently does nothing.
+
+5. `hooks/scripts/posttooluse-observe.mjs:4`: The rationale comment that explains why failures arrive only on PostToolUseFailure (#323) was deleted, along with the code, which drops the documented invariant and invites the same regression again.
+
+   Failure scenario: A later maintainer sees only PostToolUse handling, wonders why error is always false, and has no record that Claude Code routes failures to a separate event. The investigation behind #323 has to be repeated.
+
+6. `hooks/hooks.json:2`: The description string now drops PostToolUseFailure observation capture, which presents the loss of error capture as intended behaviour rather than fixing the root cause (failures come on a separate event).
+
+   Failure scenario: Readers of the hook manifest conclude that error capture works through PostToolUse alone, which is false for Claude Code. The documented behaviour no longer matches what the error flag is supposed to do.
+
+7. `hooks/scripts/posttooluse-observe.mjs:66`: The retention guard reads and splits the whole observations file on every Edit/Write/Bash call, even when it is far below MAX_LINES.
+
+   Failure scenario: With about 2000 rows, every tool call re-reads and parses the whole file on the hot hook path, inside a 3000 ms timeout. A cheap size or stat check, or occasional truncation, would avoid repeating that I/O.
+
+8. `hooks/scripts/posttooluse-observe.mjs:68`: Concurrent hook invocations race between appendFileSync and the read-then-writeFileSync truncation, so rows can be lost.
+
+   Failure scenario: Two parallel tool calls finish together. Hook A reads 2001 lines while hook B appends a row, then A writes back only its slice. B&apos;s row is silently overwritten and lost.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff removes failed-call capture entirely, so the observation log&apos;s `error` flag becomes dead code again (always `false`) under Claude Code. That is a regression of #323. No CLAUDE.md applies to these files, so the conventions angle returned nothing.
+
+8 findings, most severe first:
+
+1. `hooks/hooks.json:57`: Removing the PostToolUseFailure registration means failed Edit/Write/Bash calls are never observed, because Claude Code sends a failed call only as PostToolUseFailure and never as PostToolUse.
+
+   Failure scenario: A Bash command exits non-zero or an Edit fails to match. Claude Code fires PostToolUseFailure, but no hook is registered for it, so posttooluse-observe.mjs never runs. observations.jsonl gets no row for the failure, and retro&apos;s error-&gt;fix churn detection sees zero errors.
+
+2. `hooks/scripts/posttooluse-observe.mjs:39`: errored() no longer returns true for hook_event_name === &apos;PostToolUseFailure&apos;, so even if that event is wired again, every failure row is written as error:false.
+
+   Failure scenario: A PostToolUseFailure payload has an `error` string and `is_interrupt` but no tool_response. The function sees resp == null and returns false, so a failed call is recorded as a success.
+
+3. `hooks/scripts/posttooluse-observe.mjs:40`: The fallback `typeof payload.error === &apos;string&apos; &amp;&amp; payload.tool_response == null` was removed and `resp == null` now returns false, so any payload with only an error string is classified as not errored.
+
+   Failure scenario: A harness or adapter delivers a failure as {error: &apos;boom&apos;} with no tool_response. errored() returns false and the observation row shows error:false.
+
+4. `hooks/scripts/posttooluse-observe.mjs:41`: Under Claude Code, the only error checks left (tool_response.is_error, success===false, a non-zero exit_code) are fields that successful PostToolUse payloads don&apos;t carry, so the error flag is effectively always false (the &apos;dead flag&apos; bug from #323 comes back).
+
+   Failure scenario: Every row Claude Code writes to observations.jsonl has error:false. Retro&apos;s candidate-card review never finds repeated-error hotspots, so that whole feature silently does nothing.
+
+5. `hooks/scripts/posttooluse-observe.mjs:4`: The rationale comment that explains why failures arrive only on PostToolUseFailure (#323) was deleted, along with the code, which drops the documented invariant and invites the same regression again.
+
+   Failure scenario: A later maintainer sees only PostToolUse handling, wonders why error is always false, and has no record that Claude Code routes failures to a separate event. The investigation behind #323 has to be repeated.
+
+6. `hooks/hooks.json:2`: The description string now drops PostToolUseFailure observation capture, which presents the loss of error capture as intended behaviour rather than fixing the root cause (failures come on a separate event).
+
+   Failure scenario: Readers of the hook manifest conclude that error capture works through PostToolUse alone, which is false for Claude Code. The documented behaviour no longer matches what the error flag is supposed to do.
+
+7. `hooks/scripts/posttooluse-observe.mjs:66`: The retention guard reads and splits the whole observations file on every Edit/Write/Bash call, even when it is far below MAX_LINES.
+
+   Failure scenario: With about 2000 rows, every tool call re-reads and parses the whole file on the hot hook path, inside a 3000 ms timeout. A cheap size or stat check, or occasional truncation, would avoid repeating that I/O.
+
+8. `hooks/scripts/posttooluse-observe.mjs:68`: Concurrent hook invocations race between appendFileSync and the read-then-writeFileSync truncation, so rows can be lost.
+
+   Failure scenario: Two parallel tool calls finish together. Hook A reads 2001 lines while hook B appends a row, then A writes back only its slice. B&apos;s row is silently overwritten and lost.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/03-failed-call-reaches-buffer high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/03-failed-call-reaches-buffer</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-03</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/03-failed-call-reaches-buffer against main raised, as a finding, this defect: a failed tool call never reaches the observation buffer because the observe hook listens on PostToolUse only and a failure arrives as PostToolUseFailure, so the error flag can never be true (in hooks/hooks.json). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/03-failed-call-reaches-buffer against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: a failed tool call never reaches the observation buffer because the observe hook listens on PostToolUse only and a failure arrives as PostToolUseFailure, so the error flag can never be true (in hooks/hooks.json); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-4">
+<div class="case-head">
+<h2>corpus-04-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/04-git-dash-c-folder/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.25 · 04:09:28 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-04</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">7 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-harnessguard.mjs:1728`: gitTargets now resolves the -C value with plain resolveIn(dir, value), so it no longer expands ~, $HOME, ${HOME}, $PWD or ~+. A git operand under a home-relative -C is judged under a folder literally named `~` or `$HOME` inside cwd, which bypasses the harness guard.
+
+   Failure scenario: `git -C ~ checkout -- .claude/settings.json` or `git -C $HOME/proj rm -r hooks`: dir becomes `&lt;cwd&gt;/~` or `&lt;cwd&gt;/$HOME/proj`, so the operand resolves to `&lt;cwd&gt;/~/.claude/settings.json`, which is not protected, and the write is allowed. git actually overwrites ~/.claude/settings.json or deletes the real hooks folder. linePlaces does add ~/proj as a place, but gitTargets then resolves `~/proj` again from that place, giving ~/proj/~/proj, so the real target is never judged.
+
+2. `hooks/scripts/pretooluse-harnessguard.mjs:1590`: tar -x -C is now resolved with resolveIn instead of dirTarget, so `~`, `$HOME` and `$PWD` in the -C value are not expanded. Extracted members are then judged under a literal `~` folder inside cwd.
+
+   Failure scenario: `tar -xf payload.tar -C ~ .claude/settings.json`: the -C value itself is still checked through add() and expandVars, but `~` alone is not protected. The member is judged at `&lt;cwd&gt;/~/.claude/settings.json` and allowed, while tar actually writes ~/.claude/settings.json. Chained forms have the same bypass, e.g. `-C ~ -C .claude`, where the later -C is resolved relative to a literal `&lt;cwd&gt;/~`.
+
+3. `hooks/scripts/pretooluse-harnessguard.mjs:1737`: A git -C or tar -C folder the guard cannot read (`-C &quot;$X&quot;`, `-C $(...)`, `-C ~user`, `-C $OLDPWD`, or a glob with several matches) is no longer mapped to LOST. It becomes an ordinary literal path, so relative operands are judged and allowed when they should be refused (fail open).
+
+   Failure scenario: `tar -xf a.tar -C &quot;$D&quot; settings.json` with D=~/.claude: dir becomes `&lt;cwd&gt;/$D`, which is not lost, so settings.json is judged at a harmless literal path and allowed. tar then writes ~/.claude/settings.json. Before this change, dirTarget returned LOST and the write was refused.
+
+4. `hooks/scripts/pretooluse-harnessguard.mjs:1737`: segMoves and linePlaces still read git -C targets through dirTarget (expanding ~ and $HOME, and returning LOST for variables), but gitTargets now reads the same word with resolveIn. One command line gets two different meanings for the same folder.
+
+   Failure scenario: For `git -C ~/proj rm hooks`, linePlaces counts ~/proj as a place where the shell may be, while gitTargets judges operands at `&lt;place&gt;/~/proj`. Line-level tracking and operand judging disagree, and that disagreement is exactly the gap behind the bypasses above. The parsing that was shared through dirTarget is now duplicated in a weaker copy.
+
+5. `hooks/scripts/pretooluse-harnessguard.mjs:2359`: The fail-closed message no longer mentions git -C, but segMoves still pushes git -C targets into linePlaces, and those targets can resolve to LOST. When a git -C causes a refusal, the message names only cd, pushd and env -C.
+
+   Failure scenario: `git -C &quot;$X&quot; status; echo hi &gt; hooks/x` is refused because linePlaces got LOST from the git -C. The user is told the cause was a cd, pushd or env -C, none of which appear on the line, so they cannot tell what to fix.
+
+6. `hooks/scripts/pretooluse-harnessguard.mjs:1592`: Wildcard handling for tar -C and git -C is gone: resolveIn treats `*`, `?` and `[` literally, while dirTarget expanded a pattern with one match and returned LOST when there were several.
+
+   Failure scenario: `git -C ~/.cla* checkout settings.json`: the shell expands the pattern to ~/.claude, but the guard judges `&lt;cwd&gt;/~/.cla*/settings.json` and allows it. ~/.claude/settings.json is overwritten.
+
+7. `docs/01-runbook.md:2027`: This removes the documented guarantee that `git -C ~/proj rm -r hooks` is judged where it lands. That deletion is the visible symptom of a security regression: a protection was dropped rather than replaced with something equivalent.
+
+   Failure scenario: Operators reading the runbook no longer learn about the git -C and tar -C handling, and the guard really does let `git -C ~/proj rm -r hooks` through. The fix is to keep dirTarget for -C values, not to remove the doc. The deleted #318 regression tests, if any existed, should be restored too.
+
+There is one root cause. This commit reverts #318: the `-C` value for `git` and `tar` is now resolved with `resolveIn` instead of `dirTarget`. Without `dirTarget`, home and `$PWD` paths are no longer expanded, unreadable folders are no longer refused, and globs are no longer matched. The guard therefore allows writes into protected paths, `~/.claude` settings and hook folders included. Reverting the two call sites at lines 1592 and 1737 to `dirTarget` fixes findings 1–4 and 6. Finding 5 needs `git -C` back in the refusal message, and finding 7 needs the runbook text restored.
+
+No CLAUDE.md applies to the changed files. Line numbers are from the checkout I had, which holds the pre-change version of the code.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">7 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-harnessguard.mjs:1728`: gitTargets now resolves the -C value with plain resolveIn(dir, value), so it no longer expands ~, $HOME, ${HOME}, $PWD or ~+. A git operand under a home-relative -C is judged under a folder literally named `~` or `$HOME` inside cwd, which bypasses the harness guard.
+
+   Failure scenario: `git -C ~ checkout -- .claude/settings.json` or `git -C $HOME/proj rm -r hooks`: dir becomes `&lt;cwd&gt;/~` or `&lt;cwd&gt;/$HOME/proj`, so the operand resolves to `&lt;cwd&gt;/~/.claude/settings.json`, which is not protected, and the write is allowed. git actually overwrites ~/.claude/settings.json or deletes the real hooks folder. linePlaces does add ~/proj as a place, but gitTargets then resolves `~/proj` again from that place, giving ~/proj/~/proj, so the real target is never judged.
+
+2. `hooks/scripts/pretooluse-harnessguard.mjs:1590`: tar -x -C is now resolved with resolveIn instead of dirTarget, so `~`, `$HOME` and `$PWD` in the -C value are not expanded. Extracted members are then judged under a literal `~` folder inside cwd.
+
+   Failure scenario: `tar -xf payload.tar -C ~ .claude/settings.json`: the -C value itself is still checked through add() and expandVars, but `~` alone is not protected. The member is judged at `&lt;cwd&gt;/~/.claude/settings.json` and allowed, while tar actually writes ~/.claude/settings.json. Chained forms have the same bypass, e.g. `-C ~ -C .claude`, where the later -C is resolved relative to a literal `&lt;cwd&gt;/~`.
+
+3. `hooks/scripts/pretooluse-harnessguard.mjs:1737`: A git -C or tar -C folder the guard cannot read (`-C &quot;$X&quot;`, `-C $(...)`, `-C ~user`, `-C $OLDPWD`, or a glob with several matches) is no longer mapped to LOST. It becomes an ordinary literal path, so relative operands are judged and allowed when they should be refused (fail open).
+
+   Failure scenario: `tar -xf a.tar -C &quot;$D&quot; settings.json` with D=~/.claude: dir becomes `&lt;cwd&gt;/$D`, which is not lost, so settings.json is judged at a harmless literal path and allowed. tar then writes ~/.claude/settings.json. Before this change, dirTarget returned LOST and the write was refused.
+
+4. `hooks/scripts/pretooluse-harnessguard.mjs:1737`: segMoves and linePlaces still read git -C targets through dirTarget (expanding ~ and $HOME, and returning LOST for variables), but gitTargets now reads the same word with resolveIn. One command line gets two different meanings for the same folder.
+
+   Failure scenario: For `git -C ~/proj rm hooks`, linePlaces counts ~/proj as a place where the shell may be, while gitTargets judges operands at `&lt;place&gt;/~/proj`. Line-level tracking and operand judging disagree, and that disagreement is exactly the gap behind the bypasses above. The parsing that was shared through dirTarget is now duplicated in a weaker copy.
+
+5. `hooks/scripts/pretooluse-harnessguard.mjs:2359`: The fail-closed message no longer mentions git -C, but segMoves still pushes git -C targets into linePlaces, and those targets can resolve to LOST. When a git -C causes a refusal, the message names only cd, pushd and env -C.
+
+   Failure scenario: `git -C &quot;$X&quot; status; echo hi &gt; hooks/x` is refused because linePlaces got LOST from the git -C. The user is told the cause was a cd, pushd or env -C, none of which appear on the line, so they cannot tell what to fix.
+
+6. `hooks/scripts/pretooluse-harnessguard.mjs:1592`: Wildcard handling for tar -C and git -C is gone: resolveIn treats `*`, `?` and `[` literally, while dirTarget expanded a pattern with one match and returned LOST when there were several.
+
+   Failure scenario: `git -C ~/.cla* checkout settings.json`: the shell expands the pattern to ~/.claude, but the guard judges `&lt;cwd&gt;/~/.cla*/settings.json` and allows it. ~/.claude/settings.json is overwritten.
+
+7. `docs/01-runbook.md:2027`: This removes the documented guarantee that `git -C ~/proj rm -r hooks` is judged where it lands. That deletion is the visible symptom of a security regression: a protection was dropped rather than replaced with something equivalent.
+
+   Failure scenario: Operators reading the runbook no longer learn about the git -C and tar -C handling, and the guard really does let `git -C ~/proj rm -r hooks` through. The fix is to keep dirTarget for -C values, not to remove the doc. The deleted #318 regression tests, if any existed, should be restored too.
+
+There is one root cause. This commit reverts #318: the `-C` value for `git` and `tar` is now resolved with `resolveIn` instead of `dirTarget`. Without `dirTarget`, home and `$PWD` paths are no longer expanded, unreadable folders are no longer refused, and globs are no longer matched. The guard therefore allows writes into protected paths, `~/.claude` settings and hook folders included. Reverting the two call sites at lines 1592 and 1737 to `dirTarget` fixes findings 1–4 and 6. Finding 5 needs `git -C` back in the refusal message, and finding 7 needs the runbook text restored.
+
+No CLAUDE.md applies to the changed files. Line numbers are from the checkout I had, which holds the pre-change version of the code.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/04-git-dash-c-folder high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/04-git-dash-c-folder</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-04</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/04-git-dash-c-folder against main raised, as a finding, this defect: a <code>git -C &lt;folder&gt;</code> (or <code>tar -C</code>) value is resolved literally instead of being read like a cd target, so <code>~/proj</code>, <code>$HOME/proj</code> or <code>&quot;$PWD&quot;</code> is judged as a folder spelled with those characters under the current place and an unreadable <code>-C &quot;$X&quot;</code> is not refused -- a protected path reached through -C is written past the guard (in hooks/scripts/pretooluse-harnessguard.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/04-git-dash-c-folder against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: a <code>git -C &lt;folder&gt;</code> (or <code>tar -C</code>) value is resolved literally instead of being read like a cd target, so <code>~/proj</code>, <code>$HOME/proj</code> or <code>&quot;$PWD&quot;</code> is judged as a folder spelled with those characters under the current place and an unreadable <code>-C &quot;$X&quot;</code> is not refused -- a protected path reached through -C is written past the guard (in hooks/scripts/pretooluse-harnessguard.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-5">
+<div class="case-head">
+<h2>corpus-05-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/05-git-option-value-as-subcommand/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.14 · 04:10:19 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-05</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">I found 5 issues in the diff. The main one is a security regression: the commit shrinks `GIT_VALUE_OPTS` back to its pre-#301 contents, which brings back the guard bypass that #301 had closed. I checked this by reading the branch&apos;s `gitInvocations` (lines 108–131), not by running the guard. The other four findings are lower severity: the same bug through the other removed options, and a dropped comment and header reference.
+
+5 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-runguard.mjs:62`: Removing --attr-source from GIT_VALUE_OPTS makes the parser read its value as the git subcommand, so destructive commands get past the run guard.
+
+   Failure scenario: `git --attr-source HEAD reset --hard`: the loop at line 129 skips only the `--attr-source` word, so `sub` = &quot;HEAD&quot; and `args` start at `reset`. The reset/hard-reset refusal never matches, and git really does reset the owner&apos;s working tree. This is exactly the #301 case the deleted comment documented.
+
+2. `hooks/scripts/pretooluse-runguard.mjs:62`: --shallow-file was also dropped from GIT_VALUE_OPTS, so its separate value is taken as the subcommand and the guard is bypassed.
+
+   Failure scenario: `git --shallow-file x push --force origin main` or `git --shallow-file x checkout -- .`: `sub` = &quot;x&quot;, so the push ship gate and the checkout-discard refusal never fire.
+
+3. `hooks/scripts/pretooluse-runguard.mjs:62`: --super-prefix and --list-cmds were dropped too, so the same subcommand misparse happens on git versions that accept their separate-word form.
+
+   Failure scenario: On an older git, `git --super-prefix foo/ clean -fdx` parses as `sub` = &quot;foo/&quot; and the clean/reset refusals are skipped. The deleted comment kept these entries for exactly this case.
+
+4. `hooks/scripts/pretooluse-runguard.mjs:61`: The detailed comment explaining which options consume a value (with sources and edge cases like --exec-path and the --opt=value form) was replaced by a one-line comment.
+
+   Failure scenario: The next maintainer has no record of why --attr-source and the others must be in the set, which makes it easy to reintroduce this same regression; this commit already did so.
+
+5. `hooks/scripts/pretooluse-runguard.mjs:4`: The Purpose header drops the #301 reference even though the option-value issue it tracks is still relevant, so the header no longer matches the cases the guard should cover.
+
+   Failure scenario: Someone auditing the guard against its tracked issues sees #301 missing and assumes the --attr-source bypass is out of scope, so the regression goes unnoticed.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">I found 5 issues in the diff. The main one is a security regression: the commit shrinks `GIT_VALUE_OPTS` back to its pre-#301 contents, which brings back the guard bypass that #301 had closed. I checked this by reading the branch&apos;s `gitInvocations` (lines 108–131), not by running the guard. The other four findings are lower severity: the same bug through the other removed options, and a dropped comment and header reference.
+
+5 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-runguard.mjs:62`: Removing --attr-source from GIT_VALUE_OPTS makes the parser read its value as the git subcommand, so destructive commands get past the run guard.
+
+   Failure scenario: `git --attr-source HEAD reset --hard`: the loop at line 129 skips only the `--attr-source` word, so `sub` = &quot;HEAD&quot; and `args` start at `reset`. The reset/hard-reset refusal never matches, and git really does reset the owner&apos;s working tree. This is exactly the #301 case the deleted comment documented.
+
+2. `hooks/scripts/pretooluse-runguard.mjs:62`: --shallow-file was also dropped from GIT_VALUE_OPTS, so its separate value is taken as the subcommand and the guard is bypassed.
+
+   Failure scenario: `git --shallow-file x push --force origin main` or `git --shallow-file x checkout -- .`: `sub` = &quot;x&quot;, so the push ship gate and the checkout-discard refusal never fire.
+
+3. `hooks/scripts/pretooluse-runguard.mjs:62`: --super-prefix and --list-cmds were dropped too, so the same subcommand misparse happens on git versions that accept their separate-word form.
+
+   Failure scenario: On an older git, `git --super-prefix foo/ clean -fdx` parses as `sub` = &quot;foo/&quot; and the clean/reset refusals are skipped. The deleted comment kept these entries for exactly this case.
+
+4. `hooks/scripts/pretooluse-runguard.mjs:61`: The detailed comment explaining which options consume a value (with sources and edge cases like --exec-path and the --opt=value form) was replaced by a one-line comment.
+
+   Failure scenario: The next maintainer has no record of why --attr-source and the others must be in the set, which makes it easy to reintroduce this same regression; this commit already did so.
+
+5. `hooks/scripts/pretooluse-runguard.mjs:4`: The Purpose header drops the #301 reference even though the option-value issue it tracks is still relevant, so the header no longer matches the cases the guard should cover.
+
+   Failure scenario: Someone auditing the guard against its tracked issues sees #301 missing and assumes the --attr-source bypass is out of scope, so the regression goes unnoticed.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/05-git-option-value-as-subcommand high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/05-git-option-value-as-subcommand</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-05</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/05-git-option-value-as-subcommand against main raised, as a finding, this defect: the run guard takes the separate value of a git top-level option (such as <code>git -c key=val reset --hard</code>) as the subcommand, so the destructive command behind it is not judged (in hooks/scripts/pretooluse-runguard.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/05-git-option-value-as-subcommand against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the run guard takes the separate value of a git top-level option (such as <code>git -c key=val reset --hard</code>) as the subcommand, so the destructive command behind it is not judged (in hooks/scripts/pretooluse-runguard.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-6">
+<div class="case-head">
+<h2>corpus-06-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/06-unreadable-stamp-fails-open/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.17 · 04:10:44 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-06</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">Two blocking safety gates in `hooks/scripts/pretooluse-runguard.mjs` now let commands through when they can&apos;t read their own state files. The commit reverts #299: a missing ship-gate stamp still blocks, but one that exists and can&apos;t be read now skips the gate, and an unreadable run list or manifest counts as &quot;no run is live&quot;. I didn&apos;t run the hook; these findings come from reading the diff and the enclosing functions. I checked `runs[0]` at line 672 and it is still safe, because `currentRuns()` assigns `runs` before that line.
+
+7 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-runguard.mjs:587`: shipGateRefusal now returns null (skips the gate) for any stamp read error other than ENOENT/SyntaxError, so an unreadable ship-gate stamp lets a push to the default branch through without a clean drift check.
+
+   Failure scenario: The stamp file ~/.cairn/ship-gate/&lt;base&gt;-&lt;hash&gt;.json is chmod 000, or its ship-gate dir is unreadable, or the path is a directory (EISDIR). Then `git push origin main` hits EACCES/EISDIR, the function returns null, and the push lands on main with no drift check. Before this change it was refused with &apos;the gate won&apos;t skip a check it can&apos;t see&apos; (#299).
+
+2. `hooks/scripts/pretooluse-runguard.mjs:172`: liveRuns returns [] for every readdirSync error, not just ENOENT, so a runs dir that can&apos;t be read counts as &apos;no batch run live&apos;.
+
+   Failure scenario: The ~/.cairn/runs dir exists but is unreadable (EACCES, or ENOTDIR if it&apos;s a file) while a batch run is going. currentRuns() returns [], so a `git checkout`/`git switch`/`git reset --hard` in the owner&apos;s main worktree is allowed and rewrites the human&apos;s files mid-run. The unreadable-runs refusal that used to catch this was removed.
+
+3. `hooks/scripts/pretooluse-runguard.mjs:183`: The per-manifest catch now swallows every error with `continue`, including EACCES/EISDIR, so a live run whose manifest can&apos;t be read is treated as not running.
+
+   Failure scenario: The running manifest &lt;prefix&gt;run.json is chmod 000. The read throws EACCES, the manifest is skipped, and pushRefusal is never checked. An agent push during the run goes through without the staging-gate push authority (#252/#260), and checkout/reset in the main worktree is also allowed.
+
+4. `hooks/scripts/pretooluse-runguard.mjs:653`: The push branch no longer refuses when the run list is unreadable, so a mid-run push can&apos;t be checked against the run&apos;s push authority and is allowed.
+
+   Failure scenario: During a batch run without push authority, the runs dir is unreadable. `git push` from the run worktree loops over [] and exits 0, and the push lands even though the phase should end verified-not-pushed.
+
+5. `hooks/scripts/pretooluse-runguard.mjs:667`: The #216 checkout/switch/hard-reset gate only checks `currentRuns().length`, and the unreadable branch was deleted, so it fails open whenever the run state can&apos;t be read.
+
+   Failure scenario: `git reset --hard` in the main worktree with the runs dir at EACCES: length is 0, the gate skips, and uncommitted edits are lost while an unattended run is in flight.
+
+6. `hooks/scripts/pretooluse-runguard.mjs:645`: Changing the return value from a [why, remedy] tuple to a plain string dropped the remedy line for the unreadable-stamp case; every refusal now suggests &apos;/cairn:ship&apos;, which can&apos;t help when the stamp can&apos;t be read.
+
+   Failure scenario: If the unreadable case is ever restored as a refusal, the user is told to run /cairn:ship, but the real fix is restoring read access to the stamp path. The message also no longer names that path.
+
+7. `hooks/scripts/pretooluse-runguard.mjs:21`: The header comment now writes down fail-open (&apos;an unreadable one skips&apos;) as the intended contract for a security gate and drops #299 from the purpose list, which contradicts the file&apos;s own rule that a gate that can&apos;t see its stamp refuses.
+
+   Failure scenario: Future maintainers read the skip as intended and copy the pattern. Anyone who can make the stamp or runs dir unreadable (chmod or a directory swap) can get around the ship gate and the mid-run guards.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">Two blocking safety gates in `hooks/scripts/pretooluse-runguard.mjs` now let commands through when they can&apos;t read their own state files. The commit reverts #299: a missing ship-gate stamp still blocks, but one that exists and can&apos;t be read now skips the gate, and an unreadable run list or manifest counts as &quot;no run is live&quot;. I didn&apos;t run the hook; these findings come from reading the diff and the enclosing functions. I checked `runs[0]` at line 672 and it is still safe, because `currentRuns()` assigns `runs` before that line.
+
+7 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-runguard.mjs:587`: shipGateRefusal now returns null (skips the gate) for any stamp read error other than ENOENT/SyntaxError, so an unreadable ship-gate stamp lets a push to the default branch through without a clean drift check.
+
+   Failure scenario: The stamp file ~/.cairn/ship-gate/&lt;base&gt;-&lt;hash&gt;.json is chmod 000, or its ship-gate dir is unreadable, or the path is a directory (EISDIR). Then `git push origin main` hits EACCES/EISDIR, the function returns null, and the push lands on main with no drift check. Before this change it was refused with &apos;the gate won&apos;t skip a check it can&apos;t see&apos; (#299).
+
+2. `hooks/scripts/pretooluse-runguard.mjs:172`: liveRuns returns [] for every readdirSync error, not just ENOENT, so a runs dir that can&apos;t be read counts as &apos;no batch run live&apos;.
+
+   Failure scenario: The ~/.cairn/runs dir exists but is unreadable (EACCES, or ENOTDIR if it&apos;s a file) while a batch run is going. currentRuns() returns [], so a `git checkout`/`git switch`/`git reset --hard` in the owner&apos;s main worktree is allowed and rewrites the human&apos;s files mid-run. The unreadable-runs refusal that used to catch this was removed.
+
+3. `hooks/scripts/pretooluse-runguard.mjs:183`: The per-manifest catch now swallows every error with `continue`, including EACCES/EISDIR, so a live run whose manifest can&apos;t be read is treated as not running.
+
+   Failure scenario: The running manifest &lt;prefix&gt;run.json is chmod 000. The read throws EACCES, the manifest is skipped, and pushRefusal is never checked. An agent push during the run goes through without the staging-gate push authority (#252/#260), and checkout/reset in the main worktree is also allowed.
+
+4. `hooks/scripts/pretooluse-runguard.mjs:653`: The push branch no longer refuses when the run list is unreadable, so a mid-run push can&apos;t be checked against the run&apos;s push authority and is allowed.
+
+   Failure scenario: During a batch run without push authority, the runs dir is unreadable. `git push` from the run worktree loops over [] and exits 0, and the push lands even though the phase should end verified-not-pushed.
+
+5. `hooks/scripts/pretooluse-runguard.mjs:667`: The #216 checkout/switch/hard-reset gate only checks `currentRuns().length`, and the unreadable branch was deleted, so it fails open whenever the run state can&apos;t be read.
+
+   Failure scenario: `git reset --hard` in the main worktree with the runs dir at EACCES: length is 0, the gate skips, and uncommitted edits are lost while an unattended run is in flight.
+
+6. `hooks/scripts/pretooluse-runguard.mjs:645`: Changing the return value from a [why, remedy] tuple to a plain string dropped the remedy line for the unreadable-stamp case; every refusal now suggests &apos;/cairn:ship&apos;, which can&apos;t help when the stamp can&apos;t be read.
+
+   Failure scenario: If the unreadable case is ever restored as a refusal, the user is told to run /cairn:ship, but the real fix is restoring read access to the stamp path. The message also no longer names that path.
+
+7. `hooks/scripts/pretooluse-runguard.mjs:21`: The header comment now writes down fail-open (&apos;an unreadable one skips&apos;) as the intended contract for a security gate and drops #299 from the purpose list, which contradicts the file&apos;s own rule that a gate that can&apos;t see its stamp refuses.
+
+   Failure scenario: Future maintainers read the skip as intended and copy the pattern. Anyone who can make the stamp or runs dir unreadable (chmod or a directory swap) can get around the ship gate and the mid-run guards.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/06-unreadable-stamp-fails-open high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/06-unreadable-stamp-fails-open</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-06</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/06-unreadable-stamp-fails-open against main raised, as a finding, this defect: an unreadable drift stamp or run list makes the run guard allow the push (fail-open) instead of refusing it with the reason (in hooks/scripts/pretooluse-runguard.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/06-unreadable-stamp-fails-open against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: an unreadable drift stamp or run list makes the run guard allow the push (fail-open) instead of refusing it with the reason (in hooks/scripts/pretooluse-runguard.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-7">
+<div class="case-head">
+<h2>corpus-07-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/07-computed-folder-cd/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">100%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span></span>
+<span class="num">100%</span>
+<span class="muted num">100% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span></span>
+<span class="num">100%</span>
+<span class="muted num">0 turns · $0.18 · 04:11:18 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-07</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff makes one real regression: a write path built with `$(git rev-parse --show-toplevel)` is now judged in the wrong place when the shell isn&apos;t inside a repo. I found nothing else of substance, so there are 2 findings, under the floor of 5. I didn&apos;t invent any to reach it.
+
+The change is a single commit to `hooks/scripts/pretooluse-harnessguard.mjs`. It shortens `computedDir` and drops the check that sent the repo-root case to `LOST` when no `.git` exists. The cause is that `gitRoot` ends on `return dir` when it finds no `.git`, so that case now resolves to the shell&apos;s own folder. Inside a repo the old `existsSync` check made no difference, so only the no-repo case changed. When the shell&apos;s folder is `LOST`, both old and new code still give `LOST`. No CLAUDE.md applies to this file, so the conventions angle had nothing to report. Nothing was verified by running the guard.
+
+2 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-harnessguard.mjs:2087`: computedDir no longer turns `$(git rev-parse --show-toplevel)` into LOST when no .git is above the shell&apos;s folder; gitRoot&apos;s fallback (`return dir`) makes it resolve to the shell&apos;s own folder, so the write is judged in the wrong place instead of being refused.
+
+   Failure scenario: Shell is in a folder outside any repo (e.g. `cd /tmp/scratch` or `cd ~`), then `rm -rf &quot;$(git rev-parse --show-toplevel)/&quot;` or `echo x &gt; $(git rev-parse --show-toplevel)/etc/foo`. git fails and the substitution is empty, so the shell really targets `/` or `/etc/foo`. The guard resolves it to `/tmp/scratch/` or `/tmp/scratch/etc/foo`, a harmless folder, and allows it. Before this change the target was LOST and the write was refused.
+
+2. `hooks/scripts/pretooluse-harnessguard.mjs:2085`: The doc comment on computedDir (and the header comment near line 66) was cut down to drop the LOST rule (&apos;LOST where no .git is above it: git would fail&apos;) and the note that each cd candidate is judged one at a time, so the docs no longer record the invariant the removed code enforced.
+
+   Failure scenario: A later maintainer reading `gitRoot`/`computedDir` has no note that a missing repo must map to LOST. That makes the regression above look intended and easy to repeat elsewhere, for example at the other `gitRoot` caller (line 1673).</pre>
+</div>
+</details>
+<details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff makes one real regression: a write path built with `$(git rev-parse --show-toplevel)` is now judged in the wrong place when the shell isn&apos;t inside a repo. I found nothing else of substance, so there are 2 findings, under the floor of 5. I didn&apos;t invent any to reach it.
+
+The change is a single commit to `hooks/scripts/pretooluse-harnessguard.mjs`. It shortens `computedDir` and drops the check that sent the repo-root case to `LOST` when no `.git` exists. The cause is that `gitRoot` ends on `return dir` when it finds no `.git`, so that case now resolves to the shell&apos;s own folder. Inside a repo the old `existsSync` check made no difference, so only the no-repo case changed. When the shell&apos;s folder is `LOST`, both old and new code still give `LOST`. No CLAUDE.md applies to this file, so the conventions angle had nothing to report. Nothing was verified by running the guard.
+
+2 findings, most severe first:
+
+1. `hooks/scripts/pretooluse-harnessguard.mjs:2087`: computedDir no longer turns `$(git rev-parse --show-toplevel)` into LOST when no .git is above the shell&apos;s folder; gitRoot&apos;s fallback (`return dir`) makes it resolve to the shell&apos;s own folder, so the write is judged in the wrong place instead of being refused.
+
+   Failure scenario: Shell is in a folder outside any repo (e.g. `cd /tmp/scratch` or `cd ~`), then `rm -rf &quot;$(git rev-parse --show-toplevel)/&quot;` or `echo x &gt; $(git rev-parse --show-toplevel)/etc/foo`. git fails and the substitution is empty, so the shell really targets `/` or `/etc/foo`. The guard resolves it to `/tmp/scratch/` or `/tmp/scratch/etc/foo`, a harmless folder, and allows it. Before this change the target was LOST and the write was refused.
+
+2. `hooks/scripts/pretooluse-harnessguard.mjs:2085`: The doc comment on computedDir (and the header comment near line 66) was cut down to drop the LOST rule (&apos;LOST where no .git is above it: git would fail&apos;) and the note that each cd candidate is judged one at a time, so the docs no longer record the invariant the removed code enforced.
+
+   Failure scenario: A later maintainer reading `gitRoot`/`computedDir` has no note that a missing repo must map to LOST. That makes the regression above look intended and easy to repeat elsewhere, for example at the other `gitRoot` caller (line 1673).</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/07-computed-folder-cd high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/07-computed-folder-cd</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-07</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/07-computed-folder-cd against main raised, as a finding, this defect: the computed repo root <code>$(git rev-parse --show-toplevel)</code> resolves to the shell's own folder when no <code>.git</code> is above it, instead of being marked unknowable and refused -- outside a repo the real shell expands it empty and writes from the disk root, so a protected path reached through it is not seen (in hooks/scripts/pretooluse-harnessguard.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/07-computed-folder-cd against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the computed repo root <code>$(git rev-parse --show-toplevel)</code> resolves to the shell's own folder when no <code>.git</code> is above it, instead of being marked unknowable and refused -- outside a repo the real shell expands it empty and writes from the disk root, so a protected path reached through it is not seen (in hooks/scripts/pretooluse-harnessguard.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-8">
+<div class="case-head">
+<h2>corpus-08-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/08-relative-verb-paths/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">0%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span></span>
+<span class="num">0%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span></span>
+<span class="num">0%</span>
+<span class="muted num">0 turns · $0.22 · 04:11:37 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">k-08</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff (`git diff main...corpus/08-relative-verb-paths`) has one root defect: it reverts the command shims from `${CLAUDE_PLUGIN_ROOT}`-absolute paths back to bare relative paths. It regresses a fix that had been verified, and it lands in the generator and in all 39 generated shims. No CLAUDE.md applies to these files, so the conventions angle found nothing. The workspace only has the touched files, so I couldn&apos;t read `check-surface.mjs`. The guard finding below is an inference from the generator&apos;s header comment.
+
+6 findings, most severe first:
+
+1. `scripts/gen-commands.mjs:66`: The generator now writes shims that point to the plugin&apos;s skill files with bare relative paths (`skills/cairn-trailhead/SKILL.md`) instead of `${CLAUDE_PLUGIN_ROOT}/skills/...`, so the path resolves against the user&apos;s project directory, not the plugin install directory.
+
+   Failure scenario: A user runs /cairn:plan in their own repo. The agent tries to Read `skills/cairn-trailhead/SKILL.md` relative to that repo, the file isn&apos;t there, and (as the deleted comment notes, trace fb6fa9fb) the agent guesses the plugin root or improvises the verb from its one-line description instead of following the real subroutine.
+
+2. `scripts/gen-commands.mjs:68`: Step 2&apos;s path to the verb&apos;s subroutine (`skills/cairn-trailhead/verbs/${verb}.md`) is also relative, and unlike step 1 it doesn&apos;t even say &apos;(this plugin)&apos;, so nothing tells the agent where it lives.
+
+   Failure scenario: Even if the agent somehow finds SKILL.md, it reads `verbs/&lt;verb&gt;.md` relative to the cwd, misses it, and every verb runs without its subroutine instructions. This hits all 39 verbs (audit, work, ship, summit, and the rest).
+
+3. `commands/work.md:9`: The regenerated shims (all 39 files in commands/, including work.md, ship.md and summit.md) carry the broken relative paths in steps 1 and 2.
+
+   Failure scenario: Destructive or gated verbs like /cairn:ship, /cairn:backtrack and /cairn:summit run outside the plugin repo without loading their guard rules (drift-clean gate, manifest-only revert). The agent improvises, which can push or revert things the real subroutine would have refused.
+
+4. `scripts/gen-commands.mjs:66`: The diff deletes the comment explaining why `${CLAUDE_PLUGIN_ROOT}` is needed (it is substituted at load time; verified 2026-09-19, trace fb6fa9fb), so the evidence behind the earlier fix is gone and the regression is easy to repeat.
+
+   Failure scenario: Future maintainers no longer see that relative paths were tried and failed under `claude plugin eval`, so the same bug comes back or stays unnoticed; reviewers of this diff lose the context showing it is a revert of a verified fix.
+
+5. `scripts/gen-commands.mjs:6`: The header says `check-surface.mjs` check (f) only keeps commands/ in sync with the generator, so nothing appears to catch relative, non-portable paths in the shim body; the regenerated broken shims would pass the surface check.
+
+   Failure scenario: CI and check-surface pass because the shims match the generator&apos;s output exactly, so the broken paths ship. A check that every Read path in the shim body starts with `${CLAUDE_PLUGIN_ROOT}/` would have caught this diff.
+
+6. `commands/resync.md:8`: The &apos;resolve relative to this plugin&apos; instruction is an English parenthetical (&apos;(this plugin)&apos;) that the agent has to interpret, replacing a path the harness substitutes deterministically.
+
+   Failure scenario: The model reads &apos;(this plugin)&apos; but has no way to learn the plugin root without searching (e.g. Glob across ~/.claude/plugins/cache). That&apos;s slower and unreliable, and when several cached versions are installed (e.g. cairn 2.x vs 3.x) it may read a stale copy of SKILL.md.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">The diff (`git diff main...corpus/08-relative-verb-paths`) has one root defect: it reverts the command shims from `${CLAUDE_PLUGIN_ROOT}`-absolute paths back to bare relative paths. It regresses a fix that had been verified, and it lands in the generator and in all 39 generated shims. No CLAUDE.md applies to these files, so the conventions angle found nothing. The workspace only has the touched files, so I couldn&apos;t read `check-surface.mjs`. The guard finding below is an inference from the generator&apos;s header comment.
+
+6 findings, most severe first:
+
+1. `scripts/gen-commands.mjs:66`: The generator now writes shims that point to the plugin&apos;s skill files with bare relative paths (`skills/cairn-trailhead/SKILL.md`) instead of `${CLAUDE_PLUGIN_ROOT}/skills/...`, so the path resolves against the user&apos;s project directory, not the plugin install directory.
+
+   Failure scenario: A user runs /cairn:plan in their own repo. The agent tries to Read `skills/cairn-trailhead/SKILL.md` relative to that repo, the file isn&apos;t there, and (as the deleted comment notes, trace fb6fa9fb) the agent guesses the plugin root or improvises the verb from its one-line description instead of following the real subroutine.
+
+2. `scripts/gen-commands.mjs:68`: Step 2&apos;s path to the verb&apos;s subroutine (`skills/cairn-trailhead/verbs/${verb}.md`) is also relative, and unlike step 1 it doesn&apos;t even say &apos;(this plugin)&apos;, so nothing tells the agent where it lives.
+
+   Failure scenario: Even if the agent somehow finds SKILL.md, it reads `verbs/&lt;verb&gt;.md` relative to the cwd, misses it, and every verb runs without its subroutine instructions. This hits all 39 verbs (audit, work, ship, summit, and the rest).
+
+3. `commands/work.md:9`: The regenerated shims (all 39 files in commands/, including work.md, ship.md and summit.md) carry the broken relative paths in steps 1 and 2.
+
+   Failure scenario: Destructive or gated verbs like /cairn:ship, /cairn:backtrack and /cairn:summit run outside the plugin repo without loading their guard rules (drift-clean gate, manifest-only revert). The agent improvises, which can push or revert things the real subroutine would have refused.
+
+4. `scripts/gen-commands.mjs:66`: The diff deletes the comment explaining why `${CLAUDE_PLUGIN_ROOT}` is needed (it is substituted at load time; verified 2026-09-19, trace fb6fa9fb), so the evidence behind the earlier fix is gone and the regression is easy to repeat.
+
+   Failure scenario: Future maintainers no longer see that relative paths were tried and failed under `claude plugin eval`, so the same bug comes back or stays unnoticed; reviewers of this diff lose the context showing it is a revert of a verified fix.
+
+5. `scripts/gen-commands.mjs:6`: The header says `check-surface.mjs` check (f) only keeps commands/ in sync with the generator, so nothing appears to catch relative, non-portable paths in the shim body; the regenerated broken shims would pass the surface check.
+
+   Failure scenario: CI and check-surface pass because the shims match the generator&apos;s output exactly, so the broken paths ship. A check that every Read path in the shim body starts with `${CLAUDE_PLUGIN_ROOT}/` would have caught this diff.
+
+6. `commands/resync.md:8`: The &apos;resolve relative to this plugin&apos; instruction is an English parenthetical (&apos;(this plugin)&apos;) that the agent has to interpret, replacing a path the harness substitutes deterministically.
+
+   Failure scenario: The model reads &apos;(this plugin)&apos; but has no way to learn the plugin root without searching (e.g. Glob across ~/.claude/plugins/cache). That&apos;s slower and unreliable, and when several cached versions are installed (e.g. cairn 2.x vs 3.x) it may read a stale copy of SKILL.md.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/08-relative-verb-paths high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/08-relative-verb-paths</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-08</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/08-relative-verb-paths against main raised, as a finding, this defect: the generated command shims reference the verb files by a relative path that does not resolve from a fresh agent's working directory; the shims must use the plugin-root variable (in scripts/gen-commands.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/08-relative-verb-paths against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the generated command shims reference the verb files by a relative path that does not resolve from a fresh agent's working directory; the shims must use the plugin-root variable (in scripts/gen-commands.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-9">
+<div class="case-head">
+<h2>corpus-09-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/09-model-prices-by-family/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">50%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:50.0%"></span></span>
+<span class="num">50%</span>
+<span class="muted num">0 turns · $0.18 · 04:12:18 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-09</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">10 findings, most severe first:
+
+1. `hooks/scripts/stop-costtracker.mjs:70`: Fable and Mythos models now get Sonnet&apos;s price of $3/$15, but they are list-priced at $10/$50 with a 0.025x cache-read rate.
+
+   Failure scenario: A session running claude-fable-5 with 1M input and 1M output tokens is recorded as $18 instead of $60. Spend for the most expensive models is understated about 3.3x in est_cost_usd and in every cost-report sum.
+
+2. `hooks/scripts/stop-costtracker.mjs:68`: Every Opus id now gets the 4.1-era price of $15/$75 whatever its generation; the previous table had 4.5-era Opus at $5/$25 and 5.5-era Opus at $4/$20.
+
+   Failure scenario: A claude-opus-5-5 session with 1M input and 1M output tokens is recorded as $90 instead of $24, a 3.75x overstatement. This is the regression #330 fixed, and it inflates by_phase and by_issue totals as well as budget decisions.
+
+3. `hooks/scripts/stop-costtracker.mjs:73`: Model ids the table does not recognize fall back to Sonnet pricing through `?? PRICES[2]`, replacing the rule that an unplaceable id is never priced as some other model.
+
+   Failure scenario: Entries with no model (defaulted to &quot;unknown&quot;), synthetic or non-Claude ids, and any future family name all get a confident $3/$15 cost. The report shows the figure with no sign that it is a guess, which breaks the rule in ADR 0021.
+
+4. `hooks/scripts/stop-costtracker.mjs:207`: The `unpriced` tracking and the `unpriced_models` field on the metrics row were removed, so a model that could not be priced can no longer be detected downstream.
+
+   Failure scenario: Readers of the metrics JSONL, and cost-report&apos;s --json output, no longer get `unpriced_models` or `unpriced_sessions`. Any consumer that checks those fields to flag incomplete totals silently treats every total as complete.
+
+5. `hooks/scripts/cost-report.mjs:157`: cost-report no longer warns that some sessions carry unpriced models, even for older rows that still contain `unpriced_models`.
+
+   Failure scenario: Rows written before this change with a non-empty `unpriced_models` (cost 0 for those tokens) now add into `total` silently. The headline dollar figure understates spend and nothing tells the user.
+
+6. `hooks/scripts/stop-costtracker.mjs:207`: The cache-read multiplier is hardcoded at 0.1x for every model; the 5.5-generation models were at 0.05x and Fable/Mythos at 0.025x.
+
+   Failure scenario: Cache-read-heavy sessions dominate real usage (one session logged 957M cache-read tokens). For opus-5-5 that volume is billed here at $1.50/MTok instead of $0.20/MTok, inflating cost by hundreds of dollars per session.
+
+7. `hooks/scripts/stop-costtracker.mjs:70`: Sonnet 5.x is priced at $3/$15 instead of $2/$10, and Haiku 4.x at $0.8/$4 instead of $1/$5, because the generation tiers were removed.
+
+   Failure scenario: Usage on claude-sonnet-5 is overstated about 1.5x and usage on claude-haiku-4-5 is understated 20%, so per-kind and per-issue cost comparisons come out skewed.
+
+8. `hooks/scripts/stop-costtracker.mjs:73`: The fallback `PRICES[2]` depends on the array&apos;s position, and the bare substring regexes match any id that happens to contain &quot;opus&quot;, &quot;haiku&quot; or &quot;sonnet&quot;.
+
+   Failure scenario: Reordering or adding a PRICES entry silently changes what the default price is. Any id containing one of those substrings gets that tier&apos;s price without its generation being checked.
+
+9. `hooks/scripts/stop-costtracker.mjs:19`: The header note was deleted that explained rows written before 2026-10-13 overstate Opus about 3.75x and Sonnet about 1.5x, and the new code writes rows on that same inflated basis again.
+
+   Failure scenario: The metrics history now mixes rows priced by the generation-aware table with rows priced by the flat table. Nothing in the code or the data marks which is which, so trends across this commit can&apos;t be compared.
+
+10. `hooks/scripts/stop-costtracker.mjs:207`: The named CACHE_WRITE constant was replaced with inline magic numbers 1.25 and 0.1 in the cost formula.
+
+    Failure scenario: Pricing multipliers are now buried in the formula instead of sitting in the price table. Changing a cache rate per model would mean editing the arithmetic, which makes per-model cache pricing harder to restore.</pre>
+</div>
+</details>
+<details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">10 findings, most severe first:
+
+1. `hooks/scripts/stop-costtracker.mjs:70`: Fable and Mythos models now get Sonnet&apos;s price of $3/$15, but they are list-priced at $10/$50 with a 0.025x cache-read rate.
+
+   Failure scenario: A session running claude-fable-5 with 1M input and 1M output tokens is recorded as $18 instead of $60. Spend for the most expensive models is understated about 3.3x in est_cost_usd and in every cost-report sum.
+
+2. `hooks/scripts/stop-costtracker.mjs:68`: Every Opus id now gets the 4.1-era price of $15/$75 whatever its generation; the previous table had 4.5-era Opus at $5/$25 and 5.5-era Opus at $4/$20.
+
+   Failure scenario: A claude-opus-5-5 session with 1M input and 1M output tokens is recorded as $90 instead of $24, a 3.75x overstatement. This is the regression #330 fixed, and it inflates by_phase and by_issue totals as well as budget decisions.
+
+3. `hooks/scripts/stop-costtracker.mjs:73`: Model ids the table does not recognize fall back to Sonnet pricing through `?? PRICES[2]`, replacing the rule that an unplaceable id is never priced as some other model.
+
+   Failure scenario: Entries with no model (defaulted to &quot;unknown&quot;), synthetic or non-Claude ids, and any future family name all get a confident $3/$15 cost. The report shows the figure with no sign that it is a guess, which breaks the rule in ADR 0021.
+
+4. `hooks/scripts/stop-costtracker.mjs:207`: The `unpriced` tracking and the `unpriced_models` field on the metrics row were removed, so a model that could not be priced can no longer be detected downstream.
+
+   Failure scenario: Readers of the metrics JSONL, and cost-report&apos;s --json output, no longer get `unpriced_models` or `unpriced_sessions`. Any consumer that checks those fields to flag incomplete totals silently treats every total as complete.
+
+5. `hooks/scripts/cost-report.mjs:157`: cost-report no longer warns that some sessions carry unpriced models, even for older rows that still contain `unpriced_models`.
+
+   Failure scenario: Rows written before this change with a non-empty `unpriced_models` (cost 0 for those tokens) now add into `total` silently. The headline dollar figure understates spend and nothing tells the user.
+
+6. `hooks/scripts/stop-costtracker.mjs:207`: The cache-read multiplier is hardcoded at 0.1x for every model; the 5.5-generation models were at 0.05x and Fable/Mythos at 0.025x.
+
+   Failure scenario: Cache-read-heavy sessions dominate real usage (one session logged 957M cache-read tokens). For opus-5-5 that volume is billed here at $1.50/MTok instead of $0.20/MTok, inflating cost by hundreds of dollars per session.
+
+7. `hooks/scripts/stop-costtracker.mjs:70`: Sonnet 5.x is priced at $3/$15 instead of $2/$10, and Haiku 4.x at $0.8/$4 instead of $1/$5, because the generation tiers were removed.
+
+   Failure scenario: Usage on claude-sonnet-5 is overstated about 1.5x and usage on claude-haiku-4-5 is understated 20%, so per-kind and per-issue cost comparisons come out skewed.
+
+8. `hooks/scripts/stop-costtracker.mjs:73`: The fallback `PRICES[2]` depends on the array&apos;s position, and the bare substring regexes match any id that happens to contain &quot;opus&quot;, &quot;haiku&quot; or &quot;sonnet&quot;.
+
+   Failure scenario: Reordering or adding a PRICES entry silently changes what the default price is. Any id containing one of those substrings gets that tier&apos;s price without its generation being checked.
+
+9. `hooks/scripts/stop-costtracker.mjs:19`: The header note was deleted that explained rows written before 2026-10-13 overstate Opus about 3.75x and Sonnet about 1.5x, and the new code writes rows on that same inflated basis again.
+
+   Failure scenario: The metrics history now mixes rows priced by the generation-aware table with rows priced by the flat table. Nothing in the code or the data marks which is which, so trends across this commit can&apos;t be compared.
+
+10. `hooks/scripts/stop-costtracker.mjs:207`: The named CACHE_WRITE constant was replaced with inline magic numbers 1.25 and 0.1 in the cost formula.
+
+    Failure scenario: Pricing multipliers are now buried in the formula instead of sitting in the price table. Changing a cache rate per model would mean editing the arithmetic, which makes per-model cache pricing harder to restore.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/09-model-prices-by-family high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/09-model-prices-by-family</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-09</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/09-model-prices-by-family against main raised, as a finding, this defect: the price table keys on family name only, so every Opus is priced at the old $15/$75 and a model id the table cannot place is silently priced as Sonnet instead of being marked unpriced (in hooks/scripts/stop-costtracker.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/09-model-prices-by-family against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the price table keys on family name only, so every Opus is priced at the old $15/$75 and a model id the table cannot place is silently priced as Sonnet instead of being marked unpriced (in hooks/scripts/stop-costtracker.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-10">
+<div class="case-head">
+<h2>corpus-10-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/10-process-substitution-body/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">100%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span></span>
+<span class="num">100%</span>
+<span class="muted num">100% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:100.0%"></span></span>
+<span class="num">100%</span>
+<span class="muted num">0 turns · $0.16 · 04:12:24 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">k-10</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">8 findings, most severe first:
+
+1. `hooks/scripts/shell-words.mjs:362`: The bodies of process substitutions `&lt;(...)` and `&gt;(...)` are no longer queued as command lines. The shell still runs those bodies, so both guards stop seeing commands inside them.
+
+   Failure scenario: `tee &gt;(cat &gt; hooks/hooks.json)` or `diff &lt;(git reset --hard) x` passes through: substitute() gets body=null because c is &apos;&lt;&apos; or &apos;&gt;&apos;, so neither the harness guard nor the run guard ever reads the write or the hard reset. Both were refused before (#320).
+
+2. `hooks/scripts/shell-words.mjs:362`: The body of an unquoted `$((...))` is now dropped (body=null). A `$(...)` or backtick nested inside the arithmetic still runs in the shell, and so does the whole body when the shell can&apos;t parse it as arithmetic.
+
+   Failure scenario: `echo $(( $(git reset --hard) ))` and `$((rm -rf hooks))` are both let through. The inner $(...) runs during arithmetic expansion, and bash falls back to a subshell for a body that isn&apos;t arithmetic, so the reset or rm runs but no guard sees it.
+
+3. `hooks/scripts/shell-words.mjs:359`: The new comment &apos;Arithmetic has no command inside it.&apos; is false. Arithmetic expansion runs nested command substitutions, so the comment justifies the regression.
+
+   Failure scenario: A future maintainer trusts the comment and leaves `$(( $(cmd) ))` unscanned. The bypass in the finding above stays in place under documentation that says it is safe.
+
+4. `hooks/scripts/shell-words.mjs:325`: Double-quoted and unquoted substitutions are now handled differently. Inside double quotes, `&quot;$((...))&quot;` still queues its body `(…)` because any `$(` matches, but the unquoted form now drops it.
+
+   Failure scenario: `echo &quot;$((git reset --hard))&quot;` is caught, while `echo $((git reset --hard))` is allowed. The guard&apos;s verdict depends on quoting that doesn&apos;t change what the shell runs.
+
+5. `hooks/scripts/shell-words.mjs:362`: A command substitution whose body starts with a subshell and no space after `$(` (`$((cmd) ...)`) is now treated as pure arithmetic and skipped. Bash runs it as a command substitution holding a subshell.
+
+   Failure scenario: `x=$((git reset --hard); true)` is not arithmetic, so bash runs it as `$( (git reset --hard); true )`. The guard sees command[i+2]===&apos;(&apos; and passes body=null, so the reset is not detected.
+
+6. `docs/01-runbook.md:2042`: The runbook drops its promise that `&lt;(…)`, `&gt;(…)` and `$((…))` bodies are checked, which documents a new bypass class as accepted behaviour. The unchanged text above still says the guard sees writes through substitutions.
+
+   Failure scenario: Users and auditors reading the runbook can&apos;t tell that `tee &gt;(cat &gt; hooks/hooks.json)` goes unguarded. The section on what the guard misses (line ~2150) lists only `$(…)` substitutions read, and never says that process substitution bodies are now missed.
+
+7. `hooks/scripts/pretooluse-runguard.mjs:88`: The run guard&apos;s header comment removes the #320 guarantee that `diff &lt;(git reset --hard) x` and `$((git reset --hard))` are read as resets. This is a silent loss of destructive-git protection, not a documentation cleanup.
+
+   Failure scenario: `diff &lt;(git reset --hard) /dev/null` or `: $((git clean -fdx))` now runs without the run guard prompting, which discards uncommitted work the guard exists to protect.
+
+8. `hooks/scripts/shell-words.mjs:245`: The doc block still lists `$((...))`, `&lt;(...)` and `&gt;(...)` alongside `$(...)` and backtick as substitution forms. The read.substitutions option now covers only `$(...)` and backtick bodies, so the API contract is misleading.
+
+   Failure scenario: A caller that enables `substitutions: true` expects every substitution body to be queued (as before) and builds a guard on that assumption. Process substitution bodies are silently missing from the `subs` output.</pre>
+</div>
+</details>
+<details class="grader">
+<summary><span class="chip chip-pass">✓ pass</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: PASS PASS PASS</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✓ ✓ ✓</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">8 findings, most severe first:
+
+1. `hooks/scripts/shell-words.mjs:362`: The bodies of process substitutions `&lt;(...)` and `&gt;(...)` are no longer queued as command lines. The shell still runs those bodies, so both guards stop seeing commands inside them.
+
+   Failure scenario: `tee &gt;(cat &gt; hooks/hooks.json)` or `diff &lt;(git reset --hard) x` passes through: substitute() gets body=null because c is &apos;&lt;&apos; or &apos;&gt;&apos;, so neither the harness guard nor the run guard ever reads the write or the hard reset. Both were refused before (#320).
+
+2. `hooks/scripts/shell-words.mjs:362`: The body of an unquoted `$((...))` is now dropped (body=null). A `$(...)` or backtick nested inside the arithmetic still runs in the shell, and so does the whole body when the shell can&apos;t parse it as arithmetic.
+
+   Failure scenario: `echo $(( $(git reset --hard) ))` and `$((rm -rf hooks))` are both let through. The inner $(...) runs during arithmetic expansion, and bash falls back to a subshell for a body that isn&apos;t arithmetic, so the reset or rm runs but no guard sees it.
+
+3. `hooks/scripts/shell-words.mjs:359`: The new comment &apos;Arithmetic has no command inside it.&apos; is false. Arithmetic expansion runs nested command substitutions, so the comment justifies the regression.
+
+   Failure scenario: A future maintainer trusts the comment and leaves `$(( $(cmd) ))` unscanned. The bypass in the finding above stays in place under documentation that says it is safe.
+
+4. `hooks/scripts/shell-words.mjs:325`: Double-quoted and unquoted substitutions are now handled differently. Inside double quotes, `&quot;$((...))&quot;` still queues its body `(…)` because any `$(` matches, but the unquoted form now drops it.
+
+   Failure scenario: `echo &quot;$((git reset --hard))&quot;` is caught, while `echo $((git reset --hard))` is allowed. The guard&apos;s verdict depends on quoting that doesn&apos;t change what the shell runs.
+
+5. `hooks/scripts/shell-words.mjs:362`: A command substitution whose body starts with a subshell and no space after `$(` (`$((cmd) ...)`) is now treated as pure arithmetic and skipped. Bash runs it as a command substitution holding a subshell.
+
+   Failure scenario: `x=$((git reset --hard); true)` is not arithmetic, so bash runs it as `$( (git reset --hard); true )`. The guard sees command[i+2]===&apos;(&apos; and passes body=null, so the reset is not detected.
+
+6. `docs/01-runbook.md:2042`: The runbook drops its promise that `&lt;(…)`, `&gt;(…)` and `$((…))` bodies are checked, which documents a new bypass class as accepted behaviour. The unchanged text above still says the guard sees writes through substitutions.
+
+   Failure scenario: Users and auditors reading the runbook can&apos;t tell that `tee &gt;(cat &gt; hooks/hooks.json)` goes unguarded. The section on what the guard misses (line ~2150) lists only `$(…)` substitutions read, and never says that process substitution bodies are now missed.
+
+7. `hooks/scripts/pretooluse-runguard.mjs:88`: The run guard&apos;s header comment removes the #320 guarantee that `diff &lt;(git reset --hard) x` and `$((git reset --hard))` are read as resets. This is a silent loss of destructive-git protection, not a documentation cleanup.
+
+   Failure scenario: `diff &lt;(git reset --hard) /dev/null` or `: $((git clean -fdx))` now runs without the run guard prompting, which discards uncommitted work the guard exists to protect.
+
+8. `hooks/scripts/shell-words.mjs:245`: The doc block still lists `$((...))`, `&lt;(...)` and `&gt;(...)` alongside `$(...)` and backtick as substitution forms. The read.substitutions option now covers only `$(...)` and backtick bodies, so the API contract is misleading.
+
+   Failure scenario: A caller that enables `substitutions: true` expects every substitution body to be queued (as before) and builds a guard on that assumption. Process substitution bodies are silently missing from the `subs` output.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/10-process-substitution-body high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/10-process-substitution-body</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">k-10</span><span class="badge">llm</span></div>
+<div class="md"><p>The review of branch corpus/10-process-substitution-body against main raised, as a finding, this defect: the body of a process substitution (<code>&lt;(...)</code> / <code>&gt;(...)</code>) or an arithmetic expansion (<code>$((...))</code>) is no longer read as commands by the shared shell reader, so a guarded command or protected write inside one runs unseen by both guards (in hooks/scripts/shell-words.mjs). The finding may be worded differently but must identify the same file and the same mechanism; a review that lists other findings but misses this one fails, and a review that says the diff is clean fails.</p>
+</div>
+</div>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/10-process-substitution-body against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. The one known defect is: the body of a process substitution (<code>&lt;(...)</code> / <code>&gt;(...)</code>) or an arithmetic expansion (<code>$((...))</code>) is no longer read as commands by the shared shell reader, so a guarded command or protected write inside one runs unseen by both guards (in hooks/scripts/shell-words.mjs); raising it is correct. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<article class="case" id="case-11">
+<div class="case-head">
+<h2>corpus-11-default</h2>
+<span class="muted mono">evals-archive/evals-corpus/11-clean-control-help-suffix/default</span>
+<span class="spacer"></span>
+
+
+
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span><i class="tick" style="left:100.0%"></i></span>
+<span class="num case-score">0%</span>
+</div>
+
+<details class="section" open>
+<summary>Results</summary>
+<section class="arm">
+<div class="arm-head">
+<span class="arm-label">Runs</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span></span>
+<span class="num">0%</span>
+<span class="muted num">0% of runs perfect</span>
+</div>
+<div class="run">
+<div class="run-head">
+<span class="run-title">Run 1</span>
+<span class="meter m-accent" aria-hidden="true"><span style="width:0.0%"></span></span>
+<span class="num">0%</span>
+<span class="muted num">0 turns · $0.24 · 04:13:20 UTC</span>
+</div>
+<details class="mocks"><summary>Mocked: cairn — audit_record=fixed, context_get=fixed, continuity_get=fixed, docs_drift=fixed, issue_close=fixed, issue_comment=fixed, issue_create=fixed, issue_get=fixed, issue_list=fixed, issue_update=fixed, mem_card_create=fixed, mem_card_recall=fixed, plan_drift=fixed, plan_status=fixed, plan_tracker_delta=fixed, plan_unplanned=fixed, seat_roster=fixed · 0 calls</summary></details>
+<div class="graders"><details class="grader" open>
+<summary><span class="chip chip-fail">✗ fail</span> <span class="grader-name">precision</span>  </summary>
+<div class="grader-body">
+<p class="explanation">judge votes: FAIL FAIL FAIL</p>
+<div class="kv"><span>Judge votes</span><span class="votes">✗ ✗ ✗</span></div><div class="kv"><span>Evidence (what the judge was shown; for an image, a description of what was sent)</span></div><pre class="evidence">I reviewed `git diff main...corpus/11-clean-control-help-suffix` (one commit). It undoes the #226 change: the 39 command descriptions go back from &quot;(/cairn:help)&quot; to the longer &quot;(cairn — /cairn:help for the verb reference)&quot; suffix, and the footprint budget goes back up to 13429. Nothing in it crashes or breaks the build:
+
+- **The guard still passes.** By the script&apos;s chars/4 estimate, the reading should be about 13409 tokens against the new 13429 budget.
+- **The generator and the 39 shims match.** `gen-commands.mjs` produces exactly the suffix the hand-edited shims now carry.
+- **Nothing else references the suffix.** The workspace only holds the touched files, and none of them mention it outside the two scripts.
+
+What&apos;s left are policy and accuracy problems: the budget goes up against the script&apos;s own rule, and some comments are now stale or misleading. No CLAUDE.md applies, so the conventions angle found nothing.
+
+7 findings, most severe first:
+
+1. `scripts/check-footprint.mjs:113`: BUDGET_TOKENS goes back up from 13145 to 13429 to make room for the longer suffix, which is the move the file&apos;s header calls &apos;the failure&apos; (&apos;Raising it to silence a failure is the failure&apos;).
+
+   Failure scenario: The longer suffix adds about 39 × 31 chars / 4 ≈ 302 resident tokens per session (13107 → about 13409). At 13145 the guard would have failed, so the pin was moved to let it pass. The rent is paid in every session, and the guard no longer catches the regression it was set up to stop.
+
+2. `scripts/check-footprint.mjs:111`: The restored comment says the reading is 13391 with a &apos;~38 cushion&apos;, but the #332 manifest field has since added 18 tokens, so the real reading is about 13409 and the cushion is about 20.
+
+   Failure scenario: A later contributor trusts the comment&apos;s 38-token margin and makes a 25-token prose edit. The guard fails unexpectedly, and the comment points them the wrong way about where the budget stands.
+
+3. `scripts/check-footprint.mjs:112`: The comment calls #226 &apos;the next planned drop&apos;, but #226 already shipped (phase 26) and this commit is what reverts it. The history now describes a past decision as future work.
+
+   Failure scenario: A maintainer reads that #226 is still pending, re-applies it, and re-pins. Or they assume the owner never made the discoverability call, when the owner actually chose the short form. Either way, the record of that decision is lost.
+
+4. `scripts/check-footprint.mjs:51`: The restored header says there is a 438-token saving &apos;sitting&apos; in the descriptions, which is the figure for dropping the suffix entirely. It also wipes out the record of the owner&apos;s decision to shorten it instead.
+
+   Failure scenario: Someone uses this comment to size work and expects 438 tokens back. Re-shortening to &apos;(/cairn:help)&apos; only returns about 302, so the budget gets mis-sized again.
+
+5. `scripts/gen-commands.mjs:56`: The generator goes back to emitting the long suffix on every live verb, which undoes the deliberate &apos;discoverability kept, most of the rent returned&apos; trade-off.
+
+   Failure scenario: Every regeneration writes the longer suffix into all 39 shims. The slash listing shown each session grows by about 1200 characters with no new information, because &apos;/cairn:help&apos; was already in the short form.
+
+6. `commands/help.md:2`: The help verb&apos;s description now reads &apos;Render this verb reference (cairn — /cairn:help for the verb reference)&apos;, which points to itself and says &apos;verb reference&apos; twice.
+
+   Failure scenario: In the slash listing, /cairn:help tells users to run /cairn:help for the verb reference. The text is redundant and confusing, and it costs extra tokens for no added discoverability.
+
+7. `scripts/gen-commands.mjs:56`: The suffix is still a literal string built into the generator, and the footprint comments re-describe it separately (&apos;42-character suffix&apos;; it is actually 44 characters). The next suffix change will again mean editing the generator, regenerating 39 shims, and hand-fixing prose in another script.
+
+   Failure scenario: This diff shows the cost: 41 files touched to change one string, and the comments describing it (the length, the 438-token figure) are already inconsistent. A named constant that the footprint check reports on would keep the two in sync.</pre>
+</div>
+</details></div>
+</div>
+</section>
+</details>
+<details class="section" open>
+<summary>Prompt</summary>
+<div class="md"><p>/code-review corpus/11-clean-control-help-suffix high</p>
+<p>The branch carries exactly one commit past its merge-base with main; the diff under review is that commit (<code>git diff main...corpus/11-clean-control-help-suffix</code>). The workspace holds only the files that diff touches.</p>
+</div>
+</details>
+<details class="section" open>
+<summary>Graders — what "good" means for this case</summary>
+<div class="grader-def">
+<div class="grader-def-head"><span class="grader-name">precision</span><span class="badge">llm</span></div>
+<div class="md"><p>Judge only the findings the review of branch corpus/11-clean-control-help-suffix against main presents as defects -- wrong behaviour the code change actually causes (a bug, a regression, broken handling). Each such finding must be a real defect present in that diff, not a style preference, a hypothetical, or a claim about code the diff does not touch. This diff contains no defect at all: a review that raises no defect finding passes, whether or not it adds clarity or style notes; any finding presented as a defect fails. Remarks the review itself labels as clarity, naming, comment, documentation, architecture, test-coverage or style notes are outside the correctness axis this corpus scores and are ignored, as is anything the review says about its own tooling or record-keeping. A review with one or more defect findings that are not real defects in this diff fails.</p>
+</div>
+</div>
+</details>
+</article>
+<footer>Generated by <code>claude plugin eval</code> · schema v1 · scores are not comparable across different suites</footer>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded',function(){
+  var bar=document.querySelector('.toolbar');
+  if(!bar)return;
+  bar.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest('button');
+    if(!b)return;
+    var open=b.dataset.act==='expand';
+    document.querySelectorAll('details.section, details.grader').forEach(function(d){d.open=open});
+  });
+});
+// Collapsed details vanish from print/PDF; these pages are share artifacts.
+window.addEventListener('beforeprint',function(){
+  document.querySelectorAll('details').forEach(function(d){
+    if(!d.open){d.dataset.printOpened='1';d.open=true}
+  });
+});
+window.addEventListener('afterprint',function(){
+  document.querySelectorAll('details[data-print-opened]').forEach(function(d){
+    d.open=false;delete d.dataset.printOpened;
+  });
+});
+</script>
+</body>
+</html>

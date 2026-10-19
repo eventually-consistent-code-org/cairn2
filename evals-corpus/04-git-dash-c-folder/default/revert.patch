@@ -1,0 +1,73 @@
+diff --git a/docs/01-runbook.md b/docs/01-runbook.md
+index 69d6c30..0ecbbc7 100644
+--- a/docs/01-runbook.md
++++ b/docs/01-runbook.md
+@@ -2024,9 +2024,7 @@ through `npx`, `bunx`, `pnpm dlx`, `yarn dlx` or `node` and its CLI.
+ Listing, a dry run and `--help` pass. A relative path is judged from
+ the tool's working folder and from every folder a `cd`, `pushd`, `env
+ -C` or `git -C` on the line could have moved to, in any order, because a
+-`cd` can fail or run later. A `git -C` (or `tar -C`) value is read the
+-way a `cd` target is: `~/proj`, `$HOME/proj` and `"$PWD"` are spelled
+-out, so `git -C ~/proj rm -r hooks` is judged where it lands.
++`cd` can fail or run later.
+ After a `cd` the guard can't follow (`cd "$X"`, `cd -`, `cd $(…)`), a
+ relative write is refused with a line saying so — name the folder
+ plainly, or write to an absolute path, and it can judge it. Reading
+diff --git a/hooks/scripts/pretooluse-harnessguard.mjs b/hooks/scripts/pretooluse-harnessguard.mjs
+index f0f0e2f..aec5ca8 100644
+--- a/hooks/scripts/pretooluse-harnessguard.mjs
++++ b/hooks/scripts/pretooluse-harnessguard.mjs
+@@ -59,9 +59,7 @@
+  *   --shell, a gh extension ...), and so is a pager variable set on the
+  *   line (PAGER=, MANPAGER=, GIT_PAGER= ...). A
+  *   relative path is judged from every folder a cd, env -C or git -C on the
+- *   line can reach (#258); after a cd it can't follow, refused. A git -C or
+- *   tar -C value is read like a cd target (#318): ~, $HOME and $PWD spelled
+- *   out, a variable it can't read refused the same way. A command
++ *   line can reach (#258); after a cd it can't follow, refused. A command
+  *   that plants a whole tree is judged by where it lands, like a mkdir of
+  *   it (#317): git clone, worktree add, submodule add and init, gh repo
+  *   clone and fork --clone, npx degit, and the create-* initializers npm,
+@@ -1589,7 +1587,7 @@ function tarTargets(args, ctx, add) {
+   for (const o of opts) {
+     if ((o.name === "-C" || o.name === "--directory") && o.value) {
+       add(o.value, "write", dir);
+-      [dir] = dirTarget(o.value, dir, ctx.shellDir ?? ctx.dir); // a later -C is relative to the one before, read like a cd (#318)
++      dir = resolveIn(dir, o.value); // a later -C is relative to the one before
+       moved = true;
+     }
+   }
+@@ -1722,19 +1720,12 @@ function degitTargets(words, add) {
+   if (bare.length) add(bare[1] ?? ".", "write");
+ }
+ 
+-/**
+- * git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree
+- * clone and kin plant (#317) -- from its -C folder (#258), read the way a
+- * cd target is (#318): `~/proj`, `$HOME/proj` and `"$PWD"` spelled out,
+- * and a folder the guard can't read (`-C "$X"`) LOST, so a relative
+- * operand from it is refused rather than judged under a folder literally
+- * named `~`.
+- */
++/** git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree clone and kin plant (#317) -- from its -C folder (#258). */
+ function gitTargets(args, seg, ctx, add) {
+   let k = 0;
+   let dir = ctx.dir;
+   while (k < args.length && args[k].startsWith("-")) {
+-    if (args[k] === "-C" && args[k + 1]) [dir] = dirTarget(args[k + 1], dir, ctx.shellDir ?? ctx.dir);
++    if (args[k] === "-C" && args[k + 1]) dir = resolveIn(dir, args[k + 1]);
+     k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+   }
+   const sub = args[k];
+@@ -2354,9 +2345,9 @@ try {
+   if (!hit) process.exit(0);
+ 
+   if (hit.lost) {
+-    // #258: a directory change it couldn't follow -- fail closed, and say so (a git -C too, #318)
++    // #258: a directory change it couldn't follow -- fail closed, and say so
+     console.error(
+-      "cairn harness guard: a directory change in this line (cd, pushd, env -C, git -C) goes " +
++      "cairn harness guard: a directory change in this line (cd, pushd, env -C) goes " +
+       "somewhere the guard couldn't tell, so this relative write may land in the hook directory " +
+       "or a settings file.",
+     );
