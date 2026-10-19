@@ -62,6 +62,8 @@ export interface AuditFinding {
     failure_scenario: string;
     detail?: string;
     issue?: string;
+    /** Where it fails, "path:line" — the dedup engine's location (#368). */
+    at?: string;
     /**
      * Refutation panel (#196). Required on critical/important findings —
      * at least one vote, two on a security scope; the quorum below decides
@@ -85,6 +87,8 @@ export interface FindingResult {
      * evidence; this bit decides whether the verb may offer "apply".
      */
     applyEligible?: boolean;
+    /** The tracker issue behind it — filed by `file: true`, or carried in (#368). */
+    issue?: string;
 }
 /** One leg of a sweep — the per-mode record the manifest indexes. */
 export interface SweepLeg {
@@ -141,6 +145,12 @@ export interface AuditRecordResult {
     note?: string;
     /** Sweep scopes only: the baseline delta; null on the first sweep. */
     delta?: SweepDelta | null;
+    /**
+     * opts.summary only: "panel: N confirmed, N plausible, N refuted (not
+     * filed)" — over this record's panelled findings, or, on a sweep with a
+     * leg index, summed across the legs' own records (#368).
+     */
+    panelSummary?: string;
 }
 /** A sweep manifest's scope — the only shape that gets the #215 treatment. */
 export declare const SWEEP_SCOPE_RE: RegExp;
@@ -169,6 +179,9 @@ export declare function patchClaimsHold(c: PatchClaims): boolean;
  * :param findings: the full finding list, refuted-to-be included
  * :param opts.yieldBaseDir: yield store root override (test seam)
  * :param opts.legs: sweep scopes only — the leg records this manifest indexes
+ * :param opts.summary: also return panelSummary (#368)
+ * :param opts.noYield: skip the yield credit — a rewrite of a record whose
+ *   first write already credited it (filing adds the issue lines, #368)
  * :returns: path, counts, per-finding outcomes, stamp (+ delta on a sweep)
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
@@ -180,7 +193,17 @@ export declare function patchClaimsHold(c: PatchClaims): boolean;
 export declare function writeAuditRecord(projectDir: string, scope: string, verdict: "pass" | "findings", findings: AuditFinding[], opts?: {
     yieldBaseDir?: string;
     legs?: SweepLeg[];
+    summary?: boolean;
+    noYield?: boolean;
 }): AuditRecordResult;
+/**
+ * The closing report's panel line (#368). Unpanelled findings (minors)
+ * never met a panel, so they count nowhere.
+ *
+ * :param outcomes: one outcome per finding
+ * :returns: "panel: N confirmed, N plausible, N refuted (not filed)"
+ */
+export declare function panelSummary(outcomes: FindingOutcome[]): string;
 export interface AuditRecordSummary {
     scope: string;
     date: string;

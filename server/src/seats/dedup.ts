@@ -1,10 +1,9 @@
 /**
  * Purpose: the seat-finding dedup engine — N seats over one target
  * collapse to ONE finding set before anything reaches the tracker (the
- * phase's hard requirement). Pure library, no tool surface: review and
- * audit are agent-side verbs, so the coordinator calls this via node
- * against dist when it needs the reference merge, and the server consumes
- * it in future pipelines — same precedent as composeBrief in brief.ts.
+ * phase's hard requirement). Pure library, no tool of its own: since #368
+ * audit_record(dedup: true) runs it on intake, so the verbs reach it
+ * through that call instead of a node one-liner against dist.
  * Dependency-free and deterministic on purpose: shuffled input, same
  * output, every time.
  *
@@ -160,6 +159,8 @@ export function textsMatch(a: string, b: string): boolean {
 
 interface Member {
   finding: SeatFinding;
+  /** Position in the caller's input array. */
+  index: number;
   norm: string;
   tokens: Set<string>;
   /** Normalized failure_scenario + its token set — undefined when absent. */
@@ -209,6 +210,15 @@ function severityRank(s: Severity): number {
 
 // Main
 
+/** One merged finding plus which inputs it absorbed (#368). */
+export interface FindingCluster {
+  finding: DedupedFinding;
+  /** Indices into the input array, in clustering order. */
+  members: number[];
+  /** Input index that owns the canonical claim. */
+  canonical: number;
+}
+
 /**
  * Collapses N seats' findings over one target into one finding set.
  *
@@ -234,9 +244,22 @@ function severityRank(s: Severity): number {
  * :returns: the deduplicated finding set, deterministically ordered
  */
 export function dedupFindings(findings: SeatFinding[]): DedupedFinding[] {
+  return clusterFindings(findings).map((c) => c.finding);
+}
+
+/**
+ * dedupFindings with its working shown: each merged finding alongside the
+ * input indices it absorbed, so audit_record's intake (#368) can carry a
+ * cluster's panel votes and detail onto the one finding it records. Same
+ * engine, same order — dedupFindings is this, minus the indices.
+ *
+ * :param findings: raw per-seat findings, any order
+ * :returns: one cluster per deduplicated finding, in dedupFindings' order
+ */
+export function clusterFindings(findings: SeatFinding[]): FindingCluster[] {
   // Sort first — clustering order is what makes the greedy pass
   // deterministic under shuffled input.
-  const sorted = [...findings].sort((a, b) =>
+  const sorted = findings.map((finding, index) => ({ finding, index })).sort(({ finding: a }, { finding: b }) =>
     a.file.localeCompare(b.file) ||
     a.line - b.line ||
     severityRank(a.severity) - severityRank(b.severity) ||
@@ -250,10 +273,10 @@ export function dedupFindings(findings: SeatFinding[]): DedupedFinding[] {
   // merge; 14 does not ride along on 12's coattails).
   const clusters: Cluster[] = [];
 
-  for (const finding of sorted) {
+  for (const { finding, index } of sorted) {
     const norm = normalizeClaim(finding.claim);
     const tokens = new Set(norm.split(" ").filter(Boolean));
-    const member: Member = { finding, norm, tokens };
+    const member: Member = { finding, index, norm, tokens };
     if (finding.failure_scenario !== undefined && finding.failure_scenario.trim() !== "") {
       member.scenarioNorm = normalizeClaim(finding.failure_scenario);
       member.scenarioTokens = new Set(member.scenarioNorm.split(" ").filter(Boolean));
@@ -285,7 +308,7 @@ export function dedupFindings(findings: SeatFinding[]): DedupedFinding[] {
   }
 
   // Fold each cluster into one finding.
-  const out: DedupedFinding[] = clusters.map((cluster) => {
+  const out: FindingCluster[] = clusters.map((cluster) => {
     // Members arrive in (line, severity, seat, claim) order — the first
     // member at the best (lowest) severity rank owns the canonical claim.
     const bestRank = Math.min(
@@ -315,7 +338,7 @@ export function dedupFindings(findings: SeatFinding[]): DedupedFinding[] {
       ? canonical.finding.failure_scenario
       : cluster.members.find((m) => m.scenarioNorm !== undefined)?.finding.failure_scenario;
 
-    return {
+    const finding: DedupedFinding = {
       file: cluster.file,
       line: cluster.anchorLine,
       claim: canonical.finding.claim,
@@ -323,10 +346,11 @@ export function dedupFindings(findings: SeatFinding[]): DedupedFinding[] {
       severity: SEVERITIES[bestRank],
       seats: [...credits.values()].sort((a, b) => a.seat.localeCompare(b.seat)),
     };
+    return { finding, members: cluster.members.map((m) => m.index), canonical: canonical.index };
   });
 
   // Deterministic output order: file, line, severity, claim.
-  out.sort((a, b) =>
+  out.sort(({ finding: a }, { finding: b }) =>
     a.file.localeCompare(b.file) ||
     a.line - b.line ||
     severityRank(a.severity) - severityRank(b.severity) ||

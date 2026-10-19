@@ -1,10 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { dedupIntake, filedCost } from "../src/audit/closing.js";
 import { listAuditRecords, parseAuditRecord, writeAuditRecord, type AuditFinding } from "../src/audit/record.js";
+import { metricsPath } from "../src/core/continuity.js";
+import { outlookMirrorPath } from "../src/core/outlook.js";
+import { buildServer } from "../src/index.js";
+import { dedupFindings, type SeatFinding } from "../src/seats/dedup.js";
 import { loadYield } from "../src/seats/yield.js";
+import { FakeTracker } from "../src/tracker/fake.js";
 
 const fresh = () => mkdtempSync(join(tmpdir(), "cairn-audit-"));
 const today = new Date().toISOString().slice(0, 10);
@@ -618,5 +625,230 @@ describe("sweep manifest + baseline delta (#215)", () => {
     expect(back.legs).toEqual([]);
     expect(back.deltaFixed).toEqual([]);
     expect(back.deltaUnchecked).toEqual([]);
+  });
+});
+
+
+// #368: the closing chain behind audit_record's flags, and issue_attach's
+// comment fallback — asserted at the tool level against the fake tracker.
+describe("audit_record closes the chain: dedup on intake, file the survivors (#368)", () => {
+  const RETRY = "retry POST /pay after a timeout → the card is charged twice";
+  /** The same bug from two seats a line apart, plus one distinct finding. */
+  const raw = (): AuditFinding[] => [
+    { severity: "important", title: "payment retry charges the card twice", failure_scenario: RETRY,
+      at: "src/pay.ts:42", seats: ["security"],
+      panel: [{ seat: "correctness", verdict: "CONFIRMED", evidence: "replayed the retry" }] },
+    { severity: "critical", title: "payment retry charges card twice", failure_scenario: RETRY,
+      at: "src/pay.ts:43", seats: ["correctness"], detail: "The idempotency key is dropped on retry.",
+      panel: [{ seat: "tests", verdict: "PLAUSIBLE", evidence: "could not run the gateway stub" }] },
+    { severity: "minor", title: "receipt footer shows last year", failure_scenario: "open a receipt → footer says 2025",
+      at: "src/receipt.ts:7", seats: ["docs"] },
+  ];
+  /** The library's view of the same input — one SeatFinding per finding and seat. */
+  const asSeatFindings = (fs: AuditFinding[]): SeatFinding[] => fs.flatMap((f) => (f.seats ?? []).map((seat) => {
+    const [file, line] = f.at!.split(":");
+    return { seat, file, line: Number(line), claim: f.title, failure_scenario: f.failure_scenario, severity: f.severity };
+  }));
+
+  it("dedupIntake is the library result, whatever the input order", () => {
+    const lib = dedupFindings(asSeatFindings(raw()));
+    expect(lib).toHaveLength(2);
+    for (const input of [raw(), raw().reverse()]) {
+      const got = dedupIntake(input);
+      expect(got.map((f) => ({ title: f.title, severity: f.severity, failure_scenario: f.failure_scenario,
+        seats: f.seats, at: f.at }))).toEqual(lib.map((d) => ({ title: d.claim, severity: d.severity,
+        failure_scenario: d.failure_scenario, seats: d.seats.map((s) => s.seat), at: `${d.file}:${d.line}` })));
+    }
+    const [merged] = dedupIntake(raw());
+    // Every member's votes ride along; detail comes from the canonical (critical) member.
+    expect(merged.panel?.map((v) => v.seat).sort()).toEqual(["correctness", "tests"]);
+    expect(merged.detail).toBe("The idempotency key is dropped on retry.");
+  });
+
+  it("filedCost sums the latest row per session for the given issues; null when none match", () => {
+    const log = join(fresh(), "m.jsonl");
+    expect(filedCost(fresh(), ["X-1"], log)).toBeNull();
+    writeFileSync(log, [
+      { session_id: "s1", issue: "X-1", est_cost_usd: 1.0 },
+      { session_id: "s1", issue: "X-1", est_cost_usd: 1.25 },
+      { session_id: "s2", issue: "X-2", est_cost_usd: 0.5 },
+      { session_id: "s3", issue: "other", est_cost_usd: 9 },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\nnot json\n");
+    expect(filedCost(fresh(), ["X-1", "X-2"], log)).toBe(1.75);
+    expect(filedCost(fresh(), ["nope"], log)).toBeNull();
+  });
+
+  describe("tool level, fake tracker", () => {
+    let client: Client;
+    let projectDir: string;
+    let fake: FakeTracker;
+    let bare: Client;
+    let bareProject: string;
+    let bareTracker: FakeTracker;
+
+    /** A fake with no native attachments — github, linear and friends. */
+    class NoAttachTracker extends FakeTracker {
+      override readonly capabilities = { ...new FakeTracker().capabilities, hasIssueAttachments: false };
+    }
+    const project = () => {
+      const dir = fresh();
+      writeFileSync(join(dir, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+      return dir;
+    };
+    const connect = async (dir: string, tracker: FakeTracker) => {
+      const server = buildServer({ projectDir: dir, tracker, fetchLatestVersion: async () => "9.9.9" });
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const c = new Client({ name: "test", version: "0.0.0" });
+      await Promise.all([server.connect(st), c.connect(ct)]);
+      return c;
+    };
+    const callOn = async (c: Client, name: string, args: Record<string, unknown>) => {
+      const res = await c.callTool({ name, arguments: args });
+      return { isError: res.isError, json: JSON.parse((res.content as Array<{ text: string }>)[0].text) };
+    };
+    const call = (name: string, args: Record<string, unknown>) => callOn(client, name, args);
+
+    beforeAll(async () => {
+      projectDir = project();
+      fake = new FakeTracker();
+      client = await connect(projectDir, fake);
+      bareProject = project();
+      bareTracker = new NoAttachTracker();
+      bare = await connect(bareProject, bareTracker);
+    });
+    afterAll(() => {
+      rmSync(outlookMirrorPath(projectDir), { force: true });
+      rmSync(metricsPath(projectDir), { force: true });
+    });
+
+    it("dedup: true records the library's set and says how many went in", async () => {
+      const out = await call("audit_record", { scope: "review-dedup", verdict: "findings", findings: raw(), dedup: true });
+      expect(out.isError).toBeFalsy();
+      expect(out.json.dedupedFrom).toBe(3);
+      expect(out.json.findings).toBe(2);
+      const lib = dedupFindings(asSeatFindings(raw()));
+      expect(out.json.results.map((r: { title: string; severity: string }) => [r.title, r.severity]))
+        .toEqual(lib.map((d) => [d.claim, d.severity]));
+      expect(parseAuditRecord(out.json.path).findings.map((f) => f.title)).toEqual(lib.map((d) => d.claim));
+      const recorded = readFileSync(out.json.path, "utf8");
+      expect(recorded).toContain("raised by: correctness, security");
+      expect(recorded).toContain("at: src/pay.ts:42");
+      // No file flag → nothing reaches the tracker.
+      expect(out.json.filed).toBeUndefined();
+      expect(await fake.listIssues()).toEqual([]);
+    });
+
+    it("file: true files the survivor with the exact severity-first body, the id on the result and in the record", async () => {
+      const finding: AuditFinding = {
+        severity: "critical", title: "Checkout charges twice on a retry", failure_scenario: RETRY,
+        at: "src/pay.ts:42", seats: ["security", "correctness"], detail: "The idempotency key is dropped on retry.",
+        panel: [{ seat: "correctness", verdict: "CONFIRMED", evidence: "replayed" },
+          { seat: "tests", verdict: "PLAUSIBLE", evidence: "could not run" }],
+      };
+      const out = await call("audit_record", { scope: "review-pay", verdict: "findings", findings: [finding], file: true });
+      expect(out.isError).toBeFalsy();
+      expect(out.json.filed).toBe(1);
+      const issue = await fake.getIssue(out.json.results[0].issue);
+      expect(issue.title).toBe("Checkout charges twice on a retry");
+      expect(issue.labels).toEqual(["cairn:audit"]);
+      expect(issue.body).toBe([
+        "Critical: Checkout charges twice on a retry",
+        "",
+        `What fails: ${RETRY}`,
+        "Where: src/pay.ts:42",
+        "Raised by the security and correctness seats.",
+        "Panel: confirmed (correctness CONFIRMED, tests PLAUSIBLE).",
+        "",
+        "The idempotency key is dropped on retry.",
+        "",
+        "From the review-pay audit record.",
+      ].join("\n"));
+      expect(out.json.panelSummary).toBe("panel: 1 confirmed, 0 plausible, 0 refuted (not filed)");
+      expect(readFileSync(out.json.path, "utf8")).toContain(`issue: ${issue.id}`);
+      // Not a sweep: no outlook, no spend.
+      expect(out.json.outlook).toBeUndefined();
+      expect(out.json.agentCostUsd).toBeUndefined();
+    });
+
+    it("refuted findings are never filed, minors stay in the record, carried issues are not re-filed", async () => {
+      const before = (await fake.listIssues()).length;
+      const kept = await fake.createIssue({ title: "already filed" });
+      const out = await call("audit_record", { scope: "review-mixed", verdict: "findings", file: true, findings: [
+        { severity: "important", title: "killed by the panel", failure_scenario: "x → y",
+          panel: [{ seat: "a", verdict: "REFUTED", evidence: "no" }, { seat: "b", verdict: "REFUTED", evidence: "no" },
+            { seat: "c", verdict: "CONFIRMED", evidence: "yes" }] },
+        { severity: "minor", title: "a rough edge", failure_scenario: "p → q" },
+        { severity: "important", title: "a tie survives", failure_scenario: "m → n",
+          panel: [{ seat: "a", verdict: "REFUTED", evidence: "no" }, { seat: "b", verdict: "CONFIRMED", evidence: "yes" }] },
+        { severity: "important", title: "filed last time", failure_scenario: "s → t", issue: kept.id,
+          panel: [{ seat: "a", verdict: "CONFIRMED", evidence: "yes" }] },
+      ] });
+      expect(out.json.filed).toBe(1);
+      expect((await fake.listIssues()).slice(before).map((i) => i.title)).toEqual(["already filed", "a tie survives"]);
+      expect(out.json.results.map((r: { issue?: string }) => r.issue))
+        .toEqual([undefined, undefined, expect.stringMatching(/^FAKE-/), kept.id]);
+      expect(out.json.panelSummary).toBe("panel: 1 confirmed, 1 plausible, 1 refuted (not filed)");
+    });
+
+    it("a sweep manifest labels its legs' issues cairn:sweep, emits the outlook and sums their spend", async () => {
+      const votes = [{ seat: "security", verdict: "CONFIRMED", evidence: "grep found it" },
+        { seat: "correctness", verdict: "CONFIRMED", evidence: "same" }];
+      const leg = await call("audit_record", { scope: "security-9", verdict: "findings", file: true, findings: [
+        { severity: "important", title: "token logged in plain text", failure_scenario: "login → token in app.log", panel: votes },
+        { severity: "important", title: "rate limit bypass", failure_scenario: "header spoof → unlimited calls",
+          panel: [{ seat: "security", verdict: "REFUTED", evidence: "proxy strips it" },
+            { seat: "correctness", verdict: "REFUTED", evidence: "same" }] },
+      ] });
+      const id = leg.json.results[0].issue as string;
+      expect((await fake.getIssue(id)).labels).toEqual(["cairn:audit"]);
+      const manifest = { scope: "sweep-2026-02-01", verdict: "findings", file: true,
+        findings: [{ severity: "important", title: "token logged in plain text",
+          failure_scenario: "login → token in app.log", issue: id, panel: votes }],
+        legs: [{ scope: "security-9", path: leg.json.path }] };
+
+      const first = await call("audit_record", manifest);
+      expect(first.isError).toBeFalsy();
+      expect(first.json.filed).toBe(0);
+      expect((await fake.getIssue(id)).labels).toEqual(["cairn:audit", "cairn:sweep"]);
+      // Summed across the legs' own records — the leg's refuted finding counts.
+      expect(first.json.panelSummary).toBe("panel: 1 confirmed, 0 plausible, 1 refuted (not filed)");
+      expect(first.json.outlook).toEqual({ emitted: true });
+      const snap = JSON.parse(readFileSync(outlookMirrorPath(projectDir), "utf8"));
+      expect(snap.tracker.open).toBe((await fake.listIssues()).filter((i) => i.category === "open").length);
+      expect(first.json.agentCostUsd).toBeNull();
+
+      mkdirSync(dirname(metricsPath(projectDir)), { recursive: true });
+      writeFileSync(metricsPath(projectDir), [
+        { session_id: "s1", issue: id, est_cost_usd: 1.0 },
+        { session_id: "s1", issue: id, est_cost_usd: 1.25 }, // cumulative: the latest row wins
+        { session_id: "s2", issue: "elsewhere", est_cost_usd: 9 },
+      ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+      const second = await call("audit_record", manifest);
+      expect(second.json.agentCostUsd).toBe(1.25);
+      // A re-run never stacks the label.
+      expect((await fake.getIssue(id)).labels).toEqual(["cairn:audit", "cairn:sweep"]);
+    });
+
+    it("issue_attach degrades to a fenced comment on a tracker without attachments", async () => {
+      const target = await bareTracker.createIssue({ title: "fix target" });
+      // The patch itself carries a triple fence, so the wrapper needs four.
+      writeFileSync(join(bareProject, "fix.patch"), "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-```old\n+```new\n");
+      const out = await callOn(bare, "issue_attach", { id: target.id, path: "fix.patch",
+        lead: "What was wrong: retries double-charge. What changed: the key is kept." });
+      expect(out.isError).toBeFalsy();
+      expect(out.json.degradedTo).toBe("comment");
+      expect(bareTracker.comments(target.id).map((c) => c.text)).toEqual([
+        "What was wrong: retries double-charge. What changed: the key is kept.\n\n" +
+        "````diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-```old\n+```new\n````",
+      ]);
+      expect(bareTracker.issueAttachments.get(target.id)).toBeUndefined();
+
+      // Binary content can't ride a comment: still a refusal, never garbage.
+      writeFileSync(join(bareProject, "shot.png"), Buffer.from([137, 80, 78, 71, 0, 1]));
+      const png = await callOn(bare, "issue_attach", { id: target.id, path: "shot.png" });
+      expect(png.isError).toBe(true);
+      expect(png.json.code).toBe("UNSUPPORTED");
+      expect(bareTracker.comments(target.id)).toHaveLength(1);
+    });
   });
 });

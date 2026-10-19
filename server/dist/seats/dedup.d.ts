@@ -1,10 +1,9 @@
 /**
  * Purpose: the seat-finding dedup engine — N seats over one target
  * collapse to ONE finding set before anything reaches the tracker (the
- * phase's hard requirement). Pure library, no tool surface: review and
- * audit are agent-side verbs, so the coordinator calls this via node
- * against dist when it needs the reference merge, and the server consumes
- * it in future pipelines — same precedent as composeBrief in brief.ts.
+ * phase's hard requirement). Pure library, no tool of its own: since #368
+ * audit_record(dedup: true) runs it on intake, so the verbs reach it
+ * through that call instead of a node one-liner against dist.
  * Dependency-free and deterministic on purpose: shuffled input, same
  * output, every time.
  *
@@ -96,6 +95,14 @@ export declare function claimsMatch(aNorm: string, aSet: Set<string>, bNorm: str
  * :returns: true when the two describe the same finding
  */
 export declare function textsMatch(a: string, b: string): boolean;
+/** One merged finding plus which inputs it absorbed (#368). */
+export interface FindingCluster {
+    finding: DedupedFinding;
+    /** Indices into the input array, in clustering order. */
+    members: number[];
+    /** Input index that owns the canonical claim. */
+    canonical: number;
+}
 /**
  * Collapses N seats' findings over one target into one finding set.
  *
@@ -121,3 +128,13 @@ export declare function textsMatch(a: string, b: string): boolean;
  * :returns: the deduplicated finding set, deterministically ordered
  */
 export declare function dedupFindings(findings: SeatFinding[]): DedupedFinding[];
+/**
+ * dedupFindings with its working shown: each merged finding alongside the
+ * input indices it absorbed, so audit_record's intake (#368) can carry a
+ * cluster's panel votes and detail onto the one finding it records. Same
+ * engine, same order — dedupFindings is this, minus the indices.
+ *
+ * :param findings: raw per-seat findings, any order
+ * :returns: one cluster per deduplicated finding, in dedupFindings' order
+ */
+export declare function clusterFindings(findings: SeatFinding[]): FindingCluster[];
