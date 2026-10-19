@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 import { MAX_CANDIDATES, pairRule, type Control, type RuleLine } from "../src/audit/rule-coverage.js";
+import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 
@@ -85,19 +86,18 @@ describe("audit sweep mode (#179)", () => {
   // The prose wraps; compare on collapsed whitespace.
   const flat = section.replace(/\s+/g, " ");
 
-  it("the report is one prioritized backlog, then the eval table, then spend, then the outlook emit", () => {
+  it("the report is one prioritized backlog, then the eval table, then spend and the snapshot", () => {
     expect(flat).toContain("regressed critical → new critical → persisting critical → " +
       "regressed important → new important → persisting important. Minors as counts only");
     expect(flat).toContain("fixed since the baseline: N");
     // #266: findings whose leg didn't re-run get their own line, never the fixed one.
     expect(flat).toContain('"unchecked: N — legs not re-run: <uncoveredLegs>"; never fold those into fixed');
-    const at =["Backlog, in exactly this order", "Eval table", "Spend:", "`outlook_emit(tracker:"]
+    const at =["Backlog, in exactly this order", "Eval table", "Spend:", "`agentCostUsd`", "`outlook`"]
       .map((s) => flat.indexOf(s));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    // Spend sums the cost report per filed issue — the flag must exist.
-    expect(flat).toContain('hooks/scripts/cost-report.mjs" --issue <id>');
-    expect(read("hooks/scripts/cost-report.mjs")).toContain('flag("--issue")');
+    // #368: the manifest's file: true sums the cost log itself — no shell call per issue.
+    expect(flat).not.toContain("cost-report.mjs");
   });
 
   it("the eval table reads eval-verdicts --json, and every field it leads with is one the script emits", () => {
@@ -113,21 +113,31 @@ describe("audit sweep mode (#179)", () => {
     for (const col of ["case", "tier", "passed", "runs", "verdict"]) expect(row, col).toHaveProperty(col);
   });
 
-  it("the outlook emit names only tracker keys the tool's schema accepts", async () => {
-    const keys = /`outlook_emit\(tracker: \{([^}]*)\}\)`/.exec(flat)?.[1].split(",").map((k) => k.trim()) ?? [];
-    expect(keys).toEqual(["open", "inProgress", "blocked", "nextVerb", "asOf"]);
+  it("the outlook snapshot rides the manifest's file: true, with only tracker keys outlook_emit accepts (#368)", async () => {
+    // The verb no longer hand-writes the emit; the manifest call does it.
+    expect(flat).not.toMatch(/`outlook_emit\(tracker:/);
+    expect(flat).toContain('audit_record(scope: "sweep-<YYYY-MM-DD>", verdict, findings, legs, file: true)');
     const projectDir = mkdtempSync(join(tmpdir(), "cairn-sweep-outlook-"));
     writeFileSync(join(projectDir, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     const server = buildServer({ projectDir, tracker: new FakeTracker(), fetchLatestVersion: async () => "9.9.9" });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test", version: "0.0.0" });
     await Promise.all([server.connect(st), client.connect(ct)]);
-    const tool = (await client.listTools()).tools.find((t) => t.name === "outlook_emit");
-    const tracker = (tool?.inputSchema.properties as Record<string, { properties?: Record<string, unknown> }>)?.tracker;
-    const accepted = Object.keys(tracker?.properties ?? {});
-    // Unknown keys are stripped, not refused — a misnamed one would vanish from the board silently.
-    for (const k of keys) expect(accepted, k).toContain(k);
-    await client.close();
+    try {
+      const res = await client.callTool({ name: "audit_record",
+        arguments: { scope: "sweep-2026-03-01", verdict: "pass", findings: [], file: true } });
+      expect(JSON.parse((res.content as Array<{ text: string }>)[0].text).outlook).toEqual({ emitted: true });
+      const keys = Object.keys(JSON.parse(readFileSync(outlookMirrorPath(projectDir), "utf8")).tracker ?? {});
+      expect(keys.length).toBeGreaterThan(0);
+      const tool = (await client.listTools()).tools.find((t) => t.name === "outlook_emit");
+      const tracker = (tool?.inputSchema.properties as Record<string, { properties?: Record<string, unknown> }>)?.tracker;
+      const accepted = Object.keys(tracker?.properties ?? {});
+      // A key the emit schema doesn't know is one a plain emit could never write or read back.
+      for (const k of keys) expect(accepted, k).toContain(k);
+    } finally {
+      rmSync(outlookMirrorPath(projectDir), { force: true });
+      await client.close();
+    }
   });
 
   it("--fix runs leg by leg, and a skipped leg is one line, never a stand-in record", () => {
