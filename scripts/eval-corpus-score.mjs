@@ -19,7 +19,13 @@
 //                 not recoverable here.
 //
 // Usage:
-//   node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json]
+//   node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json] [--arms a,b]
+//
+// `--arms` names the arms the input is expected to hold (default: all
+// three -- seats, native, default). A named arm with no cases still exits
+// 2: an absent arm is a failure, never a pass. The flag exists for a
+// results dir that holds one arm by design (#372: the default arm ran
+// alone, its #334 siblings being local runs since lost).
 //
 // Several sources pool into one table: each arm runs as its own
 // `claude plugin eval` invocation and lands in its own results/<timestamp>,
@@ -126,9 +132,14 @@ function scoreArm(cases) {
 function main() {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
-  const srcs = args.filter((a) => !a.startsWith("--"));
-  if (!srcs.length) {
-    console.error("usage: node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json]");
+  const ARMS = ["seats", "native", "default"];
+  const armsAt = args.indexOf("--arms");
+  const wanted = armsAt === -1 ? ARMS : (args[armsAt + 1] ?? "").split(",").filter(Boolean);
+  const srcs = args.filter((a, i) => !a.startsWith("--") && i !== armsAt + 1);
+  const unknown = wanted.filter((a) => !ARMS.includes(a));
+  if (!srcs.length || !wanted.length || unknown.length) {
+    if (unknown.length) console.error(`eval-corpus-score: unknown arm(s) ${unknown.join(", ")} (known: ${ARMS.join(", ")})`);
+    console.error("usage: node scripts/eval-corpus-score.mjs <results-dir | aggregate-result.json>... [--json] [--arms a,b]");
     process.exit(2);
   }
 
@@ -151,8 +162,11 @@ function main() {
     process.exit(2);
   }
 
-  const byArm = { seats: [], native: [], default: [] };
-  for (const c of byName.values()) byArm[CASE.exec(c.name)[2]].push(c);
+  const byArm = Object.fromEntries(wanted.map((a) => [a, []]));
+  for (const c of byName.values()) {
+    const arm = CASE.exec(c.name)[2];
+    if (arm in byArm) byArm[arm].push(c);
+  }
   const claudeVersion = [...versions].join(", ");
   const source = sources.join(", ");
   const out = { sources, claudeVersion, arms: {} };
