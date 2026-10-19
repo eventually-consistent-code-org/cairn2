@@ -80,6 +80,9 @@ export function patchClaimsHold(c) {
  * :param findings: the full finding list, refuted-to-be included
  * :param opts.yieldBaseDir: yield store root override (test seam)
  * :param opts.legs: sweep scopes only — the leg records this manifest indexes
+ * :param opts.summary: also return panelSummary (#368)
+ * :param opts.noYield: skip the yield credit — a rewrite of a record whose
+ *   first write already credited it (filing adds the issue lines, #368)
  * :returns: path, counts, per-finding outcomes, stamp (+ delta on a sweep)
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
@@ -206,6 +209,8 @@ export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}
     findings.forEach((f, i) => {
         body.push(`## finding — ${f.severity}`, f.title);
         body.push(`scenario: ${f.failure_scenario.trim()}`);
+        if (f.at?.trim())
+            body.push(`at: ${f.at.trim()}`);
         if (sourceLeg[i])
             body.push(`source leg: ${sourceLeg[i]}`);
         if (f.seats && f.seats.length > 0)
@@ -247,7 +252,7 @@ export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}
     // would count every sweep finding twice.
     const credit = new Map();
     findings.forEach((f, i) => {
-        if (sweep || !results[i].survived || results[i].outcome === "unpanelled")
+        if (opts.noYield || sweep || !results[i].survived || results[i].outcome === "unpanelled")
             return;
         for (const seat of f.seats ?? [])
             credit.set(seat, (credit.get(seat) ?? 0) + 1);
@@ -271,7 +276,20 @@ export function writeAuditRecord(projectDir, scope, verdict, findings, opts = {}
         ...(stamp ? { commit: stamp.commit, dirty: stamp.dirty } : {}),
         ...(note ? { note } : {}),
         ...(sweep ? { delta } : {}),
+        ...(opts.summary ? { panelSummary: panelSummary(sweep && read.length > 0 ? read.flatMap((l) => l.record.findings.map((f) => f.outcome))
+                : results.map((r) => r.outcome)) } : {}),
     };
+}
+/**
+ * The closing report's panel line (#368). Unpanelled findings (minors)
+ * never met a panel, so they count nowhere.
+ *
+ * :param outcomes: one outcome per finding
+ * :returns: "panel: N confirmed, N plausible, N refuted (not filed)"
+ */
+export function panelSummary(outcomes) {
+    const n = (o) => outcomes.filter((x) => x === o).length;
+    return `panel: ${n("confirmed")} confirmed, ${n("plausible")} plausible, ${n("refuted")} refuted (not filed)`;
 }
 export function listAuditRecords(projectDir) {
     const dir = auditDir(projectDir);

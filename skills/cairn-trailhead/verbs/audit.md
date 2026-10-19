@@ -111,21 +111,18 @@ active phase from `plan_status` and audit that.
 
 ## Closing discipline — every mode, no exceptions
 
-**Dedup first — before severity ranking, before any `issue_create`.**
-When a viewpoint-shaped mode ran with more than one seat's eye on the
-same target, collapse the combined finding list through the dedup engine
-(`dedupFindings` in `server/src/seats/dedup.ts` — run it via `node`
-against dist; pure library, no tool call). Same file, within ±2 lines,
-same claim by normalized-token overlap → one finding crediting every
-raising seat, keeping the highest severity and each seat's score.
-Distinct claims at the same location stay separate. Each tracker-bound
-finding then names its crediting seats in plain language in the body —
-"raised by the security and correctness seats" — and N seats over one
-bug NEVER means N issues: the tracker sees the deduplicated set only.
+**Dedup rides the record.** When more than one seat's eye was on the
+same target, pass every seat's raw findings, each with `at`
+(`path:line`) and its raising seat in `seats`, plus `dedup: true`: the
+server collapses them through the dedup engine before judging (same
+file within ±2 lines, same claim or scenario → one finding crediting
+every seat, highest severity kept; distinct claims at one location stay
+separate). N seats over one bug NEVER means N issues.
 
 **Refutation panel — verify before the tracker.** Same rule as
-`review`: for each deduped finding rated **critical** or **important**,
-dispatch a bounded read-only verifier — one lens normally, two or three
+`review`: for each distinct finding rated **critical** or **important**
+(votes merge across duplicates; the record refuses a merged one still
+short of votes), dispatch a bounded read-only verifier — one lens normally, two or three
 for `security` mode (correctness plus security, plus the raising seat
 when it's neither); effort scales what the verifier may read, never how
 many verifiers there are. The brief is the finding as recorded and one
@@ -135,30 +132,23 @@ and vote — default **REFUTED**, moved only by evidence: `CONFIRMED` /
 skip the panel; no critical/important findings means this step does
 nothing.
 
-1. `audit_record(scope, verdict, findings)` — `scope` names the mode and
-   target (e.g. `"uat-12"`, `"milestone-3"`), `verdict` is `pass` or
-   `findings`, and `findings` is the full list even when most of them
-   never make it to the tracker. Every finding carries a typed
-   `failure_scenario` — the concrete inputs/state → wrong output/crash —
-   and the tool refuses one without it (`PRECONDITION_FAILED`): a
-   finding without a scenario is a hunch, so state it or downgrade the
-   finding out of the record. Critical/important findings also carry
-   their `panel` votes and `seats` (the raising seats); the server
-   computes the quorum — a REFUTED strict majority kills the finding
-   (it stays in the record, never reaches the tracker), ties survive as
-   plausible — and refuses a critical/important finding with no panel
-   (two votes minimum in `security` mode). `results[].survived` is the
-   filing list. This file is the source of truth; the tracker is the
-   summary.
-2. For each SURVIVING finding rated **critical** or **important**:
-   `issue_create` with label `cairn:audit`, a plain-language title a
-   non-engineer could read cold, and the severity as the literal first
-   line of the body (`Critical: …` / `Important: …`) — no burying it in
-   paragraph three. Refuted findings are never filed; the report says
-   "panel: N confirmed, N plausible, N refuted (not filed)".
-3. **Minor** findings stay in the audit record only. Not every rough edge
-   earns a tracker issue; the record already has them, and a tracker full
-   of minors is a tracker nobody reads.
+1. `audit_record(scope, verdict, findings, file: true)` — `scope` names
+   mode and target (`"uat-12"`, `"milestone-3"`), `findings` the full
+   list. Every finding carries a typed `failure_scenario` (concrete
+   inputs/state → wrong output/crash; refused without one — state it or
+   downgrade it out of the record) and a `title` a non-engineer could
+   read cold (it becomes the issue title); critical/important ones carry
+   `panel` votes and `seats`. The server computes the quorum (a REFUTED
+   strict majority kills a finding: recorded, never filed; ties survive
+   as plausible), refuses a critical/important with no panel (two votes
+   in `security` mode), files each survivor rated critical/important as
+   a `cairn:audit` issue (severity as the body's first line, crediting
+   seats named) and returns its id on `results[].issue`. The record is
+   the source of truth; the tracker is the summary.
+2. Report `panelSummary` verbatim. `fileErrors` names any filing the
+   tracker refused; re-run with the ids that landed carried in `issue`.
+3. **Minor** findings stay in the record only — a tracker full of minors
+   is a tracker nobody reads.
 
 Skipping the record because the audit came back clean is still skipping
 it — a `pass` verdict is a finding too, and it's the one that proves the
@@ -203,11 +193,10 @@ working tree at all. The sequence, per `--fix` run:
    in the worktree so the next finding starts from HEAD again. A fix
    the worktree can't express as a clean patch is investigation-shaped
    — hand it to `trace_start`.
-4. **Mirror the patch to its issue**: `issue_attach` when the tracker
-   declares `hasIssueAttachments`; otherwise `issue_comment` carrying
-   the patch in a fenced block with a one-line "what was wrong / what
-   changed" lead. The tracker sees the proposed fix before anyone
-   applies it.
+4. **Mirror the patch to its issue**: `issue_attach(id, path, lead)`,
+   `lead` a one-line "what was wrong / what changed" — without
+   attachments it lands as a fenced comment. The tracker sees the
+   proposed fix before anyone applies it.
 5. **One independent verifier per round** (a fresh read-only agent,
    never the one that wrote the patch; default verdict REJECT). It
    reads the finding + the patch, runs the tests in the worktree with
@@ -246,9 +235,9 @@ modes; it never invents a check of its own and never re-judges a leg.
 **Legs, in this order** — each one runs exactly as its mode row says,
 with its default target, and closes through its own closing discipline
 unchanged: dedup → refutation panel → its own `audit_record` under its
-normal `<mode>-<target>` scope → each surviving critical/important
-finding filed with the `cairn:audit` label PLUS `cairn:sweep`, so one
-tracker filter shows everything a sweep raised.
+normal `<mode>-<target>` scope, `file: true`. The manifest's own
+`file: true` adds `cairn:sweep` to those issues, so one tracker filter
+shows everything a sweep raised.
 
 1. `security`, then `security --surface` (which carries the
    rule-to-control coverage leg).
@@ -273,7 +262,7 @@ report and is left out of the index; never write a stand-in record for a
 leg that didn't run.
 
 **The manifest — one write, no re-panel.** After the last leg:
-`audit_record(scope: "sweep-<YYYY-MM-DD>", verdict, findings, legs)`.
+`audit_record(scope: "sweep-<YYYY-MM-DD>", verdict, findings, legs, file: true)`.
 `findings` is the union of every leg's SURVIVORS, each carried verbatim
 from its leg — title, severity, `failure_scenario`, `panel`, `seats`,
 `issue` — so the server re-reads the same votes and lands the same
@@ -307,8 +296,8 @@ unchecked) plus one new. The verb never computes the delta itself.
    drop it. Then "unchecked: N — legs not re-run: <uncoveredLegs>";
    never fold those into fixed — re-running those legs over their old
    targets settles them. On a first sweep every survivor is new; say so
-   once instead of labelling each line. Close with the panel line summed
-   across legs: "panel: N confirmed, N plausible, N refuted (not filed)".
+   once instead of labelling each line. Close with the manifest's
+   `panelSummary` (summed across legs).
 3. Eval table — reported, never run: the latest
    `evals/results/*/aggregate-result.json` (or a CI artifact path the
    user names) through `node scripts/eval-verdicts.mjs <that file>
@@ -316,14 +305,10 @@ unchecked) plus one new. The verb never computes the delta itself.
    then one row per case: case, tier, passed/runs, verdict, regression
    rows marked as gates. No results, or no script in this project → one
    line saying so; never an error.
-4. Spend: for each issue filed this sweep,
-   `node "$CLAUDE_PLUGIN_ROOT/hooks/scripts/cost-report.mjs" --issue <id>`;
-   print the sum as "agent cost: ~$X (approximate)", or one line saying
-   the cost log has no rows for them.
-5. `outlook_emit(tracker: {open, inProgress, blocked, nextVerb, asOf})`
-   — counts from an `issue_list`, `nextVerb` the step you are about to
-   suggest (usually the top backlog line), `asOf` today. Skip silently
-   only if the emit tool errors — a snapshot problem never fails a sweep.
+4. Spend: the manifest's `agentCostUsd` as "agent cost: ~$X
+   (approximate)"; `null` → one line saying the cost log has no rows for
+   them. Its `outlook` already carries the snapshot (no `outlook_emit`
+   call); `emitted: false` never fails a sweep.
 
 **`sweep --fix`:** the staged-patch discipline, leg by leg — after each
 leg's record and filing, that leg's `--fix` runs over that leg's

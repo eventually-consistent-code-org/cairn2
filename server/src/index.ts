@@ -146,7 +146,8 @@ import {
   startSession,
 } from "./sessions/store.js";
 import { planCheck } from "./planning/check.js";
-import { writeAuditRecord, type AuditFinding, type SweepLeg } from "./audit/record.js";
+import { SWEEP_SCOPE_RE, writeAuditRecord, type AuditFinding, type SweepLeg } from "./audit/record.js";
+import { dedupIntake, fileSurvivors, filedCost } from "./audit/closing.js";
 import {
   mapGet,
   mapQuery,
@@ -2289,29 +2290,27 @@ export function buildServer(deps: {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
   };
+  // Comment bodies cap out near 64K characters on the strictest backend
+  // (a claim: GitHub's 65536-character body limit, as of 2026-10); past
+  // this an inlined attachment would be refused or cut.
+  const ATTACH_INLINE_MAX = 60_000;
   server.registerTool(
     "issue_attach",
     {
       annotations: { readOnlyHint: false, destructiveHint: false },
       description:
-        "Attach a file (screenshot, render, visual evidence) to a tracker issue. " +
-        "UNSUPPORTED on backends without native attachments",
+        "Attach a file to a tracker issue. No attachment support: text posts as a fenced comment " +
+        "under `lead` (degradedTo: comment)",
       inputSchema: z.object({
         id: z.string(),
         path: z.string(),
         filename: z.string().optional(),
+        lead: z.string().optional(),
       }),
     },
-    wrap(async (a: { id: string; path: string; filename?: string }) => {
+    wrap(async (a: { id: string; path: string; filename?: string; lead?: string }) => {
       const d = dir();
       const tracker = await getTracker(d);
-      if (!tracker.capabilities.hasIssueAttachments || !tracker.attachFile) {
-        throw new CairnError(
-          "UNSUPPORTED",
-          "this tracker has no attachment support",
-          "attachments need a backend with hasIssueAttachments (jira, local)",
-        );
-      }
       const abs = resolve(d, a.path);
       let data: Buffer;
       try {
@@ -2324,8 +2323,28 @@ export function buildServer(deps: {
         );
       }
       const filename = a.filename ?? basename(abs);
-      const mediaType = ATTACH_MEDIA_TYPES[extname(abs).toLowerCase()];
-      return tracker.attachFile(a.id, filename, data, mediaType);
+      if (tracker.capabilities.hasIssueAttachments && tracker.attachFile) {
+        const mediaType = ATTACH_MEDIA_TYPES[extname(abs).toLowerCase()];
+        return tracker.attachFile(a.id, filename, data, mediaType);
+      }
+      // #368: no native attachments → the --fix mirror's other branch, one
+      // call: the content inline in a fenced comment under its lead line.
+      // Only text can ride a comment; an image or a binary still refuses.
+      const text = data.toString("utf8");
+      if (data.includes(0) || text.includes("�") || text.length > ATTACH_INLINE_MAX) {
+        throw new CairnError(
+          "UNSUPPORTED",
+          `this tracker has no attachment support and ${filename} is ${
+            text.length > ATTACH_INLINE_MAX ? "too large" : "not text"} to inline as a comment`,
+          "binary attachments need a backend with hasIssueAttachments (jira, local); link the file instead",
+        );
+      }
+      const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+      const lang = /\.(patch|diff)$/i.test(filename) ? "diff" : "";
+      const lead = a.lead?.trim() || `Attached ${filename} (inlined: this tracker has no attachments).`;
+      const posted = await tracker.commentIssue(a.id,
+        `${lead}\n\n${fence}${lang}\n${text.replace(/\n$/, "")}\n${fence}`);
+      return { ...posted, degradedTo: "comment" };
     }),
   );
 
@@ -2602,14 +2621,14 @@ export function buildServer(deps: {
     {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Write the audit record (.cairn/audit/<scope>-<date>.md) — single writer; same scope+date " +
-        "supersedes, prior dates immutable. Every finding needs a failure_scenario (inputs/state → wrong " +
-        "output/crash). Critical/important need a refutation `panel` (>=1 vote, >=2 on security); quorum " +
-        "computed here: REFUTED strict majority kills it (kept in the record, never filed — " +
-        "`results[].survived` false), CONFIRMED > REFUTED confirms, else plausible. Survivors credit " +
-        "their `seats`' yield. A staged `patch` is apply-eligible only if the finding survived and its " +
-        "verifier's three claims are true (`results[].applyEligible`). A sweep-<YYYY-MM-DD> scope is a " +
-        "manifest: `legs` index leg records; returns `delta` vs the prior sweep",
+        "Write audit record .cairn/audit/<scope>-<date>.md; same scope+date supersedes. Findings " +
+        "need a failure_scenario; critical/important a `panel` (>=1 vote; 2 on security). Quorum: " +
+        "REFUTED majority kills (recorded, never filed), CONFIRMED > REFUTED confirms, else plausible; " +
+        "survivors credit `seats`. `patch` applyEligible: survived + all 3 verifier claims. " +
+        "dedup: merge per-seat findings by `at` (path:line). file: file " +
+        "surviving critical/important (results[].issue), panelSummary. sweep-<YYYY-MM-DD> scope = " +
+        "manifest: `legs` index, returns `delta`; file also labels cairn:sweep, emits outlook, sums " +
+        "agentCostUsd",
       inputSchema: z.object({
         scope: z.string(),
         verdict: z.enum(["pass", "findings"]),
@@ -2621,6 +2640,7 @@ export function buildServer(deps: {
               failure_scenario: z.string().min(1),
               detail: z.string().optional(),
               issue: z.string().optional(),
+              at: z.string().optional(),
               panel: z
                 .array(
                   z.object({
@@ -2652,15 +2672,61 @@ export function buildServer(deps: {
         legs: z
           .array(z.object({ scope: z.string().min(1), path: z.string().min(1) }))
           .optional(),
+        dedup: z.boolean().optional(),
+        file: z.boolean().optional(),
       }),
     },
     wrap(
-      (a: {
+      async (a: {
         scope: string;
         verdict: "pass" | "findings";
         findings: AuditFinding[];
         legs?: SweepLeg[];
-      }) => writeAuditRecord(dir(), a.scope, a.verdict, a.findings, { legs: a.legs }),
+        dedup?: boolean;
+        file?: boolean;
+      }) => {
+        const d = dir();
+        // #368: the closing chain behind two flags — dedup on intake (the
+        // same engine the node one-liner ran), then the filing the record
+        // already prescribes. Neither flag → byte-identical to before.
+        const findings = a.dedup ? dedupIntake(a.findings) : a.findings;
+        const out = writeAuditRecord(d, a.scope, a.verdict, findings,
+          { legs: a.legs, ...(a.file ? { summary: true } : {}) });
+        const dedupedFrom = a.dedup ? { dedupedFrom: a.findings.length } : {};
+        if (!a.file) return { ...out, ...dedupedFrom };
+
+        const sweep = SWEEP_SCOPE_RE.test(a.scope);
+        const tracker = await getTracker(d);
+        const filing = await fileSurvivors(tracker, a.scope, findings, out.results, sweep);
+        for (const issue of filing.created) snapshotNote(d, issue);
+        // The record is the source of truth, so it carries the new ids too:
+        // one rewrite, same scope+date, yield already credited by the first.
+        if (filing.created.length > 0) {
+          writeAuditRecord(d, a.scope, a.verdict,
+            findings.map((f, i) => (f.issue || !out.results[i].issue ? f : { ...f, issue: out.results[i].issue })),
+            { legs: a.legs, noYield: true });
+        }
+        const filed = {
+          ...out, ...dedupedFrom, filed: filing.created.length,
+          ...(filing.errors.length > 0 ? { fileErrors: filing.errors } : {}),
+        };
+        if (!sweep) return filed;
+
+        // A sweep closes with the board snapshot and the spend of what it
+        // raised. Both fail open: a sweep never fails on its report lines.
+        let outlook: { emitted: boolean; error?: string };
+        try {
+          const issues = await tracker.listIssues();
+          const count = (c: string) => issues.filter((i) => i.category === c).length;
+          const snap = emitOutlook(d, { tracker: { open: count("open"), inProgress: count("in_progress"),
+            asOf: new Date().toISOString().slice(0, 10) } });
+          outlook = { emitted: snap !== null };
+        } catch (e) {
+          outlook = { emitted: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        const ids = out.results.flatMap((r) => (r.issue ? [r.issue] : []));
+        return { ...filed, outlook, agentCostUsd: filedCost(d, ids) };
+      },
     ),
   );
 

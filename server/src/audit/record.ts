@@ -80,6 +80,8 @@ export interface AuditFinding {
   failure_scenario: string;
   detail?: string;
   issue?: string;
+  /** Where it fails, "path:line" — the dedup engine's location (#368). */
+  at?: string;
   /**
    * Refutation panel (#196). Required on critical/important findings —
    * at least one vote, two on a security scope; the quorum below decides
@@ -104,6 +106,8 @@ export interface FindingResult {
    * evidence; this bit decides whether the verb may offer "apply".
    */
   applyEligible?: boolean;
+  /** The tracker issue behind it — filed by `file: true`, or carried in (#368). */
+  issue?: string;
 }
 
 /** One leg of a sweep — the per-mode record the manifest indexes. */
@@ -159,6 +163,12 @@ export interface AuditRecordResult {
   note?: string;
   /** Sweep scopes only: the baseline delta; null on the first sweep. */
   delta?: SweepDelta | null;
+  /**
+   * opts.summary only: "panel: N confirmed, N plausible, N refuted (not
+   * filed)" — over this record's panelled findings, or, on a sweep with a
+   * leg index, summed across the legs' own records (#368).
+   */
+  panelSummary?: string;
 }
 
 
@@ -225,6 +235,9 @@ export function patchClaimsHold(c: PatchClaims): boolean {
  * :param findings: the full finding list, refuted-to-be included
  * :param opts.yieldBaseDir: yield store root override (test seam)
  * :param opts.legs: sweep scopes only — the leg records this manifest indexes
+ * :param opts.summary: also return panelSummary (#368)
+ * :param opts.noYield: skip the yield credit — a rewrite of a record whose
+ *   first write already credited it (filing adds the issue lines, #368)
  * :returns: path, counts, per-finding outcomes, stamp (+ delta on a sweep)
  * :raises CairnError: UNSUPPORTED on shape errors or a leg path outside
  *   the audit dir; PRECONDITION_FAILED on verdict mismatch, a missing
@@ -235,7 +248,7 @@ export function patchClaimsHold(c: PatchClaims): boolean {
  */
 export function writeAuditRecord(projectDir: string, scope: string,
   verdict: "pass" | "findings", findings: AuditFinding[],
-  opts: { yieldBaseDir?: string; legs?: SweepLeg[] } = {}): AuditRecordResult {
+  opts: { yieldBaseDir?: string; legs?: SweepLeg[]; summary?: boolean; noYield?: boolean } = {}): AuditRecordResult {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(scope)) {
     throw new CairnError("UNSUPPORTED", `audit scope '${scope}' is empty or not kebab-case`,
       "use a short kebab-case scope like uat-phase-1");
@@ -370,6 +383,7 @@ export function writeAuditRecord(projectDir: string, scope: string,
   findings.forEach((f, i) => {
     body.push(`## finding — ${f.severity}`, f.title);
     body.push(`scenario: ${f.failure_scenario.trim()}`);
+    if (f.at?.trim()) body.push(`at: ${f.at.trim()}`);
     if (sourceLeg[i]) body.push(`source leg: ${sourceLeg[i]}`);
     if (f.seats && f.seats.length > 0) body.push(`raised by: ${f.seats.join(", ")}`);
     if (f.panel && f.panel.length > 0) {
@@ -403,7 +417,7 @@ export function writeAuditRecord(projectDir: string, scope: string,
   // would count every sweep finding twice.
   const credit = new Map<string, number>();
   findings.forEach((f, i) => {
-    if (sweep || !results[i].survived || results[i].outcome === "unpanelled") return;
+    if (opts.noYield || sweep || !results[i].survived || results[i].outcome === "unpanelled") return;
     for (const seat of f.seats ?? []) credit.set(seat, (credit.get(seat) ?? 0) + 1);
   });
   let note: string | undefined;
@@ -425,7 +439,22 @@ export function writeAuditRecord(projectDir: string, scope: string,
     ...(stamp ? { commit: stamp.commit, dirty: stamp.dirty } : {}),
     ...(note ? { note } : {}),
     ...(sweep ? { delta } : {}),
+    ...(opts.summary ? { panelSummary: panelSummary(
+      sweep && read.length > 0 ? read.flatMap((l) => l.record.findings.map((f) => f.outcome))
+        : results.map((r) => r.outcome)) } : {}),
   };
+}
+
+/**
+ * The closing report's panel line (#368). Unpanelled findings (minors)
+ * never met a panel, so they count nowhere.
+ *
+ * :param outcomes: one outcome per finding
+ * :returns: "panel: N confirmed, N plausible, N refuted (not filed)"
+ */
+export function panelSummary(outcomes: FindingOutcome[]): string {
+  const n = (o: FindingOutcome) => outcomes.filter((x) => x === o).length;
+  return `panel: ${n("confirmed")} confirmed, ${n("plausible")} plausible, ${n("refuted")} refuted (not filed)`;
 }
 
 
