@@ -7,8 +7,9 @@
 // planned phases where this check finds nothing.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { phaseDirPrefix, plansRoot } from "./artifacts.js";
-import { parsePlanDoc } from "./frontmatter.js";
+import { parsePhaseDirName, phaseDirPrefix, plansRoot } from "./artifacts.js";
+import { parseLedger } from "./distill-manifest.js";
+import { parseFrontmatter, parsePlanDoc } from "./frontmatter.js";
 // The approaches block, as data: an H2 whose text is "Approaches
 // considered", ≥2 H3 candidates under it, and one "chosen:" line before
 // the next H2. Case-insensitive on the headings; bold markers tolerated.
@@ -198,6 +199,84 @@ function scanThresholds(lines, planRel) {
     return findings;
 }
 /**
+ * The pre-phase-23 exemption, stated once. The close-evidence gate shipped
+ * in phase 23, so a phase numbered 23 or below that is already verified
+ * closed its issues before the gate existed (phase 23's own lines
+ * included), and the ledger is append-only, so those lines can never grow
+ * the segment: exempt. An unverified phase is held to the gate whatever its
+ * number. The tdd and superseded gates have no exemption.
+ */
+export const EVIDENCE_GATE_SHIPPED = 23;
+const bareId = (id) => id.trim().replace(/^#/, "");
+/**
+ * The LEDGER.md gates for one phase: tdd-missing, evidence-missing and
+ * closure-superseded, read off the same parse distill_manifest uses.
+ *
+ * A phase with no LEDGER.md yet reports nothing — plan_check runs at plan
+ * time too, before any task has closed. Once the ledger exists every
+ * planned id owes its closing line, so an id with none is reported against
+ * the PLAN.md frontmatter line that declared it.
+ *
+ * :param projectDir: project root, for the relative paths findings carry
+ * :param p: the scanned plan
+ * :returns the gate findings, unsorted
+ */
+function judgeLedgerGates(projectDir, p) {
+    const ledgerPath = join(p.phaseDir, "LEDGER.md");
+    if (!existsSync(ledgerPath))
+        return [];
+    let data;
+    try {
+        data = parseFrontmatter(p.text).data;
+    }
+    catch {
+        return []; // a malformed plan is reported elsewhere, never bricked on here
+    }
+    const list = (v) => (v === undefined ? [] : Array.isArray(v) ? v : [v]).map(bareId).filter(Boolean);
+    const issues = new Set(list(data.issues));
+    const tdd = new Set(list(data.tdd));
+    const declaredAt = (key) => p.lines.findIndex((l) => l.startsWith(`${key}:`)) + 1 || 1;
+    // Last standing closure per issue, and last superseded one -- file order
+    // is chronological, so a later line is the one that speaks.
+    const { entries, superseded } = parseLedger(p.phaseDir);
+    const byIssue = (rows) => new Map(rows.map((r) => [bareId(r.issueId), r]));
+    const standing = byIssue(entries);
+    const corrected = byIssue(superseded);
+    const exempt = p.verified && p.phase !== null && p.phase <= EVIDENCE_GATE_SHIPPED;
+    const ledger = relative(projectDir, ledgerPath);
+    const out = [];
+    for (const id of new Set([...issues, ...tdd])) {
+        const closing = standing.get(id);
+        const gone = corrected.get(id);
+        if (!closing && gone) {
+            // One cause, one finding: the closure doesn't stand, so its segments
+            // can't satisfy the other two gates either.
+            out.push({
+                type: "closure-superseded", plan: ledger, line: gone.line,
+                detail: `#${id}'s closure is corrected by the evidence-only line ${gone.supersededBy} for the same task — `
+                    + "it reads as NOT closed; append a fresh closing line",
+                counterpart: { plan: ledger, line: gone.supersededBy },
+            });
+            continue;
+        }
+        if (issues.has(id) && !exempt && !closing?.closeEvidence) {
+            out.push(closing
+                ? { type: "evidence-missing", plan: ledger, line: closing.line,
+                    detail: `#${id}'s closing line has neither an \`evidence <command> => <result>\` nor a \`waived <reason>\` segment` }
+                : { type: "evidence-missing", plan: p.rel, line: declaredAt("issues"),
+                    detail: `#${id} has no closing line in LEDGER.md` });
+        }
+        if (tdd.has(id) && !closing?.tdd) {
+            out.push(closing
+                ? { type: "tdd-missing", plan: ledger, line: closing.line,
+                    detail: `#${id} is a tdd: task but its closing line has no red..green commit pair` }
+                : { type: "tdd-missing", plan: p.rel, line: declaredAt("tdd"),
+                    detail: `#${id} is a tdd: task with no closing line in LEDGER.md` });
+        }
+    }
+    return out;
+}
+/**
  * Whether the approaches gate applies to a plan: it lists tracker issues
  * (it has been planned, not merely scaffolded) and its resolved depth —
  * PLAN.md `depth:` frontmatter, else standard (cairn.json carries no depth
@@ -238,6 +317,7 @@ export function planCheck(projectDir, phase) {
             rel, lines, text, contracts: extractContracts(lines, rel),
             contextPath: join(phasesDir, entry, "CONTEXT.md"), gated: isGated(text),
             verified: existsSync(join(phasesDir, entry, "VERIFICATION.md")),
+            phaseDir: join(phasesDir, entry), phase: parsePhaseDirName(entry)?.number ?? null,
         });
     }
     const findings = [];
@@ -275,6 +355,10 @@ export function planCheck(projectDir, phase) {
             });
         }
     }
+    // Ledger gates (#366) — what verify holds a phase to, read off the
+    // ledger the server wrote rather than by eye.
+    for (const p of plans)
+        findings.push(...judgeLedgerGates(projectDir, p));
     // Contract drift — pair every Produces against every Consumes in a
     // different plan that shares a symbol, flag on the consumer's line.
     const seen = new Set();
