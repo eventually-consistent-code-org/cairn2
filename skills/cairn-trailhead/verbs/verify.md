@@ -27,23 +27,10 @@ Verify the given phase per the `cairn-planning` skill.
    must have `category: "closed"`. Anything still `open` or `in_progress`
    (whatever its board state name) FAILS verification — report each
    straggler with its state instead of closing it unexamined.
-4. TDD evidence: for every id in PLAN.md `tdd:` frontmatter, this phase's
-   LEDGER.md line for that id must carry a `tdd <red>..<green>` segment.
-   Any TDD task missing its pair → the phase FAILS verification — report
-   which ids, do not write VERIFICATION.md.
-   4b. Close evidence (phase 23): every issue in PLAN.md `issues:` must
-   have a LEDGER.md line carrying an `evidence <command> => <result>`
-   segment or a `waived <reason>` segment. A line with neither → the
-   phase FAILS verification the same way — report which ids. Lines
-   written before the gate existed (pre-phase-23 ledgers) are exempt
-   only in phases already verified; a live phase re-verified after the
-   gate is held to it.
-   4c. Evidence-only lines (`- [ ] … evidence for <id> <date>`, written by
-   `ledger_append kind: "evidence"`) are never closures — they don't
-   satisfy 4/4b as the issue's closing line, and a closure line followed
-   later by an evidence line for the SAME taskRef reads as NOT closed
-   (the evidence line is its correction; `distill_manifest` lists it
-   under `superseded`).
+4. Ledger gates: the same `plan_check` must report none of `tdd-missing`,
+   `evidence-missing`, `closure-superseded` (the server reads LEDGER.md and
+   owns the pre-phase-23 exemption). Any one → the phase FAILS
+   verification — report each id and line, do not write VERIFICATION.md.
 5. Write `.cairn/plans/phases/<NN-dir>/VERIFICATION.md`: what was checked, what
    passed, deviations. (Its presence marks the phase verified — drift treats
    closed issues in verified phases as normal.)
