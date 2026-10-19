@@ -9,6 +9,7 @@
 //
 //   evals-corpus/NN-<slug>/seats/    case.yaml (prompt: /cairn:review corpus/NN-<slug>)
 //   evals-corpus/NN-<slug>/native/   case.yaml (prompt: /code-review corpus/NN-<slug> high --max-findings all)
+//   evals-corpus/NN-<slug>/default/  case.yaml (prompt: /code-review corpus/NN-<slug> high; #372)
 //     graders/   k-NN.md (the known defect is named) + precision.md (no defect invented;
 //                correctness axis only -- clarity/style notes are ignored)
 //     fixture/   the files the fix touched, as the FIX left them (tests excluded)
@@ -210,6 +211,8 @@ function main() {
     const arms = [
       ["seats", `corpus-${item.id}-seats`, TOOLS_SEATS, `/cairn:review ${branch}\n\n${note}`],
       ["native", `corpus-${item.id}-native`, TOOLS_NATIVE, `/code-review ${branch} high --max-findings all\n\n${note}`],
+      // Third arm (#372): the native call at its default finding limit, the shape a developer runs.
+      ["default", `corpus-${item.id}-default`, TOOLS_NATIVE, `/code-review ${branch} high\n\n${note}`],
     ];
     for (const [arm, name, tools, promptText] of arms) {
       const dir = join(DIR, `${item.id}-${item.slug}`, arm);

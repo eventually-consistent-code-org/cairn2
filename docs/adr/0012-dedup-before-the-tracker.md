@@ -100,6 +100,28 @@ what they raised. Single-run, judge-scored numbers — the precision
 column in particular is a Haiku judge's verdict per run, stated as a
 proxy.
 
+**Second arm shape (2026-10-18, #372, Claude Code 2.1.303, one run per
+case, eleven items):** the native call at its default finding limit —
+`/code-review <branch> high`, no `--max-findings`, the shape a developer
+actually runs — same graders, same decision rule. Eleven of eleven runs
+graded, none errored. The #334 rows are carried from above (their raw
+runs were local and are gone); the default row is from this run.
+
+| arm | recall | precision proxy | cost per review |
+|---|---|---|---|
+| seats — five-seat panel, dedup, refutation (`/cairn:review`) | 100% (10/10) | 100% (11/11) | ~$0.75 median |
+| native — `--max-findings all` | 100% (10/10) | 27% (3/11) | ~$0.19 median |
+| native at the default finding limit (`/code-review <branch> high`) | 90% (9/10) | 18% (2/11) | ~$0.18 median |
+
+**The clause stays unmet.** The default finding limit did not rescue
+precision: nine of eleven runs, the clean control among them, were
+failed by the correctness-axis judge for raised findings, and recall
+slipped by one item (08, the relative verb paths: judge votes PASS /
+FAIL / FAIL, left as scored; the harness kept no transcript to
+re-read). The default limit trims the breadth of the list, not the
+kind of finding on it. Single-run, judge-scored, so the same proxy
+caveat as above applies. Nothing in `review.md` or the seats changed.
+
 Either way the other four axes, tracker filing, the audit record and
 refutation voting are outside what the native call can see, and this
 ADR's dedup stays while any two seats run.

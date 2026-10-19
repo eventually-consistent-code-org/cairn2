@@ -49,7 +49,7 @@ import { join, resolve } from "node:path";
 // Constants
 
 const AGGREGATE = "aggregate-result.json";
-const CASE = /^corpus-(\d+)-(seats|native)$/;
+const CASE = /^corpus-(\d+)-(seats|native|default)$/;
 const KNOWN = /^k-\d+/;
 const PRECISION = "precision";
 
@@ -151,7 +151,7 @@ function main() {
     process.exit(2);
   }
 
-  const byArm = { seats: [], native: [] };
+  const byArm = { seats: [], native: [], default: [] };
   for (const c of byName.values()) byArm[CASE.exec(c.name)[2]].push(c);
   const claudeVersion = [...versions].join(", ");
   const source = sources.join(", ");
