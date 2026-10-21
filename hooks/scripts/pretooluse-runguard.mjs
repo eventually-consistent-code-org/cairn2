@@ -1,11 +1,27 @@
 #!/usr/bin/env node
 
 /**
- * Purpose: PreToolUse run guard (#216, #249-#252, #257, #262, #264, #270, #296, #297, #299-#302,
- *   #305, #306, #310, #311, #315) -- refuses git commands that rewrite a working tree or its history
- *   out from under whoever is in it, or push past the ship gate. Exit 2
- *   blocks; ANY internal error exits 0 -- a broken guard never blocks work.
- *   The rules are spelled out in the block below.
+ * Purpose: PreToolUse run guard -- classifies every git invocation by what
+ *   it does, and refuses by effect. Exit 2 blocks; ANY internal error exits
+ *   0 -- a broken guard (or classifier) never blocks work.
+ *
+ * Effects (git-effects.mjs classifies; its EFFECT_TABLE is the data):
+ *   discards-work           uncommitted or unpushed work lost with no undo.
+ *                           Refused always; owner escape
+ *                           CAIRN_ALLOW_DESTRUCTIVE_GIT.
+ *   moves-shared-ref        the default branch or any remote ref changes.
+ *                           Refused onto the default branch without a clean
+ *                           ship-gate stamp (escape CAIRN_ALLOW_UNSHIPPED_PUSH),
+ *                           and while a run is live without its push grant.
+ *   touches-owner-checkout  the human's working directory changes under
+ *                           them. Refused while a run is live, aimed at the
+ *                           owner's checkout; one-command escape CAIRN_RUN_OK.
+ *   read-only               the default: everything else.
+ *   Every refusal names the effect and the flag that caused it.
+ *
+ * Corpus: server/test/runguard-effects.test.ts (one test per effect, three
+ *   spellings each, and the everyday git that stays allowed) and
+ *   server/test/runguard-guards.test.ts, one describe per issue in History.
  *
  * removeWhen: headless runs execute in platform-provided isolated
  *   checkouts that cannot reach the human's working directory, and a
@@ -19,34 +35,38 @@
  */
 
 /*
- * The rules
+ * The rules, by effect
  *
- *   Always, in every session: the git commands that throw work away with
- *   no undo (the table in destructive(): hard reset; force, mirror and
- *   prune pushes, or one deleting the default branch; forced or whole-tree
- *   checkout/restore; a discarding switch; clean; stash clear; reflog
- *   expire; a forced worktree remove, #414), options shortened as git
- *   allows (--har is --hard, #296). Their
- *   everyday neighbours stay allowed. Escape: CAIRN_ALLOW_DESTRUCTIVE_GIT=1
- *   -- for the session, or as the leading assignment of the one command
- *   (honoured, never taught: refusals name only the owner's ways, #262).
+ *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
+ *   force, mirror and prune pushes, or one deleting the default branch;
+ *   forced or whole-tree checkout/restore; a discarding switch; clean;
+ *   stash clear; reflog expire; a forced worktree remove), options
+ *   shortened as git allows (--har is --hard). Their everyday neighbours
+ *   carry no such effect and stay allowed. Escape:
+ *   CAIRN_ALLOW_DESTRUCTIVE_GIT=1 -- for the session, or as the leading
+ *   assignment of the one command (honoured, never taught: refusals name
+ *   only the owner's ways).
  *
- *   Always: an agent push landing on the default branch (main, master, the
- *   remote's HEAD branch; a glob, `:` or push-everything push may, #297, as
- *   may a short name or the push settings git follows, #302) is refused
+ *   moves-shared-ref, onto the default branch: a push landing on main,
+ *   master or the remote's HEAD branch (a glob, `:` or push-everything push
+ *   may, as may a short name or the push settings git follows) is refused
  *   unless the last plan_drift left a clean ship-gate stamp for the exact
- *   commit pushed (#251; open issues stay prose). Other branches are
- *   untouched; a missing or unreadable stamp refuses (#299). Escape:
+ *   commit pushed (open issues stay prose). Other branches are untouched; a
+ *   missing or unreadable stamp refuses. Escape:
  *   CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
- *   While a batch run is live, or the run list can't be read (#299): `git checkout`,
- *   `git switch` and the hard reset (even overridden) aimed at the owner's
- *   own checkout (see ownerCheckout) are refused -- they change the
- *   human's files underneath them, mid-edit. CAIRN_RUN_OK=1 as the leading
- *   assignment overrides that once. And `git push`, from any worktree, is
- *   refused unless the run manifest grants pushAuth and marks one of its
- *   phases in flight (#260). No override: push authority is the owner's
- *   staging decision (ADR 0007).
+ *   moves-shared-ref, while a batch run is live: from any worktree, refused
+ *   unless the run manifest grants pushAuth and marks one of its phases in
+ *   flight, or when the run list can't be read. No override: push
+ *   authority is the owner's staging decision (ADR 0007).
+ *
+ *   touches-owner-checkout, while a batch run is live or the run list
+ *   can't be read: `git checkout`, `git switch` and the hard reset (even
+ *   with discards-work overridden) aimed at the owner's own checkout (see
+ *   ownerCheckout) are refused -- they change the human's files underneath
+ *   them, mid-edit. CAIRN_RUN_OK=1 as the leading assignment overrides
+ *   that once. A hard reset there carries both effects; the refusal names
+ *   both.
  *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
@@ -138,6 +158,10 @@ import {
   SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
+import {
+  DISCARDS_WORK, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine, longNames,
+  parseInvocation, pushArgs, readArgs, truthy,
+} from "./git-effects.mjs";
 
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
@@ -148,18 +172,6 @@ function pathHash(projectDir) {
 }
 
 // Constants
-
-/**
- * git's top-level options that eat the following word as their value, from
- * git(1) and git.c (#301): `git --attr-source HEAD reset --hard` resets.
- * Their `--opt=value` forms are one word, skipped like any switch, and so is
- * --exec-path, which only ever takes its value after `=`. git spells these
- * in full -- it shortens no top-level option. --super-prefix is gone from
- * newer git and --list-cmds only takes `=`; both stay, since git refuses a
- * line that misuses them, and an older git reads them this way.
- */
-const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
-  "--attr-source", "--shallow-file", "--super-prefix", "--list-cmds"]);
 
 /**
  * How this guard reads a command line (shell-words.mjs): ( ) and #
@@ -333,35 +345,11 @@ function readLine(line) {
         continue;
       }
 
-      let i = 1;
-      const dirs = [];
-      const configs = [];
-      const configEnvs = [];
-      const opts = {};
-      while (i < words.length && words[i].startsWith("-")) {
-        const w = words[i];
-        if (w === "-C") dirs.push(words[i + 1] ?? "");
-        if (w === "-c") configs.push(words[i + 1] ?? "");
-        if (w === "--config-env") configEnvs.push(words[i + 1] ?? "");
-        if (w.startsWith("--config-env=")) configEnvs.push(w.slice(13));
-        // --git-dir and --work-tree, either form; the last one wins, as in git
-        const where = /^--(git-dir|work-tree)(?:=(.*))?$/.exec(w);
-        if (where) opts[where[1] === "git-dir" ? "GIT_DIR" : "GIT_WORK_TREE"] = where[2] ?? words[i + 1] ?? "";
-        if (w === "--bare") opts.bare = true;
-        i += GIT_VALUE_OPTS.has(w) ? 2 : 1;
-      }
-      const rest = words.slice(i + 1);
-      const dashes = rest.indexOf("--");
+      // #301 -- top-level options and their values come off, `--` splits paths off (git-effects.mjs)
       const inv = {
         assigns,
-        dirs,
-        configs,
-        configEnvs,
-        sub: words[i] ?? "",
-        args: dashes < 0 ? rest : rest.slice(0, dashes),
-        paths: dashes < 0 ? [] : rest.slice(dashes + 1),
+        ...parseInvocation(words),
         step: out.steps.length,
-        opts,
         wrapDirs,
         envAssigns: env.assigns,
         envCleared: env.cleared,
@@ -707,46 +695,6 @@ function pushRefusal(state) {
 }
 
 /**
- * The long options in `names` that a typed `--name` stands for, the way
- * git's option parser reads it (#296): an exact spelling is that option,
- * and any shorter start of one is it too -- `--har` is `--hard`,
- * `--force-w` is `--force-with-lease`. A start that fits several counts as
- * all of them (git refuses an ambiguous one anyway); `--no-x` fits none.
- */
-function longNames(typed, names) {
-  return names.includes(typed) ? [typed] : names.filter((n) => n.startsWith(typed));
-}
-
-// git push's value-taking options, and how the guard reads a push (#296):
-// -f, -d and -o are --force, --delete and --push-option.
-const PUSH_VALUED = ["--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"];
-const PUSH_READ = {
-  short: "o",
-  longs: ["--force", "--force-with-lease", "--force-if-includes", "--mirror", "--prune", "--delete",
-    "--all", "--branches", "--tags", ...PUSH_VALUED],
-  valued: PUSH_VALUED,
-  alias: { f: "--force", d: "--delete" },
-};
-
-/** A push's flags and bare words -- remote, then refspecs -- read once per invocation. */
-const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.paths], PUSH_READ));
-
-/**
- * True when this push overwrites remote history: --force or -f (alone or
- * clustered, e.g. -fu), --force-with-lease[=...], --force-if-includes --
- * spelled out or shortened -- or any refspec with a leading `+`.
- */
-function isForcePush(inv) {
-  const { flags, words } = pushArgs(inv);
-  return ["--force", "--force-with-lease", "--force-if-includes"].some((f) => flags.has(f))
-    || words.some((w) => w.startsWith("+")); // +refspec forces that ref
-}
-
-/** True for `git reset --hard`, or any shortened `--hard` git reads as it (#296). */
-const isHardReset = (inv) =>
-  inv.sub === "reset" && readArgs(inv.args, { longs: ["--hard"] }).flags.has("--hard");
-
-/**
  * Prints a refusal and blocks (#262). Every refusal here guards an act
  * that needs the owner's go-ahead, so the tail names the owner's ways to
  * give it -- run it from their own prompt with `!`, or start the session
@@ -764,9 +712,10 @@ function refuse(lines, env) {
   process.exit(2);
 }
 
-/** Prints the refusal for an always-on destructive command and blocks. */
-function refuseDestructive(what, why) {
-  refuse([`cairn run guard: ${what} is refused in every session — ${why}`], DESTRUCTIVE_ENV);
+/** Prints the refusal for a discards-work invocation, naming the effect and its flag (#359), and blocks. */
+function refuseDestructive(inv, cause) {
+  refuse([`cairn run guard: ${cause.what} is refused in every session — ${cause.why}`,
+    effectLine(inv, cause)], DESTRUCTIVE_ENV);
 }
 
 /**
@@ -1113,86 +1062,16 @@ function branchSources(inv, at) {
 }
 
 /**
- * A git subcommand's args split into the flags it sets and its bare words,
- * skipping the values valued flags swallow: `-b name`, `--source x`, and a
- * short cluster's tail after a valued letter (`-sHEAD`). `--x=v` keeps `--x`.
- * A typed long option counts as each of `longs` it spells or shortens
- * (#296), and takes the next word when one of them is `valued`; `alias`
- * files a short letter under its long name (`f` is `--force`). `flags` is
- * every flag ever set, for the ones that refuse; `on` is each one's state
- * after any `--no-` negation, for the ones that make a command safe --
- * `git clean -n --no-dry-run` deletes.
+ * True when a push's remote is configured to mirror already (`git remote
+ * add --mirror=push`, `git config remote.<r>.mirror true`), which turns a
+ * plain `git push <r>` into one that force-updates and deletes every
+ * remote ref. The `--mirror` flag and a `-c remote.<r>.mirror` are read by
+ * the classifier; this is the repository's half.
  */
-function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
-  const flags = new Set();
-  const on = new Map();
-  const words = [];
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (a.startsWith("--")) {
-      const eq = a.indexOf("=");
-      const name = eq < 0 ? a : a.slice(0, eq);
-      const hit = longNames(name, longs);
-      for (const n of hit) { flags.add(n); on.set(n, true); }
-      if (eq < 0 && hit.some((n) => valued.includes(n))) k++;
-      if (!hit.length && name.startsWith("--no-")) {
-        for (const n of longNames(`--${name.slice(5)}`, longs)) on.set(n, false);
-      }
-      continue;
-    }
-    if (/^-[^-]/.test(a)) {
-      for (let c = 1; c < a.length; c++) {
-        const f = alias[a[c]] ?? `-${a[c]}`;
-        flags.add(f);
-        on.set(f, true);
-        if (short.includes(a[c])) {
-          if (c === a.length - 1) k++; // value is the next word
-          break; // ...or the rest of this one
-        }
-      }
-      continue;
-    }
-    words.push(a);
-  }
-  return { flags, on, words };
-}
-
-/**
- * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, and a bare glob (`*`,
- * `**`, `./*` -- a pathspec `*` crosses `/`). A single path -- `src/a.ts`,
- * `.gitignore`, `:/src`, `*.ts` -- is not.
- */
-function wholeTree(p) {
-  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p);
-}
-
-/**
- * True when a checkout/restore's pathspec names the whole tree -- or comes
- * from --pathspec-from-file, which the guard can't see into.
- */
-function wholeTreeSpec(flags, words, paths) {
-  return flags.has("--pathspec-from-file") || [...words, ...paths].some(wholeTree);
-}
-
-/** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
-const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
-
-/**
- * True when this push mirrors -- `--mirror`, `-c remote.<r>.mirror=true`,
- * or a remote configured to mirror already (`git remote add --mirror=push`,
- * `git config remote.<r>.mirror true`), which turns a plain `git push <r>`
- * into one that force-updates and deletes every remote ref.
- */
-function isMirrorPush(inv, flags, words, at) {
-  if (flags.has("--mirror")) return true;
-  const key = /^remote\.(.+)\.mirror(?:=(.*))?$/i;
-  if (inv.configs.some((c) => { const m = key.exec(c); return m && truthy(m[2] ?? "true"); })) {
-    return true;
-  }
+function mirrorConfigured(inv, at) {
   const set = gitOut(at, ["config", "--get-regexp", "^remote\\..*\\.mirror$"]);
   if (!set) return false;
-  const remote = words[0];
+  const remote = pushArgs(inv).words[0];
   return set.split("\n").some((line) => {
     const m = /^remote\.(.+)\.mirror\s*(.*)$/i.exec(line.trim());
     return m && truthy(m[2] || "true") && (remote === undefined || remote === m[1]);
@@ -1200,96 +1079,14 @@ function isMirrorPush(inv, flags, words, at) {
 }
 
 /**
- * The always-on table (#249, #250, #264): why `inv` throws work away with
- * no undo, as [what, why] -- or null. Every row is refused in every session
- * behind the one CAIRN_ALLOW_DESTRUCTIVE_GIT escape. The everyday
- * neighbours stay allowed because they are routine or recoverable: a
- * single-path checkout/restore, `stash drop`, `branch -D`, `restore
- * --staged .` (the index only, like a plain `git reset`), deleting a
- * feature branch, and `clean -n`.
+ * The repository's answers the classifier asks for at the target `at`
+ * (#359): a remote that mirrors, and a push that deletes the default
+ * branch -- defaultBranchSources reads which branches that is.
  */
-function destructive(inv, at) {
-  const { sub, args, paths } = inv;
-  const discards = "it discards uncommitted work with no undo.";
-  switch (sub) {
-    case "reset":
-      return isHardReset(inv) ? ["`git reset --hard`", discards] : null;
-
-    case "checkout": {
-      const { flags, words } = readArgs(args, { short: "bB", alias: { f: "--force" },
-        longs: ["--force", "--orphan", "--conflict", "--pathspec-from-file"],
-        valued: ["--orphan", "--conflict", "--pathspec-from-file"] });
-      if (flags.has("--force")) return ["`git checkout --force`", discards];
-      return wholeTreeSpec(flags, words, paths) ? ["a whole-tree `git checkout`", discards] : null;
-    }
-
-    case "switch": {
-      const { flags } = readArgs(args, { short: "cC", alias: { f: "--force" },
-        longs: ["--discard-changes", "--force", "--create", "--force-create", "--orphan", "--conflict"],
-        valued: ["--create", "--force-create", "--orphan", "--conflict"] });
-      return flags.has("--discard-changes") || flags.has("--force")
-        ? ["`git switch --discard-changes`", discards] : null;
-    }
-
-    case "restore": {
-      const { flags, on, words } = readArgs(args, { short: "s",
-        alias: { s: "--source", S: "--staged", W: "--worktree" },
-        longs: ["--source", "--staged", "--worktree", "--pathspec-from-file", "--conflict"],
-        valued: ["--source", "--pathspec-from-file", "--conflict"] });
-      // the work tree is restored unless only --staged is asked for, and
-      // --no-staged takes that back
-      const worktree = flags.has("--worktree") || on.get("--staged") !== true;
-      return worktree && wholeTreeSpec(flags, words, paths)
-        ? ["a whole-tree `git restore`", discards] : null;
-    }
-
-    case "clean": {
-      // Every clean but a dry run: plain `git clean` only refuses on its own
-      // while clean.requireForce holds, and `-c clean.requireForce=false`
-      // or a repo config turns that off -- so the -f isn't what to look for.
-      // A dry run counts once it's the last word on it: -n --no-dry-run deletes
-      const { on } = readArgs(args, { short: "e", alias: { n: "--dry-run" },
-        longs: ["--dry-run", "--exclude"], valued: ["--exclude"] });
-      return on.get("--dry-run") === true ? null
-        : ["`git clean`", "it deletes untracked files, which git never had a copy of."];
-    }
-
-    case "worktree": {
-      // `remove --force` deletes a linked worktree together with its
-      // uncommitted and untracked files (#414, security-27-5). A plain
-      // remove refuses a dirty tree on its own; list, add, prune and the
-      // rest stay allowed.
-      if (args[0] !== "remove") return null;
-      const { flags } = readArgs(args.slice(1), { alias: { f: "--force" }, longs: ["--force"] });
-      return flags.has("--force") ? ["`git worktree remove --force`", discards] : null;
-    }
-
-    case "stash":
-      return args[0] === "clear" ? ["`git stash clear`", "it drops every stash at once."] : null;
-
-    case "reflog":
-      return args[0] === "expire"
-        ? ["`git reflog expire`", "it erases the record git recovers lost commits from."] : null;
-
-    case "push": {
-      // Past a bare `--` a push's words are still refspecs, not paths (pushArgs)
-      if (isForcePush(inv)) {
-        return ["`git push --force`",
-          "it overwrites remote history other people may already have pulled."];
-      }
-      const { flags, words } = pushArgs(inv);
-      if (isMirrorPush(inv, flags, words, at)) {
-        return ["`git push --mirror`", "it force-updates and deletes remote refs to match this clone."];
-      }
-      if (flags.has("--prune")) {
-        return ["`git push --prune`", "it deletes every remote branch this clone doesn't have."];
-      }
-      return defaultBranchSources(inv, at).includes(null)
-        ? ["a push deleting the default branch", "everyone's shared history hangs off it."] : null;
-    }
-  }
-  return null;
-}
+const repoProbe = (at) => ({
+  mirrorConfigured: (inv) => mirrorConfigured(inv, at),
+  deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
+});
 
 /**
  * Why this push may not land on the default branch yet, as [why, what to
@@ -1398,29 +1195,33 @@ function judgeLine(line, start, ctx) {
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
-    const hardReset = isHardReset(inv);
     const targets = invTargets(inv, places, lineEnv);
     const known = targets.filter((t) => t !== LOST);
     const lost = known.length < targets.length;
+    // #359 -- what it does, read off the effect table; the rows only the
+    // repository can answer wait for a target, below
+    const [shared] = classify(inv, {}, { only: MOVES_SHARED_REF, first: true });
+    const [touch] = classify(inv, {}, { only: TOUCHES_OWNER_CHECKOUT, first: true });
 
-    // #249, #250, #264 -- the work-destroying table, every session. Most
-    // rows don't depend on where; a push's mirror and deletion rows are
-    // read at every target the guard can see.
+    // discards-work, every session. Most rows don't depend on where; a
+    // push's mirror and deletion rows are read at every target the guard
+    // can see.
     if (!ctx.allowDestructive && !prefixed(DESTRUCTIVE_ENV)) {
       for (const at of known.length ? known : [{ dir: ctx.cwd }]) {
-        const hit = destructive(inv, at);
-        if (hit) refuseDestructive(...hit);
+        const [hit] = classify(inv, repoProbe(at), { only: DISCARDS_WORK, first: true });
+        if (hit) refuseDestructive(inv, hit);
       }
     }
 
-    // #251 -- the default branch only takes what a clean drift check saw,
-    // judged at every repository the push may leave from (#306)
-    if (inv.sub === "push" && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
+    // moves-shared-ref onto the default branch: it only takes what a clean
+    // drift check saw, judged at every repository the push may leave from
+    if (shared && process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
       if (lost) {
         refuse([
           `cairn run guard: ${WHERE_LOST}, so it can't tell which repository this push leaves from ` +
           "or what it lands.",
           "  name the folder plainly (cd <path>, git -C <path>) and the guard can judge it -- or run /cairn:ship.",
+          effectLine(inv, shared),
         ], UNSHIPPED_ENV);
       }
       for (const at of known) {
@@ -1429,22 +1230,24 @@ function judgeLine(line, start, ctx) {
           refuse([
             `cairn run guard: ${why[2] ?? "this push lands on the default branch"}, but ${why[0]}.`,
             why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
+            effectLine(inv, shared),
           ], UNSHIPPED_ENV);
         }
       }
     }
 
-    // #252, #260 -- mid-run, a push needs the authority granted at the
+    // moves-shared-ref mid-run: it needs the authority granted at the
     // staging gate and a manifest phase in flight. From ANY worktree --
     // the run's own is exactly where it pushes.
-    if (inv.sub === "push") {
+    if (shared) {
       const { live, unreadable } = currentRuns();
-      // #299 -- a run list that can't be read can't vouch that no run is live
+      // a run list that can't be read can't vouch that no run is live
       if (unreadable) {
         refuse([
           `cairn run guard: can't read the batch-run list at ${unreadable}, so this push ` +
           "can't be checked against a live run's push authority.",
           "  the owner should restore read access to it; nothing pushes until the guard can read it.",
+          effectLine(inv, shared),
         ]);
       }
       for (const run of live) {
@@ -1453,34 +1256,37 @@ function judgeLine(line, start, ctx) {
         console.error(`cairn run guard: a batch run (${run.runId}) is in flight ${why}.`);
         console.error("  the phase ends verified-not-pushed; push it yourself from your own");
         console.error("  terminal once the run is done.");
+        console.error(effectLine(inv, shared));
         process.exit(2);
       }
-      // #305 -- authority covers a push the guard can see, not one a
-      // commit earlier on the line changes after the guard has looked
+      // authority covers a push the guard can see, not one a commit
+      // earlier on the line changes after the guard has looked
       if (live.length && inv.movedBefore) {
         refuse([
           `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${MOVED_BEFORE}.`,
           "  push as its own step, so what it sends is what was checked.",
+          effectLine(inv, shared),
         ]);
       }
       continue;
     }
 
-    // #216 -- tree-rewriting commands aimed at the owner's checkout mid-run
-    if (!hardReset && inv.sub !== "checkout" && inv.sub !== "switch") continue;
+    // touches-owner-checkout mid-run: aimed at the owner's checkout, refused
+    if (!touch) continue;
     if (prefixed("CAIRN_RUN_OK")) continue;
     const { live, unreadable } = currentRuns();
     if (!live.length && !unreadable) continue; // no unattended run in flight -- ordinary work
-    // #306 -- every place it may act; only the run's own worktree is left alone
+    // every place it may act; only the run's own worktree is left alone
     const owner = known.some(ownerCheckout);
     if (!lost && !owner) continue;
 
-    const name = hardReset ? "git reset --hard" : `git ${inv.sub}`;
+    const name = inv.sub === "reset" ? "git reset --hard" : `git ${inv.sub}`;
     if (unreadable) {
       refuse([
         `cairn run guard: can't read the batch-run list at ${unreadable}, so this \`${name}\` of ` +
         "the checkout you work in can't be checked against a live run.",
         "  the owner should restore read access to it, or run the command inside a run's own worktree.",
+        effectLine(inv, touch),
       ]);
     }
     if (!owner) {
@@ -1488,12 +1294,14 @@ function judgeLine(line, start, ctx) {
         `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${WHERE_LOST}, so this ` +
         `\`${name}\` may target the checkout you work in.`,
         "  name the folder plainly (cd <path>, git -C <path>), or run the command inside the run's own worktree.",
+        effectLine(inv, touch),
       ]);
     }
     refuse([
       `cairn run guard: a batch run (${live[0].runId}) is in flight, and this \`${name}\` targets ` +
       "the checkout you work in — it would change your files underneath you.",
       "  run the command inside the run's own worktree, or wait for the run to finish.",
+      effectLine(inv, touch),
     ]);
   }
 }
@@ -1538,3 +1346,41 @@ try {
 } catch {
   process.exit(0); // guard must never block work because IT broke
 }
+
+/*
+ * ## History
+ *
+ * Each issue below has its own describe block in
+ * server/test/runguard-guards.test.ts (or hooks.test.ts for #216), named
+ * after it -- the corpus index. The effect rewrite (#359) kept every one
+ * green unchanged.
+ *
+ *   #216  unattended runs stay out of the owner's checkout
+ *   #249  hard reset refused in every session
+ *   #250  force push refused in every session
+ *   #251  default-branch push needs a clean drift stamp
+ *   #252  mid-run push needs manifest push authority
+ *   #257  a $(...) inside double quotes is a command
+ *   #260  push authority needs the phase in flight
+ *   #262  refusals name the owner's ways, never the override prefix
+ *   #264  the work-destroying equivalents of hard reset; whole-tree pathspecs
+ *   #270  one shell reader shared with the harness guard; wrappers peeled
+ *   #296  a shortened long option is the option git reads it as
+ *   #297  glob, matching and push-everything pushes meet the ship gate
+ *   #299  an unreadable stamp or run list refuses
+ *   #300  a capitalised command name is the program a Mac runs
+ *   #301  a top-level option's separate value is not the subcommand
+ *   #302  short destinations and the push settings meet the ship gate
+ *   #305  a commit or ref move earlier on the line can't slip past the gate
+ *   #306  each git command is judged in the repository it acts on
+ *   #307  program runners don't hide git
+ *   #310  MCP tools that run command lines meet the guard
+ *   #311  off-table runners are backstopped
+ *   #315  a reading program's one program-running option is a command
+ *   #319  an unquoted $(...) is one word of its command
+ *   #320  process substitution and arithmetic bodies run
+ *   #321  a line nested past the reader's depth is refused unread
+ *   #322  a heredoc body is data; the substitutions it runs are commands
+ *   #359  classified by effect; refusals derived from the effects
+ *   #414  forced worktree remove refused in every session
+ */

@@ -1958,12 +1958,29 @@ heredoc body is data too, so a README written through `cat <<'EOF'`
 can say the same; only the `$(…)` or backtick an unquoted body
 (`<<EOF`) runs is read as a command, and a heredoc fed to a shell
 reading stdin (`sh <<EOF`, `cat <<EOF | sh`) is that shell's script. A guard
-that breaks lets the command through rather than blocking work. It
-enforces three rules.
+that breaks lets the command through rather than blocking work.
 
-**Always, in every session: no git command that throws work away with
-no undo.** Each refused form has an everyday neighbour that stays
-allowed, because the neighbour is routine or recoverable:
+It judges git by **effect**, not by a list of spellings. Every git
+command is classified, from git's own reading of its flags (a long
+option shortened as git allows — `--har` is `--hard` — a short cluster
+like `-fu`, a `+refspec`, a whole-tree pathspec), into the effects it
+carries:
+
+- **discards-work** — uncommitted or unpushed work is lost with no undo;
+- **moves-shared-ref** — the default branch or any remote ref changes;
+- **touches-owner-checkout** — the working tree and HEAD of the checkout
+  it runs in change, which mid-run matters when that checkout is yours;
+- **read-only** — none of the above, the default.
+
+The rules below refer to effects only, and every refusal ends with a
+line naming the effect and the flag that caused it — ``effect:
+discards-work, from `--har`; also touches-owner-checkout.`` — so you can
+see why it fired. The classifier's table lives in
+`hooks/scripts/git-effects.mjs`.
+
+**discards-work — refused in every session.** Each refused form has an
+everyday neighbour that carries no discarding effect and stays allowed,
+because the neighbour is routine or recoverable:
 
 | Refused in every session | Still allowed |
 |---|---|
@@ -1980,8 +1997,8 @@ allowed, because the neighbour is routine or recoverable:
 `git clean` refuses even without `-f`, because `-c
 clean.requireForce=false` or a repo setting turns git's own safety off.
 
-**Always: the default branch takes only what a clean drift check saw.**
-An agent push that would land on the default branch — `main`, `master`,
+**moves-shared-ref onto the default branch — only what a clean drift
+check saw.** An agent push that would land on the default branch — `main`, `master`,
 or the remote's HEAD branch, whether named, swept up by `--all` /
 `--mirror`, or a bare `git push` from that branch — is refused unless
 the last `plan_drift` left a clean stamp for the exact commit being
@@ -2011,14 +2028,15 @@ hook half of ship's "never push with flagged drift".
 **While a batch run is live** — a run manifest for this project reads
 `running` — two more rules apply. A batch run works inside its own
 worktree so you can keep editing while it builds, and the guard makes
-that separation enforced rather than merely intended: `git checkout`,
-`git switch` and `git reset --hard` aimed at your main checkout are
-refused with a line naming the run — the hard reset even with the
-destructive override set. In the run's own worktree they pass, subject
-to the always-on rules.
+that separation enforced rather than merely intended: anything carrying
+**touches-owner-checkout** — `git checkout`, `git switch` and `git reset
+--hard` — aimed at your main checkout is refused with a line naming the
+run. A hard reset there carries discards-work too, and the refusal names
+both; it refuses even with the destructive override set. In the run's
+own worktree they pass, subject to the always-on rules.
 If that refusal fires, the run escaped its worktree — put it back. And
-`git push`, from any worktree (the run's own is exactly where it
-pushes), is refused unless the manifest carries the push authority you
+anything carrying **moves-shared-ref** — `git push`, from any worktree
+(the run's own is exactly where it pushes) — is refused unless the manifest carries the push authority you
 granted at staging for its phases *and* marks one of those phases in
 flight. `auto` records the phase with `run_manifest`'s `set_phase`
 action at each phase start, and it only moves forward; a running
@@ -2028,7 +2046,7 @@ for you to push once the run is done. The push rule has no override:
 push authority is your staging decision.
 
 **The overrides are yours, not the agent's.**
-`CAIRN_ALLOW_DESTRUCTIVE_GIT=1` unlocks the always-on table, and
+`CAIRN_ALLOW_DESTRUCTIVE_GIT=1` lifts the always-on discards-work refusal, and
 `CAIRN_ALLOW_UNSHIPPED_PUSH=1` lifts the default-branch gate. Each lifts
 only its own rule — deleting the default branch with the table unlocked
 still meets the stamp gate — and each counts in two shapes only: set in
