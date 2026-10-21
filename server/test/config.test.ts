@@ -266,6 +266,32 @@ describe("audit.debt.markers (#355)", () => {
   });
 });
 
+describe("verify.rerun (#357)", () => {
+  const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  it("verify absent → rerun off, a 600s timeout", () => {
+    expect(loadConfig(writeTmpConfig(base)).verify).toEqual({ rerun: false, timeoutSeconds: 600 });
+  });
+
+  it("parses rerun on and a timeout override", () => {
+    const cfg = loadConfig(writeTmpConfig({ ...base, verify: { rerun: true, timeoutSeconds: 90 } }));
+    expect(cfg.verify).toEqual({ rerun: true, timeoutSeconds: 90 });
+  });
+
+  it("an unknown key in the block is refused, like the rest of the strict config", () => {
+    const d = writeTmpConfig({ ...base, verify: { rerun: true, rerunn: true } });
+    expect(() => loadConfig(d)).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(() => loadConfig(d)).toThrow(/rerunn/);
+  });
+
+  it("a non-boolean rerun and a zero timeout are refused", () => {
+    expect(() => loadConfig(writeTmpConfig({ ...base, verify: { rerun: "yes" } })))
+      .toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    expect(() => loadConfig(writeTmpConfig({ ...base, verify: { rerun: true, timeoutSeconds: 0 } })))
+      .toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+  });
+});
+
 describe("peers config", () => {
   const base = { tracker: { type: "github", config: { repo: "o/r" } } };
 

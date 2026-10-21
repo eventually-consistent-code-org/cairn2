@@ -84,6 +84,49 @@ export declare function actualsSegment(from: ({
     wall: Measured;
 }): string;
 /**
+ * What the server saw when it re-ran the declared verify at close (#357):
+ * the side effect it observed, beside the narration the worker supplied.
+ * `exit` is the declared line's exit status, or "timeout" when it ran out
+ * of time. `tail` is the last lines of combined stdout and stderr with
+ * only trailing whitespace stripped -- it is evidence, so nothing else is
+ * cleaned. `at` is the server clock when the run finished.
+ */
+export interface Observed {
+    exit: number | "timeout";
+    tail: string;
+    at: string;
+    /** What ran: always the PLAN.md-declared line, never the worker's string. */
+    command: string;
+}
+/**
+ * Why a close with `verify.rerun` on ran nothing. Every reason is a named
+ * string the tool result and the ledger line carry -- never silence.
+ * `plan-untracked`: PLAN.md is not tracked by git, so the declared line has
+ * no provenance to check. `base-unreadable`: PLAN.md could not be read at
+ * the claim's base commit. `declared-changed`: the declared line differs
+ * from the one at that commit. `spawn-failed`: the server's own error
+ * running the line (fail-open: the close still lands).
+ */
+export type ObservedSkip = "evidence-waived" | "no-declared-verify" | "command-differs" | "not-plain-shell" | "plan-untracked" | "base-unreadable" | "declared-changed" | "spawn-failed";
+export type Observation = Observed | {
+    skipped: ObservedSkip;
+    detail?: string;
+};
+/**
+ * A close is the claim that the declared run passed, so an observed
+ * non-zero exit or a timeout is the mismatch (#357). A skip observed
+ * nothing, so it can never be one.
+ */
+export declare function isObservedMismatch(o: Observation): boolean;
+/**
+ * The ledger line's `observed` segment (#357), placed right after the
+ * evidence segment it checks. Space-separated key=value pairs like
+ * `actuals`, never an em dash; the tail stays in the tool result, not on a
+ * one-line record. A mismatch carries the literal `observed-mismatch`
+ * marker that plan_check and distill_manifest read back.
+ */
+export declare function observedSegment(o: Observation): string;
+/**
  * Reads and deletes the receipt for one issue. Exactly one of `receipt` /
  * `degraded` is set. An unreadable file is deleted too -- a corrupt receipt
  * left behind would degrade every later append for the same id the same way.

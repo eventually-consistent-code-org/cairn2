@@ -28,9 +28,15 @@ export interface PlanFinding {
    * neither evidence nor a waiver, a closure an evidence-only line for the
    * same task later corrected. Anchored on the ledger line, or on the
    * PLAN.md frontmatter that declared the id when no closing line exists.
+   * observed-mismatch (#357): a standing closing line carrying the
+   * `observed-mismatch` marker -- the server re-ran the declared verify at
+   * close and saw a non-zero exit or a timeout. Severity `important`.
    */
   type: "contract-drift" | "unanchored-threshold" | "missing-approaches"
-    | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded";
+    | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded"
+    | "observed-mismatch";
+  /** Set only where a kind carries one; today `observed-mismatch` is `important`. */
+  severity?: "important";
   plan: string; line: number; detail: string;
   counterpart?: { plan: string; line: number };
 }
@@ -54,11 +60,75 @@ export const APPROACHES_MIN_CANDIDATES = 2;
  */
 const TASK_LINE = /^-\s+(?:\*\*#?|#)(\d+(?:\.\d+)?)[\s—-]/;
 
-/** The declaration itself, wherever it sits in the task's paragraph. */
-const VERIFY_CLAUSE = /`verify:\s*(\S[^`]*)`/i;
+/**
+ * The declaration itself (#357: the one parser -- plan_check, the ledger
+ * append and the close-time re-run all read through it). A clause is a
+ * backtick span whose WHOLE content is `verify: <command>`, and the span
+ * either opens its line (indentation allowed: the house form, the clause
+ * on its own line under the task) or closes it (the inline form at the end
+ * of a bullet). Prose that mentions a `verify:` span mid-sentence is never
+ * the declaration: an empty span ("two `verify:` parsers exist") has no
+ * command, and a span inside a sentence neither opens nor closes the line.
+ */
+const VERIFY_SPAN_OPENS = /^\s*`verify:[ \t]*([^`\s][^`]*)`/i;
+const VERIFY_SPAN_CLOSES = /`verify:[ \t]*([^`\s][^`]*)`[\s.]*$/i;
 
-/** Where a task's text ends: the next task bullet, or any heading. */
-const TASK_ENDS = /^(?:-\s+\*\*#|#{1,6}\s)/;
+/**
+ * The declared command on one line, or null when the line carries no
+ * declaration (see the span rule above).
+ *
+ * :param line: one PLAN.md line
+ * :returns the command, trimmed, or null
+ */
+export function verifyClauseOf(line: string): string | null {
+  const m = VERIFY_SPAN_OPENS.exec(line) ?? VERIFY_SPAN_CLOSES.exec(line);
+  return m ? m[1].trim() : null;
+}
+
+/** Where a task's text ends: the next task bullet (bold or plain), or any heading. */
+const TASK_ENDS = /^(?:-\s+(?:\*\*#|\*\*\d|#)|#{1,6}\s)/;
+
+/**
+ * The `verify:` command PLAN.md declares for one issue (#206), or null.
+ * The search covers the task's own block -- its bullet line down to the
+ * next task bullet or heading -- and the LAST clause in that block wins,
+ * so a task that restates its check after a revision reads the restated
+ * one.
+ *
+ * :param lines: PLAN.md split into lines
+ * :param issueId: the tracker id, with or without a leading "#"
+ * :returns the declared command, or null when the task declares none
+ */
+export function declaredVerifyIn(lines: string[], issueId: string): string | null {
+  const id = issueId.trim().replace(/^#/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const start = lines.findIndex((l) =>
+    new RegExp(`^-\\s+(?:\\*\\*#?|#)${id}[\\s—-]`).test(l));
+  if (start === -1) return null;
+  let found: string | null = null;
+  for (let i = start; i < lines.length; i++) {
+    if (i > start && TASK_ENDS.test(lines[i])) break;
+    found = verifyClauseOf(lines[i]) ?? found;
+  }
+  return found;
+}
+
+/**
+ * Whether a declared command is a plain shell line the server may run
+ * verbatim at close (#357), rather than prose or a template. Refused: more
+ * than one line, an em/en dash or ellipsis (plan prose, never shell), a
+ * `<placeholder>`, and a manual-check opener ("manual", "none", "n/a",
+ * "tbd", "todo"). Everything else is the owner's own shell line.
+ *
+ * :param command: the declared command
+ * :returns true when it is safe to hand to a shell as written
+ */
+export function isPlainShellLine(command: string): boolean {
+  const c = command.trim();
+  if (!c || /[\r\n]/.test(c)) return false;
+  if (/[—–…]/.test(c) || /\.\.\.(?:\s|$)/.test(c)) return false;
+  if (/<[A-Za-z][\w.-]*>/.test(c)) return false;
+  return !/^(?:manual|none|n\/a|tbd|todo)\b/i.test(c);
+}
 
 /**
  * Task lines in a plan that never declare how they will be proved.
@@ -76,9 +146,9 @@ export function judgeVerifyDeclarations(lines: string[]): { line: number; issue:
   for (let i = 0; i < lines.length; i++) {
     const m = TASK_LINE.exec(lines[i]);
     if (!m) continue;
-    let declared = VERIFY_CLAUSE.test(lines[i]);
-    for (let j = i + 1; j < lines.length && !TASK_ENDS.test(lines[j]); j++) {
-      if (VERIFY_CLAUSE.test(lines[j])) { declared = true; break; }
+    let declared = verifyClauseOf(lines[i]) !== null;
+    for (let j = i + 1; !declared && j < lines.length && !TASK_ENDS.test(lines[j]); j++) {
+      declared = verifyClauseOf(lines[j]) !== null;
     }
     if (!declared) out.push({ line: i + 1, issue: m[1] });
   }
@@ -249,8 +319,9 @@ export const EVIDENCE_GATE_SHIPPED = 23;
 const bareId = (id: string): string => id.trim().replace(/^#/, "");
 
 /**
- * The LEDGER.md gates for one phase: tdd-missing, evidence-missing and
- * closure-superseded, read off the same parse distill_manifest uses.
+ * The LEDGER.md gates for one phase: tdd-missing, evidence-missing,
+ * closure-superseded and observed-mismatch, read off the same parse
+ * distill_manifest uses.
  *
  * A phase with no LEDGER.md yet reports nothing — plan_check runs at plan
  * time too, before any task has closed. Once the ledger exists every
@@ -315,6 +386,18 @@ function judgeLedgerGates(projectDir: string, p: ScannedPlan): PlanFinding[] {
         : { type: "tdd-missing", plan: p.rel, line: declaredAt("tdd"),
           detail: `#${id} is a tdd: task with no closing line in LEDGER.md` });
     }
+  }
+  // Observed mismatch (#357): the standing close for an issue claimed a
+  // pass its close-time re-run did not reproduce. Every standing close is
+  // read, planned or not -- the line is the server's own observation. A
+  // later passing close for the same issue is the one that speaks.
+  for (const [id, closing] of standing) {
+    if (!closing.observedMismatch) continue;
+    out.push({
+      type: "observed-mismatch", severity: "important", plan: ledger, line: closing.line,
+      detail: `#${id} closed on claimed evidence, but the server's re-run of the declared verify `
+        + `observed exit ${closing.observedExit ?? "unknown"} — read both before trusting the close`,
+    });
   }
   return out;
 }

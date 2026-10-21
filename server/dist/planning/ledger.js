@@ -10,9 +10,11 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { CairnError } from "../errors.js";
 import { plansRoot } from "./artifacts.js";
-import { actualsSegment, takeReceipt } from "./close-receipt.js";
+import { declaredVerifyIn } from "./check.js";
+import { actualsSegment, isObservedMismatch, observedSegment, takeReceipt, } from "./close-receipt.js";
 import { gitSpan } from "./duration.js";
 import { projectStatus } from "./status.js";
+import { observeDeclaredVerify } from "./verify-rerun.js";
 /** Short-SHA form used in the ledger line -- matches `git log --abbrev=7` convention. */
 function shortSha(commit) {
     return commit.slice(0, 7);
@@ -74,7 +76,7 @@ function validateEntry(entry) {
     }
     evidenceSegment(entry);
 }
-function formatEntry(entry, actuals) {
+function formatEntry(entry, actuals, observed = "") {
     const tdd = entry.redCommit
         ? `tdd ${shortSha(sanitize(entry.redCommit))}..${shortSha(sanitize(entry.greenCommit))} — `
         : "";
@@ -91,30 +93,19 @@ function formatEntry(entry, actuals) {
     }
     return `- [x] ${sanitize(entry.taskRef)} — ${sanitize(entry.summary)} — commits `
         + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
-        + `${tdd}${evidence}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
+        + `${tdd}${evidence}${observed}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
 }
 /**
  * The `verify:` command a phase's PLAN.md declared for one issue (#206),
- * or null when the plan names none. The declaration may sit anywhere in
- * that task's paragraph; the search stops at the next task bullet.
+ * or null when the plan names none. One parser for the whole server
+ * (#357): plan_check's `declaredVerifyIn` reads the task block, and the
+ * last clause in it wins.
  */
 export function declaredVerifyFor(projectDir, phaseDir, issueId) {
     const planPath = join(plansRoot(projectDir), "phases", phaseDir, "PLAN.md");
     if (!existsSync(planPath))
         return null;
-    const lines = readFileSync(planPath, "utf8").split("\n");
-    const id = issueId.replace(/^#/, "");
-    const start = lines.findIndex((l) => new RegExp(`^-\\s+(?:\\*\\*#?|#)${id.replace(/[.*+?^$()|[\]\\]/g, "\\$&")}[\\s—-]`).test(l));
-    if (start === -1)
-        return null;
-    for (let i = start; i < lines.length; i++) {
-        if (i > start && /^(?:-\s+\*\*#|#{1,6}\s)/.test(lines[i]))
-            break;
-        const m = /`verify:\s*(\S[^`]*)`/i.exec(lines[i]);
-        if (m)
-            return m[1].trim();
-    }
-    return null;
+    return declaredVerifyIn(readFileSync(planPath, "utf8").split("\n"), issueId);
 }
 /**
  * Whether the evidence actually run cites what the plan declared.
@@ -172,11 +163,13 @@ export function checkLedgerEntry(projectDir, phaseDir, entry) {
  */
 export function appendLedger(projectDir, phaseDir, entry) {
     const phase = checkLedgerEntry(projectDir, phaseDir, entry);
+    const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
     const path = join(plansRoot(projectDir), "phases", phaseDir, "LEDGER.md");
     const span = () => gitSpan(projectDir, sanitize(entry.baseCommit), sanitize(entry.headCommit));
     let line;
     let wall;
     let degraded;
+    let observation = null;
     if ((entry.kind ?? "close") === "evidence") {
         // An evidence line closes nothing (#256), so it must not eat the close
         // receipt a real close of this issue may still be waiting to render.
@@ -187,6 +180,14 @@ export function appendLedger(projectDir, phaseDir, entry) {
         // The close receipt (#233): consumed only once the line is known to be
         // writable. takeReceipt never throws -- a missing or broken receipt
         // degrades the segment, it never fails the append.
+        // The re-run (#357) happens here, inside the one write path, so the
+        // folded close (#365) and a standalone ledger_append both observe. It
+        // never throws and is null when rerun is off -- the line then carries
+        // no observed segment at all, byte-identical to before.
+        observation = observeDeclaredVerify({
+            projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
+            declared: declaredVerify, baseCommit: sanitize(entry.baseCommit),
+        });
         const taken = takeReceipt(projectDir, sanitize(entry.issueId));
         // Duration ladder (#232): the close measured rungs one and two when it
         // could; rung three needs the commit range, which only this append holds.
@@ -195,7 +196,7 @@ export function appendLedger(projectDir, phaseDir, entry) {
         wall = fromClose && fromClose.source !== "none" && fromClose.minutes !== null
             ? fromClose : span();
         line = formatEntry(entry, actualsSegment(taken.receipt
-            ? { receipt: taken.receipt, wall } : { degraded: taken.degraded, wall }));
+            ? { receipt: taken.receipt, wall } : { degraded: taken.degraded, wall }), observation ? observedSegment(observation) : "");
         degraded = taken.degraded;
     }
     if (existsSync(path)) {
@@ -204,7 +205,6 @@ export function appendLedger(projectDir, phaseDir, entry) {
     else {
         writeFileSync(path, ledgerHeader(phase) + line);
     }
-    const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
     return {
         path, line: line.trimEnd(),
         ...(degraded ? { degraded: [degraded] } : {}),
@@ -215,5 +215,6 @@ export function appendLedger(projectDir, phaseDir, entry) {
                 ? citesDeclared(declaredVerify, entry.evidence.command)
                 : false,
         }),
+        ...(observation ? { observed: observation, observedMismatch: isObservedMismatch(observation) } : {}),
     };
 }

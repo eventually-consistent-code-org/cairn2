@@ -1,4 +1,4 @@
-import { type Measured } from "./close-receipt.js";
+import { type Measured, type Observation } from "./close-receipt.js";
 /** Typed close evidence (phase 23): what was run, and what it showed. */
 export interface CloseEvidence {
     /** The proving command — a suite name or the shell line ("npm test", "vitest run x.test.ts"). */
@@ -39,8 +39,9 @@ export interface LedgerEntryInput {
 export type LedgerKind = "close" | "evidence";
 /**
  * The `verify:` command a phase's PLAN.md declared for one issue (#206),
- * or null when the plan names none. The declaration may sit anywhere in
- * that task's paragraph; the search stops at the next task bullet.
+ * or null when the plan names none. One parser for the whole server
+ * (#357): plan_check's `declaredVerifyIn` reads the task block, and the
+ * last clause in it wins.
  */
 export declare function declaredVerifyFor(projectDir: string, phaseDir: string, issueId: string): string | null;
 /**
@@ -72,4 +73,9 @@ export declare function appendLedger(projectDir: string, phaseDir: string, entry
     declaredVerify?: string;
     /** Whether the evidence run cites that declaration. Reported, never enforced. */
     evidenceCitesDeclared?: boolean;
+    /** What the server saw re-running the declared verify (#357), or why it ran
+     *  nothing. Present only when `verify.rerun` is on and the line is a close. */
+    observed?: Observation;
+    /** The close claimed a pass the re-run did not reproduce. Reported, never refused. */
+    observedMismatch?: boolean;
 };

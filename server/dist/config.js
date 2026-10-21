@@ -96,6 +96,18 @@ export const ConfigSchema = z.object({
             .prefault({}),
     })
         .prefault({}),
+    // Close-time re-run of the declared verify (#357). Off by default: when
+    // on, a close-kind ledger append whose evidence command equals the
+    // PLAN.md `verify:` line character for character runs THAT line (never
+    // the worker's string) in the project root and records what it observed
+    // beside what was claimed. A mismatch is reported, never refused (ADR
+    // 0017). Strict like `seats`: an unknown key here is a typo, refused.
+    verify: z
+        .strictObject({
+        rerun: z.boolean().default(false),
+        timeoutSeconds: z.number().int().min(1).max(3600).default(600),
+    })
+        .prefault({}),
     // Per-provider peer CLI settings (Tier F2 #997) — absent provider or
     // absent field means enabled with defaults; unknown provider keys are
     // rejected by the enum-keyed record below.

@@ -51,6 +51,9 @@ export interface DistillManifest {
   /** Closure lines an evidence line for the same taskRef later corrected --
    *  the issue reads NOT closed. */
   superseded: DistillLedgerEntry[];
+  /** Standing closures whose close-time re-run (#357) did not reproduce the
+   *  claimed pass -- a non-zero exit or a timeout, with the exit observed. */
+  observedMismatches: (DistillLedgerEntry & { exit: string })[];
   /** Union range the ledger lines span (closure and evidence lines alike --
    *  both landed commits): first line's base to last line's head (the ledger is append-only, so file order IS chronological order).
    *  Null when the ledger has no parsed entries. */
@@ -62,13 +65,14 @@ export interface DistillManifest {
 
 // The exact shape ledger.ts formatEntry writes -- em dashes and all:
 //   - [x] <taskRef> — <summary> — commits <base7>..<head7> — [tdd <r>..<g> — ]
-//     [evidence <cmd> => <result> — | waived <reason> — ][actuals <k=v ...> — ]
-//     <issueId> closed <date>
+//     [evidence <cmd> => <result> — | waived <reason> — ][observed <k=v ...> — ]
+//     [actuals <k=v ...> — ]<issueId> closed <date>
 // taskRef and summary match lazily so the "commits <sha>..<sha>" anchor, not
 // an em dash inside a summary, decides where the fields end. The evidence
 // segment (phase 23) is optional so pre-gate lines keep parsing; the writer
 // strips em dashes from evidence text so the segment can't swallow issueId.
-// The actuals segment (phase 24.7) is optional for the same reason.
+// The actuals segment (phase 24.7) is optional for the same reason, and so
+// is the observed segment (#357), written only when `verify.rerun` is on.
 //
 // An evidence line (#256) makes no closure claim: unchecked box, optional
 // note segment, and an "evidence for <issueId> <date>" tail. It is matched
@@ -78,14 +82,17 @@ const EVIDENCE_LINE_RE = new RegExp(
   + "(?:tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
   + "(?:(?:evidence|waived) [^—]*? — )?(?:note [^—]*? — )?evidence for (.+?) (.+)$",
 );
-// The closure pattern also captures its two gate segments (groups 5 and 6)
-// so plan_check's ledger gates read the same parse distill does -- one
-// grammar, one parser.
+// The closure pattern also captures its gate segments (groups 5, 6 and 7:
+// tdd, evidence, observed) so plan_check's ledger gates read the same parse
+// distill does -- one grammar, one parser.
 const LEDGER_LINE_RE = new RegExp(
   "^- \\[x\\] (.+?) — (.+?) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
   + "(tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
-  + "((?:evidence|waived) [^—]*? — )?(?:actuals [^—]*? — )?(.+?) closed (.+)$",
+  + "((?:evidence|waived) [^—]*? — )?(observed [^—]*? — )?(?:actuals [^—]*? — )?(.+?) closed (.+)$",
 );
+// Inside an observed segment: the exit it recorded, and the mismatch marker.
+const OBSERVED_EXIT_RE = /\bexit=(\S+)/;
+const OBSERVED_MISMATCH_RE = /\sobserved-mismatch\s/;
 
 interface ResolvedPhase {
   number: number; name: string; dir: string; archived: boolean; base: string;
@@ -146,6 +153,10 @@ export interface ParsedClosure extends DistillLedgerEntry {
   tdd: boolean;
   /** Carries an `evidence <cmd> => <result>` or `waived <reason>` segment. */
   closeEvidence: boolean;
+  /** The close-time re-run's exit (#357) when the line carries one ("0", "1", "timeout"). */
+  observedExit?: string;
+  /** Carries the literal `observed-mismatch` marker. */
+  observedMismatch: boolean;
   /** Superseded closures only: the evidence line that corrected it. */
   supersededBy?: number;
 }
@@ -205,10 +216,13 @@ export function parseLedger(base: string): ParsedLedger {
         + `format -- skipped: ${line.slice(0, 120)}`);
       continue;
     }
+    const observedExit = m[7] === undefined ? undefined : OBSERVED_EXIT_RE.exec(m[7])?.[1];
     entries.push({
       taskRef: m[1], summary: m[2], baseCommit: m[3], headCommit: m[4],
-      issueId: m[7], closedDate: m[8],
+      issueId: m[8], closedDate: m[9],
       line: i + 1, tdd: m[5] !== undefined, closeEvidence: m[6] !== undefined,
+      ...(observedExit !== undefined ? { observedExit } : {}),
+      observedMismatch: m[7] !== undefined && OBSERVED_MISMATCH_RE.test(m[7]),
     });
     extend(m[3], m[4]);
   }
@@ -250,6 +264,8 @@ export function distillManifest(projectDir: string,
     ledgerEntries: entries.map(asEntry),
     evidenceEntries: evidence.map(asEvidence),
     superseded: superseded.map(asEntry),
+    observedMismatches: entries.filter((e) => e.observedMismatch)
+      .map((e) => ({ ...asEntry(e), exit: e.observedExit ?? "unknown" })),
     commitRange: range,
     skipped,
   };

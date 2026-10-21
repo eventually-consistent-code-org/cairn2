@@ -35,6 +35,11 @@ export interface DistillManifest {
     /** Closure lines an evidence line for the same taskRef later corrected --
      *  the issue reads NOT closed. */
     superseded: DistillLedgerEntry[];
+    /** Standing closures whose close-time re-run (#357) did not reproduce the
+     *  claimed pass -- a non-zero exit or a timeout, with the exit observed. */
+    observedMismatches: (DistillLedgerEntry & {
+        exit: string;
+    })[];
     /** Union range the ledger lines span (closure and evidence lines alike --
      *  both landed commits): first line's base to last line's head (the ledger is append-only, so file order IS chronological order).
      *  Null when the ledger has no parsed entries. */
@@ -58,6 +63,10 @@ export interface ParsedClosure extends DistillLedgerEntry {
     tdd: boolean;
     /** Carries an `evidence <cmd> => <result>` or `waived <reason>` segment. */
     closeEvidence: boolean;
+    /** The close-time re-run's exit (#357) when the line carries one ("0", "1", "timeout"). */
+    observedExit?: string;
+    /** Carries the literal `observed-mismatch` marker. */
+    observedMismatch: boolean;
     /** Superseded closures only: the evidence line that corrected it. */
     supersededBy?: number;
 }

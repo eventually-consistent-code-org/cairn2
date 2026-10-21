@@ -69,6 +69,10 @@ export declare const ConfigSchema: z.ZodObject<{
             markers: z.ZodDefault<z.ZodArray<z.ZodString>>;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
+    verify: z.ZodPrefault<z.ZodObject<{
+        rerun: z.ZodDefault<z.ZodBoolean>;
+        timeoutSeconds: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strict>>;
     peers: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
         codex: "codex";
         opencode: "opencode";

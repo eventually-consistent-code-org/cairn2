@@ -11,9 +11,14 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { CairnError } from "../errors.js";
 import { plansRoot } from "./artifacts.js";
-import { actualsSegment, takeReceipt, type Measured } from "./close-receipt.js";
+import { declaredVerifyIn } from "./check.js";
+import {
+  actualsSegment, isObservedMismatch, observedSegment, takeReceipt,
+  type Measured, type Observation,
+} from "./close-receipt.js";
 import { gitSpan } from "./duration.js";
 import { projectStatus } from "./status.js";
+import { observeDeclaredVerify } from "./verify-rerun.js";
 
 /** Typed close evidence (phase 23): what was run, and what it showed. */
 export interface CloseEvidence {
@@ -134,7 +139,7 @@ function validateEntry(entry: LedgerEntryInput): void {
   evidenceSegment(entry);
 }
 
-function formatEntry(entry: LedgerEntryInput, actuals: string): string {
+function formatEntry(entry: LedgerEntryInput, actuals: string, observed = ""): string {
   const tdd = entry.redCommit
     ? `tdd ${shortSha(sanitize(entry.redCommit))}..${shortSha(sanitize(entry.greenCommit!))} — `
     : "";
@@ -151,30 +156,21 @@ function formatEntry(entry: LedgerEntryInput, actuals: string): string {
   }
   return `- [x] ${sanitize(entry.taskRef)} — ${sanitize(entry.summary)} — commits `
     + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
-    + `${tdd}${evidence}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
+    + `${tdd}${evidence}${observed}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
 }
 
 /**
  * The `verify:` command a phase's PLAN.md declared for one issue (#206),
- * or null when the plan names none. The declaration may sit anywhere in
- * that task's paragraph; the search stops at the next task bullet.
+ * or null when the plan names none. One parser for the whole server
+ * (#357): plan_check's `declaredVerifyIn` reads the task block, and the
+ * last clause in it wins.
  */
 export function declaredVerifyFor(
   projectDir: string, phaseDir: string, issueId: string,
 ): string | null {
   const planPath = join(plansRoot(projectDir), "phases", phaseDir, "PLAN.md");
   if (!existsSync(planPath)) return null;
-  const lines = readFileSync(planPath, "utf8").split("\n");
-  const id = issueId.replace(/^#/, "");
-  const start = lines.findIndex((l) =>
-    new RegExp(`^-\\s+(?:\\*\\*#?|#)${id.replace(/[.*+?^$()|[\]\\]/g, "\\$&")}[\\s—-]`).test(l));
-  if (start === -1) return null;
-  for (let i = start; i < lines.length; i++) {
-    if (i > start && /^(?:-\s+\*\*#|#{1,6}\s)/.test(lines[i])) break;
-    const m = /`verify:\s*(\S[^`]*)`/i.exec(lines[i]);
-    if (m) return m[1].trim();
-  }
-  return null;
+  return declaredVerifyIn(readFileSync(planPath, "utf8").split("\n"), issueId);
 }
 
 /**
@@ -247,13 +243,20 @@ export function appendLedger(projectDir: string, phaseDir: string,
     declaredVerify?: string;
     /** Whether the evidence run cites that declaration. Reported, never enforced. */
     evidenceCitesDeclared?: boolean;
+    /** What the server saw re-running the declared verify (#357), or why it ran
+     *  nothing. Present only when `verify.rerun` is on and the line is a close. */
+    observed?: Observation;
+    /** The close claimed a pass the re-run did not reproduce. Reported, never refused. */
+    observedMismatch?: boolean;
   } {
   const phase = checkLedgerEntry(projectDir, phaseDir, entry);
+  const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
   const path = join(plansRoot(projectDir), "phases", phaseDir, "LEDGER.md");
   const span = () => gitSpan(projectDir, sanitize(entry.baseCommit), sanitize(entry.headCommit));
   let line: string;
   let wall: Measured;
   let degraded: string | undefined;
+  let observation: Observation | null = null;
   if ((entry.kind ?? "close") === "evidence") {
     // An evidence line closes nothing (#256), so it must not eat the close
     // receipt a real close of this issue may still be waiting to render.
@@ -263,6 +266,14 @@ export function appendLedger(projectDir: string, phaseDir: string,
     // The close receipt (#233): consumed only once the line is known to be
     // writable. takeReceipt never throws -- a missing or broken receipt
     // degrades the segment, it never fails the append.
+    // The re-run (#357) happens here, inside the one write path, so the
+    // folded close (#365) and a standalone ledger_append both observe. It
+    // never throws and is null when rerun is off -- the line then carries
+    // no observed segment at all, byte-identical to before.
+    observation = observeDeclaredVerify({
+      projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
+      declared: declaredVerify, baseCommit: sanitize(entry.baseCommit),
+    });
     const taken = takeReceipt(projectDir, sanitize(entry.issueId));
     // Duration ladder (#232): the close measured rungs one and two when it
     // could; rung three needs the commit range, which only this append holds.
@@ -271,7 +282,8 @@ export function appendLedger(projectDir: string, phaseDir: string,
     wall = fromClose && fromClose.source !== "none" && fromClose.minutes !== null
       ? fromClose : span();
     line = formatEntry(entry, actualsSegment(taken.receipt
-      ? { receipt: taken.receipt, wall } : { degraded: taken.degraded!, wall }));
+      ? { receipt: taken.receipt, wall } : { degraded: taken.degraded!, wall }),
+    observation ? observedSegment(observation) : "");
     degraded = taken.degraded;
   }
   if (existsSync(path)) {
@@ -279,7 +291,6 @@ export function appendLedger(projectDir: string, phaseDir: string,
   } else {
     writeFileSync(path, ledgerHeader(phase) + line);
   }
-  const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
   return {
     path, line: line.trimEnd(),
     ...(degraded ? { degraded: [degraded] } : {}),
@@ -290,5 +301,6 @@ export function appendLedger(projectDir: string, phaseDir: string,
         ? citesDeclared(declaredVerify, entry.evidence.command)
         : false,
     }),
+    ...(observation ? { observed: observation, observedMismatch: isObservedMismatch(observation) } : {}),
   };
 }

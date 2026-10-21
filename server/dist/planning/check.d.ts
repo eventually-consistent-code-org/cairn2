@@ -14,8 +14,13 @@ export interface PlanFinding {
      * neither evidence nor a waiver, a closure an evidence-only line for the
      * same task later corrected. Anchored on the ledger line, or on the
      * PLAN.md frontmatter that declared the id when no closing line exists.
+     * observed-mismatch (#357): a standing closing line carrying the
+     * `observed-mismatch` marker -- the server re-ran the declared verify at
+     * close and saw a non-zero exit or a timeout. Severity `important`.
      */
-    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded";
+    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded" | "observed-mismatch";
+    /** Set only where a kind carries one; today `observed-mismatch` is `important`. */
+    severity?: "important";
     plan: string;
     line: number;
     detail: string;
@@ -26,6 +31,37 @@ export interface PlanFinding {
 }
 export declare const APPROACHES_HEADING: RegExp;
 export declare const APPROACHES_MIN_CANDIDATES = 2;
+/**
+ * The declared command on one line, or null when the line carries no
+ * declaration (see the span rule above).
+ *
+ * :param line: one PLAN.md line
+ * :returns the command, trimmed, or null
+ */
+export declare function verifyClauseOf(line: string): string | null;
+/**
+ * The `verify:` command PLAN.md declares for one issue (#206), or null.
+ * The search covers the task's own block -- its bullet line down to the
+ * next task bullet or heading -- and the LAST clause in that block wins,
+ * so a task that restates its check after a revision reads the restated
+ * one.
+ *
+ * :param lines: PLAN.md split into lines
+ * :param issueId: the tracker id, with or without a leading "#"
+ * :returns the declared command, or null when the task declares none
+ */
+export declare function declaredVerifyIn(lines: string[], issueId: string): string | null;
+/**
+ * Whether a declared command is a plain shell line the server may run
+ * verbatim at close (#357), rather than prose or a template. Refused: more
+ * than one line, an em/en dash or ellipsis (plan prose, never shell), a
+ * `<placeholder>`, and a manual-check opener ("manual", "none", "n/a",
+ * "tbd", "todo"). Everything else is the owner's own shell line.
+ *
+ * :param command: the declared command
+ * :returns true when it is safe to hand to a shell as written
+ */
+export declare function isPlainShellLine(command: string): boolean;
 /**
  * Task lines in a plan that never declare how they will be proved.
  *

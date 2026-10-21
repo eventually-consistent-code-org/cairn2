@@ -149,6 +149,26 @@ export function actualsSegment(from) {
         + `est=${estimateField(r.estimate)} worklog=${r.worklog} — `;
 }
 /**
+ * A close is the claim that the declared run passed, so an observed
+ * non-zero exit or a timeout is the mismatch (#357). A skip observed
+ * nothing, so it can never be one.
+ */
+export function isObservedMismatch(o) {
+    return "exit" in o && o.exit !== 0;
+}
+/**
+ * The ledger line's `observed` segment (#357), placed right after the
+ * evidence segment it checks. Space-separated key=value pairs like
+ * `actuals`, never an em dash; the tail stays in the tool result, not on a
+ * one-line record. A mismatch carries the literal `observed-mismatch`
+ * marker that plan_check and distill_manifest read back.
+ */
+export function observedSegment(o) {
+    if (!("exit" in o))
+        return `observed skipped=${o.skipped} — `;
+    return `observed exit=${o.exit} at=${o.at}${isObservedMismatch(o) ? " observed-mismatch" : ""} — `;
+}
+/**
  * Reads and deletes the receipt for one issue. Exactly one of `receipt` /
  * `degraded` is set. An unreadable file is deleted too -- a corrupt receipt
  * left behind would degrade every later append for the same id the same way.

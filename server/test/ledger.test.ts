@@ -3,7 +3,10 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffoldProject, scaffoldPhase } from "../src/planning/artifacts.js";
+import { execFileSync } from "node:child_process";
 import { appendLedger, checkLedgerEntry, declaredVerifyFor } from "../src/planning/ledger.js";
+import { declaredVerifyIn, isPlainShellLine, planCheck, verifyClauseOf } from "../src/planning/check.js";
+import { distillManifest } from "../src/planning/distill-manifest.js";
 import { CairnError } from "../src/errors.js";
 import {
   actualsSegment, receiptsDir, takeReceipt, writeReceipt, type CloseReceipt,
@@ -385,5 +388,173 @@ describe("evidence-only lines (#256)", () => {
     const r = appendLedger(d, phaseDir, entry);
     expect(r.line).toBe(
       "- [x] task-3 — wire adapter retries — commits a1b2c3d..d4e5f6a — " + EV + "PROJ-105 closed 2026-07-14");
+  });
+});
+
+describe("one verify-clause parser (#357)", () => {
+  it("prose naming a `verify:` span is never the declaration; the last real clause wins", () => {
+    // The 2026-10-18 case: an empty `verify:` span in prose, followed on
+    // the same line by another backtick span, read as the declared line.
+    const lines = [
+      "- **#357 — rerun** (3pt). Two `verify:` parsers already exist (see `check.ts`);",
+      "  the old `verify: npm run old` was the wrong check, mid-sentence.",
+      "  `verify: npm run first`",
+      "  `verify: cd server && npx vitest run test/ledger.test.ts`",
+      "- **#358 — next** `verify: npm run other`",
+    ];
+    expect(declaredVerifyIn(lines, "357")).toBe("cd server && npx vitest run test/ledger.test.ts");
+    expect(declaredVerifyIn(lines, "#358")).toBe("npm run other");
+    expect(verifyClauseOf("Two `verify:` parsers already exist (see `check.ts`);")).toBeNull();
+    expect(verifyClauseOf("- **#7 — thing** `verify: npm test`")).toBe("npm test");
+  });
+
+  it("a plain task bullet ends the block, so a task never borrows its neighbour's clause", () => {
+    expect(declaredVerifyIn(["- #7 red first", "- #8 docs `verify: npm test`"], "7")).toBeNull();
+  });
+
+  it("plain shell lines pass; prose, placeholders and manual checks do not", () => {
+    expect(isPlainShellLine("cd server && npx vitest run && ! grep -q x y.md")).toBe(true);
+    expect(isPlainShellLine("<command>")).toBe(false);
+    expect(isPlainShellLine("manual: eyeball the page")).toBe(false);
+    expect(isPlainShellLine("npm test — and read the output")).toBe(false);
+    expect(isPlainShellLine("npm test ...")).toBe(false);
+  });
+});
+
+describe("verify.rerun: the server re-runs the declared verify at close (#357)", () => {
+  const gitIn = (d: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: d, encoding: "utf8" }).trim();
+
+  /**
+   * A project whose PLAN.md declares `declared` for PROJ-105, committed
+   * (tracked) unless `track` is false, with cairn.json's verify block as
+   * given. Returns the commit the plan landed in -- the claim's base.
+   */
+  function rerunProject(declared: string, verify: Record<string, unknown> | undefined,
+    opts: { track?: boolean } = {}): { d: string; phaseDir: string; base: string } {
+    const d = dir();
+    writeFileSync(join(d, "cairn.json"), JSON.stringify({
+      tracker: { type: "local", config: {} }, ...(verify ? { verify } : {}),
+    }));
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 1, "Core");
+    writeFileSync(join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md"),
+      "---\nissues: [PROJ-105]\n---\n# Phase 1\n\n## Tasks\n"
+      + `- **#PROJ-105 — thing** (1pt). Wire it.\n  \`verify: ${declared}\`\n`);
+    let base = "a1b2c3d4e5f6";
+    if (opts.track !== false) {
+      gitIn(d, "init", "-q");
+      gitIn(d, "config", "user.email", "t@t");
+      gitIn(d, "config", "user.name", "t");
+      gitIn(d, "add", "-A");
+      gitIn(d, "commit", "-qm", "plan", "--no-gpg-sign");
+      base = gitIn(d, "rev-parse", "HEAD");
+    }
+    return { d, phaseDir, base };
+  }
+  const closeOn = (base: string, command: string) => ({
+    ...entry, baseCommit: base, headCommit: base, evidence: { command, result: "passed" },
+  });
+  const plain = (base: string) =>
+    `- [x] task-3 — wire adapter retries — commits ${base.slice(0, 7)}..${base.slice(0, 7)} — `
+    + "evidence touch ran.marker => passed — actuals wall=none degraded=no_receipt — PROJ-105 closed 2026-07-14";
+
+  it("rerun off records nothing new: no observed field, the line byte-identical, nothing run", () => {
+    for (const verify of [undefined, { rerun: false }]) {
+      const { d, phaseDir, base } = rerunProject("touch ran.marker", verify);
+      const r = appendLedger(d, phaseDir, closeOn(base, "touch ran.marker"));
+      expect(r.line).toBe(plain(base));
+      expect(r.observed).toBeUndefined();
+      expect(r.observedMismatch).toBeUndefined();
+      expect(existsSync(join(d, "ran.marker"))).toBe(false);
+    }
+  });
+
+  it("rerun on, evidence equals the declared line, it passes: observed.exit = 0 beside the claim", () => {
+    const declared = "echo suite ok && echo 3 passed";
+    const { d, phaseDir, base } = rerunProject(declared, { rerun: true });
+    const r = appendLedger(d, phaseDir, closeOn(base, declared));
+    expect(r.observed).toMatchObject({ exit: 0, tail: "suite ok\n3 passed", command: declared });
+    expect(Number.isNaN(Date.parse((r.observed as { at: string }).at))).toBe(false);
+    expect(r.observedMismatch).toBe(false);
+    expect(r.line).toMatch(/ — evidence echo suite ok && echo 3 passed => passed — observed exit=0 at=\S+ — actuals /);
+    expect(r.line).not.toContain("observed-mismatch");
+    expect(planCheck(d, 1).findings.filter((f) => f.type === "observed-mismatch")).toEqual([]);
+    expect(distillManifest(d, 1).observedMismatches).toEqual([]);
+    // the line still parses as a standing closure
+    expect(distillManifest(d, 1).ledgerEntries.map((e) => e.issueId)).toEqual(["PROJ-105"]);
+  });
+
+  it("rerun on, it fails: the line is marked observed-mismatch, plan_check reports it important, distill lists it", () => {
+    const declared = "echo boom >&2; exit 1";
+    const { d, phaseDir, base } = rerunProject(declared, { rerun: true });
+    const r = appendLedger(d, phaseDir, closeOn(base, declared));
+    // Never refused (ADR 0017): the line is written, the mismatch reported.
+    expect(r.observed).toMatchObject({ exit: 1, tail: "boom" });
+    expect(r.observedMismatch).toBe(true);
+    expect(r.line).toMatch(/ — observed exit=1 at=\S+ observed-mismatch — /);
+    const found = planCheck(d, 1).findings.filter((f) => f.type === "observed-mismatch");
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ severity: "important", plan: expect.stringContaining("LEDGER.md") });
+    expect(found[0].detail).toContain("exit 1");
+    expect(distillManifest(d, 1).observedMismatches).toEqual([expect.objectContaining({
+      issueId: "PROJ-105", exit: "1",
+    })]);
+  });
+
+  it("a worker-supplied command that differs from the declared line is never executed", () => {
+    const { d, phaseDir, base } = rerunProject("touch declared.marker", { rerun: true });
+    const r = appendLedger(d, phaseDir, closeOn(base, "touch worker.marker"));
+    expect(r.observed).toEqual({ skipped: "command-differs" });
+    expect(r.observedMismatch).toBe(false);
+    expect(r.line).toContain(" — observed skipped=command-differs — ");
+    expect(existsSync(join(d, "worker.marker"))).toBe(false);
+    expect(existsSync(join(d, "declared.marker"))).toBe(false);
+  });
+
+  it("a timeout reads exit=timeout and is a mismatch", () => {
+    const declared = "echo started; sleep 5";
+    const { d, phaseDir, base } = rerunProject(declared, { rerun: true, timeoutSeconds: 1 });
+    const t0 = Date.now();
+    const r = appendLedger(d, phaseDir, closeOn(base, declared));
+    expect(Date.now() - t0).toBeLessThan(4500);
+    expect(r.observed).toMatchObject({ exit: "timeout", tail: "started" });
+    expect(r.observedMismatch).toBe(true);
+    expect(r.line).toMatch(/ — observed exit=timeout at=\S+ observed-mismatch — /);
+  });
+
+  it("an untracked PLAN.md has no provenance: reported, not run", () => {
+    const { d, phaseDir, base } = rerunProject("touch ran.marker", { rerun: true }, { track: false });
+    const r = appendLedger(d, phaseDir, closeOn(base, "touch ran.marker"));
+    expect(r.observed).toEqual({ skipped: "plan-untracked" });
+    expect(existsSync(join(d, "ran.marker"))).toBe(false);
+  });
+
+  it("a declared line edited since the claim's base is reported, not run", () => {
+    const { d, phaseDir, base } = rerunProject("echo planned", { rerun: true });
+    const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
+    writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
+    const r = appendLedger(d, phaseDir, closeOn(base, "touch hostile.marker"));
+    expect(r.observed).toMatchObject({ skipped: "declared-changed" });
+    expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+    // committed after the base, the same edit is still refused
+    gitIn(d, "commit", "-qam", "edit", "--no-gpg-sign");
+    expect(appendLedger(d, phaseDir, closeOn(base, "touch hostile.marker")).observed)
+      .toMatchObject({ skipped: "declared-changed" });
+    expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+  });
+
+  it("every other way of not running is a named skip", () => {
+    const { d, phaseDir, base } = rerunProject("<command>", { rerun: true });
+    expect(appendLedger(d, phaseDir, closeOn(base, "<command>")).observed)
+      .toEqual({ skipped: "not-plain-shell" });
+    expect(appendLedger(d, phaseDir, {
+      ...closeOn(base, "x"), evidence: undefined, evidenceWaived: "docs only",
+    }).observed).toEqual({ skipped: "evidence-waived" });
+    expect(appendLedger(d, phaseDir, { ...closeOn(base, "x"), issueId: "PROJ-999" }).observed)
+      .toEqual({ skipped: "no-declared-verify" });
+    // an evidence-kind line closes nothing, so it observes nothing either
+    expect(appendLedger(d, phaseDir, { ...closeOn(base, "<command>"), kind: "evidence" }).observed)
+      .toBeUndefined();
   });
 });

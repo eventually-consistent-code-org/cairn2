@@ -528,6 +528,41 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       expect(res.json.message).toContain("base commit");
       expect((await h.call("issue_get", { id: made.json.id })).json.category).toBe("in_progress");
     });
+
+    // verify.rerun (#357): the fold reaches the same appendLedger, so the
+    // close observes too. The plan is committed before the claim, so the
+    // declared line at the claim's base is the one the close re-runs.
+    it("with verify.rerun on, the folded close re-runs the declared line and reports observed", async () => {
+      const tracker = new FakeTracker();
+      const h = await harness(tracker, { git: true });
+      writeFileSync(join(h.projectDir, "cairn.json"), JSON.stringify({
+        tracker: { type: "github", config: { repo: "o/r" } }, verify: { rerun: true },
+      }));
+      const declared = "echo fold ok; exit 3";
+      writeFileSync(join(h.projectDir, ".cairn", "plans", "phases", "01-core", "PLAN.md"),
+        `---\nissues: [FAKE-1]\n---\n# Phase 1\n\n## Tasks\n- **#FAKE-1 — fold**\n  \`verify: ${declared}\`\n`);
+      execFileSync("git", ["add", "-A"], { cwd: h.projectDir });
+      execFileSync("git", ["commit", "-qm", "plan", "--no-gpg-sign"], { cwd: h.projectDir });
+      const made = await h.call("issue_create", { title: "fold", claim: { wave: "3", task: "fold" } });
+      expect(made.json.id).toBe("FAKE-1");
+      await h.call("context_set", { phase: 1, issueId: made.json.id });
+      const closed = await h.call("issue_close", {
+        id: made.json.id, summary: "Rerun observed", evidence: { command: declared, result: "all passed" },
+      });
+      // the close itself is never refused over what the re-run saw (ADR 0017)
+      expect(closed.isError).toBeFalsy();
+      expect(closed.json.category).toBe("closed");
+      expect(closed.json.ledger.observed).toMatchObject({ exit: 3, tail: "fold ok", command: declared });
+      expect(closed.json.ledger.observedMismatch).toBe(true);
+      expect(closed.json.ledger.line).toMatch(
+        / — evidence echo fold ok; exit 3 => all passed — observed exit=3 at=\S+ observed-mismatch — actuals /);
+      // standalone ledger_append observes through the same path
+      const again = await h.call("ledger_append", {
+        ...append(made.json.id), baseCommit: headCommit(h.projectDir)!,
+        evidence: { command: "a different command", result: "ok" },
+      });
+      expect(again.json.observed).toEqual({ skipped: "command-differs" });
+    });
   });
 });
 
