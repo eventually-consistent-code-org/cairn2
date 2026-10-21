@@ -83,3 +83,19 @@ is not a plain shell line. Within that boundary the trust is the same as
 the model running the line through its own Bash tool. A project that keeps
 its planning directory out of git, as this repository does, gets the skip
 on every close until it tracks the plan.
+
+The base commit the comparison keys on is the one the server stamped when
+the issue was claimed (#369), never the `baseCommit` on the append call:
+a caller who could name the base could name a commit carrying its own
+edit of the plan. No stamp, no run (`no-claim-record`). The line runs
+under a minimal environment (PATH, HOME, TMPDIR, locale, TERM, user), so
+the tracker tokens the server holds never reach it. What this boundary
+does not close, stated so it can be read as a decision and not an
+oversight: the claim is the agent's act, so an agent that commits a plan
+edit and then claims passes the comparison, and the line itself is not
+classified before it runs. Enabling `verify.rerun` therefore grants
+whoever can commit PLAN.md a shell line outside the PreToolUse hooks;
+keep it off unless plans are owner-reviewed before they are claimed. An
+owner-approval stamp on the plan and the run guard's effect classifier
+(`git-effects.mjs`, #359) applied to the declared line before it runs
+are the follow-up filed at #357's close, phase 30.

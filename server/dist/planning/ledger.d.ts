@@ -62,7 +62,12 @@ export declare function checkLedgerEntry(projectDir: string, phaseDir: string, e
  * mid-task. Ledger rides into git with the closing commit; the server just
  * writes the bytes.
  */
-export declare function appendLedger(projectDir: string, phaseDir: string, entry: LedgerEntryInput): {
+export declare function appendLedger(projectDir: string, phaseDir: string, entry: LedgerEntryInput, opts?: {
+    /** The claim's base commit as the server stamped it, when the caller
+     *  already consumed the claim record (the folded close, #365). Never
+     *  the entry's own baseCommit -- that one is the caller's word (#357). */
+    claimBase?: string;
+}): {
     path: string;
     line: string;
     /** Why this line carries no receipt facts, when it doesn't (#233). */

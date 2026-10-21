@@ -1593,7 +1593,11 @@ default 600). When it's on, a close doesn't just record the evidence the
 worker narrated — the server re-runs the task's declared `verify:` line
 itself, but only when the evidence command equals that line exactly, the
 PLAN.md holding it is tracked by git, and the line is unchanged since the
-claim's base commit. What it saw lands beside the claim: `observed exit=<n>`
+base commit the server stamped at claim time (a base named on the append
+call is never used). It runs under a minimal environment, so no tracker
+token reaches it. Know what you're switching on: whoever can commit
+PLAN.md gets a shell line that runs outside the PreToolUse hooks, so keep
+it off unless plans are owner-reviewed before they're claimed (ADR 0017). What it saw lands beside the claim: `observed exit=<n>`
 on the ledger line, the last 20 lines of output in the tool result. A
 failing or timed-out re-run marks the line `observed-mismatch`, which
 `plan_check` reports as `important` and verify fails the phase on — the

@@ -233,7 +233,12 @@ export function checkLedgerEntry(projectDir: string, phaseDir: string,
  * writes the bytes.
  */
 export function appendLedger(projectDir: string, phaseDir: string,
-  entry: LedgerEntryInput): {
+  entry: LedgerEntryInput, opts: {
+    /** The claim's base commit as the server stamped it, when the caller
+     *  already consumed the claim record (the folded close, #365). Never
+     *  the entry's own baseCommit -- that one is the caller's word (#357). */
+    claimBase?: string;
+  } = {}): {
     path: string; line: string;
     /** Why this line carries no receipt facts, when it doesn't (#233). */
     degraded?: string[];
@@ -272,7 +277,7 @@ export function appendLedger(projectDir: string, phaseDir: string,
     // no observed segment at all, byte-identical to before.
     observation = observeDeclaredVerify({
       projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
-      declared: declaredVerify, baseCommit: sanitize(entry.baseCommit),
+      declared: declaredVerify, claimBase: opts.claimBase,
     });
     const taken = takeReceipt(projectDir, sanitize(entry.issueId));
     // Duration ladder (#232): the close measured rungs one and two when it

@@ -161,7 +161,7 @@ export function checkLedgerEntry(projectDir, phaseDir, entry) {
  * mid-task. Ledger rides into git with the closing commit; the server just
  * writes the bytes.
  */
-export function appendLedger(projectDir, phaseDir, entry) {
+export function appendLedger(projectDir, phaseDir, entry, opts = {}) {
     const phase = checkLedgerEntry(projectDir, phaseDir, entry);
     const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
     const path = join(plansRoot(projectDir), "phases", phaseDir, "LEDGER.md");
@@ -186,7 +186,7 @@ export function appendLedger(projectDir, phaseDir, entry) {
         // no observed segment at all, byte-identical to before.
         observation = observeDeclaredVerify({
             projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
-            declared: declaredVerify, baseCommit: sanitize(entry.baseCommit),
+            declared: declaredVerify, claimBase: opts.claimBase,
         });
         const taken = takeReceipt(projectDir, sanitize(entry.issueId));
         // Duration ladder (#232): the close measured rungs one and two when it

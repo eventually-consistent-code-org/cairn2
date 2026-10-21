@@ -9,8 +9,9 @@ import { declaredVerifyIn, isPlainShellLine, planCheck, verifyClauseOf } from ".
 import { distillManifest } from "../src/planning/distill-manifest.js";
 import { CairnError } from "../src/errors.js";
 import {
-  actualsSegment, receiptsDir, takeReceipt, writeReceipt, type CloseReceipt,
+  actualsSegment, receiptsDir, recordClaim, takeReceipt, writeReceipt, type CloseReceipt,
 } from "../src/planning/close-receipt.js";
+import { minimalEnv } from "../src/planning/verify-rerun.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "cairn-ledger-"));
 
@@ -431,7 +432,7 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
    * given. Returns the commit the plan landed in -- the claim's base.
    */
   function rerunProject(declared: string, verify: Record<string, unknown> | undefined,
-    opts: { track?: boolean } = {}): { d: string; phaseDir: string; base: string } {
+    opts: { track?: boolean; claim?: boolean } = {}): { d: string; phaseDir: string; base: string } {
     const d = dir();
     writeFileSync(join(d, "cairn.json"), JSON.stringify({
       tracker: { type: "local", config: {} }, ...(verify ? { verify } : {}),
@@ -450,6 +451,9 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
       gitIn(d, "commit", "-qm", "plan", "--no-gpg-sign");
       base = gitIn(d, "rev-parse", "HEAD");
     }
+    // The server's own claim stamp (#369) is the only provenance the re-run
+    // keys on; the tests that want it absent pass claim: false.
+    if (opts.claim !== false) recordClaim(d, "PROJ-105", "2026-07-14T10:00:00.000Z", base);
     return { d, phaseDir, base };
   }
   const closeOn = (base: string, command: string) => ({
@@ -542,6 +546,46 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
     expect(appendLedger(d, phaseDir, closeOn(base, "touch hostile.marker")).observed)
       .toMatchObject({ skipped: "declared-changed" });
     expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+  });
+
+  it("the base on the append call is never provenance: no server claim stamp, nothing runs", () => {
+    // A caller who could name the base could name a commit carrying its own
+    // edit of the plan. Without the server's stamp the line is reported, not run.
+    const { d, phaseDir } = rerunProject("echo planned", { rerun: true }, { claim: false });
+    const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
+    writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
+    gitIn(d, "commit", "-qam", "hostile", "--no-gpg-sign");
+    const hostile = gitIn(d, "rev-parse", "HEAD");
+    const r = appendLedger(d, phaseDir, closeOn(hostile, "touch hostile.marker"));
+    expect(r.observed).toMatchObject({ skipped: "no-claim-record" });
+    expect(r.line).toContain(" — observed skipped=no-claim-record — ");
+    expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+  });
+
+  it("with a server claim stamp, a hostile base on the append call is ignored", () => {
+    const { d, phaseDir } = rerunProject("echo planned", { rerun: true });
+    const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
+    writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
+    gitIn(d, "commit", "-qam", "hostile", "--no-gpg-sign");
+    const hostile = gitIn(d, "rev-parse", "HEAD");
+    // the entry names the hostile commit as its base; the stamp still says the planned one
+    const r = appendLedger(d, phaseDir, closeOn(hostile, "touch hostile.marker"));
+    expect(r.observed).toMatchObject({ skipped: "declared-changed" });
+    expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+  });
+
+  it("the declared line runs under a minimal environment: no token the server holds reaches it", () => {
+    process.env.CAIRN_TEST_SECRET_PROBE = "leaked";
+    try {
+      expect(minimalEnv()).not.toHaveProperty("CAIRN_TEST_SECRET_PROBE");
+      expect(minimalEnv({ PATH: "/bin", GITHUB_TOKEN: "x", HOME: "/h" })).toEqual({ PATH: "/bin", HOME: "/h" });
+      const declared = 'test -z "$CAIRN_TEST_SECRET_PROBE" && test -n "$PATH"';
+      const { d, phaseDir, base } = rerunProject(declared, { rerun: true });
+      const r = appendLedger(d, phaseDir, closeOn(base, declared));
+      expect(r.observed).toMatchObject({ exit: 0 });
+    } finally {
+      delete process.env.CAIRN_TEST_SECRET_PROBE;
+    }
   });
 
   it("every other way of not running is a named skip", () => {

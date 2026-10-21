@@ -14,6 +14,8 @@ export interface RerunSettings {
  * :returns the rerun switch and its timeout
  */
 export declare function rerunSettings(projectDir: string): RerunSettings;
+/** The minimal environment the declared line runs under. */
+export declare function minimalEnv(from?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 /**
  * Run the declared line in the project root and capture what happened.
  * stdout and stderr share ONE file descriptor, so the tail interleaves the
@@ -32,11 +34,15 @@ export declare function runDeclared(projectDir: string, command: string, timeout
  * Every way of NOT running is a named skip, checked in this order:
  * evidence waived, no declared verify, the evidence command differs from
  * the declaration (character for character), the declaration is not a
- * plain shell line, PLAN.md is untracked, the declared line changed since
- * the claim's base. Only then does the declared line run.
+ * plain shell line, PLAN.md is untracked, the server holds no claim stamp
+ * with a base for this issue, the declared line changed since that base.
+ * Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
- * :param o.baseCommit: the ledger line's base; the claim stamp's base wins when it is still on disk
+ * :param o.claimBase: the base the server stamped at claim time, when the
+ *   caller already read (and consumed) the claim record -- the folded close
+ *   does; a standalone append leaves it unset and the record is read here.
+ *   The ledger entry's own baseCommit is never consulted: it is the caller's.
  * :returns the observation, or null when rerun is off
  */
 export declare function observeDeclaredVerify(o: {
@@ -47,7 +53,7 @@ export declare function observeDeclaredVerify(o: {
         command: string;
     };
     declared: string | null;
-    baseCommit: string;
+    claimBase?: string;
     settings?: RerunSettings;
     now?: () => Date;
 }): Observation | null;

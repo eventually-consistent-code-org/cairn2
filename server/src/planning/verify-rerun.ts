@@ -8,9 +8,18 @@
 // The trust boundary, stated once: the server runs ONLY the declared line
 // read out of a git-tracked PLAN.md, never the worker-supplied string, and
 // never a declared line that differs from the one at the claim's base
-// commit. Server-side execution bypasses every PreToolUse hook, so the
-// tracked plan file is the whole of the trust; an untracked plan has no
-// provenance and is reported, not run.
+// commit -- the base the SERVER stamped at claim time, never one the
+// append call supplies (a caller who could pick the base could pick a
+// commit carrying its own edit of the plan). Server-side execution
+// bypasses every PreToolUse hook, so the tracked plan file is the whole of
+// the trust; an untracked plan has no provenance and is reported, not run.
+// The line runs with a minimal environment: the server's own env carries
+// tracker tokens, and a verify line has no business reading them.
+// Residual, on purpose: the claim is the agent's act, so an agent that
+// commits a plan edit and THEN claims passes this check. An owner-approval
+// stamp for the plan and an effect classification of the declared line
+// (the run guard's, hooks/scripts/git-effects.mjs) belong to the follow-up
+// filed at #357's close, phase 30.
 //
 // removeWhen: never for the observation itself -- a side effect the server
 // saw is the only evidence a self-graded close cannot narrate around.
@@ -58,6 +67,19 @@ function git(projectDir: string, args: string[]): string {
 // A ref that starts with "-" would read as an option; anything outside a
 // commit-ish alphabet is not a ref the claim could have recorded.
 const SAFE_REF = /^[0-9A-Za-z][0-9A-Za-z._/~^-]*$/;
+
+// What the declared line may see of the server's environment: enough to
+// find node, npm and a cache, and nothing that authenticates anything.
+// The server holds GITHUB_TOKEN and the other tracker tokens for its own
+// use; a verify line that needs a credential is not a verify line.
+const ENV_ALLOWED = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"];
+
+/** The minimal environment the declared line runs under. */
+export function minimalEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const k of ENV_ALLOWED) if (from[k] !== undefined) env[k] = from[k];
+  return env;
+}
 
 /**
  * Whether the declared line has the provenance the server needs before it
@@ -126,7 +148,7 @@ export function runDeclared(projectDir: string, command: string,
     fd = openSync(outPath, fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_TRUNC, 0o600);
     const r = spawnSync(command, {
       cwd: projectDir, shell: true, stdio: ["ignore", fd, fd],
-      timeout: timeoutSeconds * 1000, killSignal: "SIGKILL", env: process.env,
+      timeout: timeoutSeconds * 1000, killSignal: "SIGKILL", env: minimalEnv(),
     });
     const err = r.error as NodeJS.ErrnoException | undefined;
     const timedOut = err?.code === "ETIMEDOUT";
@@ -149,16 +171,20 @@ export function runDeclared(projectDir: string, command: string,
  * Every way of NOT running is a named skip, checked in this order:
  * evidence waived, no declared verify, the evidence command differs from
  * the declaration (character for character), the declaration is not a
- * plain shell line, PLAN.md is untracked, the declared line changed since
- * the claim's base. Only then does the declared line run.
+ * plain shell line, PLAN.md is untracked, the server holds no claim stamp
+ * with a base for this issue, the declared line changed since that base.
+ * Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
- * :param o.baseCommit: the ledger line's base; the claim stamp's base wins when it is still on disk
+ * :param o.claimBase: the base the server stamped at claim time, when the
+ *   caller already read (and consumed) the claim record -- the folded close
+ *   does; a standalone append leaves it unset and the record is read here.
+ *   The ledger entry's own baseCommit is never consulted: it is the caller's.
  * :returns the observation, or null when rerun is off
  */
 export function observeDeclaredVerify(o: {
   projectDir: string; phaseDir: string; issueId: string;
-  evidence?: { command: string }; declared: string | null; baseCommit: string;
+  evidence?: { command: string }; declared: string | null; claimBase?: string;
   settings?: RerunSettings; now?: () => Date;
 }): Observation | null {
   const settings = o.settings ?? rerunSettings(o.projectDir);
@@ -170,7 +196,10 @@ export function observeDeclaredVerify(o: {
   if (o.evidence.command !== o.declared) return { skipped: "command-differs" };
   if (!isPlainShellLine(o.declared)) return { skipped: "not-plain-shell" };
   const planPath = join(plansRoot(o.projectDir), "phases", o.phaseDir, "PLAN.md");
-  const baseRef = readClaimRecord(o.projectDir, o.issueId)?.baseCommit ?? o.baseCommit.trim();
+  const baseRef = o.claimBase?.trim() || readClaimRecord(o.projectDir, o.issueId)?.baseCommit;
+  if (!baseRef) {
+    return { skipped: "no-claim-record", detail: "no server-stamped claim with a base commit for this issue" };
+  }
   const refused = provenance(o.projectDir, planPath, o.issueId, o.declared, baseRef);
   if (refused) return refused;
   return runDeclared(o.projectDir, o.declared, settings.timeoutSeconds, o.now);

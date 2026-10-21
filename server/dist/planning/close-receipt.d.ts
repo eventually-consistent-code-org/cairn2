@@ -102,12 +102,14 @@ export interface Observed {
  * Why a close with `verify.rerun` on ran nothing. Every reason is a named
  * string the tool result and the ledger line carry -- never silence.
  * `plan-untracked`: PLAN.md is not tracked by git, so the declared line has
- * no provenance to check. `base-unreadable`: PLAN.md could not be read at
- * the claim's base commit. `declared-changed`: the declared line differs
- * from the one at that commit. `spawn-failed`: the server's own error
- * running the line (fail-open: the close still lands).
+ * no provenance to check. `no-claim-record`: the server never stamped a
+ * claim with a base commit for this issue, and a base supplied on the
+ * append call is the caller's word, never provenance. `base-unreadable`:
+ * PLAN.md could not be read at the claim's base commit. `declared-changed`:
+ * the declared line differs from the one at that commit. `spawn-failed`:
+ * the server's own error running the line (fail-open: the close still lands).
  */
-export type ObservedSkip = "evidence-waived" | "no-declared-verify" | "command-differs" | "not-plain-shell" | "plan-untracked" | "base-unreadable" | "declared-changed" | "spawn-failed";
+export type ObservedSkip = "evidence-waived" | "no-declared-verify" | "command-differs" | "not-plain-shell" | "plan-untracked" | "no-claim-record" | "base-unreadable" | "declared-changed" | "spawn-failed";
 export type Observation = Observed | {
     skipped: ObservedSkip;
     detail?: string;

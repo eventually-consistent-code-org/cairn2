@@ -1150,7 +1150,10 @@ export function buildServer(deps: {
       let ledgerError: string | undefined;
       if (fold) {
         try {
-          ledger = appendLedger(d, fold.phaseDir, fold.entry);
+          // The claim record was cleared by the close above; its base is
+          // passed on as the server read it, so the re-run (#357) keys on
+          // the stamp, not on the entry the caller could have shaped.
+          ledger = appendLedger(d, fold.phaseDir, fold.entry, { claimBase: claimRecord?.baseCommit });
         } catch (e) {
           ledgerError = e instanceof Error ? e.message : String(e);
         }
