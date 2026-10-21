@@ -1588,6 +1588,20 @@ is tests-pass, standard adds the tracker cross-check, deep adds an
 adversarial verification subagent. VERIFICATION.md is written only on a
 pass, and a failed verify mandatorily becomes a trace.
 
+**`verify.rerun`** (cairn.json, default `false`; `verify.timeoutSeconds`,
+default 600). When it's on, a close doesn't just record the evidence the
+worker narrated — the server re-runs the task's declared `verify:` line
+itself, but only when the evidence command equals that line exactly, the
+PLAN.md holding it is tracked by git, and the line is unchanged since the
+claim's base commit. What it saw lands beside the claim: `observed exit=<n>`
+on the ledger line, the last 20 lines of output in the tool result. A
+failing or timed-out re-run marks the line `observed-mismatch`, which
+`plan_check` reports as `important` and verify fails the phase on — the
+close itself is never refused (ADR 0017). Every reason it ran nothing is
+named in the result (`plan-untracked`, `declared-changed`,
+`command-differs`, …), never silent. The run happens server-side, outside
+your hooks, which is why it only ever runs the owner's tracked plan line.
+
 ### Drift
 
 Drift is a stop signal, not a warning. The drift scan reads every phase's

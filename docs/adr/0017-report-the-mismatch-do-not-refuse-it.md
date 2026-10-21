@@ -55,3 +55,31 @@ they pass, and why the context budget was pinned at the measured shape
 rather than at an aspiration the tree already failed. A gate that cannot
 fail teaches nothing; a gate that fails for the wrong reason teaches
 people to route around it.
+
+## Amendment 2026-10-21
+
+The check above compares two strings the worker wrote; nothing in it is
+something the server saw. With `verify.rerun: true` in cairn.json (off by
+default), a close's ledger append re-runs the task's declared `verify:`
+line itself when the evidence command equals that line character for
+character, in the project root under a timeout (`verify.timeoutSeconds`,
+600 by default), and records `observed { exit, tail, at }` beside the
+claimed evidence: an `observed exit=<n> at=<when>` segment on the ledger
+line, the tail in the tool result. A non-zero exit or a timeout marks the
+line `observed-mismatch`, which `plan_check` reports at `important` and
+`distill_manifest` lists. The decision stands: the close is never refused
+over what the re-run saw. The observation is added, not a new gate.
+
+The trust boundary is the tracked plan file. Server-side execution
+bypasses every PreToolUse hook, so the server runs only the owner-authored
+line it read out of PLAN.md, never the worker-supplied string, and only
+when that PLAN.md is tracked by git and the task's declared line is the
+same at the claim's base commit as it is now (a content comparison, which
+also catches an uncommitted edit). An untracked plan has no provenance and
+a changed line may be a hostile edit, so both are reported as named skips
+(`plan-untracked`, `declared-changed`) and never run; so are a waived
+close, a missing declaration, a differing command and a declaration that
+is not a plain shell line. Within that boundary the trust is the same as
+the model running the line through its own Bash tool. A project that keeps
+its planning directory out of git, as this repository does, gets the skip
+on every close until it tracks the plan.

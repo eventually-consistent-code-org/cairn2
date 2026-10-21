@@ -28,8 +28,10 @@ Verify the given phase per the `cairn-planning` skill.
    (whatever its board state name) FAILS verification — report each
    straggler with its state instead of closing it unexamined.
 4. Ledger gates: the same `plan_check` must report none of `tdd-missing`,
-   `evidence-missing`, `closure-superseded` (the server reads LEDGER.md and
-   owns the pre-phase-23 exemption). Any one → the phase FAILS
+   `evidence-missing`, `closure-superseded`, `observed-mismatch` (the
+   server reads LEDGER.md and owns the pre-phase-23 exemption;
+   `observed-mismatch` is `important` — its close-time re-run saw the
+   declared verify fail or time out, so quote the exit). Any one → the phase FAILS
    verification — report each id and line, do not write VERIFICATION.md.
 5. Write `.cairn/plans/phases/<NN-dir>/VERIFICATION.md`: what was checked, what
    passed, deviations. (Its presence marks the phase verified — drift treats

@@ -175,7 +175,10 @@ pairing overlay applies:
    today, phase dir from the active context (`ledger.phaseDir`
    overrides). Quote its `measured` and `ledger.line`; `ledger` also
    reports `declaredVerify` / `evidenceCitesDeclared`, never refusing a
-   shorthand mismatch. Never compute a time spent: self-reports measured
+   shorthand mismatch. With `verify.rerun` on, pass the declared line
+   verbatim as `evidence.command`: the server re-runs it and reports
+   `ledger.observed`, and an `observedMismatch` is quoted as a finding,
+   never closed over. Never compute a time spent: self-reports measured
    6x-14x high. On stopping early: leave in_progress and post a parked
    comment — why it stopped, what remains.
 7. Nothing to run (docs or plan text only): `issue_close(id)` with no
