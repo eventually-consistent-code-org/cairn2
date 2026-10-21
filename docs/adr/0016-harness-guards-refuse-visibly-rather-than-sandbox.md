@@ -55,3 +55,37 @@ covering the other's ground.
 Cost: an operator who genuinely wants a harness edit pays one flag. That
 is the intended friction, and the refusal text is written to make the
 question — did you actually ask for this? — the thing they read first.
+
+## Amendment 2026-10-21 — the run guard is described by effect (#359)
+
+The decision stands; this changes how the run guard is described and
+built, not what it buys. Cairn stays in the "refused at runtime" tier:
+the classification below makes the run guard's refusals derivable and
+auditable, not airtight.
+
+Its rules used to be an enumerated table, one row per flag spelling and
+one issue per row. Every spelling that discarded work and was not in the
+table slipped through until someone filed the next issue. The run guard
+now classifies each git invocation by what it does, from git's own
+semantics (shortened long options, short clusters, `+refspec`, whole-tree
+pathspecs), into three effects, with `read-only` the default:
+
+- **discards-work** — uncommitted or unpushed work lost with no undo.
+  Refused in every session; the owner's escape is unchanged.
+- **moves-shared-ref** — the default branch or any remote ref changes.
+  Refused onto the default branch without a clean ship-gate stamp, and
+  while a run is live without the push authority granted at staging.
+- **touches-owner-checkout** — the human's working directory changes under
+  them. Refused while a run is live, aimed at the owner's checkout.
+
+The table is data a classifier reads (`hooks/scripts/git-effects.mjs`),
+and the refusals reference effects only. Every refusal names the effect
+and the flag that caused it, so a reader can audit why it fired; a hard
+reset of the owner's checkout carries both of the first and third, and
+says so. The everyday neighbours (`stash drop`, `branch -D`, a single-path
+restore, `clean -n`) carry no discarding effect and stay allowed, as
+before. As with every hook, a classifier that breaks lets the command
+through rather than blocking work. Each of these is asserted in
+`server/test/runguard-effects.test.ts`; the per-issue suite
+`server/test/runguard-guards.test.ts` stayed green unchanged through the
+rewrite.
