@@ -19,12 +19,24 @@
  *   forward through the manifest's own phases while running (#260), so
  *   the run guard can tie a push to a phase the owner authorized.
  *
+ *   The circuit breaker (#358) is the one writer of this file that is not
+ *   the server: the PreToolUse guards (hooks/scripts/breaker.mjs) freeze a
+ *   running run at `auto.breaker` refusals by writing status `stopped` and
+ *   a `stop` block (reason breaker, the last three refusal rows, the
+ *   sessions they came from). A frozen run is terminal like any stopped
+ *   one, and more: every move on it refuses RUN_FROZEN (a re-stop is a
+ *   no-op), and no server write may clobber a freeze that landed between
+ *   its read and its rename -- the re-read in writeManifestFile. Hooks have
+ *   no tracker access, so the one plain-language comment a freeze owes is
+ *   the server's: markFreezeCommented records it, once.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
  * Author(s): John Reed
  */
 import { z } from "zod";
+import { CairnError } from "../errors.js";
 /** Same per-machine hashing scheme as continuity.ts / budget-ledger.ts --
  * exported so the ship-gate stamp keys the same way the manifests do. */
 export declare function pathHash(projectDir: string): {
@@ -84,8 +96,42 @@ export interface RunManifestState {
      * phase start. Absent until the first phase starts — and on manifests
      * written before it existed, which the run guard reads as "no push". */
     currentPhase?: number;
+    /** Why the run stopped, when something other than the executor stopped
+     * it (#358): today only the circuit breaker, written by the guards. */
+    stop?: RunStop;
+}
+/** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
+ * digest, never the raw command or path. */
+export interface RefusalRow {
+    ts: string;
+    guard: string;
+    tool: string;
+    effect: string;
+    reason: string;
+    session_id: string | null;
+    run_id?: string;
+    input_sha256: string;
+}
+/** The breaker's freeze record (#358). */
+export interface RunStop {
+    reason: "breaker";
+    at: string;
+    /** auto.breaker as the guard read it, and the refusals it had counted. */
+    limit: number;
+    count: number;
+    /** The last three refusals -- what the run report lists. */
+    refusals: RefusalRow[];
+    /** The sessions those refusals came from: the run guard refuses their pushes. */
+    sessions: string[];
+    /** The one tracker comment the freeze owes, once posted (server-written). */
+    commentedAt?: string;
+    commentedOn?: string;
 }
 export declare const RunManifestSchema: z.ZodType<RunManifestState>;
+/** True for a manifest the circuit breaker froze (#358). */
+export declare function isFrozenByBreaker(state: RunManifestState | null | undefined): boolean;
+/** The typed refusal every move on a frozen run gets (#358), with the way it ends. */
+export declare function runFrozenError(state: RunManifestState): CairnError;
 /**
  * Writes a fresh manifest at staging time. One manifest per run — an
  * existing manifest for this runId throws instead of being overwritten
@@ -136,7 +182,9 @@ export declare function grantPushAuth(projectDir: string, runId: string, opts?: 
 /**
  * Advances the run's status along the legal lifecycle
  * (staged → running → complete|stopped; staged → stopped for a run
- * abandoned before start). Any other move throws.
+ * abandoned before start). Any other move throws. A run the breaker froze
+ * (#358) is already stopped: stopping it again -- auto's wrap -- is a
+ * no-op, and any other move is RUN_FROZEN.
  */
 export declare function setRunStatus(projectDir: string, runId: string, status: RunStatus, baseDir?: string): RunManifestState;
 /**
@@ -152,3 +200,34 @@ export declare function setRunStatus(projectDir: string, runId: string, status: 
  * :returns the manifest state as written
  */
 export declare function setCurrentPhase(projectDir: string, runId: string, phase: number, baseDir?: string): RunManifestState;
+/**
+ * Every valid manifest for a project, newest staged first (#358) -- what
+ * the outlook board reads to say a project's latest run is frozen. A file
+ * that fails to read or validate is skipped: the board decorates, it never
+ * fails on a bad manifest.
+ *
+ * :param projectDir: the project the runs belong to
+ * :returns manifest states, sorted by `created`, newest first
+ */
+export declare function listRunManifests(projectDir: string, baseDir?: string): RunManifestState[];
+/**
+ * Records that the one plain-language comment a freeze owes was posted
+ * (#358), and on which issue. The comment is the server's -- hooks have no
+ * tracker access -- and goes out at most once per freeze: a manifest that
+ * already says commentedAt is left as it is.
+ *
+ * :param on: the issue the comment went to
+ * :returns the manifest state as written (or as found, already commented)
+ */
+export declare function markFreezeCommented(projectDir: string, runId: string, opts: {
+    on: string;
+    at?: string;
+    baseDir?: string;
+}): RunManifestState;
+/**
+ * The tracker comment a freeze owes (#358), in plain language: what froze
+ * the run, the refusals that tripped it, and the owner's way back. Reasons
+ * and effects are the guards' fixed text, so no command or path reaches
+ * the tracker.
+ */
+export declare function composeFreezeComment(state: RunManifestState): string;

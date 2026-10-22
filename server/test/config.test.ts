@@ -292,6 +292,22 @@ describe("verify.rerun (#357)", () => {
   });
 });
 
+describe("auto.breaker (#358)", () => {
+  const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  it("auto absent → the breaker trips at 3; 0 is the off switch and parses", () => {
+    expect(loadConfig(writeTmpConfig(base)).auto).toEqual({ breaker: 3 });
+    expect(loadConfig(writeTmpConfig({ ...base, auto: { breaker: 0 } })).auto).toEqual({ breaker: 0 });
+  });
+
+  it("a negative, fractional or non-number limit and an unknown key are refused", () => {
+    for (const auto of [{ breaker: -1 }, { breaker: 2.5 }, { breaker: "3" }, { breakr: 3 }]) {
+      expect(() => loadConfig(writeTmpConfig({ ...base, auto })), JSON.stringify(auto))
+        .toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    }
+  });
+});
+
 describe("peers config", () => {
   const base = { tracker: { type: "github", config: { repo: "o/r" } } };
 

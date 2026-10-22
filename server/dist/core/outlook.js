@@ -10,6 +10,7 @@ import { projectStatus } from "../planning/status.js";
 import { sessionLandscape } from "../sessions/store.js";
 import { metricsSegments } from "./metrics.js";
 import { readRegistry } from "./registry.js";
+import { isFrozenByBreaker, listRunManifests } from "../planning/run-manifest.js";
 import { readHandoff, writeHandoff, waveNotes, waveNextVerb, } from "./continuity.js";
 export const OutlookSnapshotSchema = z.object({
     version: z.literal(1),
@@ -34,6 +35,7 @@ export const OutlookSnapshotSchema = z.object({
         nextVerb: z.string().optional(),
         asOf: z.string().optional(),
     }).optional(),
+    frozen: z.object({ runId: z.string(), at: z.string(), refusals: z.number() }).optional(),
 });
 /** Same per-machine hashing scheme as handoffPath/indexDbPath. */
 function pathHash(projectDir) {
@@ -93,6 +95,24 @@ export function waveTracker(previous, wave, now = new Date().toISOString()) {
     };
 }
 /**
+ * The project's latest batch run, when the circuit breaker froze it
+ * (#358) -- re-derived from the run manifests on every emit, like the rest
+ * of the snapshot. Only the newest staged run counts: once the owner
+ * re-stages, the board stops saying frozen. Never throws -- the board
+ * decorates, it doesn't fail.
+ */
+export function frozenRun(projectDir, home) {
+    try {
+        const [latest] = listRunManifests(projectDir, join(home ?? homedir(), ".cairn"));
+        if (!latest || !isFrozenByBreaker(latest) || !latest.stop)
+            return undefined;
+        return { runId: latest.runId, at: latest.stop.at, refusals: latest.stop.count };
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
  * Derives a fresh snapshot and dual-writes it (in-repo + machine mirror),
  * both atomic. Mirrors writeHandoff's guards: unregistered projects skip
  * silently (CONFIG_MISSING, returns null), and the previous snapshot's
@@ -118,6 +138,7 @@ export function emitOutlook(projectDir, patch, home) {
     const previous = readSnapshot(mirror);
     const status = projectStatus(abs);
     const landscape = sessionLandscape(abs);
+    const frozen = frozenRun(abs, home);
     const snapshot = {
         version: 1,
         ts: new Date().toISOString(),
@@ -135,6 +156,7 @@ export function emitOutlook(projectDir, patch, home) {
         tracker: patch?.wave
             ? waveTracker(previous?.tracker, patch.wave)
             : patch?.tracker ?? previous?.tracker,
+        ...(frozen ? { frozen } : {}),
     };
     atomicWrite(mirror, snapshot);
     atomicWrite(outlookLocalPath(projectDir), snapshot);
@@ -258,6 +280,10 @@ export function renderOutlookMd(cards, now) {
         const verified = s.phases.filter((p) => p.verified).map((p) => p.number);
         const next = s.phases.find((p) => p.planned && !p.verified);
         lines.push(`- last activity: ${s.ts}${c.stale ? ` — STALE: ${c.staleReason}` : ""}`);
+        if (s.frozen) {
+            lines.push(`- FROZEN: batch run ${s.frozen.runId} was stopped by the circuit breaker at ${s.frozen.at} `
+                + `after ${s.frozen.refusals} guard refusals — waiting on the owner to re-stage it`);
+        }
         if (verified.length)
             lines.push(`- verified through phase ${Math.max(...verified)}`);
         if (next)

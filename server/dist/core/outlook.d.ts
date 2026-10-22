@@ -22,6 +22,12 @@ export interface OutlookTracker {
     nextVerb?: string;
     asOf?: string;
 }
+/** The project's latest batch run, when the circuit breaker froze it (#358). */
+export interface OutlookFrozen {
+    runId: string;
+    at: string;
+    refusals: number;
+}
 export interface OutlookSnapshot {
     version: 1;
     ts: string;
@@ -36,6 +42,7 @@ export interface OutlookSnapshot {
         thread: number;
     };
     tracker?: OutlookTracker;
+    frozen?: OutlookFrozen;
 }
 export declare const OutlookSnapshotSchema: z.ZodType<OutlookSnapshot>;
 /** The machine-wide mirror the aggregate reads (never walks repos). */
@@ -49,6 +56,14 @@ export declare function outlookLocalPath(projectDir: string): string;
  * prior block gets zeros. asOf is this emit, nextVerb is the resume line.
  */
 export declare function waveTracker(previous: OutlookTracker | undefined, wave: WaveRef, now?: string): OutlookTracker;
+/**
+ * The project's latest batch run, when the circuit breaker froze it
+ * (#358) -- re-derived from the run manifests on every emit, like the rest
+ * of the snapshot. Only the newest staged run counts: once the owner
+ * re-stages, the board stops saying frozen. Never throws -- the board
+ * decorates, it doesn't fail.
+ */
+export declare function frozenRun(projectDir: string, home?: string): OutlookFrozen | undefined;
 /**
  * Derives a fresh snapshot and dual-writes it (in-repo + machine mirror),
  * both atomic. Mirrors writeHandoff's guards: unregistered projects skip
