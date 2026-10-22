@@ -13,6 +13,11 @@
  *   other patterns still apply to those files, and every other path keeps
  *   full strictness. See leak-patterns.mjs for the full rationale.
  *
+ *   Breaker (#358): a block is handed to breaker.mjs, which appends its
+ *   audit row (the pattern names and a digest of the command, never the
+ *   leaking text) and, while a batch run is live, counts it toward
+ *   freezing the run.
+ *
  * removeWhen: never for the scan itself; this hook can retire if the
  *   platform offers a pre-commit content policy cairn can register
  *   patterns with.
@@ -24,6 +29,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { buildPatterns, scanLines, isAllowedPath, patternsForFile } from "./leak-patterns.mjs";
+
+// #358 -- the breaker loads on its own: a breaker.mjs that is missing or
+// broken leaves this guard refusing exactly as before, never crashed
+const BREAKER = await import("./breaker.mjs").catch(() => null);
 
 // Best-effort shell tokenizer -- splits on whitespace and chain operators
 // (&&, ||, ;, |, &) while keeping quoted strings intact. Only used to decide
@@ -102,6 +111,7 @@ try {
   const patterns = buildPatterns(config);
   const allow = config?.leakGuard?.allow ?? [];
   const hits = [];
+  const kinds = new Set(); // the pattern names that hit -- what the breaker's row may say
   let file = null;
   let skipped = true;
   let activePatterns = patterns; // per-file view: path-scoped exemptions applied
@@ -123,6 +133,7 @@ try {
     if (skipped || !line.startsWith("+") || line.startsWith("+++")) continue;
     for (const h of scanLines([line.slice(1)], activePatterns)) {
       hits.push(`${file}:${lineNo}: [${h.name}] ${h.match}`);
+      kinds.add(h.name);
     }
     lineNo++;
   }
@@ -131,6 +142,10 @@ try {
     console.error("cairn leak guard: staged changes leak internal refs —");
     for (const h of hits) console.error(`  ${h}`);
     console.error("fix the lines, allowlist the path via `/cairn tune`, or prefix the command with CAIRN_LEAK_OK=1 to override once.");
+    // #358 -- the audit row and the breaker's count: pattern names only, never a file or a match
+    const reason = `staged lines leak internal refs (${[...kinds].sort().join(", ")})`;
+    const more = BREAKER?.recordRefusal({ guard: "leak", payload, effect: "leaks-internal-refs", reason, projectDir });
+    for (const line of more ?? []) console.error(line);
     process.exit(2);
   }
   process.exit(0);

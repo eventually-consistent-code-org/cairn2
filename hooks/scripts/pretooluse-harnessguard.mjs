@@ -21,7 +21,8 @@
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
- *   pass a hook). Letter case never counts (#295): a path is read in its
+ *   pass a hook), and the refusal log the circuit breaker counts (#358,
+ *   same homes). Letter case never counts (#295): a path is read in its
  *   on-disk case and compared case-folded, and so is a command's name, so a
  *   Mac's volume can't hide either -- a real HOOKS/ on a case-sensitive
  *   volume is refused too. An agent that can rewrite its own hooks can
@@ -35,6 +36,11 @@
  *   sandbox: CAIRN_HARNESS_EDIT=1 is the owner's escape (inline, it exempts
  *   only its own command, #265), never taught by a refusal (#286). What
  *   each tool is read for, and what it can't see, is under Coverage below.
+ *
+ *   Breaker (#358): each refusal is handed to breaker.mjs, which appends
+ *   its audit row (a digest of the input, never the path) and, while a
+ *   batch run is live, counts it toward freezing the run -- a run that
+ *   keeps reaching for its own hooks is a run whose plan went wrong.
  *
  * removeWhen: the platform isolates agent config at the OS level in every
  *   session and harness, so the agent process cannot write its own hooks or
@@ -124,6 +130,10 @@ import {
   SHELLS, SUBSTITUTION_DEPTH, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
+
+// #358 -- the breaker loads on its own: a breaker.mjs that is missing or
+// broken leaves this guard refusing exactly as before, never crashed
+const BREAKER = await import("./breaker.mjs").catch(() => null);
 
 // Constants
 
@@ -541,9 +551,10 @@ function expandVars(raw) {
 
 /**
  * The protected places outside the project (#263): the ship-gate stamp
- * and the run manifests the run guard trusts, in every cairn home they
- * can live in -- CAIRN_HOME (the run guard reads it) and ~/.cairn (the
- * server writes it). The run report beside the manifests stays writable.
+ * and the run manifests the run guard trusts, and the refusal log the
+ * circuit breaker counts (#358), in every cairn home they can live in --
+ * CAIRN_HOME (the run guard reads it) and ~/.cairn (the server writes
+ * it). The run report beside the manifests stays writable.
  *
  * And the plugin copy that actually runs (#267): everything under
  * ~/.claude/plugins (the registry files, the cache each install runs
@@ -573,6 +584,8 @@ function outsideZones() {
     if (!base) continue;
     add(join(base, "ship-gate"), "the ship-gate stamp", true);
     add(join(base, "runs"), "the run manifests", false);
+    // #358 -- the breaker counts these rows; a log the agent can empty is a breaker it can reset
+    add(join(base, "refusals"), "the guard refusal log", true);
   }
   for (const home of HOMES) {
     add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
@@ -2438,6 +2451,11 @@ try {
   console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
   console.error("  If you did not ask for this, something the agent read did — check where the");
   console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
+  // #358 -- the audit row and the breaker's count; fixed text only, never the path
+  const reason = hit.deep ? "a line nested past the reader's depth"
+    : hit.lost ? "a write past a folder the guard can't follow" : `a write to ${hit.what}`;
+  const more = BREAKER?.recordRefusal({ guard: "harness", payload, effect: "changes-harness-config", reason, projectDir });
+  for (const line of more ?? []) console.error(line);
   process.exit(2);
 } catch {
   process.exit(0); // guard must never block work because IT broke
