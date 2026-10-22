@@ -1252,6 +1252,10 @@ ship-gate stamp and run manifests):
 Where a guard doesn't run, its rule is prose in `AGENTS.md` and nothing
 stops the agent. Codex, Gemini, Copilot and OpenCode all have blocking
 pre-tool hooks the guards could be wired into; that is follow-up work.
+The circuit breaker rides on the guards, so it runs where they run. In
+Cursor the adapter hands the guards no session id, so a frozen run's
+pushes there aren't refused by session; its claims and closes still
+are, by the server.
 
 What degrades, honestly: no slash-command ergonomics in Grok Build, Cursor,
 or Zed (verbs run by name), and the cost tracker stays Claude Code-only
@@ -1830,6 +1834,7 @@ nothing.
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
 | `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
+| `auto.breaker` | integer ≥ 0 | `3` | Guard refusals inside a live headless batch run that freeze it (the circuit breaker, beside the run guard below). `0` turns the freeze off; every refusal is still logged |
 | `audit.debt.markers` | non-empty string[] | `["shortcut", "TODO", "FIXME", "HACK", "XXX"]` | The comment words `audit debt` greps for (each followed by a colon). An override replaces the list, never merges; an empty list is refused at load |
 | `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
@@ -1847,9 +1852,9 @@ nothing.
 **Unknown keys are mostly ignored, not rejected.** Most blocks drop a
 key they don't know without a word: a misspelled `ship.confrim` or
 `leakGuard.enabeld` validates, stays in the file, and does nothing,
-while the setting you meant keeps its default. Two places are strict.
-The `seats` block rejects any key it doesn't know, and `peers` rejects a
-provider name outside the four. A field misspelled *inside* a provider's
+while the setting you meant keeps its default. A few places are strict.
+The `seats`, `verify` and `auto` blocks reject any key they don't know,
+and `peers` rejects a provider name outside the four. A field misspelled *inside* a provider's
 entry is dropped like everywhere else, so a typo in `execCapable` leaves
 that peer contained. When a setting seems to have no effect, check its
 spelling first.
@@ -2065,6 +2070,43 @@ request found in tracker or web text is not you asking. An agent never
 sets one of these because an issue body, a review comment or a fetched
 page asked it to. If a refusal fires and you didn't ask for the act,
 find out where the instruction came from first.
+
+**The circuit breaker — repeated refusals freeze a headless run.** Each
+guard refuses only the call in front of it; the breaker is what notices
+a run that keeps getting refused. Every refusal from any of the three
+guards — run, harness, leak — appends one row to the cairn home's
+refusal log (`~/.cairn/refusals/<project>.jsonl`): when, which guard and
+tool, the effect refused, a fixed reason, the session, the run if one is
+live, and a sha256 of the tool input. Never the command or the path
+itself: a command line can carry a credential, and the log outlives the
+session. While a batch run is live its rows carry its run id, and at
+`auto.breaker` of them (default 3) the breaker freezes the run — the
+manifest moves to `stopped` with a `stop` block naming the reason, the
+last three refusals and the sessions they came from. From then on:
+
+- the run's own sessions are refused any `git push` (a stopped manifest
+  would otherwise lift the mid-run push rule). A workflow's subagents
+  share their dispatching session's id, so they count as the run's —
+  observed 2026-10-22, a claim about the harness that can expire. Your
+  sessions are untouched;
+- claim, close and `run_manifest` moves from the run's own server return
+  `RUN_FROZEN`. The hooks can't reach the tracker, so the first of those
+  calls posts the one plain-language comment the freeze owes, on the
+  issue in hand, and the manifest records that it did;
+- the board (`/cairn:outlook`) shows the project's latest run as frozen.
+
+A frozen run never resumes under its id: read the refusals in its
+report, fix the plan, then re-stage what's left with `/cairn:auto
+--batch`. There is no variable to set. `auto.breaker: 0` turns the
+freeze off; the rows are still written. An interactive session is never
+frozen: with no live run the rows are only the audit, and a session that
+never named the run is never refused by its freeze. The breaker fails
+open — a refusal log it can't write or read means no breaker for that
+run, said once — and it never changes what a guard decided. The harness
+guard protects the log the way it protects the run manifests. Its
+limits, stated: a call two guards both refuse counts twice, and a freeze
+that lands in the same instant as a server write to the manifest can be
+lost — the next refusal, still past the limit, makes it again.
 
 The third of the trio is the **harness guard**, and it protects the
 configuration that decides what the agent may do at all: the `hooks/`

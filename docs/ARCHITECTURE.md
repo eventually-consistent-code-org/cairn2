@@ -315,7 +315,12 @@ distinction matters more than the count.
   server config, the settings cascade, the plugin manifests — from the
   agent it configures. Each refuses in one plain line naming the file
   and the way to proceed deliberately, and each fails open: an error
-  inside a guard exits zero rather than blocking work.
+  inside a guard exits zero rather than blocking work. Their refusals
+  also add up: each appends an audit row (a digest of the input, never
+  the command), and a headless batch run refused `auto.breaker` times
+  is frozen by the circuit breaker, which writes the stop into the run
+  manifest itself — the server refuses the frozen run's claims and
+  closes and posts the comment the hooks can't (ADR 0016, amendment).
 - **Advisers** say something and block nothing. The loop check notices
   the same tool called with the same input three times running and
   offers one line, once per streak.
