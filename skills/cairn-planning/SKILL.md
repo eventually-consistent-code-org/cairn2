@@ -61,26 +61,37 @@ Eligibility is per task, decided at plan time, stored in PLAN.md `tdd:`
 frontmatter via `plan_meta_set`; work-time enforcement is the RED/GREEN
 commit pair in the ledger, checked at verify.
 
-## Model routing (research fan-out)
+## Model routing (research fan-out and work waves)
 
 `cairn.json` → `agents.model`: `auto | inherit | haiku | sonnet | opus`.
-`inherit` = session model everywhere; explicit value pins everything; `auto`
-routes per work class:
+`inherit` = session model everywhere; an explicit value pins everything,
+absolutely — no annotation or rubric row overrides it; `auto` routes per
+work class:
 
 | work class | signals | routed model | effort |
 |---|---|---|---|
-| mechanical | enumerate/locate/scrape | small/fast (haiku-tier) | low |
-| synthesis | research briefs, pattern analysis | session model (sonnet-tier) | medium |
-| judgment gates | plan-checker, adversarial verify, architecture trade-offs | strongest available (opus-tier) | high |
+| mechanical | enumerate/locate/scrape, regenerate, rename, a single-file change with a named test | `haiku` | low |
+| routine synthesis | research briefs, pattern analysis, docs, a multi-file change along an existing pattern | `sonnet` | medium |
+| complex synthesis | architecture trade-offs, a multi-file change that adds a mechanism or a seam | `opus` | high |
+| judgment gates | plan-checker, adversarial verify, a spike verdict, anything whose output gates verify/ship | strongest available | high |
+
+Every row names a tier, never "the session model": a session can run
+above `opus` as easily as below it, so "session" is no tier at all.
+Strongest available is, as of 2026-10, Fable, a tier above `opus` (a
+claim about the platform's lineup — re-check it when the lineup moves).
+Pass that model's id; when the session already runs it, omitting the
+model inherits the same tier.
 
 Blast radius rules: output that gates a lifecycle transition (verify/ship)
-routes UP, never down. Downgrade only mechanical work. Uncertain → inherit.
+routes UP, never down — no `model:` annotation or seat preference takes
+a judgment gate below the strongest tier. Downgrade only mechanical work:
+`haiku` is the mechanical row's tier and no other's. Uncertain → inherit.
 
 The effort column is the Agent tool's `effort` dial (Claude Code 2.1.292+),
 passed on EVERY dispatch a verb makes — survey, scout, plan --deep, the
 review seats, work --wave — alongside the routed model; a harness without
 the dial ignores it. It moves with the work class, never with the model:
-a judgment gate on a session-tier model still runs at high. A headless run
+a judgment gate under a `sonnet` pin still runs at high. A headless run
 records the dial it was staged under in its run manifest (`effort`), so
 estimate-vs-actual can tell a cheap run from a thorough one.
 
@@ -89,10 +100,13 @@ subagent to one model and flattens this rubric to a single row — the
 routing above is the mechanism, the variable is its off switch.
 
 The rubric governs ALL research fan-out — `scout`, `survey`, and
-`plan --deep` — not only deep mode. Research verbs dispatch one subagent
-per pending topic, in parallel, classifying each TOPIC by work class to
-pick its model; the main thread writes results and flips markers as each
-agent completes.
+`plan --deep`, not only deep mode — and `work` wave dispatch. Research
+verbs dispatch one subagent per pending topic, in parallel, classifying
+each TOPIC by work class to pick its model; the main thread writes
+results and flips markers as each agent completes. `work` classifies
+each ISSUE the same way, after the pin and the task's PLAN.md `model:`
+annotation have had their say, and prints the per-issue resolution in
+its wave report (order and table in `verbs/work.md` step 2).
 
 ## Lifecycle
 

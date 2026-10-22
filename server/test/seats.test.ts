@@ -705,6 +705,34 @@ describe("wave-brief composition (composeBrief)", () => {
     expect(remembering).toContain("auth moved once");
   });
 
+  it("model (#406): one line after the standing rules, before {{rules}}; absent says the worker inherits", () => {
+    // Per-task content, so it rides at the bottom beside the rules and
+    // never in the prefix; the wave's rules block still ends the brief.
+    const prefix = (t: string) => t.slice(0, t.indexOf("## Task"));
+    const bare = composeBrief(BASE);
+    const inherit = "Model: the session model, inherited — no routing was resolved for this task.";
+    expect(bare).toContain(inherit);
+    expect(bare.indexOf(inherit)).toBeGreaterThan(bare.indexOf("## Standing rules"));
+    expect(bare.indexOf(inherit)).toBeLessThan(bare.indexOf(BASE.rules));
+    expect(bare.trimEnd().endsWith(BASE.rules)).toBe(true);
+
+    const routed = composeBrief({ ...BASE, model: { model: "haiku", by: "rubric", workClass: "mechanical" } });
+    expect(routed).toContain("Model: haiku — mechanical work, by the routing rubric. " +
+      "Any subagent you spawn runs at or below this tier.");
+    expect(routed).not.toContain(inherit);
+    expect(prefix(routed)).toBe(prefix(bare));
+    expect(composeBrief({ ...BASE, model: { model: "opus", by: "annotation" } }))
+      .toContain("Model: opus — the task's `model:` annotation.");
+    expect(composeBrief({ ...BASE, model: { model: "sonnet", by: "pin" } }))
+      .toContain("Model: sonnet — pinned by agents.model.");
+    expect(composeBrief({ ...BASE, model: { by: "pin" } }))
+      .toContain("Model: the session model — agents.model is inherit.");
+    expect(composeBrief({ ...BASE, model: { by: "inherit" } }))
+      .toContain("Model: the session model, inherited — the task could not be classified.");
+    expect(routed).not.toContain("{{model}}");
+    expect(routed).not.toContain("\n\n\n");
+  });
+
   it("rules omitted: slot renders empty, never a dangling marker", () => {
     const brief = composeBrief({
       issue: BASE.issue,

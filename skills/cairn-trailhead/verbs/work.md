@@ -58,6 +58,48 @@ pairing overlay applies:
    in the wave report, so nobody later reads it as a wave that fit by
    default.
 
+   **Model routing (both dispatch paths) — resolve every issue's model
+   before dispatch.** A dispatched worker inherits the session model
+   unless told otherwise, so a wave that skips this runs every task on
+   the session by default, not by choice. Resolution order, first match
+   wins: the `agents.model` pin > the task's `model:` annotation > the
+   rubric by work class > inherit.
+   - **Pin** (`config_get`): `haiku`, `sonnet` or `opus` routes every
+     issue there, annotations included; `inherit` routes every issue to
+     the session model. Absolute — nothing below overrides it.
+   - **Annotation** (under `auto`, the default): the task's PLAN.md line
+     carries `` `model: <tier>` `` (grammar in `plan.md`) → that tier;
+     `auto`, or no annotation, falls through.
+   - **Rubric** — classify the TASK by the cairn-planning table:
+     mechanical → `haiku` (enumerate, locate, regenerate, rename, a
+     single-file change with a named test); routine synthesis → `sonnet`
+     (docs, a research step, a multi-file change along an existing
+     pattern); complex synthesis → `opus` (a multi-file change that adds
+     a mechanism or a seam); judgment gates → strongest available (a
+     spike verdict, anything whose output gates verify or ship — pass
+     that model's id, or omit `model` when the session already runs it).
+   - **Inherit** — a task you cannot classify runs on the session model.
+   Blast radius beats an annotation: a task whose output gates a
+   lifecycle transition never routes below the strongest tier, whatever
+   it is annotated — the report says so on that row. Fill each brief's
+   `{{model}}` slot with the result: one line naming the model and the
+   step that chose it (`composeBrief`'s model line is the reference
+   shape). Print the resolution in the wave report BEFORE dispatch, one
+   row per issue:
+
+   | issue | class | model | by |
+   |---|---|---|---|
+   | #12 | mechanical | haiku | rubric |
+   | #13 | — | sonnet | annotation |
+   | #14 | — | session | inherit |
+
+   `by` is pin, annotation, rubric or inherit; `class` is the rubric's
+   read, `—` where an earlier step decided; `model` is what the dispatch
+   passed, `session` where it left `model` out. A wave that ran
+   all-session then reads as a choice — an `inherit` pin, unclassifiable
+   tasks, or judgment rows on a session already at the strongest tier —
+   never as a platform default nobody noticed.
+
    **Brief composition (both dispatch paths):** every worker's prompt
    composes from `templates/wave-brief.md` — read the template, fill its
    `{{issue}}` (id + title + body), `{{plan_excerpt}}` (this issue's
@@ -83,8 +125,15 @@ pairing overlay applies:
    **Primary — the harness has the `Workflow` tool** (probe #86 validated
    every leg of this path): dispatch the wave as ONE `Workflow` run,
    each `agent()` carrying the cairn-planning rubric's `effort` for its
-   issue's work class (a synthesis-class issue at medium, a judgment-class
-   one at high; the fallback path passes the same dial on each subagent).
+   issue's work class (a routine-synthesis issue at medium, a
+   complex-synthesis or judgment-class one at high; the fallback path
+   passes the same dial on each subagent) and its resolved model from
+   the routing above —
+   `agent(brief, { label, phase, schema, isolation, effort, model })`,
+   with `model` left out only on a row whose model reads `session`. The
+   platform's own default, omit `model` unless confident, is exactly the
+   all-session wave this resolution replaces: the resolution IS the
+   confidence.
    Default script shape — ONE agent per issue: `pipeline(issues, work)`,
    with claim, close and ledger kept in the coordinator's own thread and
    run in wave order, so the paper trail lands in one predictable
@@ -121,8 +170,10 @@ pairing overlay applies:
 
    **Fallback — no `Workflow` tool** (other harnesses): within the wave,
    dispatch one subagent per issue IN PARALLEL — worktree isolation for
-   any file-mutating issue. Each subagent runs the full per-issue
-   lifecycle below (claim → work → close → ledger).
+   any file-mutating issue, each on its resolved model (the subagent's
+   `model`, left out only on a `session` row) and the same `effort`, with
+   the same resolution table in the wave report. Each subagent runs the
+   full per-issue lifecycle below (claim → work → close → ledger).
 3. For each issue id, in order: `issue_get(id)` — skip closed ones. If it's
    assigned to someone who is not you (compare against `user.handle` in
    cairn.json, only when it's set there — if unset, there are no ownership

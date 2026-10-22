@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 import { MAX_CANDIDATES, pairRule, type Control, type RuleLine } from "../src/audit/rule-coverage.js";
+import { ConfigSchema } from "../src/config.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
@@ -276,8 +277,10 @@ describe("free dials (#332)", () => {
   it("the routing rubric carries an effort column and a rule against the workflow model override", () => {
     const skill = read("skills/cairn-planning/SKILL.md");
     expect(skill).toMatch(/\| work class \| signals \| routed model \| effort \|/);
+    // #406: synthesis splits by model, not by effort class alone
     expect(skill).toMatch(/\| mechanical \|.*\| low \|/);
-    expect(skill).toMatch(/\| synthesis \|.*\| medium \|/);
+    expect(skill).toMatch(/\| routine synthesis \|.*\| medium \|/);
+    expect(skill).toMatch(/\| complex synthesis \|.*\| high \|/);
     expect(skill).toMatch(/\| judgment gates \|.*\| high \|/);
     expect(skill).toContain("Never set `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`");
   });
@@ -299,6 +302,66 @@ describe("free dials (#332)", () => {
     const runbook = read("docs/01-runbook.md");
     expect(runbook).toContain("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL");
     expect(runbook).toMatch(/`effort` dial/);
+  });
+});
+
+describe("model routing names concrete tiers and reaches work waves (#406)", () => {
+  const skill = read("skills/cairn-planning/SKILL.md");
+  // The rubric's rows: class → routed model (raw cell, and backticks stripped).
+  const rubric = [...skill.matchAll(/^\| ([a-z ]+) \| [^|\n]+ \| ([^|\n]+) \| (?:low|medium|high) \|$/gm)]
+    .map((m) => ({ cls: m[1], raw: m[2].trim(), model: m[2].trim().replace(/`/g, "") }));
+
+  // work.md step 2 runs from its numeral to step 3's, both at column 0.
+  const work = read("skills/cairn-trailhead/verbs/work.md");
+  const step2 = work.slice(work.indexOf("\n2. "), work.indexOf("\n3. "));
+  const flat2 = step2.replace(/\s+/g, " ");
+  const annotation = "`` `model: <auto|haiku|sonnet|opus>` ``";
+
+  it("the rubric has its four work classes, each routed to a named tier, never the session", () => {
+    expect(rubric.map((r) => r.cls)).toEqual(
+      ["mechanical", "routine synthesis", "complex synthesis", "judgment gates"]);
+    expect(rubric.map((r) => r.model)).toEqual(["haiku", "sonnet", "opus", "strongest available"]);
+    // A Fable session sits above opus, so "session" names no tier at all
+    for (const r of rubric) expect(r.model, r.cls).not.toMatch(/session|inherit/i);
+  });
+
+  it("the rubric's scope sentence names work wave dispatch beside the research verbs", () => {
+    expect(skill.replace(/\s+/g, " ")).toMatch(/The rubric governs ALL research fan-out[^.]*and `work` wave dispatch/);
+  });
+
+  it("work step 2 resolves every issue's model in the stated order", () => {
+    expect(step2.length).toBeGreaterThan(0);
+    expect(flat2).toContain("agents.model");
+    expect(flat2).toContain("Resolution order, first match wins: the `agents.model` pin > " +
+      "the task's `model:` annotation > the rubric by work class > inherit.");
+  });
+
+  it("work's copy of the tiers matches the rubric table, row for row", () => {
+    expect(rubric).toHaveLength(4);
+    for (const r of rubric) expect(flat2, r.cls).toContain(`${r.cls} → ${r.raw}`);
+  });
+
+  it("both dispatch paths carry the resolved model", () => {
+    const primary = flat2.slice(flat2.indexOf("**Primary"), flat2.indexOf("**Fallback"));
+    const fallback = flat2.slice(flat2.indexOf("**Fallback"));
+    expect(primary).toMatch(/agent\(brief, \{[^}]*\bmodel\b[^}]*\}\)/);
+    expect(fallback).toContain("resolved model");
+  });
+
+  it("the wave report prints the per-issue resolution table, and the brief's {{model}} slot is filled", () => {
+    expect(step2).toContain("| issue | class | model | by |");
+    expect(flat2).toContain("`{{model}}`");
+  });
+
+  it("plan's task grammar carries the model: annotation beside seat:, with tiers agents.model accepts", () => {
+    const plan = read("skills/cairn-trailhead/verbs/plan.md").replace(/\s+/g, " ");
+    const at = plan.indexOf(annotation);
+    expect(at).toBeGreaterThan(plan.indexOf("`` `seat: <name>` ``"));
+    const tiers = /model: <([a-z|]+)>/.exec(annotation)![1].split("|");
+    const accepted = ConfigSchema.shape.agents.unwrap().shape.model.options as readonly string[];
+    for (const t of tiers) expect(accepted, t).toContain(t);
+    // inherit is the pin's word, not a per-task one
+    expect(tiers).not.toContain("inherit");
   });
 });
 
