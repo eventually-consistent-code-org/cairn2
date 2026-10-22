@@ -100,10 +100,13 @@ subagent to one model and flattens this rubric to a single row — the
 routing above is the mechanism, the variable is its off switch.
 
 The rubric governs ALL research fan-out — `scout`, `survey`, and
-`plan --deep` — not only deep mode. Research verbs dispatch one subagent
-per pending topic, in parallel, classifying each TOPIC by work class to
-pick its model; the main thread writes results and flips markers as each
-agent completes.
+`plan --deep`, not only deep mode — and `work` wave dispatch. Research
+verbs dispatch one subagent per pending topic, in parallel, classifying
+each TOPIC by work class to pick its model; the main thread writes
+results and flips markers as each agent completes. `work` classifies
+each ISSUE the same way, after the pin and the task's PLAN.md `model:`
+annotation have had their say, and prints the per-issue resolution in
+its wave report (order and table in `verbs/work.md` step 2).
 
 ## Lifecycle
 

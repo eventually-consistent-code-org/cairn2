@@ -274,7 +274,9 @@ upstream bar ships in a format seats load directly.
   template's and is load-bearing: static framing first (the prefix a
   provider can cache across a wave), then issue and plan, then the
   dated memory section, and the standing rules LAST at the recency
-  end of the window.
+  end of the window, closed by the worker's one-line model note
+  (which model it runs on and which routing step chose it; an inherit
+  line when none was resolved) and then the wave's rules.
 - **Dispatch** (`server/src/seats/signals.ts`, `yield.ts`) —
   diff-derived scope signals select firing seats (opt-in per seat,
   full-panel off dial is the default); a persisted per-seat yield

@@ -68,6 +68,17 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
      seat is noted and the brief goes out seatless. No annotation = the
      plain templated brief — annotate only when a seat's lens genuinely
      fits the task, never by default.
+   - A task MAY also name its dispatch model: a backticked
+     `` `model: <auto|haiku|sonnet|opus>` `` annotation on the same
+     first line, beside any `seat:` — at most one per task. It is a
+     work-class call made at plan time, for a task the rubric would
+     misread (`haiku` says "this is mechanical"); `auto`, or no
+     annotation, leaves the call to the cairn-planning rubric at
+     dispatch. `work` resolves every issue's model in its step 2 order
+     (`agents.model` pin > this annotation > the rubric > inherit) and
+     prints each resolution in the wave report. A pin overrides the
+     annotation, and a task whose output gates verify or ship routes to
+     the strongest tier whatever it says.
 4. Challenge round — runs ONLY when `--challenge` was passed OR the
    resolved depth is deep (where it joins the plan-checker pass);
    otherwise skip this step entirely — with no flag at standard depth,
