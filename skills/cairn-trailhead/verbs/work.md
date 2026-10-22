@@ -83,8 +83,8 @@ pairing overlay applies:
    **Primary — the harness has the `Workflow` tool** (probe #86 validated
    every leg of this path): dispatch the wave as ONE `Workflow` run,
    each `agent()` carrying the cairn-planning rubric's `effort` for its
-   issue's work class (a synthesis-class issue at medium, a judgment-class
-   one at high; the fallback path passes the same dial on each subagent).
+   issue's work class (a routine-synthesis issue at medium, a complex-synthesis
+   or judgment-class one at high; the fallback path passes the same dial on each subagent).
    Default script shape — ONE agent per issue: `pipeline(issues, work)`,
    with claim, close and ledger kept in the coordinator's own thread and
    run in wave order, so the paper trail lands in one predictable

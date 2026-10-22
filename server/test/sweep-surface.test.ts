@@ -276,8 +276,10 @@ describe("free dials (#332)", () => {
   it("the routing rubric carries an effort column and a rule against the workflow model override", () => {
     const skill = read("skills/cairn-planning/SKILL.md");
     expect(skill).toMatch(/\| work class \| signals \| routed model \| effort \|/);
+    // #406: synthesis splits by model, not by effort class alone
     expect(skill).toMatch(/\| mechanical \|.*\| low \|/);
-    expect(skill).toMatch(/\| synthesis \|.*\| medium \|/);
+    expect(skill).toMatch(/\| routine synthesis \|.*\| medium \|/);
+    expect(skill).toMatch(/\| complex synthesis \|.*\| high \|/);
     expect(skill).toMatch(/\| judgment gates \|.*\| high \|/);
     expect(skill).toContain("Never set `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`");
   });
@@ -299,6 +301,21 @@ describe("free dials (#332)", () => {
     const runbook = read("docs/01-runbook.md");
     expect(runbook).toContain("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL");
     expect(runbook).toMatch(/`effort` dial/);
+  });
+});
+
+describe("model routing names concrete tiers and reaches work waves (#406)", () => {
+  const skill = read("skills/cairn-planning/SKILL.md");
+  // The rubric's rows: class → routed model, backticks stripped.
+  const rubric = [...skill.matchAll(/^\| ([a-z ]+) \| [^|\n]+ \| ([^|\n]+) \| (?:low|medium|high) \|$/gm)]
+    .map((m) => ({ cls: m[1], model: m[2].trim().replace(/`/g, "") }));
+
+  it("the rubric has its four work classes, each routed to a named tier, never the session", () => {
+    expect(rubric.map((r) => r.cls)).toEqual(
+      ["mechanical", "routine synthesis", "complex synthesis", "judgment gates"]);
+    expect(rubric.map((r) => r.model)).toEqual(["haiku", "sonnet", "opus", "strongest available"]);
+    // A Fable session sits above opus, so "session" names no tier at all
+    for (const r of rubric) expect(r.model, r.cls).not.toMatch(/session|inherit/i);
   });
 });
 
