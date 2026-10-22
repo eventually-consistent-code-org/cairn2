@@ -4,10 +4,11 @@
   the boilerplate every dispatch used to retype; they live here once.
 
   Section order here is load-bearing, not taste:
-    - The invariants — `## Standing rules` plus {{rules}} — render LAST.
-      The recency end of the context window is the reliable attention
-      peak, so the constraints a worker must not violate sit closest to
-      it, after the issue and plan content rather than before it.
+    - The invariants — `## Standing rules`, {{model}} and {{rules}} —
+      render LAST. The recency end of the context window is the reliable
+      attention peak, so the constraints a worker must not violate sit
+      closest to it, after the issue and plan content rather than before
+      it. {{rules}} stays the final slot.
     - The prefix stays static. {{seat_framing}} and the headings are the
       same bytes for every worker in a wave; dated or counted content
       (memory-card dates, staleness marks) renders BELOW them, so a
@@ -30,6 +31,14 @@
                        created date and any staleness mark; empty when
                        the seat remembers nothing. Dated content, so it
                        rides below the prefix and never inside it
+    {{model}}        — one line: the model this worker runs on and which
+                       step of work.md's resolution picked it (the
+                       agents.model pin, the task's `model:` annotation,
+                       the rubric's work class, or inherit), so the
+                       worker sizes any delegation to its tier. Per-task
+                       content, so it rides at the bottom, never in the
+                       prefix; the composer fills an inherit line when no
+                       routing was resolved
     {{rules}}        — wave-specific standing-rule details: expected
                        base sha, setup commands (e.g. `npm ci` first),
                        the dispatching session's commit trailer block
@@ -63,5 +72,7 @@ deviations from the plan.
   stays in plain language — no local paths, tokens, or internal URLs.
 - Stay on this issue's scope; a bug outside it is reported, never an
   inline detour.
+
+{{model}}
 
 {{rules}}

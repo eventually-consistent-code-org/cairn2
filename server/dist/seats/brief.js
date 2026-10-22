@@ -77,22 +77,57 @@ function roleMemory(cards) {
     return lines.join("\n");
 }
 /**
+ * Renders the {{model}} line — which model this worker runs on and which
+ * resolution step picked it, plus the one rule that follows from it: a
+ * worker sizes its own delegation to its tier. Per-task content, so it
+ * renders beside the rules at the bottom, never into the cached prefix.
+ *
+ * :param route: the resolved route, or undefined when nobody routed it
+ * :returns: the one-line model note
+ */
+function modelLine(route) {
+    // Who picked the tier, in the words the wave report's `by` column uses
+    let tier = route?.model ?? "the session model";
+    let why;
+    if (!route) {
+        tier = "the session model, inherited";
+        why = "no routing was resolved for this task";
+    }
+    else if (route.by === "pin") {
+        why = route.model ? "pinned by agents.model" : "agents.model is inherit";
+    }
+    else if (route.by === "annotation") {
+        why = "the task's `model:` annotation";
+    }
+    else if (route.by === "rubric") {
+        why = `${route.workClass ?? "its"} work, by the routing rubric`;
+    }
+    else {
+        tier = "the session model, inherited";
+        why = "the task could not be classified";
+    }
+    return `Model: ${tier} — ${why}. Any subagent you spawn runs at or below this tier.`;
+}
+/**
  * Composes one wave dispatch brief from templates/wave-brief.md.
  *
  * Seatless composition fills the framing slot empty — the generic brief,
  * structurally identical to the hand-written ones this replaces. With a
  * seat, the framing section leads, quoting lens/categories/honesty at
  * the seat's dose. An unprovided optional slot renders empty (never a
- * dangling {{marker}}); blank-line runs left by empty slots collapse,
- * and a trailing run is trimmed — the standing rules land last, so an
- * empty {{rules}} must not leave the brief ending in whitespace.
+ * dangling {{marker}}) — except {{model}}, which always renders a line,
+ * the inherit line when no route is given; blank-line runs left by empty
+ * slots collapse, and a trailing run is trimmed — the standing rules
+ * land last, so an empty {{rules}} must not leave the brief ending in
+ * whitespace.
  *
  * Section order is the template's, not this function's: static framing
  * first (the cacheable prefix), then issue and plan, then the dated
- * seat memory, and the invariants last at the attention peak. Both files
- * move together or the composed brief and the template disagree.
+ * seat memory, and the invariants last at the attention peak — the
+ * model line among them, {{rules}} after it. Both files move together
+ * or the composed brief and the template disagree.
  *
- * :param input: seat (optional), issue content, plan excerpt, rules
+ * :param input: seat (optional), issue content, plan excerpt, rules, model route
  * :returns: the filled brief text, ready to hand a wave worker
  * :raises CairnError: code NOT_FOUND when the template file is missing
  */
@@ -119,6 +154,9 @@ export function composeBrief(input) {
         issue: input.issue,
         plan_excerpt: input.planExcerpt,
         seat_memory: input.roleCards?.length ? roleMemory(input.roleCards) : "",
+        // Always filled: a brief nobody routed says it inherits, rather than
+        // leaving the worker to guess its tier (#406)
+        model: modelLine(input.model),
         rules: input.rules ?? "",
     };
     for (const [key, value] of Object.entries(slots)) {
