@@ -73,6 +73,9 @@ export declare const ConfigSchema: z.ZodObject<{
         rerun: z.ZodDefault<z.ZodBoolean>;
         timeoutSeconds: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strict>>;
+    auto: z.ZodPrefault<z.ZodObject<{
+        breaker: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strict>>;
     peers: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
         codex: "codex";
         opencode: "opencode";

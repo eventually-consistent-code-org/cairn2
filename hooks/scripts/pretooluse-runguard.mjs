@@ -19,6 +19,12 @@
  *   read-only               the default: everything else.
  *   Every refusal names the effect and the flag that caused it.
  *
+ * Breaker (#358): every refusal is also handed to breaker.mjs, which
+ *   appends its audit row (no raw command, a digest of it) and, while a
+ *   batch run is live, counts it toward freezing the run. A run the breaker
+ *   froze is refused any push from its own sessions -- the manifest reads
+ *   `stopped`, which on its own would lift the mid-run push rule.
+ *
  * Corpus: server/test/runguard-effects.test.ts (one test per effect, three
  *   spellings each, and the everyday git that stays allowed) and
  *   server/test/runguard-guards.test.ts, one describe per issue in History.
@@ -163,6 +169,10 @@ import {
   parseInvocation, pushArgs, readArgs, truthy,
 } from "./git-effects.mjs";
 
+// #358 -- the breaker loads on its own: a breaker.mjs that is missing or
+// broken leaves this guard refusing exactly as before, never crashed
+const BREAKER = await import("./breaker.mjs").catch(() => null);
+
 // Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
 // keeps its copy private and pins every path under the real home, while
 // this guard honours CAIRN_HOME, so the few lines live here too.
@@ -250,6 +260,11 @@ const REPEATS = new Set(["while", "until", "for", "select", "repeat", "function"
 
 // A lone word before `(`: `name () { ...; }` defines a function.
 const FUNC_NAME = /^[A-Za-z_][\w.:-]*$/;
+
+// Variables
+
+// The call being judged -- its payload and project -- for the breaker's row (#358). Set once, in Main.
+let CALL = { payload: null, projectDir: process.cwd() };
 
 /**
  * Every git invocation in a command line, parsed, and every command's
@@ -632,40 +647,54 @@ function ownerCheckout(at) {
 }
 
 /**
- * Every manifest for this project whose status is `running`, as
- * { live: [{ runId, state }], unreadable }. "A run is live" is file state
- * in the per-machine cairn home, not an env var, so it survives the agent
- * boundaries an env var would not cross. `unreadable` names a runs folder
- * or manifest that exists but can't be read (#299) -- the guard can't say
- * no run is live, so the gates that ask refuse instead of skipping.
+ * Every manifest for this project whose status is `running`, and every one
+ * the breaker froze (#358), as { live, frozen: [{ runId, state }],
+ * unreadable }. "A run is live" is file state in the per-machine cairn
+ * home, not an env var, so it survives the agent boundaries an env var
+ * would not cross. `unreadable` names a runs folder or manifest that
+ * exists but can't be read (#299) -- the guard can't say no run is live,
+ * so the gates that ask refuse instead of skipping. breaker.mjs keeps a
+ * copy of this listing on purpose: it loads dynamically, so this guard
+ * must not need it to know whether a run is live.
  */
 function liveRuns(projectDir, baseDir) {
   const { base, hash } = pathHash(projectDir);
   const prefix = `${base}-${hash}-`;
   const dir = join(baseDir, "runs");
   const live = [];
+  const frozen = [];
   let entries;
   try {
     entries = readdirSync(dir);
   } catch (e) {
     // no runs dir -- this machine has never staged a batch run
-    return { live, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
+    return { live, frozen, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
   }
   for (const name of entries) {
     if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
     try {
       const state = JSON.parse(readFileSync(join(dir, name), "utf8"));
-      if (state?.status === "running") {
-        live.push({ runId: state.runId ?? name.slice(prefix.length, -5), state });
-      }
+      const run = { runId: state?.runId ?? name.slice(prefix.length, -5), state };
+      if (state?.status === "running") live.push(run);
+      else if (state?.status === "stopped" && state?.stop?.reason === "breaker") frozen.push(run);
     } catch (e) {
       // a corrupt manifest is not evidence of a live run, nor is one
       // deleted since the listing -- but one that can't be read may be
       if (e instanceof SyntaxError || e?.code === "ENOENT") continue;
-      return { live, unreadable: `${join(dir, name)} (${e?.code ?? e})` };
+      return { live, frozen, unreadable: `${join(dir, name)} (${e?.code ?? e})` };
     }
   }
-  return { live, unreadable: null };
+  return { live, frozen, unreadable: null };
+}
+
+/**
+ * True when a run the breaker froze is this session's own (#358): the
+ * session ids of the refusals it counted (stop.sessions). Another session
+ * -- the owner's, in the chair -- is never frozen. No session id, no match.
+ */
+function frozenFor(state, sessionId) {
+  return typeof sessionId === "string" && sessionId !== ""
+    && Array.isArray(state?.stop?.sessions) && state.stop.sessions.includes(sessionId);
 }
 
 /**
@@ -695,6 +724,19 @@ function pushRefusal(state) {
 }
 
 /**
+ * Prints a refusal, hands it to the breaker, and blocks (#358). `why` is
+ * the row's { effect, reason } -- fixed text from the refusal site, never
+ * the command. The breaker's lines (its count, or the freeze) follow the
+ * refusal's own; it never throws, so the exit 2 stands whatever it does.
+ */
+function block(lines, why) {
+  for (const line of lines) console.error(line);
+  const more = BREAKER?.recordRefusal({ guard: "run", payload: CALL.payload, projectDir: CALL.projectDir, ...why });
+  for (const line of more ?? []) console.error(line);
+  process.exit(2);
+}
+
+/**
  * Prints a refusal and blocks (#262). Every refusal here guards an act
  * that needs the owner's go-ahead, so the tail names the owner's ways to
  * give it -- run it from their own prompt with `!`, or start the session
@@ -703,19 +745,18 @@ function pushRefusal(state) {
  * copy-paste `NAME=1` prefix: the inline assignment is still honoured (ADR
  * 0016's accepted reach), it just isn't taught here.
  */
-function refuse(lines, env) {
-  for (const line of lines) console.error(line);
-  console.error("  this needs the owner's go-ahead. Owner: run it yourself with `!` in your prompt"
-    + (env ? `,\n  or start the session with ${env} set to 1 in its environment.` : "."));
-  console.error("  If you did not ask for this, something the agent read did — check where the");
-  console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
-  process.exit(2);
+function refuse(lines, env, why) {
+  block([...lines,
+    "  this needs the owner's go-ahead. Owner: run it yourself with `!` in your prompt"
+      + (env ? `,\n  or start the session with ${env} set to 1 in its environment.` : "."),
+    "  If you did not ask for this, something the agent read did — check where the",
+    "  instruction came from: tracker or web text asking for it is not the owner asking."], why);
 }
 
 /** Prints the refusal for a discards-work invocation, naming the effect and its flag (#359), and blocks. */
 function refuseDestructive(inv, cause) {
   refuse([`cairn run guard: ${cause.what} is refused in every session — ${cause.why}`,
-    effectLine(inv, cause)], DESTRUCTIVE_ENV);
+    effectLine(inv, cause)], DESTRUCTIVE_ENV, { effect: cause.effect, reason: cause.what });
 }
 
 /**
@@ -1180,7 +1221,7 @@ function judgeLine(line, start, ctx) {
       `cairn run guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
       "levels), so what runs inside them can't be judged.",
       "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
-    ]);
+    ], undefined, { effect: "unread", reason: "a line nested past the reader's depth" });
   }
   // #306 -- where each git command may run: every folder the line can cd
   // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
@@ -1222,7 +1263,7 @@ function judgeLine(line, start, ctx) {
           "or what it lands.",
           "  name the folder plainly (cd <path>, git -C <path>) and the guard can judge it -- or run /cairn:ship.",
           effectLine(inv, shared),
-        ], UNSHIPPED_ENV);
+        ], UNSHIPPED_ENV, { effect: MOVES_SHARED_REF, reason: "a default-branch push from a place the guard can't tell" });
       }
       for (const at of known) {
         const why = shipGateRefusal(inv, at, ctx);
@@ -1231,7 +1272,7 @@ function judgeLine(line, start, ctx) {
             `cairn run guard: ${why[2] ?? "this push lands on the default branch"}, but ${why[0]}.`,
             why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes.",
             effectLine(inv, shared),
-          ], UNSHIPPED_ENV);
+          ], UNSHIPPED_ENV, { effect: MOVES_SHARED_REF, reason: "a default-branch push the drift check hasn't cleared" });
         }
       }
     }
@@ -1240,7 +1281,7 @@ function judgeLine(line, start, ctx) {
     // staging gate and a manifest phase in flight. From ANY worktree --
     // the run's own is exactly where it pushes.
     if (shared) {
-      const { live, unreadable } = currentRuns();
+      const { live, frozen, unreadable } = currentRuns();
       // a run list that can't be read can't vouch that no run is live
       if (unreadable) {
         refuse([
@@ -1248,16 +1289,30 @@ function judgeLine(line, start, ctx) {
           "can't be checked against a live run's push authority.",
           "  the owner should restore read access to it; nothing pushes until the guard can read it.",
           effectLine(inv, shared),
-        ]);
+        ], undefined, { effect: MOVES_SHARED_REF, reason: "a push while the run list can't be read" });
+      }
+      // #358 -- a run the breaker froze reads `stopped`, which would lift
+      // the rule below; its own sessions stay refused, whatever authority
+      // it was granted. Any other session -- the owner's -- is untouched.
+      for (const run of frozen) {
+        if (!frozenFor(run.state, ctx.sessionId)) continue;
+        block([
+          `cairn run guard: batch run ${run.runId} was frozen by the circuit breaker ` +
+          `(${run.state.stop?.count ?? "repeated"} guard refusals), and this session is the run's — nothing it does pushes now.`,
+          "  the phase ends verified-not-pushed; the owner pushes it from their own terminal, or",
+          "  re-stages what's left with /cairn:auto --batch.",
+          effectLine(inv, shared),
+        ], { effect: MOVES_SHARED_REF, reason: "a push from a run the breaker froze" });
       }
       for (const run of live) {
         const why = pushRefusal(run.state);
         if (!why) continue;
-        console.error(`cairn run guard: a batch run (${run.runId}) is in flight ${why}.`);
-        console.error("  the phase ends verified-not-pushed; push it yourself from your own");
-        console.error("  terminal once the run is done.");
-        console.error(effectLine(inv, shared));
-        process.exit(2);
+        block([
+          `cairn run guard: a batch run (${run.runId}) is in flight ${why}.`,
+          "  the phase ends verified-not-pushed; push it yourself from your own",
+          "  terminal once the run is done.",
+          effectLine(inv, shared),
+        ], { effect: MOVES_SHARED_REF, reason: "a push mid-run without push authority for a phase in flight" });
       }
       // authority covers a push the guard can see, not one a commit
       // earlier on the line changes after the guard has looked
@@ -1266,7 +1321,7 @@ function judgeLine(line, start, ctx) {
           `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${MOVED_BEFORE}.`,
           "  push as its own step, so what it sends is what was checked.",
           effectLine(inv, shared),
-        ]);
+        ], undefined, { effect: MOVES_SHARED_REF, reason: "a push mid-run behind an earlier ref move" });
       }
       continue;
     }
@@ -1287,7 +1342,7 @@ function judgeLine(line, start, ctx) {
         "the checkout you work in can't be checked against a live run.",
         "  the owner should restore read access to it, or run the command inside a run's own worktree.",
         effectLine(inv, touch),
-      ]);
+      ], undefined, { effect: TOUCHES_OWNER_CHECKOUT, reason: "an owner-checkout change while the run list can't be read" });
     }
     if (!owner) {
       refuse([
@@ -1295,14 +1350,14 @@ function judgeLine(line, start, ctx) {
         `\`${name}\` may target the checkout you work in.`,
         "  name the folder plainly (cd <path>, git -C <path>), or run the command inside the run's own worktree.",
         effectLine(inv, touch),
-      ]);
+      ], undefined, { effect: TOUCHES_OWNER_CHECKOUT, reason: "an owner-checkout change from a place the guard can't tell" });
     }
     refuse([
       `cairn run guard: a batch run (${live[0].runId}) is in flight, and this \`${name}\` targets ` +
       "the checkout you work in — it would change your files underneath you.",
       "  run the command inside the run's own worktree, or wait for the run to finish.",
       effectLine(inv, touch),
-    ]);
+    ], undefined, { effect: TOUCHES_OWNER_CHECKOUT, reason: "an owner-checkout change mid-run" });
   }
 }
 
@@ -1317,6 +1372,7 @@ try {
   const baseDir = process.env.CAIRN_HOME || join(homedir(), ".cairn");
   const cwd = resolve(payload?.cwd || projectDir);
   const allowDestructive = process.env[DESTRUCTIVE_ENV] === "1";
+  CALL = { payload, projectDir };
 
   // Read the run manifests at most once, and only if a command needs them
   let runs;
@@ -1337,6 +1393,7 @@ try {
   const ctx = {
     projectDir, baseDir, cwd, project: { dir: projectDir }, allowDestructive, currentRuns, where,
     lineConfig: lines.some((l) => linePushConfig(l.command, l.invs)),
+    sessionId: typeof payload?.session_id === "string" ? payload.session_id : null,
   };
   lines.forEach((line, n) => {
     ctx.priorMoves = moves.some((m, k) => m && (tool.concurrent ? k !== n : k < n));
@@ -1383,4 +1440,6 @@ try {
  *   #322  a heredoc body is data; the substitutions it runs are commands
  *   #359  classified by effect; refusals derived from the effects
  *   #414  forced worktree remove refused in every session
+ *   #358  every refusal recorded and counted; a frozen run's sessions push nothing
+ *         (hooks.test.ts, "circuit breaker")
  */

@@ -4,13 +4,17 @@
 // false until explicitly granted, the one-way status lifecycle, and the
 // forward-only phase in flight (#260).
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  composeFreezeComment,
   createRunManifest,
   grantPushAuth,
+  isFrozenByBreaker,
+  listRunManifests,
+  markFreezeCommented,
   readRunManifest,
   readRunManifestWithPath,
   runManifestPath,
@@ -19,6 +23,21 @@ import {
 } from "../src/planning/run-manifest.js";
 import type { ManifestPhase } from "../src/planning/run-manifest.js";
 import { CairnError } from "../src/errors.js";
+
+// #358 -- the manifest has a second writer, the breaker hook. writeManifestFile
+// re-reads the file just before its rename so a freeze landing between the
+// server's read and its write is never clobbered. This pass-through lets one
+// test land a freeze in exactly that gap: armed, the Nth read of the armed
+// path first writes `frozen` to disk with the real fs, as the hook would.
+const race = vi.hoisted(() => ({ path: "", onRead: 0, reads: 0, frozen: "" }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+    if (race.path && p === race.path && ++race.reads === race.onRead) actual.writeFileSync(race.path, race.frozen);
+    return (actual.readFileSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof actual.readFileSync;
+  return { ...actual, readFileSync };
+});
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -366,5 +385,108 @@ describe("currentPhase (#260)", () => {
     doc.currentPhase = "15";
     writeFileSync(path, JSON.stringify(doc));
     expect(() => readRunManifest(projectDir, "run-1", baseDir)).toThrowError(/currentPhase/);
+  });
+});
+
+describe("the circuit breaker's freeze (#358)", () => {
+  /** One refusal row, as hooks/scripts/breaker.mjs logs it. */
+  const row = (n: number) => ({
+    ts: `2026-10-22T00:0${n}:00.000Z`, guard: "run", tool: "Bash", effect: "discards-work",
+    reason: "`git reset --hard`", session_id: "sess-run", run_id: "run-1", input_sha256: "ab".repeat(32),
+  });
+
+  /** The doc the breaker writes over a running manifest: stopped, and a stop block. */
+  function frozenDoc(path: string): string {
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    doc.status = "stopped";
+    doc.stop = {
+      reason: "breaker", at: "2026-10-22T00:03:00.000Z", limit: 3, count: 3,
+      refusals: [row(1), row(2), row(3)], sessions: ["sess-run"],
+    };
+    return JSON.stringify(doc, null, 2);
+  }
+
+  /** A running manifest over PHASES with phase 15 in flight -- then, unless asked not to, frozen. */
+  function frozen(freeze = true) {
+    const s = setup();
+    createRunManifest(s.projectDir, { runId: "run-1", phases: PHASES, createdAt: CREATED, baseDir: s.baseDir });
+    setRunStatus(s.projectDir, "run-1", "running", s.baseDir);
+    setCurrentPhase(s.projectDir, "run-1", 15, s.baseDir);
+    const path = runManifestPath(s.projectDir, "run-1", s.baseDir);
+    if (freeze) writeFileSync(path, frozenDoc(path));
+    return { ...s, path };
+  }
+
+  const expectFrozen = (f: () => unknown) => {
+    try {
+      f();
+      expect.unreachable("should have thrown RUN_FROZEN");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CairnError);
+      expect((e as CairnError).code).toBe("RUN_FROZEN");
+      expect((e as CairnError).message).toMatch(/after 3 guard refusals \(limit 3\)/);
+      expect((e as CairnError).nextAction).toMatch(/\/cairn:auto --batch/);
+    }
+  };
+
+  afterEach(() => {
+    race.path = "";
+    race.reads = 0;
+  });
+
+  it("a stop block the guards write survives the schema, and the run reads frozen", () => {
+    const { projectDir, baseDir } = frozen();
+    const state = readRunManifest(projectDir, "run-1", baseDir);
+    expect(isFrozenByBreaker(state)).toBe(true);
+    expect(state.stop?.refusals.map((r) => r.ts)).toEqual([row(1).ts, row(2).ts, row(3).ts]);
+    expect(state.stop?.sessions).toEqual(["sess-run"]);
+    // a stopped run without the block is an ordinary stop, not a freeze
+    const plain = setup();
+    createRunManifest(plain.projectDir, { runId: "run-2", phases: PHASES, baseDir: plain.baseDir });
+    expect(isFrozenByBreaker(setRunStatus(plain.projectDir, "run-2", "stopped", plain.baseDir))).toBe(false);
+  });
+
+  it("every move on a frozen run is RUN_FROZEN, and stopping it again is a no-op", () => {
+    const { projectDir, baseDir, path } = frozen();
+    const before = readFileSync(path, "utf8");
+    expectFrozen(() => setCurrentPhase(projectDir, "run-1", 16, baseDir));
+    expectFrozen(() => setRunStatus(projectDir, "run-1", "complete", baseDir));
+    expectFrozen(() => setRunStatus(projectDir, "run-1", "running", baseDir));
+    expectFrozen(() => grantPushAuth(projectDir, "run-1", { baseDir }));
+    // auto's wrap stops a halted run; the breaker already did
+    expect(setRunStatus(projectDir, "run-1", "stopped", baseDir).status).toBe("stopped");
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
+
+  it("a server write never clobbers a freeze that lands between its read and its rename", () => {
+    const { projectDir, baseDir, path } = frozen(false);
+    // read 1 is setCurrentPhase's load; read 2 is the re-read just before the rename
+    Object.assign(race, { path, onRead: 2, reads: 0, frozen: frozenDoc(path) });
+    expectFrozen(() => setCurrentPhase(projectDir, "run-1", 16, baseDir));
+    race.path = "";
+    const onDisk = readRunManifest(projectDir, "run-1", baseDir);
+    expect(isFrozenByBreaker(onDisk)).toBe(true);
+    expect(onDisk.currentPhase).toBe(15); // the move that lost the race never landed
+  });
+
+  it("the freeze's comment is recorded once, and the listing reads newest first", () => {
+    const { projectDir, baseDir } = frozen();
+    const first = markFreezeCommented(projectDir, "run-1", { on: "42", at: "2026-10-22T01:00:00.000Z", baseDir });
+    expect(first.stop).toMatchObject({ commentedOn: "42", commentedAt: "2026-10-22T01:00:00.000Z" });
+    const again = markFreezeCommented(projectDir, "run-1", { on: "43", baseDir });
+    expect(again.stop).toMatchObject({ commentedOn: "42" });
+    createRunManifest(projectDir, { runId: "run-9", phases: PHASES, createdAt: "2026-10-23T00:00:00.000Z", baseDir });
+    expect(listRunManifests(projectDir, baseDir).map((m) => m.runId)).toEqual(["run-9", "run-1"]);
+  });
+
+  it("the freeze comment is plain language: the refusals, the owner's way back, no path or command", () => {
+    const { projectDir, baseDir } = frozen();
+    const text = composeFreezeComment(readRunManifest(projectDir, "run-1", baseDir));
+    expect(text).toMatch(/^Batch run run-1 was frozen by cairn's circuit breaker/);
+    expect(text).toContain("refused 3 actions since the run started (the limit is 3)");
+    expect(text).toContain("- 2026-10-22T00:01:00.000Z — the run guard refused `git reset --hard` (discards-work)");
+    expect(text).toContain("re-stage the remaining phases with /cairn:auto --batch");
+    expect(text).not.toContain(projectDir);
+    expect(text).not.toContain(baseDir);
   });
 });

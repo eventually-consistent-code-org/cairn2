@@ -108,6 +108,15 @@ export const ConfigSchema = z.object({
         timeoutSeconds: z.number().int().min(1).max(3600).default(600),
     })
         .prefault({}),
+    // The circuit breaker (#358): guard refusals inside a live headless batch
+    // run that freeze it. 0 turns the freeze off; refusals are still logged.
+    // The guards read this key raw from cairn.json (hooks never import the
+    // server) and treat anything but a whole number >= 0 as the default, 3 --
+    // this schema is what refuses the bad value at load. Strict like
+    // `verify`: an unknown key here is a typo, refused.
+    auto: z
+        .strictObject({ breaker: z.number().int().min(0).default(3) })
+        .prefault({}),
     // Per-provider peer CLI settings (Tier F2 #997) — absent provider or
     // absent field means enabled with defaults; unknown provider keys are
     // rejected by the enum-keyed record below.

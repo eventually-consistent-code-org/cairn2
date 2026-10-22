@@ -47,7 +47,7 @@ import { registerPlanResources } from "./core/resources.js";
 import { installedVersions } from "./core/versions.js";
 import { appendLedger, checkLedgerEntry } from "./planning/ledger.js";
 import { checkBudget, openRunLedger, recordBoundary, refreshSpend, } from "./planning/budget-ledger.js";
-import { createRunManifest, grantPushAuth, readRunManifestWithPath, setCurrentPhase, setRunStatus, } from "./planning/run-manifest.js";
+import { composeFreezeComment, createRunManifest, grantPushAuth, isFrozenByBreaker, markFreezeCommented, readRunManifest, readRunManifestWithPath, runFrozenError, setCurrentPhase, setRunStatus, } from "./planning/run-manifest.js";
 import { writeBanner, bannerStats } from "./memory/banner.js";
 import { startTrace, appendTrace, listTraces, closeTrace, traceIssue, } from "./trace/store.js";
 import { KIND_SPECS, appendSession, closeSession, sessionLandscape, startSession, } from "./sessions/store.js";
@@ -350,6 +350,52 @@ export function buildServer(deps) {
             return undefined; /* claim proceeds unassigned */
         }
     };
+    // The circuit breaker's server half (#358). The guards freeze a headless
+    // run by writing its manifest (hooks/scripts/breaker.mjs); this server
+    // refuses that run's claims and closes with RUN_FROZEN. "That run" is one
+    // this server named in a run_manifest call -- the executor stages it,
+    // re-reads it at step 1 and at every boundary -- so it is the run's own
+    // session, subagents included (they reach this one server process; a
+    // claim about the harness, as of 2026-10). A session that never named
+    // the run -- the owner's, in the chair -- is never frozen. Hooks have no
+    // tracker access, so the one plain-language comment a freeze owes goes
+    // out here: on the issue in hand, once, flagged in the manifest. Fail
+    // open: a manifest that can't be read freezes nothing.
+    const boundRuns = new Map(); // project dir -> run ids this server named
+    const bindRun = (d, runId) => {
+        const ids = boundRuns.get(d) ?? new Set();
+        ids.add(runId);
+        boundRuns.set(d, ids);
+    };
+    const commenting = new Set(); // freezes whose comment is in flight in this process
+    const assertNotFrozen = async (d, issueId) => {
+        for (const runId of boundRuns.get(d) ?? []) {
+            let state;
+            try {
+                state = readRunManifest(d, runId);
+            }
+            catch {
+                continue;
+            }
+            if (!isFrozenByBreaker(state))
+                continue;
+            if (issueId && !state.stop?.commentedAt && !commenting.has(runId)) {
+                commenting.add(runId);
+                try {
+                    const tracker = await getTracker(d);
+                    await tracker.commentIssue(issueId, composeFreezeComment(state));
+                    markFreezeCommented(d, runId, { on: issueId, at: now().toISOString() });
+                }
+                catch {
+                    // best-effort: the refusal below stands, and the next claim or close tries again
+                }
+                finally {
+                    commenting.delete(runId);
+                }
+            }
+            throw runFrozenError(state);
+        }
+    };
     const stampClaim = async (d, tracker, issue, claimAt, claim) => {
         // First claim wins; recordClaim never throws. A bare in_progress
         // transition (no claim block) still stamps the time, just no commit.
@@ -382,6 +428,10 @@ export function buildServer(deps) {
     }, wrap(async (a) => {
         const d = dir();
         const { estimatePoints, estimateMinutes, claim, ...input } = a;
+        // #358 -- a frozen run claims nothing; refused before the create, so
+        // no orphan is left behind (no issue yet, so no freeze comment either)
+        if (claim)
+            await assertNotFrozen(d);
         // Resolved before the create: a refused claim must not leave an
         // orphan issue behind for the caller to find and re-create.
         const resolved = claim ? resolveClaim(d, claim) : undefined;
@@ -467,6 +517,9 @@ export function buildServer(deps) {
     }, wrap(async (a) => {
         const d = dir();
         const { id, phase: phaseParam, estimatePoints, estimateMinutes, claim, ...rest } = a;
+        // #358 -- a frozen run claims nothing: refused before any tracker write
+        if (claim || rest.state === "in_progress")
+            await assertNotFrozen(d, id);
         // A claim IS the in_progress transition (#343): the state may be
         // left off, but naming any other state alongside it is a
         // contradiction the server refuses rather than guesses at.
@@ -721,6 +774,8 @@ export function buildServer(deps) {
         }),
     }, wrap(async (a) => {
         const d = dir();
+        // #358 -- a frozen run closes nothing: refused before any tracker write
+        await assertNotFrozen(d, a.id);
         const claimRecord = readClaimRecord(d, a.id);
         const closedAt = now().toISOString();
         // The ledger fold (#365): with a summary the close also writes the
@@ -1418,6 +1473,9 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => {
         const d = dir();
+        // #358 -- naming a run binds this server to it: if the breaker
+        // freezes it, this server's claims and closes refuse RUN_FROZEN
+        bindRun(d, a.runId);
         switch (a.action) {
             case "create": {
                 const ceiling = a.ceilingTokens !== undefined || a.ceilingUsd !== undefined
@@ -2113,8 +2171,9 @@ export function buildServer(deps) {
                 .optional(),
         }),
     }, wrap((a) => {
-        emitOutlook(dir(), a.tracker ? { tracker: a.tracker } : undefined);
-        return { emitted: true };
+        const snapshot = emitOutlook(dir(), a.tracker ? { tracker: a.tracker } : undefined);
+        // #358 -- a frozen latest run rides on the emit, as on the board
+        return { emitted: true, ...(snapshot?.frozen ? { frozen: snapshot.frozen } : {}) };
     }));
     server.registerTool("outlook_get", {
         annotations: { readOnlyHint: true },

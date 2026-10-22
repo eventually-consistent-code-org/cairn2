@@ -3,7 +3,7 @@
 Date: 2026-09-20. Status: accepted.
 
 removeWhen: the platform isolates agent configuration at the operating-system level in every session and every harness cairn runs in — the agent process cannot write its own hooks or settings, and the human edits them through a channel the agent cannot reach — so the visible-refusal hooks become redundant. Half met (SURVEY.md 2026-10-13, native-vs-cairn-subsystem-judgement): Claude Code's sandbox now blocks writes to the `.claude` settings, hooks, skills, agents, commands, `.mcp.json`, `.git/hooks` and `~/.claude` at the OS level, for sandboxed Bash only. Still open: auto mode (the default since 2.1.284) routes a protected-path write to a steerable classifier rather than a wall; non-sandboxed sessions and the Edit/Write/MCP paths outside the sandbox; the seven other harnesses.
-derives: axiom 5 (owner-ground); axiom 3 (data-not-directive)
+derives: axiom 5 (owner-ground); axiom 3 (data-not-directive); axiom 4 (recorded-run)
 
 ## Context
 
@@ -89,3 +89,40 @@ through rather than blocking work. Each of these is asserted in
 `server/test/runguard-effects.test.ts`; the per-issue suite
 `server/test/runguard-guards.test.ts` stayed green unchanged through the
 rewrite.
+
+## Amendment 2026-10-22 — the circuit breaker (#358)
+
+The decision stands: a guard still refuses the one call in front of it,
+visibly, and is still not a sandbox. What changes is that refusals now
+add up. A headless run that keeps pushing past the ship gate, or keeps
+reaching for its own hooks, is a run whose plan has gone wrong, and
+before this it carried on until the budget or the phase ran out.
+
+Every refusal from the run, harness and leak guards appends one row to
+a refusal log under the cairn home — when, which guard and tool, the
+effect refused, fixed reason text, the session, the live run, and a
+sha256 of the tool input, never the command or path itself. While a
+batch run is live, its rows are counted; at `auto.breaker` (default 3,
+`0` off) the guard freezes the run by writing its manifest: `stopped`,
+with the reason and the last three rows. The breaker is the only freeze
+authority cairn has, and it is scoped to headless runs: a session with
+no live run, or one that never named the run, is never frozen. A frozen
+run's own sessions are refused pushes by the run guard, and its claims
+and closes return `RUN_FROZEN` from the server.
+
+The seam, stated because it is not obvious: the hooks import no server
+code and have no tracker access, so they read the run manifest straight
+from the cairn home and write the freeze into it themselves, and the one
+plain-language comment the freeze owes is posted by the server, on the
+first claim or close the frozen run attempts, once, flagged in the
+manifest.
+
+Like every hook it fails open, in both directions: a breaker that
+breaks never blocks a call and never un-blocks one; a refusal log it
+can't use means no breaker for that run, said once. Cairn stays in the
+"refused at runtime" tier — this makes refusals derivable and
+auditable, not airtight. It adds axiom 4 (recorded-run) to this
+record's derivation: the refusals and the freeze are written where the
+owner looks, not just shown once and lost. Asserted in
+`server/test/hooks.test.ts` ("circuit breaker"), with the server half in
+`server/test/run-breaker.test.ts` and `server/test/run-manifest.test.ts`.

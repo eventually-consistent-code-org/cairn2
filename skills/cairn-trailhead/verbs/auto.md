@@ -130,6 +130,18 @@ batch-specific loop.
    the run escaped its worktree and the fix is to re-enter it, never to
    override.
 
+   **The circuit breaker.** While the manifest reads `running`, every
+   guard refusal — run guard, harness guard, leak guard — is logged and
+   counted against this run. At `auto.breaker` refusals (cairn.json,
+   default 3, `0` turns it off) the guard freezes the run: the manifest
+   moves to `stopped` with a `stop` block (reason `breaker`, the last
+   three refusals). From then on the run's pushes are refused, and claim,
+   close and `run_manifest` moves return `RUN_FROZEN` — the first of them
+   posts one plain-language comment on the issue in hand. A refusal that
+   says "refusal N of M" is the warning: change course, don't retry the
+   same act. A frozen run never resumes under its id: stop working,
+   wrap (step 4), and leave re-staging to the owner.
+
    First act: the run's umbrella tracker issue — `issue_create` (label
    `batch-run`, runId in the title), opening comment in plain language:
    the phase list as staged, the ceiling, push authority granted or
@@ -231,7 +243,8 @@ batch-specific loop.
    "set_status", status: "complete")` when the loop reached the
    manifest's end (even with failed/skipped phases — those are report
    lines), `"stopped"` when the run halted early (budget, dependency
-   chain, hard stop); then the run report (next section) — it owns the
+   chain, hard stop; a run the breaker froze is already stopped, and the
+   move is a no-op); then the run report (next section) — it owns the
    umbrella issue's closing comment, the close itself, and the run's
    final board emit. Last, close continuity: `continuity_checkpoint(
    source: "auto", notes: "batch run <runId> ended <status> — next:
@@ -254,11 +267,11 @@ doesn't support.
 1. **Per-phase outcome table.** One row per manifest phase, in manifest
    order. Outcome is exactly one of: `shipped` /
    `verified-not-pushed` / `stopped-budget` / `stopped-verify-failure` /
-   `skipped-dependent` — each with ONE plain-language reason line
-   ("verified and pushed", "verified; push authority was declined at
-   staging", "never started — ceiling hit at this phase's boundary",
-   "verify failed: 2 acceptance checks unmet", "skipped — depends on
-   failed phase 7").
+   `stopped-breaker` / `skipped-dependent` — each with ONE plain-language
+   reason line ("verified and pushed", "verified; push authority was
+   declined at staging", "never started — ceiling hit at this phase's
+   boundary", "verify failed: 2 acceptance checks unmet", "frozen — its
+   guards refused 3 actions", "skipped — depends on failed phase 7").
 2. **Estimate vs actual — the calibration section.** Per phase: the
    staged range (low–high, tokens and ~$) vs actual spend — the delta
    between that phase's boundary row and the next (the wrap row closes
@@ -284,6 +297,11 @@ doesn't support.
    reason when stopped; engineer mode's waiting-PR list; and on a
    failed verify, the ready-made trace handoff — the exact
    `trace_start` description + first-evidence text, never started.
+   A run the breaker froze reports its stop reason as `stopped-breaker`
+   and lists the refusals that tripped it, from the manifest's
+   `stop.refusals` — time, guard, what was refused, its effect — beside
+   the count and the limit. The rows never carry the command itself, and
+   neither does the report.
 5. **Write the file — beside the manifest, never in the repo.** The
    `path` field on `run_manifest(action: "read")` names the manifest's
    real location under `~/.cairn/runs/`; the report is that same

@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, utimesSync,
+  copyFileSync,
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { isFrozenByBreaker, readRunManifest } from "../src/planning/run-manifest.js";
 
 // Hook scripts live at the plugin root (repo root), not under server/ -- two
 // levels up from server/test.
@@ -597,6 +599,9 @@ describe("run guard hook", () => {
       mkdirSync(join(home, "runs"), { recursive: true });
       writeFileSync(join(home, "runs", `${base}-${hash}-${runId}.json`),
         JSON.stringify({ version: 1, runId, status }));
+      // these tests judge one rule per command; the breaker (#358) would
+      // freeze a live run three refusals in -- its own tests are below
+      writeFileSync(join(proj, "cairn.json"), JSON.stringify({ auto: { breaker: 0 } }));
     }
     return { proj, home, runId };
   }
@@ -1466,10 +1471,15 @@ describe("harness guard matches protected paths in any letter case (#295)", () =
   const bash = (command: string) =>
     JSON.stringify({ tool_name: "Bash", tool_input: { command: sh(command) }, cwd: "" });
 
-  /** Exit status and stderr, with no inherited override, CDPATH or cairn home. */
+  /**
+   * Exit status and stderr, with no inherited override or CDPATH. The cairn
+   * home is the per-file scratch one (setup-cairn-home.ts) unless a test
+   * names its own -- stripping it would send the breaker's refusal rows
+   * (#358) to the real ~/.cairn.
+   */
   function run(p: string, payload: string, env: Record<string, string> = {}) {
     const e: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, ...env };
-    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CAIRN_HOME", "CLAUDE_PLUGIN_ROOT"]) if (!(k in env)) delete e[k];
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in env)) delete e[k];
     const r = spawnSync(process.execPath, [HARNESSGUARD], {
       cwd: p, env: e, input: payload, encoding: "utf8", timeout: 5000,
     });
@@ -3715,5 +3725,252 @@ describe("posttooluse-observe", () => {
     expect(fail).toHaveLength(1);
     expect(fail[0].matcher).toBe("Edit|Write|Bash");
     expect(fail[0].hooks.map((h: { command: string }) => h.command).join(" ")).toContain("posttooluse-observe.mjs");
+  });
+});
+
+// #358 -- every guard refusal appends one audit row under the cairn home,
+// and a live headless run whose guards keep refusing it is frozen. Every
+// fixture here names its own CAIRN_HOME: nothing lands in the real one.
+describe("circuit breaker (#358)", () => {
+  const RUN = "run-brk";
+
+  /** A committed project with a cairn.json, an isolated cairn home, and optionally one run manifest. */
+  function breakerFixture(opts: { status?: string; breaker?: number } = {}) {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({
+      tracker: { type: "github", config: { repo: "o/r" } },
+      ...(opts.breaker !== undefined ? { auto: { breaker: opts.breaker } } : {}),
+    }));
+    const home = freshDir("cairn-hooks-breaker-home-");
+    if (opts.status) writeManifest(home, proj, RUN, opts.status);
+    return { proj, home };
+  }
+
+  /** The manifest path the guards and the server both compute from CLAUDE_PROJECT_DIR. */
+  const manifestPath = (home: string, proj: string, runId: string) => {
+    const { base, hash } = hashAndBaseForEnvDir(proj);
+    return join(home, "runs", `${base}-${hash}-${runId}.json`);
+  };
+
+  /** A full manifest, as the server writes one: push authority granted, phase 1 in flight. */
+  function writeManifest(home: string, proj: string, runId: string, status: string, created = "2026-10-22T00:00:00.000Z") {
+    mkdirSync(join(home, "runs"), { recursive: true });
+    writeFileSync(manifestPath(home, proj, runId), JSON.stringify({
+      version: 1, runId, project: basename(proj), created,
+      phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
+      ceiling: null,
+      pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
+      status, currentPhase: 1,
+    }, null, 2));
+  }
+
+  const manifest = (home: string, proj: string, runId = RUN) =>
+    JSON.parse(readFileSync(manifestPath(home, proj, runId), "utf8"));
+
+  /** Every row in the project's refusal log. */
+  function rows(home: string, proj: string): Array<Record<string, unknown>> {
+    const { base, hash } = hashAndBaseForEnvDir(proj);
+    const path = join(home, "refusals", `${base}-${hash}.jsonl`);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  }
+
+  const bash = (command: string, cwd: string, session_id = "sess-run") =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd, session_id });
+
+  /** One run-guard refusal: a hard reset is refused in every session. */
+  const resetHard = (proj: string, home: string, session?: string) =>
+    runHookRaw(RUNGUARD, proj, bash("git reset --hard", proj, session), { CAIRN_HOME: home });
+
+  /** The lines the breaker added after the guard's own refusal. */
+  const breakerText = (stderr: string) => stderr.slice(Math.max(0, stderr.indexOf("cairn circuit breaker")));
+
+  it("three refusals inside a live run freeze it: stopped, reason breaker, the last three rows", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    const one = resetHard(proj, home);
+    expect(one.status).toBe(2);
+    expect(one.stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+    expect(manifest(home, proj).status).toBe("running");
+    expect(resetHard(proj, home).stderr).toContain("refusal 2 of 3");
+    expect(manifest(home, proj).status).toBe("running");
+
+    const third = resetHard(proj, home);
+    expect(third.status).toBe(2);
+    const said = breakerText(third.stderr);
+    expect(said).toContain(`batch run ${RUN} is frozen`);
+    expect(said).toContain("refused 3 actions since it started (the limit is 3)");
+    // how the owner resumes is the auto path, never an env var
+    expect(said).toContain("/cairn:auto --batch");
+    expect(said).not.toMatch(/CAIRN_|[A-Z][A-Z0-9_]{2,}=|set to 1/);
+
+    const m = manifest(home, proj);
+    expect(m.status).toBe("stopped");
+    expect(m.stop).toMatchObject({ reason: "breaker", limit: 3, count: 3, sessions: ["sess-run"] });
+    expect(m.stop.refusals).toHaveLength(3);
+    for (const r of m.stop.refusals) {
+      expect(r).toMatchObject({ guard: "run", tool: "Bash", effect: "discards-work", run_id: RUN, session_id: "sess-run" });
+    }
+    // the server reads what the hook wrote: the stop block survives its schema
+    const read = readRunManifest(proj, RUN, home);
+    expect(isFrozenByBreaker(read)).toBe(true);
+    expect(read.stop?.refusals).toHaveLength(3);
+  });
+
+  it("every guard's refusal counts: one each from the run, harness and leak guards freeze the run", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    const env = { CAIRN_HOME: home };
+    expect(runHookRaw(RUNGUARD, proj, bash("git reset --hard", proj), env).status).toBe(2);
+    const write = JSON.stringify({
+      tool_name: "Write", tool_input: { file_path: join(proj, "hooks", "x.mjs") }, cwd: proj, session_id: "sess-run",
+    });
+    expect(runHookRaw(HARNESSGUARD, proj, write, env).status).toBe(2);
+    // concatenated so this file's own diff never trips the live guard
+    stageFile(proj, "app.ts", 'const p = ".cai' + 'rn/plans/x";\n');
+    const leak = runHookRaw(LEAKGUARD, proj, bash("git commit -m x", proj), env);
+    expect(leak.status).toBe(2);
+    expect(leak.stderr).toContain(`batch run ${RUN} is frozen`);
+
+    expect(manifest(home, proj).status).toBe("stopped");
+    const got = rows(home, proj);
+    expect(got.map((r) => r.guard)).toEqual(["run", "harness", "leak"]);
+    expect(got.map((r) => r.effect)).toEqual(["discards-work", "changes-harness-config", "leaks-internal-refs"]);
+    expect(got[1].reason).toBe("a write to the hook directory");
+    expect(got[2].reason).toBe("staged lines leak internal refs (cairn-path)");
+  });
+
+  it("refusals with no live run never freeze anything: rows land without a run id", () => {
+    const done = breakerFixture({ status: "complete" });
+    for (let i = 0; i < 4; i++) {
+      const r = resetHard(done.proj, done.home);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(done.home, done.proj).status).toBe("complete");
+    expect(manifest(done.home, done.proj).stop).toBeUndefined();
+    const logged = rows(done.home, done.proj);
+    expect(logged).toHaveLength(4);
+    expect(logged.every((r) => !("run_id" in r))).toBe(true);
+
+    // a staged run is not live either, and no manifest at all is just the audit
+    const staged = breakerFixture({ status: "staged" });
+    for (let i = 0; i < 3; i++) resetHard(staged.proj, staged.home);
+    expect(manifest(staged.home, staged.proj).status).toBe("staged");
+    const bare = breakerFixture();
+    for (let i = 0; i < 3; i++) expect(resetHard(bare.proj, bare.home).stderr).not.toContain("circuit breaker");
+    expect(rows(bare.home, bare.proj)).toHaveLength(3);
+  });
+
+  it("auto.breaker: 0 turns the freeze off, and the rows are still written", () => {
+    const { proj, home } = breakerFixture({ status: "running", breaker: 0 });
+    for (let i = 0; i < 4; i++) {
+      const r = resetHard(proj, home);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(home, proj).status).toBe("running");
+    expect(rows(home, proj).filter((r) => r.run_id === RUN)).toHaveLength(4);
+  });
+
+  it("the counter is per run id: a new run starts at zero", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    resetHard(proj, home);
+    resetHard(proj, home);
+    // run A ends normally two refusals in; run B is staged and starts
+    writeManifest(home, proj, RUN, "complete");
+    writeManifest(home, proj, "run-b", "running", "2026-10-22T01:00:00.000Z");
+    expect(resetHard(proj, home).stderr).toContain("refusal 1 of 3 for batch run run-b");
+    expect(resetHard(proj, home).stderr).toContain("refusal 2 of 3 for batch run run-b");
+    expect(manifest(home, proj, "run-b").status).toBe("running");
+    expect(resetHard(proj, home).stderr).toContain("batch run run-b is frozen");
+    expect(manifest(home, proj, "run-b").stop.count).toBe(3);
+    expect(manifest(home, proj, RUN).status).toBe("complete"); // the ended run is never touched
+  });
+
+  it("the row never carries the raw command or path -- only fixed text and a digest of the input", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    const command = "git push --force https://user:hunter2SECRET@example.com/repo.git main";
+    expect(runHookRaw(RUNGUARD, proj, bash(command, proj), { CAIRN_HOME: home }).status).toBe(2);
+    const secretPath = join(proj, "hooks", "secret-path-XYZ.mjs");
+    const write = { tool_name: "Write", tool_input: { file_path: secretPath }, cwd: proj, session_id: "sess-run" };
+    expect(runHookRaw(HARNESSGUARD, proj, JSON.stringify(write), { CAIRN_HOME: home }).status).toBe(2);
+
+    const { base, hash } = hashAndBaseForEnvDir(proj);
+    const raw = readFileSync(join(home, "refusals", `${base}-${hash}.jsonl`), "utf8");
+    for (const leak of ["hunter2SECRET", "example.com", "repo.git", "secret-path-XYZ", proj]) {
+      expect(raw, leak).not.toContain(leak);
+    }
+    const [push, edit] = rows(home, proj);
+    // the reason is the effect table's own text, never the command typed
+    expect(push.reason).toBe("`git push --force`");
+    expect(edit.reason).toBe("a write to the hook directory");
+    expect(Object.keys(push).sort()).toEqual(
+      ["effect", "guard", "input_sha256", "reason", "run_id", "session_id", "tool", "ts"]);
+    expect(push.input_sha256).toBe(createHash("sha256").update(JSON.stringify({ command })).digest("hex"));
+    expect(edit.input_sha256).toBe(createHash("sha256").update(JSON.stringify({ file_path: secretPath })).digest("hex"));
+  });
+
+  it("a frozen run's own session is refused any push; another session's push is not", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    const env = { CAIRN_HOME: home };
+    const push = (session: string) => runHookRaw(RUNGUARD, proj, bash("git push origin feature", proj, session), env);
+    // live, granted, phase in flight: the run may push
+    expect(push("sess-run").status).toBe(0);
+    for (let i = 0; i < 3; i++) resetHard(proj, home);
+    expect(manifest(home, proj).status).toBe("stopped");
+
+    const own = push("sess-run");
+    expect(own.status).toBe(2);
+    expect(own.stderr).toContain(`batch run ${RUN} was frozen by the circuit breaker`);
+    expect(own.stderr).toContain("effect: moves-shared-ref");
+    // the owner, in another session, is never frozen
+    expect(push("sess-owner").status).toBe(0);
+  });
+
+  it("a broken refusal log never changes the guard's answer: it still refuses, and says once the breaker is off", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    writeFileSync(join(home, "refusals"), "a file where the folder should be");
+    const first = resetHard(proj, home);
+    expect(first.status).toBe(2);
+    expect(first.stderr).toContain(`can't count refusals for batch run ${RUN}`);
+    expect(first.stderr).toContain("the breaker is off for this run");
+    for (let i = 0; i < 3; i++) {
+      const r = resetHard(proj, home);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker"); // said once
+    }
+    expect(manifest(home, proj).status).toBe("running");
+  });
+
+  it("a breaker.mjs that is missing or broken leaves every guard refusing as before", () => {
+    const { proj, home } = breakerFixture({ status: "running" });
+    const copy = join(freshDir("cairn-hooks-breaker-copy-"), "scripts");
+    mkdirSync(copy);
+    for (const f of readdirSync(scriptsDir)) if (f.endsWith(".mjs") && f !== "breaker.mjs") copyFileSync(join(scriptsDir, f), join(copy, f));
+    const guard = (script: string, payloadJson: string) =>
+      runHookRaw(join(copy, script), proj, payloadJson, { CAIRN_HOME: home });
+    const write = JSON.stringify({ tool_name: "Write", tool_input: { file_path: join(proj, "hooks", "x.mjs") }, cwd: proj });
+    stageFile(proj, "app.ts", 'const p = ".cai' + 'rn/plans/x";\n');
+    for (const label of ["missing", "broken"]) {
+      if (label === "broken") writeFileSync(join(copy, "breaker.mjs"), "export function recordRefusal( {\n");
+      expect(guard("pretooluse-runguard.mjs", bash("git reset --hard", proj)).status, label).toBe(2);
+      expect(guard("pretooluse-harnessguard.mjs", write).status, label).toBe(2);
+      expect(guard("pretooluse-leakguard.mjs", bash("git commit -m x", proj)).status, label).toBe(2);
+    }
+    expect(rows(home, proj)).toEqual([]);
+    expect(manifest(home, proj).status).toBe("running");
+  });
+
+  it("the harness guard protects the refusal log the way it protects the run manifests", () => {
+    const { proj, home } = breakerFixture();
+    const { base, hash } = hashAndBaseForEnvDir(proj);
+    const log = join(home, "refusals", `${base}-${hash}.jsonl`);
+    const env = { CAIRN_HOME: home };
+    const r = runHookRaw(HARNESSGUARD, proj, bash(`: > ${log}`, proj), env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("the guard refusal log");
+    expect(runHookRaw(HARNESSGUARD, proj, bash(`cat ${log}`, proj), env).status).toBe(0);
   });
 });

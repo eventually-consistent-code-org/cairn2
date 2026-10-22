@@ -19,6 +19,17 @@
  *   forward through the manifest's own phases while running (#260), so
  *   the run guard can tie a push to a phase the owner authorized.
  *
+ *   The circuit breaker (#358) is the one writer of this file that is not
+ *   the server: the PreToolUse guards (hooks/scripts/breaker.mjs) freeze a
+ *   running run at `auto.breaker` refusals by writing status `stopped` and
+ *   a `stop` block (reason breaker, the last three refusal rows, the
+ *   sessions they came from). A frozen run is terminal like any stopped
+ *   one, and more: every move on it refuses RUN_FROZEN (a re-stop is a
+ *   no-op), and no server write may clobber a freeze that landed between
+ *   its read and its rename -- the re-read in writeManifestFile. Hooks have
+ *   no tracker access, so the one plain-language comment a freeze owes is
+ *   the server's: markFreezeCommented records it, once.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -27,10 +38,10 @@
 
 // Imports
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import {
-  mkdirSync, readFileSync, renameSync, writeFileSync,
+  mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CairnError } from "../errors.js";
@@ -120,6 +131,38 @@ export interface RunManifestState {
    * phase start. Absent until the first phase starts — and on manifests
    * written before it existed, which the run guard reads as "no push". */
   currentPhase?: number;
+  /** Why the run stopped, when something other than the executor stopped
+   * it (#358): today only the circuit breaker, written by the guards. */
+  stop?: RunStop;
+}
+
+/** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
+ * digest, never the raw command or path. */
+export interface RefusalRow {
+  ts: string;
+  guard: string;
+  tool: string;
+  effect: string;
+  reason: string;
+  session_id: string | null;
+  run_id?: string;
+  input_sha256: string;
+}
+
+/** The breaker's freeze record (#358). */
+export interface RunStop {
+  reason: "breaker";
+  at: string;
+  /** auto.breaker as the guard read it, and the refusals it had counted. */
+  limit: number;
+  count: number;
+  /** The last three refusals -- what the run report lists. */
+  refusals: RefusalRow[];
+  /** The sessions those refusals came from: the run guard refuses their pushes. */
+  sessions: string[];
+  /** The one tracker comment the freeze owes, once posted (server-written). */
+  commentedAt?: string;
+  commentedOn?: string;
 }
 
 const ManifestPhaseSchema: z.ZodType<ManifestPhase> = z.object({
@@ -131,6 +174,28 @@ const ManifestPhaseSchema: z.ZodType<ManifestPhase> = z.object({
     estUsd: z.object({ low: z.number(), high: z.number() }),
   }),
   waves: z.number().optional(),
+});
+
+const RefusalRowSchema: z.ZodType<RefusalRow> = z.object({
+  ts: z.string(),
+  guard: z.string(),
+  tool: z.string(),
+  effect: z.string(),
+  reason: z.string(),
+  session_id: z.string().nullable(),
+  run_id: z.string().optional(),
+  input_sha256: z.string(),
+});
+
+const RunStopSchema: z.ZodType<RunStop> = z.object({
+  reason: z.literal("breaker"),
+  at: z.string(),
+  limit: z.number(),
+  count: z.number(),
+  refusals: z.array(RefusalRowSchema),
+  sessions: z.array(z.string()),
+  commentedAt: z.string().optional(),
+  commentedOn: z.string().optional(),
 });
 
 const StagedAnswerSchema: z.ZodType<StagedAnswer> = z.object({
@@ -157,6 +222,7 @@ export const RunManifestSchema: z.ZodType<RunManifestState> = z.object({
   status: z.enum(["staged", "running", "complete", "stopped"]),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
   currentPhase: z.number().optional(),
+  stop: RunStopSchema.optional(),
 });
 
 // Internals
@@ -187,10 +253,44 @@ function readManifestFile(path: string): RunManifestState | null {
   return result.data;
 }
 
-/** Atomic write — tmp then rename, continuity's handoff writer pattern. */
+/** True for a manifest the circuit breaker froze (#358). */
+export function isFrozenByBreaker(state: RunManifestState | null | undefined): boolean {
+  return state?.status === "stopped" && state.stop?.reason === "breaker";
+}
+
+/** The typed refusal every move on a frozen run gets (#358), with the way it ends. */
+export function runFrozenError(state: RunManifestState): CairnError {
+  const stop = state.stop;
+  return new CairnError("RUN_FROZEN",
+    `batch run '${state.runId}' is frozen — the circuit breaker stopped it after ` +
+      `${stop?.count ?? "repeated"} guard refusals (limit ${stop?.limit ?? "?"})`,
+    "stop working this run: claim, close and push are refused for it. Wrap up — " +
+      "run_manifest read shows the refusals in its stop block for the run report — and leave " +
+      "re-staging to the owner (/cairn:auto --batch, a new run id)");
+}
+
+/**
+ * Atomic write — tmp then rename, continuity's handoff writer pattern.
+ *
+ * The manifest has a second writer (#358): the breaker, in a PreToolUse
+ * hook, can freeze it between this process's read and its write. So the
+ * file is read again just before the rename, and a freeze found there is
+ * never clobbered by a state that isn't one -- RUN_FROZEN instead. That
+ * narrows the lost-update window to the gap between this read and the
+ * rename; a freeze still lost there is re-made by the next refusal, whose
+ * count is still past the limit (see breaker.mjs).
+ */
 function writeManifestFile(path: string, state: RunManifestState): void {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
+  let onDisk: RunManifestState | null = null;
+  try {
+    onDisk = readManifestFile(path);
+  } catch {
+    onDisk = null; // a corrupt file is no freeze; the write replaces it as before
+  }
+  if (onDisk && isFrozenByBreaker(onDisk) && !isFrozenByBreaker(state)) throw runFrozenError(onDisk);
+  // pid + random suffix, never a fixed name: two writers never share a tmp
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
   renameSync(tmp, path);
 }
@@ -312,6 +412,7 @@ export function grantPushAuth(
 ): RunManifestState {
   const base = opts?.baseDir ?? join(homedir(), ".cairn");
   const { path, state } = loadManifest(projectDir, runId, base);
+  if (isFrozenByBreaker(state)) throw runFrozenError(state);
   if (state.status !== "staged") {
     throw new CairnError("PRECONDITION_FAILED",
       `run '${runId}' is '${state.status}' — push authorization is granted at staging only`,
@@ -329,7 +430,9 @@ export function grantPushAuth(
 /**
  * Advances the run's status along the legal lifecycle
  * (staged → running → complete|stopped; staged → stopped for a run
- * abandoned before start). Any other move throws.
+ * abandoned before start). Any other move throws. A run the breaker froze
+ * (#358) is already stopped: stopping it again -- auto's wrap -- is a
+ * no-op, and any other move is RUN_FROZEN.
  */
 export function setRunStatus(
   projectDir: string,
@@ -339,6 +442,10 @@ export function setRunStatus(
 ): RunManifestState {
   const base = baseDir ?? join(homedir(), ".cairn");
   const { path, state } = loadManifest(projectDir, runId, base);
+  if (isFrozenByBreaker(state)) {
+    if (status === "stopped") return state;
+    throw runFrozenError(state);
+  }
   if (!STATUS_TRANSITIONS[state.status].includes(status)) {
     throw new CairnError("PRECONDITION_FAILED",
       `run '${runId}' cannot move '${state.status}' → '${status}'`,
@@ -370,6 +477,7 @@ export function setCurrentPhase(
 ): RunManifestState {
   const base = baseDir ?? join(homedir(), ".cairn");
   const { path, state } = loadManifest(projectDir, runId, base);
+  if (isFrozenByBreaker(state)) throw runFrozenError(state);
   if (state.status !== "running") {
     throw new CairnError("PRECONDITION_FAILED",
       `run '${runId}' is '${state.status}' — only a running run has a phase in flight`,
@@ -394,4 +502,81 @@ export function setCurrentPhase(
   state.currentPhase = phase;
   writeManifestFile(path, state);
   return state;
+}
+
+/**
+ * Every valid manifest for a project, newest staged first (#358) -- what
+ * the outlook board reads to say a project's latest run is frozen. A file
+ * that fails to read or validate is skipped: the board decorates, it never
+ * fails on a bad manifest.
+ *
+ * :param projectDir: the project the runs belong to
+ * :returns manifest states, sorted by `created`, newest first
+ */
+export function listRunManifests(projectDir: string, baseDir?: string): RunManifestState[] {
+  const base = baseDir ?? join(homedir(), ".cairn");
+  const { base: name, hash } = pathHash(projectDir);
+  const prefix = `${name}-${hash}-`;
+  let entries: string[];
+  try {
+    entries = readdirSync(join(base, "runs"));
+  } catch {
+    return [];
+  }
+  const out: RunManifestState[] = [];
+  for (const file of entries) {
+    if (!file.startsWith(prefix) || !file.endsWith(".json")) continue;
+    try {
+      const state = readManifestFile(join(base, "runs", file));
+      if (state) out.push(state);
+    } catch {
+      // invalid or unreadable -- not a run the board can describe
+    }
+  }
+  return out.sort((a, b) => b.created.localeCompare(a.created));
+}
+
+/**
+ * Records that the one plain-language comment a freeze owes was posted
+ * (#358), and on which issue. The comment is the server's -- hooks have no
+ * tracker access -- and goes out at most once per freeze: a manifest that
+ * already says commentedAt is left as it is.
+ *
+ * :param on: the issue the comment went to
+ * :returns the manifest state as written (or as found, already commented)
+ */
+export function markFreezeCommented(
+  projectDir: string,
+  runId: string,
+  opts: { on: string; at?: string; baseDir?: string },
+): RunManifestState {
+  const base = opts.baseDir ?? join(homedir(), ".cairn");
+  const { path, state } = loadManifest(projectDir, runId, base);
+  if (!isFrozenByBreaker(state) || !state.stop || state.stop.commentedAt) return state;
+  state.stop = { ...state.stop, commentedAt: opts.at ?? new Date().toISOString(), commentedOn: opts.on };
+  writeManifestFile(path, state);
+  return state;
+}
+
+/**
+ * The tracker comment a freeze owes (#358), in plain language: what froze
+ * the run, the refusals that tripped it, and the owner's way back. Reasons
+ * and effects are the guards' fixed text, so no command or path reaches
+ * the tracker.
+ */
+export function composeFreezeComment(state: RunManifestState): string {
+  const stop = state.stop;
+  const rows = (stop?.refusals ?? []).map((r) =>
+    `- ${r.ts} — the ${r.guard} guard refused ${r.reason} (${r.effect})`);
+  return [
+    `Batch run ${state.runId} was frozen by cairn's circuit breaker: its guards refused ` +
+      `${stop?.count ?? "repeated"} actions since the run started (the limit is ${stop?.limit ?? "?"}), ` +
+      "so it stopped instead of pressing on.",
+    "",
+    "The last refusals:",
+    ...rows,
+    "",
+    "Nothing in this run claims, closes or pushes from here. Owner: review what it kept reaching for, " +
+      "fix the plan, then re-stage the remaining phases with /cairn:auto --batch.",
+  ].join("\n");
 }
