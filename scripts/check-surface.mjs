@@ -150,7 +150,11 @@ import { spawnSync } from "node:child_process";
   const r = spawnSync(process.execPath, [join(root, "scripts", "gen-agents.mjs"), "--check"],
     { encoding: "utf8" });
   if (r.status !== 0) {
-    failures.push("(g) harness/AGENTS-cairn.md stale vs routing table (run scripts/gen-agents.mjs)");
+    // gen-agents --check names each failure: a stale spine, or (#398) a
+    // harness with no load path to it
+    const lines = (r.stderr ?? "").split("\n").filter((l) => l.startsWith("gen-agents: "));
+    if (lines.length === 0) failures.push("(g) harness/AGENTS-cairn.md stale vs routing table (run scripts/gen-agents.mjs)");
+    for (const l of lines) failures.push(`(g) ${l.slice("gen-agents: ".length)}`);
   }
 }
 

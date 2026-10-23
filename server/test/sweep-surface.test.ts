@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,8 @@ import { ConfigSchema } from "../src/config.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
+import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
+import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
 /**
  * Phase 25 surface gaps — the pieces of the sweep that live in prose and
@@ -401,5 +403,173 @@ describe("command shim allowed-tools (#400)", () => {
       const bash = allowedTools(f).filter((t) => t.startsWith("Bash"));
       expect(bash, `commands/${f}`).toEqual(expected);
     }
+  });
+});
+
+describe("the spine's readers (#398)", () => {
+  // Claude Code reads AGENTS.md only when no CLAUDE.md is in scope (a claim,
+  // as of 2026-10, per the Claude Code memory docs), so the spine reached
+  // every harness but the one the plugin targets. These pin the fix: setup
+  // installs an @AGENTS.md import and --check sees it; the readers leg is red
+  // when any harness has no load path to the fragment.
+  const SETUP = join(ROOT, "setup", "cairn-setup.mjs");
+  const FRAGMENT = read("harness/AGENTS-cairn.md");
+  type Row = { harness: string; loadFile: string; via: string; path: string; claim: string };
+  const TABLE = READERS as Row[];
+
+  const scratch = () => {
+    const d = mkdtempSync(join(tmpdir(), "cairn-398-"));
+    mkdirSync(join(d, "p"));
+    mkdirSync(join(d, "h"));
+    return { dir: d, proj: join(d, "p"), home: join(d, "h") };
+  };
+  const setup = (home: string, ...args: string[]) => spawnSync(process.execPath, [SETUP, ...args], {
+    encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home, CAIRN_SETUP_OFFLINE: "1" },
+  });
+
+  it("setup claude --check is red on a CLAUDE.md without the import, green after install", () => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n\nnotes\n");
+      writeFileSync(join(s.proj, "AGENTS.md"), FRAGMENT);
+      const red = setup(s.home, "claude", "--project", s.proj, "--check");
+      expect(red.status).toBe(1);
+      expect(red.stdout).toContain("CLAUDE.md has no @AGENTS.md import");
+
+      expect(setup(s.home, "claude", "--project", s.proj).status).toBe(0);
+      const claude = readFileSync(join(s.proj, "CLAUDE.md"), "utf8");
+      expect(claude.startsWith(IMPORT_BLOCK)).toBe(true);
+      expect(claude.split("\n").slice(0, 3)).toContain("@AGENTS.md");
+      expect(claude).toContain("# my project\n\nnotes\n");
+
+      const green = setup(s.home, "claude", "--project", s.proj, "--check");
+      expect(green.status).toBe(0);
+      expect(green.stdout).toContain("CLAUDE.md imports AGENTS.md (line 2)");
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a second install changes nothing", () => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n");
+      setup(s.home, "claude", "--project", s.proj);
+      const once = readFileSync(join(s.proj, "CLAUDE.md"), "utf8");
+      const again = setup(s.home, "claude", "--project", s.proj);
+      expect(again.stdout).toContain("import already current");
+      expect(readFileSync(join(s.proj, "CLAUDE.md"), "utf8")).toBe(once);
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an import inside a code fence or HTML comment does not count", () => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n\n```md\n@AGENTS.md\n```\n");
+      writeFileSync(join(s.proj, "AGENTS.md"), FRAGMENT);
+      const red = setup(s.home, "claude", "--project", s.proj, "--check");
+      expect(red.status).toBe(1);
+      expect(red.stdout).toContain("line 4 sits inside a code fence");
+      expect(scanImport("~~~\n@AGENTS.md\n~~~\n@AGENTS.md\n")).toEqual({ line: 4, hidden: 2 });
+      expect(scanImport("<!--\n@AGENTS.md\n-->\n")).toEqual({ line: null, hidden: 2 });
+      expect(scanImport("    @AGENTS.md\n")).toEqual({ line: null, hidden: null });
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with no CLAUDE.md, claude --check is green when AGENTS.md carries the fragment, and says why", () => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.proj, "AGENTS.md"), FRAGMENT);
+      const r = setup(s.home, "claude", "--project", s.proj, "--check");
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("AGENTS.md read directly");
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("every other target adds the import to a CLAUDE.md already present, and creates none", () => {
+    const s = scratch();
+    const bare = scratch();
+    try {
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n");
+      expect(setup(s.home, "grok", "--project", s.proj).status).toBe(0);
+      expect(readFileSync(join(s.proj, "CLAUDE.md"), "utf8").startsWith(IMPORT_BLOCK)).toBe(true);
+      expect(setup(bare.home, "grok", "--project", bare.proj).status).toBe(0);
+      expect(existsSync(join(bare.proj, "CLAUDE.md"))).toBe(false);
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+      rmSync(bare.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("every readers row is a dated claim", () => {
+    expect(TABLE.length).toBeGreaterThan(0);
+    for (const r of TABLE) expect(r.claim, r.harness).toMatch(/^as of \d{4}-\d{2}, per /);
+  });
+
+  it("mechanism leg: green on the real table, one printed line per harness", () => {
+    const harnesses = parseHarnesses(read("setup/cairn-setup.mjs"));
+    expect(harnesses.length).toBe(8);
+    const mech = mechanismLeg({ table: TABLE, harnesses, setupPath: SETUP });
+    expect(mech.failures).toEqual([]);
+    const lines: string[] = formatReaders(mech, { rows: [] });
+    expect(lines).toHaveLength(harnesses.length);
+    for (const h of harnesses) expect(lines.some((l) => l.trimStart().startsWith(`${h} `))).toBe(true);
+  });
+
+  it("mechanism leg: red on a missing row, an empty table, or a load file setup never writes", () => {
+    const harnesses = parseHarnesses(read("setup/cairn-setup.mjs"));
+    const noZed = mechanismLeg({ table: TABLE.filter((r) => r.harness !== "zed"), harnesses, setupPath: SETUP });
+    expect(noZed.failures).toEqual(["zed: no readers row — add one naming the file zed loads at session start"]);
+
+    expect(mechanismLeg({ table: [], harnesses: [], setupPath: SETUP }).failures)
+      .toEqual(["readers table is empty", "no harness list parsed from setup/cairn-setup.mjs"]);
+
+    const gemini = { ...TABLE.find((r) => r.harness === "gemini")!, loadFile: "GEMINI-elsewhere.md" };
+    expect(mechanismLeg({ table: [gemini], harnesses: ["gemini"], setupPath: SETUP }).failures)
+      .toEqual(["gemini: setup gemini never writes GEMINI-elsewhere.md"]);
+  });
+
+  it("project leg: red when a present load file misses the fragment, absent is not installed", () => {
+    const s = scratch();
+    const legFailures = () => projectLeg({ table: TABLE, projectDir: s.proj, fragment: FRAGMENT }).failures;
+    try {
+      // nothing present: every row is "not installed here", nothing red
+      const none = projectLeg({ table: TABLE, projectDir: s.proj, fragment: FRAGMENT });
+      expect(none.failures).toEqual([]);
+      expect(none.rows.every((r: { state: string }) => r.state === "absent")).toBe(true);
+
+      writeFileSync(join(s.proj, "AGENTS.md"), FRAGMENT);
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n");
+      expect(legFailures()).toEqual(["claude: CLAUDE.md has no @AGENTS.md import"]);
+
+      writeFileSync(join(s.proj, "CLAUDE.md"), "# my project\n\n\n@AGENTS.md\n");
+      expect(legFailures()).toEqual(["claude: CLAUDE.md imports AGENTS.md at line 4, not within the first three lines"]);
+
+      writeFileSync(join(s.proj, "CLAUDE.md"), `${IMPORT_BLOCK}\n# my project\n`);
+      expect(legFailures()).toEqual([]);
+
+      writeFileSync(join(s.proj, "AGENTS.md"), "# just notes\n");
+      expect(legFailures()).toContain("codex: AGENTS.md carries no cairn section");
+      expect(legFailures()).toContain("claude: CLAUDE.md imports AGENTS.md, but AGENTS.md carries no cairn section");
+
+      writeFileSync(join(s.proj, "AGENTS.md"), FRAGMENT.replace("# cairn", "# cairn (old)"));
+      expect(legFailures()).toContain("codex: AGENTS.md cairn section is stale vs harness/AGENTS-cairn.md");
+      expect(projectLeg({ table: [], projectDir: s.proj, fragment: FRAGMENT }).failures)
+        .toEqual(["readers table is empty"]);
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("this checkout carries the dogfood AGENTS.md, fresh, for every direct reader", () => {
+    const codex = TABLE.find((r) => r.harness === "codex")!;
+    expect(reachFrom(ROOT, codex, { fragment: FRAGMENT }))
+      .toEqual({ state: "reaches", detail: "AGENTS.md carries the fragment" });
   });
 });
