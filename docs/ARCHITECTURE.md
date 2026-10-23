@@ -55,10 +55,38 @@ Every ADR under `docs/adr/` carries a `derives:` line directly after its
 semicolons — or stating `derives: convention — <why no clause decides
 it>`. A new ADR carries one too, and so does every hook script's header
 comment. The six render into the harness spine's shared rules through
-`scripts/gen-agents.mjs`, so every harness reads the same clauses;
-`server/test/sweep-surface.test.ts` fails on a missing `derives:` line,
-an axiom no rule cites, a clause count that moved without its pin, or a
-spine copy that disagrees with this file.
+`scripts/gen-agents.mjs`, so every harness that loads the spine reads the
+same clauses; `server/test/sweep-surface.test.ts` fails on a missing
+`derives:` line, an axiom no rule cites, a clause count that moved without
+its pin, or a spine copy that disagrees with this file.
+
+### Who reads the spine
+
+A copy that matches its sources is half the promise; the other half is a
+harness that loads it. Until 2026-10-22 the drift check covered the copy
+and nothing covered the reader, and the reader was where it broke (#398):
+Claude Code reads `AGENTS.md` only when no `CLAUDE.md` is in scope (a
+claim, as of 2026-10, per the Claude Code memory docs), and the plugin
+does not load a `CLAUDE.md` of its own, so in any project with both files
+the one harness the plugin targets never saw the axioms. cairn2's own
+checkout was that project.
+
+The fix, dated 2026-10-22: `cairn-setup` puts an `@AGENTS.md` import at
+the top of `CLAUDE.md`, between `cairn:begin`/`cairn:end` markers
+(the claude target creates the file; every other target edits one only
+if present), and `cairn-setup claude --check` is red when `CLAUDE.md` has
+no live import — one inside a code fence or an HTML comment does not
+count. `gen-agents --check` gained a readers leg: per harness, the file it
+loads at session start (`setup/spine-reach.mjs`; each row is a dated
+claim about that harness, never the asserted kind) and the path from it to
+the fragment — `AGENTS.md`, `GEMINI.md` and
+`.github/copilot-instructions.md` direct, `CLAUDE.md` only through the
+import. What it asserts is cairn's side: running each setup target in a
+scratch project writes that file with the fragment reachable from it, and
+every such file present in this checkout reaches a fresh fragment. A
+harness with no row, an empty table, or a present file with no path is
+red. The root `AGENTS.md` here is the dogfood copy; the `CLAUDE.md`
+import beside it is the owner's edit.
 
 ## Server subsystems
 <!-- docs: done -->

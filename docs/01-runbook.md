@@ -1216,7 +1216,15 @@ Three things happen everywhere: a `cairn` entry merges into the project's
 installs into `AGENTS.md` between `cairn:begin`/`cairn:end` markers, and
 the verb subroutines copy to `.cairn/harness/` so the harness can execute
 any verb by name — "run cairn status" reads and follows the same
-subroutine `/cairn:status` does. Copilot additionally gets
+subroutine `/cairn:status` does. When the project has a `CLAUDE.md`,
+every target also puts an `@AGENTS.md` import at its top, inside the same
+markers (`cairn-setup claude` creates the file if it is missing): Claude
+Code reads `AGENTS.md` only when no `CLAUDE.md` is in scope (a claim, as
+of 2026-10, per the Claude Code memory docs), so without the import a
+Claude Code session in that project never sees the spine. `--check` is
+red for claude when the import is missing or sits inside a code fence;
+the reader gap and its fix (2026-10-22, #398) are in
+`docs/ARCHITECTURE.md` under "Who reads the spine". Copilot additionally gets
 `~/.copilot/mcp-config.json` wiring, a `copilot-instructions.md` section,
 and `/cairn-plan|work|status|verify|ship` prompt files; Codex gets its
 `[mcp_servers.cairn]` block merged into `~/.codex/config.toml` (marker
