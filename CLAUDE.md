@@ -1,3 +1,7 @@
+<!-- cairn:begin — managed by cairn-setup; imports the cairn spine for Claude Code -->
+@AGENTS.md
+<!-- cairn:end -->
+
 # cairn2 — Claude context
 
 Work-harness plugin for Claude Code (and 7 other harnesses): a TypeScript
