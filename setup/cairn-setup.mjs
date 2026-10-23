@@ -8,7 +8,11 @@
 // What it does, per project:
 //   1. merges a `cairn` entry into the project's .mcp.json (read directly by
 //      Claude Code, Grok Build, and Cursor)
-//   2. installs the AGENTS.md cairn fragment (marker-delimited, idempotent)
+//   2. installs the AGENTS.md cairn fragment (marker-delimited, idempotent),
+//      and the `@AGENTS.md` import at the top of CLAUDE.md whenever one is
+//      present (the claude target creates it): Claude Code reads AGENTS.md
+//      only when no CLAUDE.md is in scope -- a claim, as of 2026-10, per the
+//      Claude Code memory docs (#398)
 //   3. copies the verb subroutines to .cairn/harness/ so harnesses without
 //      the plugin can read them
 //   4. harness-specific wiring (Copilot mcp-config + instructions + prompts;
@@ -18,7 +22,9 @@
 // source version + install date) so `--check` can answer "what's actually
 // installed where" (#82): it walks the surfaces, compares stamps against
 // this clone's version, prints a per-surface table, writes NOTHING, and
-// exits non-zero when anything lags — so it can gate.
+// exits non-zero when anything lags — so it can gate. It also walks the
+// readers: whether the harness's session-start file reaches the fragment
+// (setup/spine-reach.mjs holds the table).
 //
 // Additive and idempotent: existing config entries are merged, never
 // clobbered; re-running produces byte-identical results.
@@ -30,11 +36,12 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  BEGIN, READERS, reachFrom, spliceFragment, spliceImport,
+} from "./spine-reach.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESSES = ["grok", "copilot", "codex", "gemini", "cursor", "opencode", "zed", "claude"];
-const BEGIN = "<!-- cairn:begin";
-const END = "<!-- cairn:end -->";
 
 function usage(msg) {
   if (msg) console.error(msg);
@@ -118,19 +125,12 @@ function installFragment(path, fragment) {
   try {
     body = readFileSync(path, "utf8");
   } catch { /* new file */ }
-  const start = body.indexOf(BEGIN);
-  const end = body.indexOf(END);
-  if (start >= 0 && end < start) {
-    // Orphaned begin marker (truncated file / hand edit): appending would
-    // duplicate the whole fragment. Stop rather than guess.
-    console.error(`  ${path}: has a cairn:begin marker with no matching end — fix the markers, then re-run cairn-setup.`);
+  // Orphaned begin marker (truncated file / hand edit): appending would
+  // duplicate the whole fragment. Stop rather than guess.
+  const { next, error } = spliceFragment(body, fragment);
+  if (error) {
+    console.error(`  ${path}: ${error} — fix the markers, then re-run cairn-setup.`);
     process.exit(1);
-  }
-  let next;
-  if (start >= 0 && end > start) {
-    next = body.slice(0, start) + fragment.trimEnd() + body.slice(end + END.length);
-  } else {
-    next = body.length ? `${body.trimEnd()}\n\n${fragment}` : fragment;
   }
   if (next === body) {
     console.log(`  ${path}: cairn section already current...`);
@@ -139,6 +139,32 @@ function installFragment(path, fragment) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, next);
   console.log(`  ${path}: cairn section installed.`);
+}
+
+/** Put the `@AGENTS.md` import at the top of CLAUDE.md (#398), inside the
+ *  cairn markers, idempotent. Claude Code reads AGENTS.md only when no
+ *  CLAUDE.md is in scope (a claim, as of 2026-10, per the Claude Code memory
+ *  docs), so without this line a project that has both never shows Claude
+ *  the spine.
+ *  :param create write a CLAUDE.md holding only the import when none exists
+ *    (the claude target); every other target touches an existing one only */
+function installClaudeImport(path, { create }) {
+  let body = null;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch { /* absent */ }
+  if (body === null && !create) return;
+  const { next, note, error } = spliceImport(body ?? "");
+  if (error) {
+    console.error(`  ${path}: ${error} — fix the markers, then re-run cairn-setup.`);
+    process.exit(1);
+  }
+  if (next === body) {
+    console.log(`  ${path}: ${note}...`);
+    return;
+  }
+  writeFileSync(path, next);
+  console.log(`  ${path}: @AGENTS.md ${note} (Claude Code reads the spine through it).`);
 }
 
 /** Copy the verb subroutines + registry into the project for pluginless harnesses. */
@@ -271,12 +297,39 @@ if (checkMode) {
       lagging++;
     }
   }
+  // Readers (#398): does this harness's session-start file reach the
+  // fragment? For claude a CLAUDE.md without the import is red outright --
+  // that is the gap. For the rest, an absent file is "not installed", and a
+  // CLAUDE.md beside an installed AGENTS.md must still carry the import.
+  const row = READERS.find((r) => r.harness === harness);
+  const agentsInstalled = reachFrom(projectDir, { loadFile: "AGENTS.md", via: "direct" }).state === "reaches";
+  if (harness === "claude") {
+    const r = reachFrom(projectDir, row);
+    if (r.state === "reaches") {
+      console.log(`  readers (${row.path}): ${r.detail}`);
+    } else {
+      console.log(`  readers (${row.path}): ${r.detail} — Claude Code has no path to the spine`);
+      lagging++;
+    }
+  } else {
+    const r = reachFrom(projectDir, row);
+    console.log(`  readers (${row.path}): ${r.state === "absent" ? "not installed" : r.detail}`);
+    if (r.state === "broken" && r.detail.includes("cairn:begin")) lagging++;
+    if (agentsInstalled && existsSync(join(projectDir, "CLAUDE.md"))) {
+      const c = reachFrom(projectDir, READERS.find((x) => x.harness === "claude"));
+      if (c.state !== "reaches") {
+        console.log(`  readers (CLAUDE.md → @AGENTS.md → fragment): ${c.detail} — Claude Code sessions here never read the spine`);
+        lagging++;
+      }
+    }
+  }
+
   const latest = await npmLatestVersion();
   if (latest !== "unknown" && latest !== sourceVersion) {
     console.log(`  note: npm has v${latest}; this clone is v${sourceVersion} — pull/update before reinstalling.`);
   }
   if (lagging > 0) {
-    console.log(`${lagging} surface(s) lag — re-run \`node setup/cairn-setup.mjs ${harness}\` to adopt v${sourceVersion}.`);
+    console.log(`${lagging} surface(s) lag or miss their reader — re-run \`node setup/cairn-setup.mjs ${harness}\` to adopt v${sourceVersion}.`);
     process.exit(1);
   }
   console.log("all installed surfaces current.");
@@ -291,6 +344,7 @@ console.log(`wiring cairn into ${harness} for ${projectDir}...`);
 // Universal layer — every harness benefits from these three.
 mergeMcpJson(join(projectDir, ".mcp.json"));
 installFragment(join(projectDir, "AGENTS.md"), fragment);
+installClaudeImport(join(projectDir, "CLAUDE.md"), { create: harness === "claude" });
 installVerbs();
 
 if (harness === "copilot") {
@@ -430,7 +484,7 @@ if (harness === "grok") {
 }
 
 if (harness === "claude") {
-  console.log("  claude code users should install the plugin instead — the .mcp.json entry works, but the plugin adds hooks, commands, and skills.");
+  console.log("  CLAUDE.md imports AGENTS.md, so Claude Code reads the spine here. install the plugin too — it adds the hooks, commands, and skills.");
 }
 
 console.log("cairn-setup complete.");

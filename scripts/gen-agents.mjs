@@ -10,10 +10,20 @@
 // roster (templates/seats/ frontmatter) into the spine — single source,
 // rendered per host. Regenerate, never hand-edit; check-surface runs
 // `--check` / `--check-seats` so the fragment can't drift from its sources.
+//
+// --check also runs the readers leg (#398, scripts/lib/readers-leg.mjs): a
+// matching copy nobody loads is not a carried rule. Per harness, the file it
+// reads at session start (setup/spine-reach.mjs, each row a dated claim) must
+// be one cairn-setup writes with the fragment reachable from it, and every
+// such file present in this checkout must reach a fresh fragment. Writing
+// the spine refreshes the cairn span of those files here too (root AGENTS.md
+// is the dogfood copy).
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { READERS, fragmentSpan, spliceFragment } from "../setup/spine-reach.mjs";
+import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "./lib/readers-leg.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(root, "harness", "AGENTS-cairn.md");
@@ -171,8 +181,24 @@ if (checkMode) {
   try {
     existing = readFileSync(OUT, "utf8");
   } catch { /* missing counts as drift */ }
+  const failures = [];
   if (existing !== fragment) {
-    console.error("gen-agents: harness/AGENTS-cairn.md is stale — run node scripts/gen-agents.mjs");
+    failures.push("harness/AGENTS-cairn.md is stale — run node scripts/gen-agents.mjs");
+  }
+
+  // Readers leg (#398): can every harness actually load what we just compared?
+  const setupPath = join(root, "setup", "cairn-setup.mjs");
+  const harnesses = parseHarnesses(readFileSync(setupPath, "utf8"));
+  const mech = mechanismLeg({ table: READERS, harnesses, setupPath });
+  const proj = projectLeg({ table: READERS, projectDir: root, fragment });
+  console.log("readers (harness, session-start file, path to the fragment, status):");
+  for (const line of formatReaders(mech, proj)) console.log(line);
+  console.log("  (which file a harness loads is a dated claim per row in setup/spine-reach.mjs)");
+  for (const f of mech.failures) failures.push(`readers, mechanism: ${f}`);
+  for (const f of proj.failures) failures.push(`readers, this checkout: ${f}`);
+
+  if (failures.length) {
+    for (const f of failures) console.error(`gen-agents: ${f}`);
     process.exit(1);
   }
   process.exit(0);
@@ -198,6 +224,22 @@ console.log("generating AGENTS spine...");
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, fragment);
 console.log(`harness/AGENTS-cairn.md written — ${rows.length} live verbs, ${seats.length} seats.`);
+
+// Refresh the cairn span of this checkout's direct-read load files (root
+// AGENTS.md is the dogfood copy, #398) -- only files that already carry one;
+// installing is cairn-setup's job, refreshing a generated span is ours.
+for (const rel of [...new Set(READERS.filter((r) => r.via === "direct").map((r) => r.loadFile))]) {
+  const path = join(root, rel);
+  if (!existsSync(path)) continue;
+  const body = readFileSync(path, "utf8");
+  const span = fragmentSpan(body);
+  if (!span || span.orphan) continue;
+  const { next } = spliceFragment(body, fragment);
+  if (next !== body) {
+    writeFileSync(path, next);
+    console.log(`${rel}: cairn section refreshed.`);
+  }
+}
 
 // Context footprint (#211): the generated surface is resident in every
 // session, so say what it now costs. Advisory here -- check-footprint.mjs
