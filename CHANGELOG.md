@@ -1,5 +1,129 @@
 # Changelog
 
+## Unreleased — the constitution (phase 28, 2026-10-22)
+
+Cairn's standing rules become derivations instead of reactions. Six
+axioms open ARCHITECTURE.md — what counts as the record of work, a
+mechanism, a directive, a recorded run, the owner's ground, and surface
+rent — and every ADR and hook header names the clause it derives from; a
+rule that derives from none is the finding. Two mechanisms follow from
+them: the close can re-run the owner-declared verify line and record what
+it saw beside what was claimed, and a headless run that keeps being
+refused is frozen by a circuit breaker. The run guard classifies git by
+effect instead of enumerating spellings. Six fixed call chains the verb
+prose narrated move into the server as parameters on existing tools. And
+the harness spine gains readers: setup installs an import so Claude Code
+loads it beside a project `CLAUDE.md`, and the drift check is red when
+any harness has no path to it. Cairn stays in the "refused at runtime"
+tier and says so — the refusals are derivable and auditable, not airtight.
+
+Tool count holds at 87. Suite 2256 → 2358. Footprint 13145 → 13142 of a
+13145 pin. Two config keys (`verify.rerun`, `auto.breaker`), one typed
+error code (`RUN_FROZEN`), no new tool.
+
+### axioms
+
+- Six clauses open `docs/ARCHITECTURE.md` under `## Axioms`: tracker
+  truth, mechanism vs judgment, data not directive, a recorded run, the
+  owner's ground, surface is rent. They classify and prohibit nothing.
+  Every ADR carries a `derives:` line after its `removeWhen:`, every hook
+  header carries one, and the six render into the harness spine's shared
+  rules from the checkout. A sweep-surface test fails on a missing
+  `derives:`, an axiom no rule cites, a clause count that moved without
+  its pin, or a spine copy that disagrees with the source (#356).
+- "A sentence is not a mechanism" joins the shared rules and the spine:
+  every modal sentence is asserted by a named test or guard, measured as a
+  runtime field, or a dated claim; a new check is not done until it was
+  made red once; anything that produces context lists its readers (#394).
+- The spine has readers. `cairn-setup` installs a three-line `@AGENTS.md`
+  import at the top of `CLAUDE.md` (idempotent on the plain layout; the
+  claude target creates the file, other targets edit one if present) and
+  `--check` is red when a `CLAUDE.md` lacks a live import — fenced,
+  commented or indented lines do not count. `gen-agents --check` gains a
+  readers leg: per harness, the file it loads at session start and the
+  path from it to the fragment, run against every setup target in a
+  scratch project; a harness with no row, an empty table, or a present
+  load file with no path is red. Each row is a dated claim about that
+  harness. The root `AGENTS.md` is the dogfood copy and a fifth generated
+  surface (#398).
+
+### guards
+
+- The run guard classifies each git invocation by effect — discards-work,
+  moves-shared-ref, touches-owner-checkout, read-only by default — from
+  git's own option grammar (shortened long options, short clusters,
+  `+refspec`, whole-tree pathspecs) through a table the classifier reads
+  as data. Every refusal names the effect and the flag that caused it;
+  the everyday neighbours (`stash drop`, `branch -D`, a single-path
+  restore) stay allowed. The seventeen per-issue tests stayed green
+  unchanged through the rewrite, and an effects test joins them (#359).
+- Circuit breaker. Every refusal from the run, harness and leak guards
+  appends one digest-only row to a per-project refusals log — guard,
+  tool, effect, session, live run, sha256 of the input, never the command
+  or path. While a batch run is live its rows are counted; at
+  `auto.breaker` (default 3, `0` off) the guard writes the stop into the
+  run manifest itself. A frozen run's pushes are refused by the run guard;
+  its claims, closes and manifest moves return `RUN_FROZEN` from the
+  server, which posts the one plain-language comment the hooks cannot,
+  once. The outlook carries `frozen`. Guards fail open in both directions
+  (#358).
+
+### the close
+
+- `verify.rerun` (off by default): a close-kind ledger append re-runs the
+  owner-authored `verify:` line it reads out of the tracked PLAN.md at the
+  server's claim stamp — never the worker's evidence string, never a line
+  that changed since planning, never an untracked plan — under a minimal
+  environment and a timeout, and records `observed exit=<n> at=<when>`
+  beside the claimed evidence. A non-zero exit or a timeout marks the line
+  `observed-mismatch`, which `plan_check` reports and `distill_manifest`
+  lists; the close is never refused over it. The two `verify:` parsers
+  collapsed to one (#357).
+- `issue_close` takes the summary and the ledger block and composes the
+  close comment, measures, closes, writes the receipt and appends the
+  ledger line in one call through the shared append; the work verb's
+  close steps shrink to the verify run plus that call (#365).
+- `plan_check` reports `tdd-missing`, `evidence-missing` and
+  `closure-superseded` from the ledger through the shared parser; the
+  pre-phase-23 exemption is one server constant; the verify verb's three
+  ledger gates collapse to one step that defers to it (#366).
+
+### folds
+
+- `issue_create` takes a claim and creates-and-claims in one call; the
+  server resolves and stores the base commit at claim, so the work and
+  fast verbs drop their shell line (#369).
+- `continuity_checkpoint` takes a wave run id, composes notes and the
+  resume verb, writes the handoff and emits the outlook in one call; the
+  handoff-source enum has one definition (#370).
+- `trace_start` posts its started comment and seeds evidence, `trace_log`
+  mirrors cause-identified, `trace_close` writes the gotcha card with
+  derived provenance; the trace and verify verbs shrink accordingly
+  (#367).
+- `audit_record` dedups on intake (`dedup: true`) and files the surviving
+  critical and important findings with severity-first bodies, panel
+  summary, sweep label, outlook snapshot and agent cost (`file: true`);
+  `issue_attach` degrades to a fenced comment on trackers without
+  attachments; the audit verb's closing steps shrink to the flags (#368).
+
+### agents
+
+- Wave dispatch resolves each issue's model — an `agents.model` pin is
+  absolute, then a task's `model:` annotation, then a four-class rubric
+  (haiku / sonnet / opus / strongest), else inherit — on both dispatch
+  paths and prints the resolution table, so an all-session wave reads as
+  a choice. The planning rubric names a concrete tier per work class and
+  widens to the work verb; the wave brief carries the worker's resolved
+  model. Footprint unmoved (#406).
+
+### evals
+
+- A third corpus arm runs `/code-review` at its default finding limit;
+  11 of 11 graded on Claude Code 2.1.303 (recall 90%, precision 18%) and
+  recorded in ADR 0012's evidence. The scorer takes `--arms` so a one-arm
+  results directory scores honestly; run dir and cases live on the
+  `evals-archive` branch (#372).
+
 ## v2.9.0 — the directory review (2026-10-17)
 
 The plugin-directory submission of 2.8.3 came back with three policy

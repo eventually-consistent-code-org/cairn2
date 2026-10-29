@@ -91,8 +91,6 @@ import beside it is the owner's edit.
 ## Server subsystems
 <!-- docs: done -->
 
-
-
 The boundaries below are not only described here — `server/test/architecture.test.ts`
 asserts them on every run, so this section and the code cannot drift apart
 quietly. Four rules hold today:
@@ -157,8 +155,10 @@ reason.
   Two sibling scans sit beside it. `docs_drift` reports which verified
   phases the published documentation has not caught up with. The
   plan-quality scan reports contract drift, unanchored thresholds, a
-  phase that never wrote down its design alternatives, and a task that
-  never declared how it would be proved.
+  phase that never wrote down its design alternatives, a task that
+  never declared how it would be proved, and — read from the ledger
+  itself — a close with no red/green pair where one was owed, a close
+  with no evidence, and a closure a later line superseded.
 
   Closing a task measures it as well. The close derives the duration
   from timestamps it already controls (the claim comment, else the
@@ -171,6 +171,23 @@ reason.
   missing receipt is written as a named degraded marker, never as
   blanks, and no part of this can fail a close or an append (ADRs 0020,
   0021).
+
+  The close is one call, and so is the claim. `issue_close` takes the
+  summary and the ledger block and composes the close comment, measures,
+  closes, writes the receipt and appends the ledger line through the one
+  shared append; `issue_create` takes a claim, and the server resolves
+  the base commit itself and keeps it as the stamp later checks key on.
+  With `verify.rerun` on (off by default) that append also re-runs the
+  owner-declared `verify:` line it reads out of the tracked plan at the
+  claim's stamp — never the worker's string, never a line that changed
+  since, under a minimal environment and a timeout — and records
+  `observed` beside the claimed evidence; a mismatch is reported, never
+  refused (ADR 0017, amendment). The run manifest carries the circuit
+  breaker's stop as well: a run the hooks froze is refused its claims and
+  closes with `RUN_FROZEN`, and the one plain-language comment the freeze
+  owes is posted from here, once (ADR 0016, amendment). ADR 0026 —
+  removeWhen: every harness runs a skill-declared tool sequence
+  atomically, so a chain with one right order can live in the verb file.
 - `memory/` — disposable FTS index + git-committed memory cards with
   provenance, staleness checking, and phase/issue/role scopes.
 - `docs/` — documentation connectors (below) plus the marked-section
@@ -182,13 +199,19 @@ reason.
 - `sessions/` — persistent session stores for trace/probe/draft/thread
   work.
 - `trace/` — debugging-session records (evidence → hypothesis → test →
-  verdict).
+  verdict). The trace tools own their tracker mirror — the started
+  comment, the cause-identified comment — and the close writes the
+  lesson card with provenance derived from the session.
 - `audit/` — audit records: single-writer, date-scoped, immutable
-  history. The debt mode's marker words are a configuration key
-  (`audit.debt.markers`, default list, override replaces, empty
-  refused); its dedup key rides in each finding's detail, so the record
-  schema did not move. ADR 0024 — removeWhen: the tracker or platform
-  turns source deferral markers into tracked items on its own.
+  history. The record dedups findings on intake and files the surviving
+  critical and important ones itself — severity first in the body,
+  labels from constants, a refuted finding never filed — so the closing
+  steps of the audit verbs are two flags on one call. The debt mode's
+  marker words are a configuration key (`audit.debt.markers`, default
+  list, override replaces, empty refused); its dedup key rides in each
+  finding's detail, so the record schema did not move. ADR 0024 —
+  removeWhen: the tracker or platform turns source deferral markers into
+  tracked items on its own.
 - `map/` — the project knowledge graph (build, query, diff).
 - `peers/` — external-CLI peer review and council runs (roster of
   five seats: codex, opencode, antigravity, grok, copilot; fixed-argv
@@ -199,11 +222,13 @@ reason.
   roster is composed by lab at dispatch, or every seated CLI exposes its
   model before the run.
 - `seats/` — the review roster: seat schema and roster resolution,
-  dose-tiered brief composition, signal dispatch with the yield store,
-  and finding dedup (see the Seats subsystem section below).
+  dose-tiered brief composition (the wave brief carries the worker's
+  resolved model), signal dispatch with the yield store, and finding
+  dedup (see the Seats subsystem section below).
 - `workspace/` — multi-project workspaces and the dispatch board.
 - `core/` — continuity, active context, project registry, outlook
-  emission.
+  emission; the wave checkpoint composes its notes and resume verb,
+  writes the handoff and emits the outlook in one call.
 
 ## Docs connector subsystem (v2)
 <!-- docs: done -->
@@ -354,6 +379,17 @@ distinction matters more than the count.
 - **Advisers** say something and block nothing. The loop check notices
   the same tool called with the same input three times running and
   offers one line, once per streak.
+
+The run guard reads its rules as data. A classifier beside it sorts each
+git invocation, from git's own option grammar, into three effects —
+discards-work, moves-shared-ref, touches-owner-checkout — with read-only
+the default, and every refusal names the effect and the flag that caused
+it, so a reader can audit why it fired (ADR 0016, amendment). The breaker
+is the other shared library: the one call every refuser makes to append
+its row and, while a batch run is live, count toward the freeze. Each
+hook's header names the axiom it derives from, and a sweep test fails on
+a header that names none. ADR 0025 — removeWhen: never; the
+classification is what makes the next unseen case recognizable.
 
 Two properties hold across all three. They import no server code — the
 path schemes they need are recomputed in a shared helper, so the server
