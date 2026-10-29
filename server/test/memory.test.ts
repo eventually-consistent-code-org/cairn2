@@ -118,6 +118,25 @@ describe("observationBacklog", () => {
     expect(observationBacklog(d, now).oldestAgeDays).toBe(0);
   });
 
+  // #351: past its cap the hook renames the live file to a closed segment;
+  // the backlog is the live file plus every closed one.
+  it("counts closed segments and ages from the oldest row in any segment", () => {
+    const now = Date.parse("2026-09-20T12:00:00.000Z");
+    const d = registered();
+    seedObservations(d, 3, 1, now);
+    const closed = join(dirname(observationsPath(d)), "observations.20260910-120000-00.jsonl");
+    writeFileSync(closed, [
+      JSON.stringify({ ts: new Date(now - 10 * DAY_MS).toISOString(), tool: "Edit" }),
+      JSON.stringify({ ts: new Date(now - 8 * DAY_MS).toISOString(), tool: "Bash" }),
+    ].join("\n") + "\n");
+    const backlog = observationBacklog(d, now);
+    expect(backlog.count).toBe(5);
+    expect(backlog.oldestAgeDays).toBe(10);
+    // A just-rotated buffer -- closed segment, no live file -- is not empty.
+    rmSync(observationsPath(d));
+    expect(observationBacklog(d, now).count).toBe(2);
+  });
+
   it("is over threshold at exactly the threshold, not one past it", () => {
     const d = registered(3);
     seedObservations(d, 2);

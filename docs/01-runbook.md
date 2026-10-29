@@ -1494,8 +1494,8 @@ pause you; you act on the signal.
 **Observation backlog.** The PostToolUse observe hook appends a row per
 Edit/Write/Bash call to `.cairn/observations/observations.jsonl`, and retro
 is the only thing that ever reads or clears it. Left alone, that buffer
-grows until the hook's retention cap quietly drops the oldest half — work
-nobody reviewed, gone without a word. So memory announces its own state:
+grows until the hook's retention cap quietly drops the oldest closed
+segment — work nobody reviewed, gone without a word. So memory announces its own state:
 `mem_stats` returns an `observations` block (row count, oldest-entry age in
 days, the threshold), and once the count reaches
 `memory.observationWarnThreshold` (default 25) the recall banner carries a

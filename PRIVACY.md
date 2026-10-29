@@ -42,7 +42,9 @@ the local tracker's issue files when `tracker.type` is `local`, and
 `observations/observations.jsonl`. An observation row is: timestamp,
 session id, tool name, a target label (file path, or the first 80
 characters of a shell command), and an error flag. No prompt or response
-text is recorded. The file is capped at 2000 rows.
+text is recorded. The log is capped at about 2000 rows: past 1000 the
+live file is renamed to a closed segment, and only the newest 1000 or so
+closed rows are kept.
 
 **In your home directory, `~/.cairn/`.**
 - `handoff/` session continuity checkpoints (phase, issue, next step)
