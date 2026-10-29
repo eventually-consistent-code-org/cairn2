@@ -7,7 +7,7 @@
 // planned phases where this check finds nothing.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { parsePhaseDirName, phaseDirPrefix, plansRoot } from "./artifacts.js";
+import { hasLedgerUnion, LEDGER_UNION_LINE, parsePhaseDirName, phaseDirPrefix, plansRoot } from "./artifacts.js";
 import { parseLedger } from "./distill-manifest.js";
 import { parseFrontmatter, parsePlanDoc } from "./frontmatter.js";
 // The approaches block, as data: an H2 whose text is "Approaches
@@ -435,6 +435,21 @@ export function planCheck(projectDir, phase) {
     // ledger the server wrote rather than by eye.
     for (const p of plans)
         findings.push(...judgeLedgerGates(projectDir, p));
+    // Ledger merge attribute (#361) -- one finding per phase whose LEDGER.md
+    // exists while the planning root lacks the union line. The fix is one line.
+    if (!hasLedgerUnion(projectDir)) {
+        for (const p of plans) {
+            const ledgerPath = join(p.phaseDir, "LEDGER.md");
+            if (!existsSync(ledgerPath))
+                continue;
+            findings.push({
+                type: "ledger-attribute-missing", severity: "minor",
+                plan: relative(projectDir, ledgerPath), line: 1,
+                detail: `LEDGER.md merges by conflict without the union attribute -- add \`${LEDGER_UNION_LINE}\` ` +
+                    "to .cairn/plans/.gitattributes (plan_scaffold_phase writes it)",
+            });
+        }
+    }
     // Contract drift — pair every Produces against every Consumes in a
     // different plan that shares a symbol, flag on the consumer's line.
     const seen = new Set();

@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffoldProject, scaffoldPhase } from "../src/planning/artifacts.js";
 import { execFileSync } from "node:child_process";
 import { appendLedger, checkLedgerEntry, declaredVerifyFor } from "../src/planning/ledger.js";
 import { declaredVerifyIn, isPlainShellLine, planCheck, verifyClauseOf } from "../src/planning/check.js";
-import { distillManifest } from "../src/planning/distill-manifest.js";
+import { distillManifest, parseLedger } from "../src/planning/distill-manifest.js";
 import { CairnError } from "../src/errors.js";
 import {
   actualsSegment, receiptsDir, recordClaim, takeReceipt, writeReceipt, type CloseReceipt,
@@ -32,6 +32,26 @@ const EV = "evidence npm test => 12 passed — actuals wall=none degraded=no_rec
 function ledgerPath(d: string, phaseDir: string): string {
   return join(d, ".cairn", "plans", "phases", phaseDir, "LEDGER.md");
 }
+
+describe("ledger ordering is a merge artifact (#361)", () => {
+  it("two interleavings of the same lines parse to the same closures", () => {
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 3, "Ledger Phase");
+    const a = { ...entry, taskRef: "task-1", issueId: "PROJ-1" };
+    const b = { ...entry, taskRef: "task-2", issueId: "PROJ-2" };
+    const c = { ...entry, taskRef: "task-3", issueId: "PROJ-3" };
+    const closures = (order: typeof a[]): string[] => {
+      rmSync(ledgerPath(d, phaseDir), { force: true });
+      for (const e of order) appendLedger(d, phaseDir, e);
+      const base = join(d, ".cairn", "plans", "phases", phaseDir);
+      return parseLedger(base).entries.map((r) => `${r.issueId}|${r.taskRef}`).sort();
+    };
+    const one = closures([a, b, c]);
+    expect(one).toHaveLength(3);
+    expect(closures([c, a, b])).toEqual(one);
+  });
+});
 
 describe("appendLedger", () => {
   it("creates the file with a header on first append", () => {

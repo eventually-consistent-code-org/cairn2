@@ -107,13 +107,37 @@ function createIfAbsent(path, content, created, skipped) {
     writeFileSync(path, content);
     created.push(path);
 }
+/**
+ * The ledger is append-only, so git's union merge driver is correct by
+ * construction: two branches that each appended a line keep both. The
+ * attribute lives at the planning root, where `**` reaches every phase.
+ */
+export const LEDGER_UNION_LINE = "**/LEDGER.md merge=union";
+const LEDGER_UNION_RE = /^\*\*\/LEDGER\.md\s+(?:\S+\s+)*merge=union(?:\s|$)/;
+/** Whether the planning root's .gitattributes already carries the ledger union line. */
+export function hasLedgerUnion(projectDir) {
+    const path = join(plansRoot(projectDir), ".gitattributes");
+    return existsSync(path)
+        && readFileSync(path, "utf8").split("\n").some((l) => LEDGER_UNION_RE.test(l.trim()));
+}
+/** Idempotent: appends the union line when absent. Reports what it did. */
+export function ensureLedgerUnion(projectDir) {
+    if (hasLedgerUnion(projectDir))
+        return "present";
+    const path = join(plansRoot(projectDir), ".gitattributes");
+    mkdirSync(plansRoot(projectDir), { recursive: true });
+    const prior = existsSync(path) ? readFileSync(path, "utf8") : "";
+    const lead = prior === "" || prior.endsWith("\n") ? "" : "\n";
+    writeFileSync(path, `${prior}${lead}${LEDGER_UNION_LINE}\n`);
+    return "added";
+}
 export function scaffoldProject(projectDir, name) {
     const root = plansRoot(projectDir);
     const created = [];
     const skipped = [];
     createIfAbsent(join(root, "PROJECT.md"), PROJECT_TEMPLATE(name), created, skipped);
     createIfAbsent(join(root, "roadmap.md"), ROADMAP_TEMPLATE(name), created, skipped);
-    return { created, skipped };
+    return { created, skipped, gitattributes: ensureLedgerUnion(projectDir) };
 }
 export function scaffoldPhase(projectDir, number, name, opts = {}) {
     const dirName = phaseDirName(number, slugify(name));
@@ -125,7 +149,7 @@ export function scaffoldPhase(projectDir, number, name, opts = {}) {
     if (opts.research) {
         createIfAbsent(join(base, "RESEARCH.md"), RESEARCH_TEMPLATE(number, name), created, skipped);
     }
-    return { dir: dirName, created, skipped };
+    return { dir: dirName, created, skipped, gitattributes: ensureLedgerUnion(projectDir) };
 }
 export function readPlanIssues(projectDir, phaseDir) {
     const path = join(plansRoot(projectDir), "phases", phaseDir, "PLAN.md");
