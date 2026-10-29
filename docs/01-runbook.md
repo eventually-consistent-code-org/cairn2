@@ -2008,7 +2008,7 @@ because the neighbour is routine or recoverable:
 | A whole-tree `git checkout` or `git restore`: a pathspec of `.`, `./`, `..`, `:/`, `*` or `**` (with or without `--`), or `--pathspec-from-file` | One path (`git checkout -- src/a.ts`, `git restore a.ts`), and `git restore --staged .`, which touches only the index |
 | `git checkout -f`, `git switch --discard-changes` or `-f` | `git checkout <branch>`, `git switch <branch>`, `git switch -c <new>` |
 | `git clean`, unless it's a dry run | `git clean -n` / `--dry-run` |
-| `git stash clear` | `git stash drop`, `git stash pop` |
+| `git stash clear`; `git stash pop`, `apply` or `drop` while the repository has more than one worktree (they share one stash) | `git stash list` and `show`; `pop`, `apply` and `drop` with one worktree; `git stash push`, which proceeds with an advisory when worktrees share the stash |
 | `git reflog expire` | `git reflog` |
 | `git push --mirror` (or a plain push to a remote configured to mirror), `git push --prune` | Pushing a named feature branch |
 | A push that deletes the default branch | Deleting a feature branch (`git push origin --delete feature`), `git branch -D` |

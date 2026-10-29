@@ -133,6 +133,39 @@ describe("git effects: discards-work, three spellings (#359)", () => {
   });
 });
 
+describe("git effects: the stash is shared across linked worktrees (#363)", () => {
+  const two = { linkedWorktrees: () => true };
+  const one = { linkedWorktrees: () => false };
+
+  for (const action of ["pop", "apply", "drop"]) {
+    it(`\`git stash ${action}\` discards work with more than one worktree, and not with one`, () => {
+      const c = `git stash ${action} stash@{0}`;
+      expect(causes(c, DISCARDS_WORK, one), c).toEqual([]);
+      const [hit, ...rest] = causes(c, DISCARDS_WORK, two);
+      expect(rest, c).toEqual([]);
+      expect(hit.flag, c).toBe("more than one worktree");
+      expect(hit.what, c).toBe(`\`git stash ${action}\``);
+      expect(hit.why, c).toMatch(/shared by every worktree/);
+      expect(hit.why, c).toMatch(/WIP commit/);
+    });
+  }
+
+  it("the reads and the push half carry no row, whatever the worktree count", () => {
+    for (const c of ["git stash list", "git stash show -p", "git stash", "git stash push -m wip",
+      "git stash save wip", "git stash -u"]) {
+      expect(causes(c, DISCARDS_WORK, two), c).toEqual([]);
+    }
+  });
+
+  it("adds no fourth effect -- the stash rows are discards-work", () => {
+    const rows = EFFECT_TABLE.filter((r: { sub: string }) => r.sub === "stash");
+    expect(rows.map((r: { action: string }) => r.action)).toEqual(["clear", "pop", "apply", "drop"]);
+    for (const r of rows) expect(r.effect).toBe(DISCARDS_WORK);
+    expect(rows.slice(1).every((r: { when: string; name: string }) =>
+      r.when === "probe" && r.name === "linkedWorktrees")).toBe(true);
+  });
+});
+
 describe("git effects: moves-shared-ref, three spellings (#359)", () => {
   it("a push of every branch, spelled --all, -u with main, and --branc, moves a shared ref", () => {
     for (const [c, flag] of [["git push --all origin", "push --all origin"],
@@ -174,8 +207,11 @@ describe("git effects: everyday git stays allowed (#359)", () => {
     ["git branch", [READ_ONLY]],
     ["git branch -D topic", [READ_ONLY]],
     ["git worktree list", [READ_ONLY]],
+    // statically, and in a repository with one worktree; a second worktree
+    // makes pop/apply/drop discard work (#363, below)
     ["git stash push -m wip", [READ_ONLY]],
     ["git stash pop", [READ_ONLY]],
+    ["git stash apply", [READ_ONLY]],
     ["git stash drop", [READ_ONLY]],
     ["git push origin topic", [MOVES_SHARED_REF]],
     ["git reset --soft HEAD~1", [READ_ONLY]],

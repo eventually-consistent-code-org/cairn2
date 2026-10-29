@@ -46,9 +46,12 @@
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch;
  *   forced or whole-tree checkout/restore; a discarding switch; clean;
- *   stash clear; reflog expire; a forced worktree remove), options
- *   shortened as git allows (--har is --hard). Their everyday neighbours
- *   carry no such effect and stay allowed. Escape:
+ *   stash clear; reflog expire; a forced worktree remove; a stash pop,
+ *   apply or drop while more than one worktree shares the stash, #363),
+ *   options shortened as git allows (--har is --hard). Their everyday
+ *   neighbours carry no such effect and stay allowed; a stash push with
+ *   worktrees sharing the stash proceeds with an advisory (additionalContext,
+ *   stdout). Escape:
  *   CAIRN_ALLOW_DESTRUCTIVE_GIT=1 -- for the session, or as the leading
  *   assignment of the one command (honoured, never taught: refusals name
  *   only the owner's ways).
@@ -1120,14 +1123,46 @@ function mirrorConfigured(inv, at) {
 }
 
 /**
+ * True when the repository at `at` has more than one worktree (#363) --
+ * `git worktree list --porcelain` reports more than one entry -- so its one
+ * stash is shared between them. Read once per target and kept on it; a
+ * target git can't read is false, like the other probes: the guard fails
+ * open on what it can't see.
+ */
+function linkedWorktrees(at) {
+  if (at.worktrees === undefined) {
+    const list = gitOut(at, ["worktree", "list", "--porcelain"]);
+    at.worktrees = list === null ? 0 : list.split("\n").filter((l) => l.startsWith("worktree ")).length;
+  }
+  return at.worktrees > 1;
+}
+
+/**
  * The repository's answers the classifier asks for at the target `at`
- * (#359): a remote that mirrors, and a push that deletes the default
- * branch -- defaultBranchSources reads which branches that is.
+ * (#359): a remote that mirrors, a push that deletes the default branch --
+ * defaultBranchSources reads which branches that is -- and a second
+ * worktree sharing the stash (#363).
  */
 const repoProbe = (at) => ({
   mirrorConfigured: (inv) => mirrorConfigured(inv, at),
   deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
+  linkedWorktrees: () => linkedWorktrees(at),
 });
+
+/**
+ * True for the stash's parking half (#363): a bare `git stash`, `stash
+ * push`, `stash save`, or options with no action (`git stash -u`). It has
+ * no effect-table row -- stashing is recoverable -- so the run guard only
+ * advises on it, and only when worktrees share the stash.
+ */
+const parksStash = (inv) => inv.sub === "stash"
+  && (inv.args[0] === undefined || ["push", "save"].includes(inv.args[0]) || inv.args[0].startsWith("-"));
+
+// The advisory a stash push gets while linked worktrees share the stash (#363)
+const STASH_ADVICE = "cairn run guard: this repository has more than one worktree, and the stash is " +
+  "shared by every worktree of it -- an entry pushed here shows in the others' `git stash list`, and " +
+  "their pop can take it. Prefer a WIP commit on your own branch (squash it before the close); a " +
+  "stash pop, apply or drop is refused while the worktrees share the stash.";
 
 /**
  * Why this push may not land on the default branch yet, as [why, what to
@@ -1252,6 +1287,12 @@ function judgeLine(line, start, ctx) {
         const [hit] = classify(inv, repoProbe(at), { only: DISCARDS_WORK, first: true });
         if (hit) refuseDestructive(inv, hit);
       }
+    }
+
+    // #363 -- the stash's parking half proceeds; while worktrees share the
+    // stash it carries an advisory, never a refusal. One worktree: silent.
+    if (parksStash(inv) && (known.length ? known : [{ dir: ctx.cwd }]).some((at) => linkedWorktrees(at))) {
+      ctx.advice.add(STASH_ADVICE);
     }
 
     // moves-shared-ref onto the default branch: it only takes what a clean
@@ -1394,12 +1435,20 @@ try {
     projectDir, baseDir, cwd, project: { dir: projectDir }, allowDestructive, currentRuns, where,
     lineConfig: lines.some((l) => linePushConfig(l.command, l.invs)),
     sessionId: typeof payload?.session_id === "string" ? payload.session_id : null,
+    advice: new Set(),
   };
   lines.forEach((line, n) => {
     ctx.priorMoves = moves.some((m, k) => m && (tool.concurrent ? k !== n : k < n));
     judgeLine(line, start, ctx);
   });
-  process.exit(0);
+  // #363 -- nothing refused; advisories ride the allow as context for the
+  // agent (PreToolUse additionalContext, per the hooks reference as of
+  // 2026-10). No permissionDecision: the normal permission flow still runs.
+  // A pipe write can be asynchronous (macOS), so exit once it has flushed.
+  if (!ctx.advice.size) process.exit(0);
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: [...ctx.advice].join("\n") },
+  }), () => process.exit(0));
 } catch {
   process.exit(0); // guard must never block work because IT broke
 }
@@ -1442,4 +1491,13 @@ try {
  *   #414  forced worktree remove refused in every session
  *   #358  every refusal recorded and counted; a frozen run's sessions push nothing
  *         (hooks.test.ts, "circuit breaker")
+ *   #363  no stash across linked worktrees: stash pop, apply and drop are
+ *         discards-work rows under the linkedWorktrees probe (`git worktree
+ *         list --porcelain`, more than one entry), no fourth effect; one
+ *         worktree is unchanged. stash push / save / bare stash have no row
+ *         (the table refuses, it doesn't advise) -- the advisory stays a run
+ *         guard emit, STASH_ADVICE. The issue asked #359 to carry this as an
+ *         effect; #359 landed first, so it ships as rows in its table.
+ *         #435 (phase 30) adds its touches-owner-checkout condition on these
+ *         same rows, not a second row set.
  */
