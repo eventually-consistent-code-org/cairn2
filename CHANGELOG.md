@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — the constitution (phase 28, 2026-10-22)
+## v2.9.1 — the constitution (2026-10-29)
 
 Cairn's standing rules become derivations instead of reactions. Six
 axioms open ARCHITECTURE.md — what counts as the record of work, a

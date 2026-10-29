@@ -1,7 +1,7 @@
 {
   "name": "cairn",
   "displayName": "cairn",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "description": "cairn 2.0 — converged work management: tracker-truth planning, provenance-checked memory, and a per-verb /cairn:<verb> surface, backed by a typed MCP server.",
   "author": {
     "name": "eventually-consistent-code",
