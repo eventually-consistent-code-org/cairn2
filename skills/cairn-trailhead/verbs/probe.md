@@ -11,14 +11,12 @@ feature build: the artifact is disposable, the verdict is not.
 
 ## With a question: `probe "<question>"`
 
-1. `probe_start(description)` — creates the `cairn:spike` issue. If one is
-   already open for this question (the guard fires), don't start a
-   duplicate: re-read `.cairn/probe/<id>.md` and resume from the last
-   entry instead.
-2. Mirror comment #1 via `issue_comment`: one plain sentence that the
-   investigation has started and what it checks — no jargon, no file
-   paths, just what's being checked and why.
-3. Experiment loop, run HIGHEST-UNCERTAINTY FIRST — the question most
+1. `probe_start(description)` — creates the `cairn:spike` issue and posts
+   the started comment itself (plain language, composed from the
+   description). If one is already open for this question (the guard
+   fires), don't start a duplicate: re-read `.cairn/probe/<id>.md` and
+   resume from the last entry instead.
+2. Experiment loop, run HIGHEST-UNCERTAINTY FIRST — the question most
    likely to kill the whole approach gets tested before anything that only
    refines it:
    - re-ground before every experiment: re-read the session file. A probe
@@ -42,10 +40,10 @@ feature build: the artifact is disposable, the verdict is not.
    - `probe_log(kind: "verdict")` — VALIDATED | INVALIDATED | PARTIAL, plus
      the why in one or two sentences. A verdict without a why is a guess
      wearing a lab coat.
-4. Key-finding mirror comment whenever the picture materially changes —
+3. Key-finding mirror comment whenever the picture materially changes —
    not every log line, just the moments that would change what a manager
    thinks is true about this question.
-5. `probe_close(resolution: "proceed|pivot|stop — <reason>")` — archives
+4. `probe_close(resolution: "proceed|pivot|stop — <reason>")` — archives
    the session, comments the resolution on the issue, and closes it. The
    resolution is the one line that has to survive without any of the
    detail above it.
