@@ -43,7 +43,13 @@ pairing overlay applies:
    that wave). Every issue still runs the full per-issue lifecycle below
    (claim → work → close → ledger) — the dispatch mechanism and who
    holds each step change; the lifecycle never does. Wave N+1 starts
-   only when every wave-N issue is closed and merged. A failed issue:
+   only when every wave-N issue is closed and merged. Before each
+   branch merges after another, run `node scripts/lib/merge-overlap.mjs
+   <merged-so-far> <next-branch>` and lead the merge message and the
+   tracker note with its line: `overlap: 3 files — a, b, c` or
+   `overlap: none`. No overlap merges silently; overlap names the files
+   first, so a conflict or a quiet semantic collision is read where it
+   lives (asserted by sweep-surface.test.ts, #223). A failed issue:
    let the wave's others finish, then STOP before the next wave and
    report — never build on possibly-broken foundations.
 
