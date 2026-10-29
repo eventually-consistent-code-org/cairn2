@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   slugify, phaseDirName, phaseDirPrefix, parsePhaseDirName, isValidPhaseNumber, scaffoldProject, scaffoldPhase,
   readPlanIssues, writePlanIssues, readPlanMeta, writePlanMeta,
 } from "../src/planning/artifacts.js";
+import { planCheck } from "../src/planning/check.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "cairn-plans-"));
 
@@ -84,6 +85,38 @@ describe("scaffolding", () => {
     const second = scaffoldProject(d, "My Proj");
     expect(second.created).toEqual([]);
     expect(second.skipped.length).toBe(2);
+  });
+
+  it("ships the union merge attribute for ledgers, idempotently (#361)", () => {
+    const d = dir();
+    const attrs = join(d, ".cairn/plans/.gitattributes");
+    expect(scaffoldProject(d, "P").gitattributes).toBe("added");
+    expect(readFileSync(attrs, "utf8")).toBe("**/LEDGER.md merge=union\n");
+    expect(scaffoldProject(d, "P").gitattributes).toBe("present");
+    expect(scaffoldPhase(d, 1, "Core").gitattributes).toBe("present");
+    expect(readFileSync(attrs, "utf8")).toBe("**/LEDGER.md merge=union\n");
+  });
+
+  it("appends the attribute to an existing .gitattributes without a trailing newline (#361)", () => {
+    const d = dir();
+    mkdirSync(join(d, ".cairn/plans"), { recursive: true });
+    const attrs = join(d, ".cairn/plans/.gitattributes");
+    writeFileSync(attrs, "*.md text");
+    expect(scaffoldPhase(d, 1, "Core").gitattributes).toBe("added");
+    expect(readFileSync(attrs, "utf8")).toBe("*.md text\n**/LEDGER.md merge=union\n");
+  });
+
+  it("plan_check flags a ledger without the attribute as minor, with the fix (#361)", () => {
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: pd } = scaffoldPhase(d, 1, "Core");
+    writeFileSync(join(d, ".cairn/plans/phases", pd, "LEDGER.md"), "# Ledger\n");
+    expect(planCheck(d).findings.filter((f) => f.type === "ledger-attribute-missing")).toEqual([]);
+    rmSync(join(d, ".cairn/plans/.gitattributes"));
+    const hit = planCheck(d).findings.filter((f) => f.type === "ledger-attribute-missing");
+    expect(hit).toHaveLength(1);
+    expect(hit[0].severity).toBe("minor");
+    expect(hit[0].detail).toContain("**/LEDGER.md merge=union");
   });
 
   it("creates a phase dir with CONTEXT + PLAN (+ RESEARCH when asked)", () => {

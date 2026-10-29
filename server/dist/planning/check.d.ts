@@ -18,9 +18,13 @@ export interface PlanFinding {
      * `observed-mismatch` marker -- the server re-ran the declared verify at
      * close and saw a non-zero exit or a timeout. Severity `important`.
      */
-    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded" | "observed-mismatch";
-    /** Set only where a kind carries one; today `observed-mismatch` is `important`. */
-    severity?: "important";
+    type: "contract-drift" | "unanchored-threshold" | "missing-approaches" | "missing-verify" | "tdd-missing" | "evidence-missing" | "closure-superseded" | "observed-mismatch" | "ledger-attribute-missing";
+    /**
+     * Set only where a kind carries one; `observed-mismatch` is `important`,
+     * `ledger-attribute-missing` (#361: a LEDGER.md without the union merge
+     * attribute) is `minor`.
+     */
+    severity?: "important" | "minor";
     plan: string;
     line: number;
     detail: string;

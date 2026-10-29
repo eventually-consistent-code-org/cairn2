@@ -2,6 +2,11 @@
 // what was run and what it showed, or a written waiver) and the line that
 // records it.
 //
+// Ordering across branches is by merge, not by append time: the ledger
+// merges by union (.gitattributes, #361), so lines from two branches land
+// in merge order. Readers treat it as a set of lines keyed by issue id;
+// asserted by test/ledger.test.ts "ledger ordering is a merge artifact".
+//
 // removeWhen: never for the record -- a commit range and its evidence are
 // the audit trail, not a model workaround. The refusal on missing evidence
 // can soften to a report once agents attach evidence unprompted on every

@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ensureLedgerUnion } from "../src/planning/artifacts.js";
 import { judgeApproaches, judgeVerifyDeclarations, planCheck } from "../src/planning/check.js";
 
 const fresh = () => mkdtempSync(join(tmpdir(), "cairn-plancheck-"));
@@ -282,6 +283,7 @@ describe("planCheck — ledger gates (#366)", () => {
   const fixUp = (id: string) => `- [ ] T${id} — wrong close — commits aaaaaaa..bbbbbbb — evidence for ${id} 2026-10-18`;
   const setup = (phaseDir: string, entries: string[], verified = false) => {
     const dir = fresh();
+    ensureLedgerUnion(dir); // scaffolded projects ship the attribute (#361)
     plan(dir, phaseDir, LEDGER_PLAN);
     context(dir, phaseDir, GOOD_BLOCK);
     const base = join(dir, ".cairn", "plans", "phases", phaseDir);

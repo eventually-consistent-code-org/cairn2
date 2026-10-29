@@ -173,7 +173,10 @@ pairing overlay applies:
    any file-mutating issue, each on its resolved model (the subagent's
    `model`, left out only on a `session` row) and the same `effort`, with
    the same resolution table in the wave report. Each subagent runs the
-   full per-issue lifecycle below (claim → work → close → ledger).
+   full per-issue lifecycle below (claim → work → close → ledger). Each
+   worker appends to its own branch's `LEDGER.md`; the union merge
+   attribute (`plan_scaffold_phase` writes it, `plan_check` flags its
+   absence) keeps every worker-appended line when the branches merge.
 3. For each issue id, in order: `issue_get(id)` — skip closed ones. If it's
    assigned to someone who is not you (compare against `user.handle` in
    cairn.json, only when it's set there — if unset, there are no ownership

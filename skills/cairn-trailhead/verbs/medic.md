@@ -66,13 +66,14 @@ from the evidence trail. All three close the same way: a record.
 
 ## `--repair` (mechanical structure only)
 
-Only after the health record exists. Three moves, and only three:
+Only after the health record exists. The moves:
 
 | finding | fix |
 |---|---|
 | phase directory missing or incomplete | `plan_phase_ensure` |
 | phase scaffold missing (PLAN.md, LEDGER.md, etc.) | `plan_scaffold_phase` |
 | stale or missing plan↔issue links | `plan_issues_set` |
+| `ledger-attribute-missing` (minor) | `plan_scaffold_phase` on any existing phase — it adds the `**/LEDGER.md merge=union` line to `.cairn/plans/.gitattributes` and reports `gitattributes: added` |
 | dangling issue-graph edge (endpoint deleted) | `issue_unlink` per `graph_report().dangling` entry |
 
 **Never-rule: `--repair` touches structure, never content.** It creates a

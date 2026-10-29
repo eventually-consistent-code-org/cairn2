@@ -226,7 +226,9 @@ Execute the phase. The per-issue lifecycle, in vibe mode:
    remains).
 8. Every close appends a line to the phase's git-committed `LEDGER.md` — the
    durable record that the task landed, with base/head commits and (for TDD
-   tasks) the RED/GREEN pair.
+   tasks) the RED/GREEN pair. Scaffolding writes `**/LEDGER.md merge=union`
+   to the planning root's `.gitattributes`, so parallel branches that each
+   appended a line merge without a conflict (asserted by `test/artifacts.test.ts`).
 9. After the last issue: clear the issue context and suggest
    `/cairn:verify <N>`.
 
