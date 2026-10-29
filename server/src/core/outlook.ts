@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { projectStatus } from "../planning/status.js";
 import { sessionLandscape } from "../sessions/store.js";
 import { metricsSegments } from "./metrics.js";
 import { readRegistry } from "./registry.js";
-import { isFrozenByBreaker, listRunManifests } from "../planning/run-manifest.js";
+import { isFrozenByBreaker, listRunManifests, repositoryPath } from "../planning/run-manifest.js";
 import {
   readHandoff, writeHandoff, waveNotes, waveNextVerb,
   type Handoff, type WaveRef,
@@ -86,17 +86,10 @@ export const OutlookSnapshotSchema: z.ZodType<OutlookSnapshot> = z.object({
   frozen: z.object({ runId: z.string(), at: z.string(), refusals: z.number() }).optional(),
 });
 
-/** Same per-machine hashing scheme as handoffPath/indexDbPath. */
-function pathHash(projectDir: string): { base: string; hash: string } {
-  const abs = resolve(projectDir);
-  const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-  return { base: basename(abs), hash };
-}
-
-/** The machine-wide mirror the aggregate reads (never walks repos). */
+/** The machine-wide mirror the aggregate reads (never walks repos). One per
+ *  repository (#362): every worktree's emit lands on the same snapshot. */
 export function outlookMirrorPath(projectDir: string, home: string = homedir()): string {
-  const { base, hash } = pathHash(projectDir);
-  return join(home, ".cairn", "outlook", `${base}-${hash}.json`);
+  return repositoryPath(projectDir, "outlook", ".json", join(home, ".cairn"));
 }
 
 /** The in-repo copy -- travels with the project, diffable when committed. */
@@ -106,7 +99,9 @@ export function outlookLocalPath(projectDir: string): string {
 
 function atomicWrite(path: string, snapshot: OutlookSnapshot): void {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
+  // pid + random suffix, never a fixed name (#351): the file is shared by
+  // every worktree of the repository (#362), so two writers can overlap
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(snapshot, null, 2) + "\n");
   renameSync(tmp, path);
 }
@@ -274,12 +269,11 @@ export interface OutlookCard {
   costByKind?: Record<string, number>;
 }
 
-/** Metrics file for a project -- same basename+hash scheme as the mirror.
+/** Metrics file for a project -- same project key as the mirror (#362).
  *  This join is WHY the registry keeps absolute paths: the hash alone is
  *  not reversible. */
 export function metricsPathFor(projectDir: string, home: string = homedir()): string {
-  const { base, hash } = pathHash(projectDir);
-  return join(home, ".cairn", "metrics", `${base}-${hash}.jsonl`);
+  return repositoryPath(projectDir, "metrics", ".jsonl", join(home, ".cairn"));
 }
 
 /**

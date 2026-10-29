@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   OBSERVATION_WARN_THRESHOLD,
   observationBacklog,
@@ -23,6 +23,21 @@ import {
  * #173 — the observation buffer announcing its own state, through mem_stats'
  * `observations` block and the session banner's "run retro" line.
  */
+
+// The observation log lives in the cairn home (#362), which the server reads
+// as os.homedir() -- so this file runs under a scratch HOME, never the real one.
+let savedHome: string | undefined;
+let scratchHome = "";
+beforeAll(() => {
+  savedHome = process.env.HOME;
+  scratchHome = mkdtempSync(join(tmpdir(), "cairn-memory-home-"));
+  process.env.HOME = scratchHome;
+});
+afterAll(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  rmSync(scratchHome, { recursive: true, force: true });
+});
 
 const dirs: string[] = [];
 const dir = () => {
@@ -68,6 +83,7 @@ describe("observationBacklog", () => {
     const d = registered();
     expect(observationBacklog(d)).toEqual({
       count: 0, oldest: null, oldestAgeDays: 0, threshold: 25, overThreshold: false,
+      path: observationsPath(d),
     });
   });
 
@@ -124,7 +140,8 @@ describe("observationBacklog", () => {
     const now = Date.parse("2026-09-20T12:00:00.000Z");
     const d = registered();
     seedObservations(d, 3, 1, now);
-    const closed = join(dirname(observationsPath(d)), "observations.20260910-120000-00.jsonl");
+    const live = observationsPath(d);
+    const closed = join(dirname(live), `${basename(live, ".jsonl")}.20260910-120000-00.jsonl`);
     writeFileSync(closed, [
       JSON.stringify({ ts: new Date(now - 10 * DAY_MS).toISOString(), tool: "Edit" }),
       JSON.stringify({ ts: new Date(now - 8 * DAY_MS).toISOString(), tool: "Bash" }),

@@ -25,7 +25,9 @@ export interface ShipGateStamp {
     clean: boolean;
     at: string;
 }
-/** <home>/ship-gate/<project>-<hash>.json -- baseDir injectable for tests. */
+/** <home>/ship-gate/<projectKey>.json -- per repository (#362), so a drift
+ *  check run in one worktree is the stamp the run guard reads in another.
+ *  baseDir injectable for tests. */
 export declare function shipGateStampPath(projectDir: string, baseDir?: string): string;
 /** True when nothing flagged is something ship stops on. */
 export declare function driftIsClean(flagged: DriftItem[]): boolean;

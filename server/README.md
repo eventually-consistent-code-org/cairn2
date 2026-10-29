@@ -247,13 +247,14 @@ cost) and `tokensSavedVsFullInjection` (sum of the scoped cards' costs minus
 the banner cost, floored at 0) — honest accounting of what the pre-rendered
 index actually saves versus injecting every card in full.
 
-The banner also carries the observation buffer's state. Once
-`.cairn/observations/observations.jsonl` holds at least
+The banner also carries the observation buffer's state. Once the
+repository's shared log, `~/.cairn/observations/<project key>.jsonl` (one
+per repository, every worktree appends to it), holds at least
 `memory.observationWarnThreshold` rows (default 25), a line directly under
 the header reads `N unreviewed observations (oldest Xd) — run retro`, and a
 backlog past that line renders the banner even with no cards and no open
 sessions. `mem_stats` reports the same facts under `observations` (count,
-`oldestAgeDays`, threshold). Both read the plain JSONL file — like the card
+`oldestAgeDays`, threshold, and `path`, the live file). Both read the plain JSONL file — like the card
 audit, independent of the index binding, so a broken index can't hide the
 backlog. Capture stays passive; retro remains the only reader and the only
 garbage collector.
@@ -836,7 +837,7 @@ Dependency-free, fire-and-forget Node scripts, registered in
 | 1 | `PostToolUse` | `Edit\|Write\|Bash` | `posttooluse-breadcrumb.mjs` | Refresh the session handoff, throttled to ≤1 write/60s (see Session continuity above) |
 | 2 | `SessionStart` | — | `sessionstart-continuity.mjs` | Cat the handoff + recall banner; offer/auto-run/suppress resume per `continuity.resume` — `startup` and `clear` only; restored sessions get nothing |
 | 3 | `PreToolUse` | `Bash` | `pretooluse-leakguard.mjs` | Leak guard — scan a staged `git commit`'s diff for cairn-internal refs before it lands |
-| 4 | `PostToolUse` + `PostToolUseFailure` | `Edit\|Write\|Bash` | `posttooluse-observe.mjs` | Passive observation capture (tool, target, error flag) to `.cairn/observations/` — cairn projects only, capped, reviewed and cleared by `retro`, with its depth surfaced by `mem_stats` and the banner. A failed call never reaches `PostToolUse`; the `PostToolUseFailure` wiring is what makes the error flag real |
+| 4 | `PostToolUse` + `PostToolUseFailure` | `Edit\|Write\|Bash` | `posttooluse-observe.mjs` | Passive observation capture (tool, target, error flag) to the repository's shared log under `~/.cairn/observations/` — cairn projects only, capped, reviewed and cleared by `retro`, with its depth surfaced by `mem_stats` and the banner. A failed call never reaches `PostToolUse`; the `PostToolUseFailure` wiring is what makes the error flag real |
 | 5 | `Stop` | — | `stop-costtracker.mjs` | Cumulative session cost snapshot (tokens + approximate $ + report bytes) tagged with the active phase/issue, to `~/.cairn/metrics/`; `cost-report.mjs` rolls it up |
 
 ### Leak guard (hook #3)

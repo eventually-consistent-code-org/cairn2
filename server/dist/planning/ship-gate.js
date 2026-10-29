@@ -24,14 +24,15 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathHash } from "./run-manifest.js";
+import { repositoryPath } from "./run-manifest.js";
 // Constants
 /** Drift kinds ship reports but never stops on. */
 const ADVISORY = new Set(["stale-issue", "stale-branch", "roadmap-row"]);
-/** <home>/ship-gate/<project>-<hash>.json -- baseDir injectable for tests. */
+/** <home>/ship-gate/<projectKey>.json -- per repository (#362), so a drift
+ *  check run in one worktree is the stamp the run guard reads in another.
+ *  baseDir injectable for tests. */
 export function shipGateStampPath(projectDir, baseDir = join(homedir(), ".cairn")) {
-    const { base, hash } = pathHash(projectDir);
-    return join(baseDir, "ship-gate", `${base}-${hash}.json`);
+    return repositoryPath(projectDir, "ship-gate", ".json", baseDir);
 }
 /** True when nothing flagged is something ship stops on. */
 export function driftIsClean(flagged) {

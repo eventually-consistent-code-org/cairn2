@@ -1,8 +1,12 @@
 import { z } from "zod";
+/** One session's task in flight -- per worktree, keyed by the checkout
+ *  folder, never shared across a repository's worktrees (#362). */
 export declare function handoffPath(projectDir: string): string;
+/** The session banner -- per worktree, like the handoff it renders. */
 export declare function bannerPath(projectDir: string): string;
 /** The Stop hook's cumulative cost log (stop-costtracker.mjs writes it; the
- *  token estimator reads it). Scheme mirrored in hooks/scripts/lib.mjs. */
+ *  token estimator reads it) -- per repository (#362). Scheme mirrored in
+ *  hooks/scripts/lib.mjs. */
 export declare function metricsPath(projectDir: string): string;
 /** The one definition of who wrote a handoff -- the MCP input schema in
  *  index.ts imports this rather than restating it (#370 collapsed the copy). */

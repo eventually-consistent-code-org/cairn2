@@ -42,8 +42,9 @@
  * Author(s): John Reed
  */
 import { z } from "zod";
-/** ~/.cairn/budget/<project>-<hash>-<runId>.json — one ledger file per run,
- * outside the repo (metrics/handoff convention). baseDir injectable for tests. */
+/** ~/.cairn/budget/<projectKey>-<runId>.json — one ledger file per run,
+ * outside the repo, per repository like the run it meters (#362). baseDir
+ * injectable for tests. */
 export declare function budgetLedgerPath(projectDir: string, runId: string, baseDir?: string): string;
 /** The metrics jsonl the Stop hook writes — same path scheme as
  * hooks/scripts/lib.mjs's metricsPath, with the base dir injectable. */

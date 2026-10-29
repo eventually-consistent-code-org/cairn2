@@ -20,11 +20,12 @@
  */
 // Imports
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CairnError } from "../errors.js";
+import { repositoryPath } from "../planning/run-manifest.js";
 // Constants — the gating thresholds (consumed by signals.ts's selectSeats)
 /** Minimum dispatches before yield evidence may gate a seat — under this,
  * the sample is too small to prune on. */
@@ -46,17 +47,10 @@ export const YieldStateSchema = z.object({
     seats: z.record(z.string(), YieldCountersSchema),
 });
 // Paths
-/** Same per-machine hashing scheme as budget-ledger.ts / continuity.ts. */
-function pathHash(projectDir) {
-    const abs = resolve(projectDir);
-    const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-    return { base: basename(abs), hash };
-}
-/** ~/.cairn/yield/<project>-<hash>.json — one store per project, outside
- * the repo. baseDir injectable for tests (budget-ledger convention). */
+/** ~/.cairn/yield/<projectKey>.json — one store per repository (#362),
+ * outside the repo. baseDir injectable for tests (budget-ledger convention). */
 export function yieldStatePath(projectDir, baseDir = join(homedir(), ".cairn")) {
-    const { base, hash } = pathHash(projectDir);
-    return join(baseDir, "yield", `${base}-${hash}.json`);
+    return repositoryPath(projectDir, "yield", ".json", baseDir);
 }
 // Internals
 function freshState(projectDir) {
@@ -66,10 +60,17 @@ function freshState(projectDir) {
         seats: {},
     };
 }
-/** Atomic write — tmp then rename, same as budget-ledger's writer. */
+/** Atomic write — tmp then rename, same as budget-ledger's writer.
+ *
+ * Concurrency: the store is per repository (#362), so worktrees running at
+ * once share it. The rename is atomic and the tmp name is per writer (pid +
+ * random, #351), so no write tears or throws -- but load, update, write is a
+ * read-modify-write: two sessions recording at the same moment keep the
+ * last writer's counts. The yield numbers are an advisory tally, and that
+ * loss is accepted rather than locked. */
 function writeState(path, state) {
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
+    const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
     renameSync(tmp, path);
 }

@@ -159,10 +159,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { projectKey, worktreeKey } from "./lib.mjs";
 import {
   SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, toolCommandLines, unwrap,
@@ -176,13 +176,10 @@ import {
 // broken leaves this guard refusing exactly as before, never crashed
 const BREAKER = await import("./breaker.mjs").catch(() => null);
 
-// Same per-machine hashing scheme as lib.mjs / server continuity. lib.mjs
-// keeps its copy private and pins every path under the real home, while
-// this guard honours CAIRN_HOME, so the few lines live here too.
-function pathHash(projectDir) {
-  const abs = resolve(projectDir);
-  return { base: basename(abs), hash: createHash("sha256").update(abs).digest("hex").slice(0, 16) };
-}
+// The per-machine keys are lib.mjs's (#362): run manifests and the
+// ship-gate stamp are per repository, keyed by projectKey, with the
+// pre-#362 worktree-key name read as a fallback. This guard only reads --
+// the one-shot move is the writers' -- and it honours CAIRN_HOME.
 
 // Constants
 
@@ -661,8 +658,8 @@ function ownerCheckout(at) {
  * must not need it to know whether a run is live.
  */
 function liveRuns(projectDir, baseDir) {
-  const { base, hash } = pathHash(projectDir);
-  const prefix = `${base}-${hash}-`;
+  const prefixes = [`${projectKey(projectDir)}-`, `${worktreeKey(projectDir)}-`];
+  const seen = new Set();
   const dir = join(baseDir, "runs");
   const live = [];
   const frozen = [];
@@ -673,8 +670,16 @@ function liveRuns(projectDir, baseDir) {
     // no runs dir -- this machine has never staged a batch run
     return { live, frozen, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
   }
-  for (const name of entries) {
-    if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+  const named = [];
+  for (const prefix of prefixes) {
+    for (const name of entries) {
+      if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+      if (seen.has(name.slice(prefix.length))) continue;
+      seen.add(name.slice(prefix.length));
+      named.push({ name, prefix });
+    }
+  }
+  for (const { name, prefix } of named) {
     try {
       const state = JSON.parse(readFileSync(join(dir, name), "utf8"));
       const run = { runId: state?.runId ?? name.slice(prefix.length, -5), state };
@@ -1192,8 +1197,9 @@ function shipGateRefusal(inv, at, ctx) {
       "the commit -- or run /cairn:ship."];
 
     const from = stampDir(at, ctx);
-    const { base, hash } = pathHash(from);
-    const path = join(ctx.baseDir, "ship-gate", `${base}-${hash}.json`);
+    const keyed = join(ctx.baseDir, "ship-gate", `${projectKey(from)}.json`);
+    const legacy = join(ctx.baseDir, "ship-gate", `${worktreeKey(from)}.json`);
+    const path = existsSync(keyed) || !existsSync(legacy) ? keyed : legacy;
     let stamp;
     try {
       stamp = JSON.parse(readFileSync(path, "utf8"));

@@ -37,14 +37,74 @@
  */
 import { z } from "zod";
 import { CairnError } from "../errors.js";
-/** Same per-machine hashing scheme as continuity.ts / budget-ledger.ts --
- * exported so the ship-gate stamp keys the same way the manifests do. */
-export declare function pathHash(projectDir: string): {
-    base: string;
-    hash: string;
-};
-/** ~/.cairn/runs/<project>-<hash>-<runId>.json — one manifest per run,
- * outside the repo. baseDir injectable for tests (budget-ledger convention). */
+/** The cairn home folders whose files belong to the repository, keyed by
+ *  projectKey. handoff/ and banner/ are absent on purpose: per worktree. */
+export declare const REPOSITORY_STATE_DIRS: readonly ["index", "metrics", "outlook", "yield", "loop", "state", "refusals", "runs", "ship-gate", "budget"];
+/** The checkout folder's key -- the scheme every file used before #362. */
+export declare function worktreeKey(projectDir: string): string;
+/** The repository's common git dir, real path, or null outside a repository. */
+export declare function gitCommonDir(projectDir: string): string | null;
+/**
+ * The repository's key: `git rev-parse --git-common-dir` resolved to a real
+ * absolute path, hashed, named after the folder holding it (`repo/.git` reads
+ * `repo`; a bare `repo.git` reads `repo`). Outside a repository it degrades to
+ * worktreeKey, which is exactly the pre-#362 key. Cached per folder only on
+ * the git answer, so a folder that becomes a repository is re-read.
+ *
+ * :param projectDir: any checkout of the repository
+ * :returns: `<base>-<hash>`
+ */
+export declare function projectKey(projectDir: string): string;
+/**
+ * Moves `from` to `to` without ever replacing a `to` that exists: a hard
+ * link (fails EEXIST rather than clobbering) then unlink the old name; across
+ * devices, an exclusive copy then unlink. False when nothing moved.
+ *
+ * Concurrency -- the three handoff questions:
+ *   atomicity -- the link is one syscall and refuses an existing target, so
+ *     two processes moving the same file cannot both win or overwrite a
+ *     file a writer just created under the new name.
+ *   visibility -- between link and unlink both names are one inode; a
+ *     writer appending through the old name lands in the moved file. The
+ *     copy fallback has no such promise: a row appended mid-copy is lost.
+ *   ordering -- none needed; whoever links first moved it, the rest see
+ *     EEXIST or ENOENT and move nothing.
+ */
+export declare function moveNoClobber(from: string, to: string): boolean;
+/**
+ * The one-shot rekey's record: one row on the project's metrics log naming
+ * what moved. It carries no session_id, so every latest-row-per-session
+ * reader skips it. One append of one line, so it never tears another row.
+ */
+export declare function recordRekey(baseDir: string, projectDir: string, moved: string[]): void;
+/**
+ * Moves every repository-state file this folder kept under its worktree
+ * key to the project key (#362): a name is `<key><rest>` where rest starts
+ * with `.` or `-` (a closed metrics segment, a sqlite sidecar, a run id).
+ * A name whose project-key twin exists is left where it is -- a linked
+ * worktree that ran before the upgrade keeps its own leftovers, and the
+ * shared file is never replaced. Nothing to move, nothing logged, so the
+ * move is one-shot by construction: the old name is gone once it lands.
+ *
+ * :param projectDir: the checkout
+ * :param baseDir: the cairn home
+ * :returns: `<dir>/<old name>` for each file moved
+ */
+export declare function migrateRepositoryState(projectDir: string, baseDir?: string): string[];
+/**
+ * `<baseDir>/<dir>/<projectKey><suffix>`, after the one-shot move. When the
+ * new name is still absent but the old one survived (the move could not
+ * land), the old one is read instead -- nothing goes dark on an upgrade.
+ *
+ * :param projectDir: the checkout
+ * :param dir: one of REPOSITORY_STATE_DIRS
+ * :param suffix: what follows the key (`.jsonl`, `-<runId>.json`, ...)
+ * :param baseDir: the cairn home
+ */
+export declare function repositoryPath(projectDir: string, dir: (typeof REPOSITORY_STATE_DIRS)[number], suffix: string, baseDir?: string): string;
+/** ~/.cairn/runs/<projectKey>-<runId>.json — one manifest per run, outside
+ * the repo, per repository: a batch run spans worktrees (#362). baseDir
+ * injectable for tests (budget-ledger convention). */
 export declare function runManifestPath(projectDir: string, runId: string, baseDir?: string): string;
 export type RunStatus = "staged" | "running" | "complete" | "stopped";
 export interface ManifestPhase {

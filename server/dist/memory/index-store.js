@@ -1,12 +1,11 @@
-import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { join } from "node:path";
+import { repositoryPath } from "../planning/run-manifest.js";
 import { bindingsError, classifyBindingFailure, isBindingsFailure, loadSqlite, } from "./native.js";
+/** ~/.cairn/index/<projectKey>.db -- one FTS index per repository (#362), so
+ *  a linked worktree searches the memory the main checkout built. */
 export function indexDbPath(projectDir) {
-    const abs = resolve(projectDir);
-    const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-    return join(homedir(), ".cairn", "index", `${basename(abs)}-${hash}.db`);
+    return repositoryPath(projectDir, "index", ".db");
 }
 export class MemoryIndex {
     db;

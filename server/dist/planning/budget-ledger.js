@@ -43,12 +43,13 @@
  */
 // Imports
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CairnError } from "../errors.js";
 import { metricsSegments } from "../core/metrics.js";
+import { repositoryPath } from "./run-manifest.js";
 // Constants
 /** Tokens in a metrics row that count toward the token ceiling — input +
  * output ONLY, the same unit token-estimate.ts uses, so ceilings staged from
@@ -58,29 +59,22 @@ import { metricsSegments } from "../core/metrics.js";
  * honestly through est_cost_usd. */
 const TOKEN_FIELDS = ["input_tokens", "output_tokens"];
 // Paths
-/** Same per-machine hashing scheme as continuity.ts's pathHash / indexDbPath. */
-function pathHash(projectDir) {
-    const abs = resolve(projectDir);
-    const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-    return { base: basename(abs), hash };
-}
 /** Filename-safe runId — anything exotic collapses to '-'; the raw run_id
  * stays inside the file and is verified on load, so a collision here can't
  * silently merge two runs. */
 function safeRunId(runId) {
     return runId.replace(/[^A-Za-z0-9._-]/g, "-");
 }
-/** ~/.cairn/budget/<project>-<hash>-<runId>.json — one ledger file per run,
- * outside the repo (metrics/handoff convention). baseDir injectable for tests. */
+/** ~/.cairn/budget/<projectKey>-<runId>.json — one ledger file per run,
+ * outside the repo, per repository like the run it meters (#362). baseDir
+ * injectable for tests. */
 export function budgetLedgerPath(projectDir, runId, baseDir = join(homedir(), ".cairn")) {
-    const { base, hash } = pathHash(projectDir);
-    return join(baseDir, "budget", `${base}-${hash}-${safeRunId(runId)}.json`);
+    return repositoryPath(projectDir, "budget", `-${safeRunId(runId)}.json`, baseDir);
 }
 /** The metrics jsonl the Stop hook writes — same path scheme as
  * hooks/scripts/lib.mjs's metricsPath, with the base dir injectable. */
 export function budgetMetricsPath(projectDir, baseDir = join(homedir(), ".cairn")) {
-    const { base, hash } = pathHash(projectDir);
-    return join(baseDir, "metrics", `${base}-${hash}.jsonl`);
+    return repositoryPath(projectDir, "metrics", ".jsonl", baseDir);
 }
 const BudgetBoundarySchema = z.object({
     ts: z.string(),
@@ -172,7 +166,9 @@ function readLedgerFile(path) {
 /** Atomic write — tmp then rename, same as continuity's handoff writer. */
 function writeLedgerFile(path, state) {
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
+    // pid + random suffix, never a fixed name (#351): the file is shared by
+    // every worktree of the repository (#362), so two writers can overlap
+    const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
     renameSync(tmp, path);
 }

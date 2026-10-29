@@ -2,8 +2,10 @@
 
 /**
  * Purpose: PostToolUse + PostToolUseFailure hook -- append one observation row per
- *   Edit/Write/Bash call to .cairn/observations/observations.jsonl: which
- *   tool, which target, did it error. Raw material for retro's candidate-card
+ *   Edit/Write/Bash call to the repository's shared log in the cairn home
+ *   (observations/<projectKey>.jsonl, #362 -- every worktree appends to the
+ *   one log, so retro in the main checkout sees what wave workers did):
+ *   which tool, which target, did it error. Raw material for retro's candidate-card
  *   review (repeated error->fix churn, hotspot files) -- observations NEVER
  *   inject into context or become memory on their own; retro is the gate.
  *   Only fires in cairn-initialized projects (.cairn/ exists). Capped,
@@ -27,8 +29,8 @@
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
 } from "node:fs";
-import { join } from "node:path";
-import { metricsSegments } from "./lib.mjs";
+import { dirname, join } from "node:path";
+import { metricsSegments, observationsPath, segmentStamp } from "./lib.mjs";
 
 // Retention guard (CRN-27), segmented (#351). The live file is CLOSED --
 // renamed to a stamped segment, never rewritten -- once it passes MAX_LINES,
@@ -79,14 +81,6 @@ function lineCount(path) {
   } catch {
     return 0;
   }
-}
-
-/** Fixed-width UTC stamp for a closed segment: 20260920-143000. Fixed width
- *  is what makes a lexical sort chronological -- same as the metrics log. */
-function segmentStamp(d) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}`
-    + `-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
 }
 
 /**
@@ -152,8 +146,8 @@ function main() {
   const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   if (!existsSync(join(projectDir, ".cairn"))) return; // cairn projects only
 
-  const dir = join(projectDir, ".cairn", "observations");
-  const path = join(dir, "observations.jsonl");
+  // The shared log, after the one-shot move of any pre-#362 in-repo one.
+  const path = observationsPath(projectDir);
   const row = {
     ts: new Date().toISOString(),
     session_id: payload.session_id,
@@ -162,7 +156,7 @@ function main() {
     error: errored(payload),
   };
   if (interrupted(payload)) row.interrupted = true;
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(row) + "\n");
 
   // Pruning reads every segment, so it runs only on the rare rotation.

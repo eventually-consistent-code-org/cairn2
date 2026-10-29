@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { isFrozenByBreaker, readRunManifest } from "../src/planning/run-manifest.js";
+import { isFrozenByBreaker, projectKey, readRunManifest } from "../src/planning/run-manifest.js";
 
 // Hook scripts live at the plugin root (repo root), not under server/ -- two
 // levels up from server/test.
@@ -3626,26 +3626,47 @@ describe("stop-costtracker + cost-report", () => {
   });
 });
 
+// #362: the observation log lives in the cairn home, keyed by the project
+// key -- a scratch HOME per fixture project, so nothing lands in the real one.
+// The fixtures are not repositories, so the key is the folder's path hash.
+const obsHomes = new Map<string, string>();
+function obsHome(proj: string): string {
+  let home = obsHomes.get(proj);
+  if (!home) {
+    home = freshDir("cairn-obs-home-");
+    obsHomes.set(proj, home);
+  }
+  return home;
+}
+function obsKey(proj: string): string {
+  const { base, hash } = hashAndBaseForEnvDir(proj);
+  return `${base}-${hash}`;
+}
+const obsDir = (proj: string) => join(obsHome(proj), ".cairn", "observations");
+const obsLive = (proj: string) => join(obsDir(proj), `${obsKey(proj)}.jsonl`);
+const readObsRows = (proj: string) => readFileSync(obsLive(proj), "utf8")
+  .trim().split("\n").map((l) => JSON.parse(l));
+
 describe("posttooluse-observe", () => {
   const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const runObserve = (proj: string, stdin: string) => runHookRaw(OBSERVE, proj, stdin, { HOME: obsHome(proj) });
 
   it("appends an observation row in a cairn project; errors flagged", () => {
     const proj = freshDir("cairn-obs-");
     mkdirSync(join(proj, ".cairn"), { recursive: true });
-    const ok = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const ok = runObserve(proj, JSON.stringify({
       session_id: "s1", tool_name: "Edit",
       tool_input: { file_path: join(proj, "a.ts") },
       tool_response: {},
     }));
     expect(ok.status).toBe(0);
-    const fail = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const fail = runObserve(proj, JSON.stringify({
       session_id: "s1", tool_name: "Bash",
       tool_input: { command: "npm test -- --watch" },
       tool_response: { exit_code: 1 },
     }));
     expect(fail.status).toBe(0);
-    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
-      .trim().split("\n").map((l) => JSON.parse(l));
+    const rows = readObsRows(proj);
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ tool: "Edit", error: false });
     expect(rows[1]).toMatchObject({ tool: "Bash", error: true });
@@ -3654,7 +3675,7 @@ describe("posttooluse-observe", () => {
 
   it("is a no-op outside cairn-initialized projects", () => {
     const proj = freshDir("cairn-obs-");
-    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const r = runObserve(proj, JSON.stringify({
       session_id: "s1", tool_name: "Edit", tool_input: { file_path: "x" }, tool_response: {},
     }));
     expect(r.status).toBe(0);
@@ -3666,20 +3687,19 @@ describe("posttooluse-observe", () => {
   it("a PostToolUseFailure payload lands as error: true with tool and target", () => {
     const proj = freshDir("cairn-obs-");
     mkdirSync(join(proj, ".cairn"), { recursive: true });
-    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const r = runObserve(proj, JSON.stringify({
       session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Bash",
       tool_use_id: "toolu_01", tool_input: { command: "npm test -- --run" },
       error: "Command exited with code 1", is_interrupt: false,
     }));
     expect(r.status).toBe(0);
-    const edit = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const edit = runObserve(proj, JSON.stringify({
       session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Edit",
       tool_input: { file_path: join(proj, "src", "a.ts") },
       error: "String to replace not found in file.", is_interrupt: false,
     }));
     expect(edit.status).toBe(0);
-    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
-      .trim().split("\n").map((l) => JSON.parse(l));
+    const rows = readObsRows(proj);
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ tool: "Bash", error: true });
     expect(rows[0].target).toContain("npm test");
@@ -3692,14 +3712,13 @@ describe("posttooluse-observe", () => {
   it("an interrupted PostToolUseFailure payload stays error: false and carries interrupted: true", () => {
     const proj = freshDir("cairn-obs-");
     mkdirSync(join(proj, ".cairn"), { recursive: true });
-    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const r = runObserve(proj, JSON.stringify({
       session_id: "s1", hook_event_name: "PostToolUseFailure", tool_name: "Bash",
       tool_input: { command: "npm test -- --run" },
       error: "Tool execution was interrupted", is_interrupt: true,
     }));
     expect(r.status).toBe(0);
-    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
-      .trim().split("\n").map((l) => JSON.parse(l));
+    const rows = readObsRows(proj);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ tool: "Bash", error: false, interrupted: true });
     expect(rows[0].target).toContain("npm test");
@@ -3708,13 +3727,12 @@ describe("posttooluse-observe", () => {
   it("a successful PostToolUse payload with no tool_response stays error: false", () => {
     const proj = freshDir("cairn-obs-");
     mkdirSync(join(proj, ".cairn"), { recursive: true });
-    const r = runHookRaw(OBSERVE, proj, JSON.stringify({
+    const r = runObserve(proj, JSON.stringify({
       session_id: "s1", hook_event_name: "PostToolUse", tool_name: "Write",
       tool_input: { file_path: join(proj, "b.ts") },
     }));
     expect(r.status).toBe(0);
-    const rows = readFileSync(join(proj, ".cairn", "observations", "observations.jsonl"), "utf8")
-      .trim().split("\n").map((l) => JSON.parse(l));
+    const rows = readObsRows(proj);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ tool: "Write", error: false });
   });
@@ -3740,8 +3758,8 @@ describe("observation log rotation and atomic writers (#351)", () => {
   const capMatch = /const MAX_LINES = (\d+);/.exec(readFileSync(OBSERVE, "utf8"));
   const MAX_LINES = Number(capMatch?.[1]);
 
-  const obsDir = (proj: string) => join(proj, ".cairn", "observations");
-  const livePath = (proj: string) => join(obsDir(proj), "observations.jsonl");
+  const livePath = obsLive;
+  const liveName = (proj: string) => basename(livePath(proj));
 
   /** `n` well-formed rows tagged `tag`, one second apart from 2026-01-01. */
   function seedRows(n: number, tag: string): string {
@@ -3767,7 +3785,8 @@ describe("observation log rotation and atomic writers (#351)", () => {
   function runHookAsync(script: string, proj: string, stdin: string): Promise<number | null> {
     return new Promise((done) => {
       const child = spawn(process.execPath, [script], {
-        cwd: proj, env: { ...process.env, CLAUDE_PROJECT_DIR: proj }, stdio: ["pipe", "ignore", "ignore"],
+        cwd: proj, env: { ...process.env, CLAUDE_PROJECT_DIR: proj, HOME: obsHome(proj) },
+        stdio: ["pipe", "ignore", "ignore"],
       });
       child.on("close", (code) => done(code));
       child.stdin.end(stdin);
@@ -3776,6 +3795,7 @@ describe("observation log rotation and atomic writers (#351)", () => {
 
   function cairnProject(): string {
     const proj = freshDir("cairn-obs-rot-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
     mkdirSync(obsDir(proj), { recursive: true });
     return proj;
   }
@@ -3784,13 +3804,14 @@ describe("observation log rotation and atomic writers (#351)", () => {
     expect(MAX_LINES).toBeGreaterThan(0);
     const proj = cairnProject();
     writeFileSync(livePath(proj), seedRows(MAX_LINES, "seed"));
-    const r = runHookRaw(OBSERVE, proj, payload("s-rot", "npm test"));
+    const r = runHookRaw(OBSERVE, proj, payload("s-rot", "npm test"), { HOME: obsHome(proj) });
     expect(r.status).toBe(0);
 
     const names = readdirSync(obsDir(proj)).sort();
     expect(names).toHaveLength(2);
-    const closed = names.find((n) => n !== "observations.jsonl")!;
-    expect(closed).toMatch(/^observations\.\d{8}-\d{6}-\d{2}\.jsonl$/);
+    const closed = names.find((n) => n !== liveName(proj))!;
+    expect(closed.startsWith(`${obsKey(proj)}.`)).toBe(true);
+    expect(closed.slice(obsKey(proj).length)).toMatch(/^\.\d{8}-\d{6}-\d{2}\.jsonl$/);
     expect(readFileSync(livePath(proj), "utf8")).toBe("");
     const rows = readFileSync(join(obsDir(proj), closed), "utf8").split("\n").filter(Boolean);
     expect(rows).toHaveLength(MAX_LINES + 1);
@@ -3812,26 +3833,26 @@ describe("observation log rotation and atomic writers (#351)", () => {
     const targets = new Set(rows.map((r) => r.target));
     for (const c of calls) expect(targets.has(c.target)).toBe(true);
     expect(targets.has("seed-0")).toBe(true);
-    expect(readdirSync(obsDir(proj)).filter((n) => n !== "observations.jsonl").length).toBeGreaterThan(0);
+    expect(readdirSync(obsDir(proj)).filter((n) => n !== liveName(proj)).length).toBeGreaterThan(0);
   });
 
   it("prunes old closed segments on rotation only", () => {
     expect(MAX_LINES).toBeGreaterThan(0);
     const proj = cairnProject();
-    const old1 = join(obsDir(proj), "observations.20250101-000000-00.jsonl");
-    const old2 = join(obsDir(proj), "observations.20250102-000000-00.jsonl");
+    const old1 = join(obsDir(proj), `${obsKey(proj)}.20250101-000000-00.jsonl`);
+    const old2 = join(obsDir(proj), `${obsKey(proj)}.20250102-000000-00.jsonl`);
     writeFileSync(old1, seedRows(MAX_LINES + 1, "old1"));
     writeFileSync(old2, seedRows(MAX_LINES + 1, "old2"));
 
     // An append that does not rotate never prunes.
     writeFileSync(livePath(proj), seedRows(5, "live"));
-    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls")).status).toBe(0);
+    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls"), { HOME: obsHome(proj) }).status).toBe(0);
     expect(existsSync(old1) && existsSync(old2)).toBe(true);
 
     // The rotating append closes a full segment, which alone covers the
     // retained window, so both older segments go -- whole files, never rows.
     writeFileSync(livePath(proj), seedRows(MAX_LINES, "live"));
-    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls")).status).toBe(0);
+    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls"), { HOME: obsHome(proj) }).status).toBe(0);
     expect(existsSync(old1)).toBe(false);
     expect(existsSync(old2)).toBe(false);
     const left = readdirSync(obsDir(proj)).sort();
@@ -3885,11 +3906,10 @@ describe("circuit breaker (#358)", () => {
     return { proj, home };
   }
 
-  /** The manifest path the guards and the server both compute from CLAUDE_PROJECT_DIR. */
-  const manifestPath = (home: string, proj: string, runId: string) => {
-    const { base, hash } = hashAndBaseForEnvDir(proj);
-    return join(home, "runs", `${base}-${hash}-${runId}.json`);
-  };
+  /** The manifest path the guards and the server both compute from CLAUDE_PROJECT_DIR:
+   *  the fixture is a repository, so the key is the repository's (#362). */
+  const manifestPath = (home: string, proj: string, runId: string) =>
+    join(home, "runs", `${projectKey(proj)}-${runId}.json`);
 
   /** A full manifest, as the server writes one: push authority granted, phase 1 in flight. */
   function writeManifest(home: string, proj: string, runId: string, status: string, created = "2026-10-22T00:00:00.000Z") {
@@ -3908,8 +3928,7 @@ describe("circuit breaker (#358)", () => {
 
   /** Every row in the project's refusal log. */
   function rows(home: string, proj: string): Array<Record<string, unknown>> {
-    const { base, hash } = hashAndBaseForEnvDir(proj);
-    const path = join(home, "refusals", `${base}-${hash}.jsonl`);
+    const path = join(home, "refusals", `${projectKey(proj)}.jsonl`);
     if (!existsSync(path)) return [];
     return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   }
@@ -4033,8 +4052,7 @@ describe("circuit breaker (#358)", () => {
     const write = { tool_name: "Write", tool_input: { file_path: secretPath }, cwd: proj, session_id: "sess-run" };
     expect(runHookRaw(HARNESSGUARD, proj, JSON.stringify(write), { CAIRN_HOME: home }).status).toBe(2);
 
-    const { base, hash } = hashAndBaseForEnvDir(proj);
-    const raw = readFileSync(join(home, "refusals", `${base}-${hash}.jsonl`), "utf8");
+    const raw = readFileSync(join(home, "refusals", `${projectKey(proj)}.jsonl`), "utf8");
     for (const leak of ["hunter2SECRET", "example.com", "repo.git", "secret-path-XYZ", proj]) {
       expect(raw, leak).not.toContain(leak);
     }
@@ -4101,8 +4119,7 @@ describe("circuit breaker (#358)", () => {
 
   it("the harness guard protects the refusal log the way it protects the run manifests", () => {
     const { proj, home } = breakerFixture();
-    const { base, hash } = hashAndBaseForEnvDir(proj);
-    const log = join(home, "refusals", `${base}-${hash}.jsonl`);
+    const log = join(home, "refusals", `${projectKey(proj)}.jsonl`);
     const env = { CAIRN_HOME: home };
     const r = runHookRaw(HARNESSGUARD, proj, bash(`: > ${log}`, proj), env);
     expect(r.status).toBe(2);
