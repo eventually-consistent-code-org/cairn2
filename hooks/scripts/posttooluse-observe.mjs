@@ -25,12 +25,19 @@
  */
 
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
 } from "node:fs";
 import { join } from "node:path";
+import { metricsSegments } from "./lib.mjs";
 
-const MAX_LINES = 2000;
-const KEEP_LINES = 1000;
+// Retention guard (CRN-27), segmented (#351). The live file is CLOSED --
+// renamed to a stamped segment, never rewritten -- once it passes MAX_LINES,
+// and on that rotation the oldest closed segments go once the newer ones
+// already hold KEEP_CLOSED_LINES rows. So the log keeps roughly the old
+// 1000..2000-row window, and a row is only ever dropped by deleting a whole
+// segment nobody appends to any more.
+const MAX_LINES = 1000;
+const KEEP_CLOSED_LINES = 1000;
 
 function readStdin() {
   try {
@@ -65,6 +72,79 @@ function errored(payload) {
   return false;
 }
 
+/** Non-blank line count of `path`; 0 for a missing file. */
+function lineCount(path) {
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Fixed-width UTC stamp for a closed segment: 20260920-143000. Fixed width
+ *  is what makes a lexical sort chronological -- same as the metrics log. */
+function segmentStamp(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}`
+    + `-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+}
+
+/**
+ * Close the live file once it passes MAX_LINES, AFTER this row landed.
+ *
+ * Concurrency -- the three handoff questions:
+ *   atomicity -- the handoff is one appendFileSync of one short line under
+ *     O_APPEND; the rename below is one syscall. Nothing reads, trims and
+ *     writes back, so there is no read-modify-write to lose a row in.
+ *   visibility -- a reader may see a torn last row; observations.ts counts it
+ *     and skips its age. A hook that opened the live file just before another
+ *     renamed it still writes into the same inode, now the closed segment --
+ *     the row moves with the file, it is never lost.
+ *   ordering -- none across sessions. Rows carry their own ts; readers take
+ *     the oldest ts, never file position, so two writers interleaving is fine.
+ * Two hooks can both see the count past the cap; the loser renames the fresh
+ * (empty or near-empty) live file or finds it gone, and either way keeps
+ * every row. A fresh empty live file is opened with "a", which never truncates.
+ * Returns true when this call closed a segment.
+ */
+function rotate(path) {
+  if (lineCount(path) <= MAX_LINES) return false;
+
+  const stem = path.replace(/\.jsonl$/, "");
+  const stamp = segmentStamp(new Date());
+  // The counter is always present so every closed name is the same width.
+  for (let n = 0; n < 100; n++) {
+    const candidate = `${stem}.${stamp}-${String(n).padStart(2, "0")}.jsonl`;
+    if (existsSync(candidate)) continue;
+    try {
+      renameSync(path, candidate);
+    } catch {
+      return false; // another hook rotated first -- its rename kept every row
+    }
+    closeSync(openSync(path, "a"));
+    return true;
+  }
+  return false; // 100 rotations inside one second -- keep the data, skip the roll
+}
+
+/**
+ * Drop closed segments older than the newest KEEP_CLOSED_LINES rows. Walks
+ * newest first and counts rows, not files, so a tiny segment left by two
+ * hooks racing the same rotation never evicts a full one. The live file is
+ * never a candidate.
+ */
+function prune(path) {
+  const closed = metricsSegments(path).slice(0, -1).reverse();
+  let kept = 0;
+  for (const segment of closed) {
+    if (kept >= KEEP_CLOSED_LINES) {
+      rmSync(segment, { force: true });
+      continue;
+    }
+    kept += lineCount(segment);
+  }
+}
+
 function main() {
   const payload = readStdin();
   if (!payload?.tool_name) return;
@@ -85,11 +165,8 @@ function main() {
   mkdirSync(dir, { recursive: true });
   appendFileSync(path, JSON.stringify(row) + "\n");
 
-  // Retention guard (CRN-27): the log must not grow unbounded.
-  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-  if (lines.length > MAX_LINES) {
-    writeFileSync(path, lines.slice(-KEEP_LINES).join("\n") + "\n");
-  }
+  // Pruning reads every segment, so it runs only on the rare rotation.
+  if (rotate(path)) prune(path);
 }
 
 try {

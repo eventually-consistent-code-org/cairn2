@@ -2,8 +2,15 @@
  * The observation buffer's own state (#173). The PostToolUse hook appends a
  * row per Edit/Write/Bash call to `.cairn/observations/observations.jsonl`
  * and retro is the only reader — so when retro never runs, the buffer grows
- * silently until the hook's retention guard quietly drops the oldest half.
- * Work that was never reviewed disappears without anyone being told.
+ * silently until the hook's retention guard quietly drops the oldest closed
+ * segment. Work that was never reviewed disappears without anyone being told.
+ *
+ * The log is segmented (#351): past its cap the hook renames the live file to
+ * a stamped closed segment (`observations.<stamp>.jsonl`) and appends to a
+ * fresh one, so the buffer is the live file plus every closed segment, in the
+ * same shape as the metrics log (`metricsSegments`).
+ * Invariant: retro is the single consumer — the only thing that deletes rows —
+ * and hooks only ever append or rename, which is why no lock exists.
  *
  * This module is the announcement: a count and an oldest-entry age that
  * `mem_stats` reports and the recall banner escalates into "run retro".
@@ -17,10 +24,11 @@
  */
 /** Rows in the buffer before the banner starts asking for a retro. */
 export declare const OBSERVATION_WARN_THRESHOLD = 25;
-/** The buffer the PostToolUse observe hook appends to. Single source of truth. */
+/** The live file the PostToolUse observe hook appends to. Single source of truth. */
 export declare const observationsPath: (projectDir: string) => string;
 export interface ObservationBacklog {
-    /** Rows currently in the buffer — every non-blank line, parseable or not. */
+    /** Rows currently in the buffer, live file plus closed segments — every
+     *  non-blank line, parseable or not. */
     count: number;
     /** ISO timestamp of the oldest row, or null when the buffer is empty/undated. */
     oldest: string | null;
@@ -42,10 +50,11 @@ export interface ObservationBacklog {
  */
 export declare function observationThreshold(projectDir: string): number;
 /**
- * Reads the buffer and reports its size and age. Never throws: a missing
- * file is an empty backlog, and a row that will not parse still counts as a
- * row the buffer is holding (it is occupying the retention budget either
- * way) — it just cannot contribute an age.
+ * Reads the buffer — every segment, oldest first, live file last — and
+ * reports its size and age. Never throws: a missing file or segment is
+ * empty, and a row that will not parse still counts as a row the buffer is
+ * holding (it is occupying the retention budget either way) — it just cannot
+ * contribute an age. The oldest age is the minimum ts across all segments.
  *
  * :param projectDir: repository root
  * :param now: injectable clock for age math

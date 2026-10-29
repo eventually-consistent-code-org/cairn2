@@ -3,10 +3,10 @@ import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, utimesSync,
   copyFileSync,
 } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isFrozenByBreaker, readRunManifest } from "../src/planning/run-manifest.js";
 
@@ -3725,6 +3725,142 @@ describe("posttooluse-observe", () => {
     expect(fail).toHaveLength(1);
     expect(fail[0].matcher).toBe("Edit|Write|Bash");
     expect(fail[0].hooks.map((h: { command: string }) => h.command).join(" ")).toContain("posttooluse-observe.mjs");
+  });
+});
+
+// #351: the observation log is appended by every session's hook at once. A
+// read-slice-rewrite trim lost whatever another hook appended between the read
+// and the write; the log now rotates (rename) and never rewrites the live
+// file. Same hardening class: atomicWriteJson's tmp name is per writer.
+describe("observation log rotation and atomic writers (#351)", () => {
+  const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const LIB = join(scriptsDir, "lib.mjs");
+  // Read from the hook so the test follows the constant. An empty match is a
+  // failure, never a silent zero-row pass.
+  const capMatch = /const MAX_LINES = (\d+);/.exec(readFileSync(OBSERVE, "utf8"));
+  const MAX_LINES = Number(capMatch?.[1]);
+
+  const obsDir = (proj: string) => join(proj, ".cairn", "observations");
+  const livePath = (proj: string) => join(obsDir(proj), "observations.jsonl");
+
+  /** `n` well-formed rows tagged `tag`, one second apart from 2026-01-01. */
+  function seedRows(n: number, tag: string): string {
+    const base = Date.parse("2026-01-01T00:00:00.000Z");
+    return Array.from({ length: n }, (_, i) => JSON.stringify({
+      ts: new Date(base + i * 1000).toISOString(), session_id: tag, tool: "Edit",
+      target: `${tag}-${i}`, error: false,
+    })).join("\n") + "\n";
+  }
+
+  /** Every row across the live file and all closed segments. */
+  function allRows(proj: string): Array<{ session_id: string; target: string }> {
+    return readdirSync(obsDir(proj)).filter((n) => n.endsWith(".jsonl")).sort()
+      .flatMap((n) => readFileSync(join(obsDir(proj), n), "utf8").split("\n").filter(Boolean))
+      .map((l) => JSON.parse(l));
+  }
+
+  const payload = (session: string, target: string) => JSON.stringify({
+    session_id: session, tool_name: "Bash", tool_input: { command: target }, tool_response: {},
+  });
+
+  /** Spawns the hook without waiting, so several can overlap for real. */
+  function runHookAsync(script: string, proj: string, stdin: string): Promise<number | null> {
+    return new Promise((done) => {
+      const child = spawn(process.execPath, [script], {
+        cwd: proj, env: { ...process.env, CLAUDE_PROJECT_DIR: proj }, stdio: ["pipe", "ignore", "ignore"],
+      });
+      child.on("close", (code) => done(code));
+      child.stdin.end(stdin);
+    });
+  }
+
+  function cairnProject(): string {
+    const proj = freshDir("cairn-obs-rot-");
+    mkdirSync(obsDir(proj), { recursive: true });
+    return proj;
+  }
+
+  it("rotation produces a closed segment and an empty live file", () => {
+    expect(MAX_LINES).toBeGreaterThan(0);
+    const proj = cairnProject();
+    writeFileSync(livePath(proj), seedRows(MAX_LINES, "seed"));
+    const r = runHookRaw(OBSERVE, proj, payload("s-rot", "npm test"));
+    expect(r.status).toBe(0);
+
+    const names = readdirSync(obsDir(proj)).sort();
+    expect(names).toHaveLength(2);
+    const closed = names.find((n) => n !== "observations.jsonl")!;
+    expect(closed).toMatch(/^observations\.\d{8}-\d{6}-\d{2}\.jsonl$/);
+    expect(readFileSync(livePath(proj), "utf8")).toBe("");
+    const rows = readFileSync(join(obsDir(proj), closed), "utf8").split("\n").filter(Boolean);
+    expect(rows).toHaveLength(MAX_LINES + 1);
+    expect(JSON.parse(rows[rows.length - 1]).session_id).toBe("s-rot");
+  });
+
+  it("two appenders past MAX_LINES lose no rows", async () => {
+    expect(MAX_LINES).toBeGreaterThan(0);
+    const proj = cairnProject();
+    writeFileSync(livePath(proj), seedRows(MAX_LINES - 1, "seed"));
+    // Two sessions, eight overlapping calls each, crossing the cap together.
+    const calls = ["A", "B"].flatMap((s) =>
+      Array.from({ length: 8 }, (_, i) => ({ session: `s-${s}`, target: `cmd-${s}-${i}` })));
+    const codes = await Promise.all(calls.map((c) => runHookAsync(OBSERVE, proj, payload(c.session, c.target))));
+    expect(codes.every((c) => c === 0)).toBe(true);
+
+    const rows = allRows(proj);
+    expect(rows).toHaveLength(MAX_LINES - 1 + calls.length);
+    const targets = new Set(rows.map((r) => r.target));
+    for (const c of calls) expect(targets.has(c.target)).toBe(true);
+    expect(targets.has("seed-0")).toBe(true);
+    expect(readdirSync(obsDir(proj)).filter((n) => n !== "observations.jsonl").length).toBeGreaterThan(0);
+  });
+
+  it("prunes old closed segments on rotation only", () => {
+    expect(MAX_LINES).toBeGreaterThan(0);
+    const proj = cairnProject();
+    const old1 = join(obsDir(proj), "observations.20250101-000000-00.jsonl");
+    const old2 = join(obsDir(proj), "observations.20250102-000000-00.jsonl");
+    writeFileSync(old1, seedRows(MAX_LINES + 1, "old1"));
+    writeFileSync(old2, seedRows(MAX_LINES + 1, "old2"));
+
+    // An append that does not rotate never prunes.
+    writeFileSync(livePath(proj), seedRows(5, "live"));
+    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls")).status).toBe(0);
+    expect(existsSync(old1) && existsSync(old2)).toBe(true);
+
+    // The rotating append closes a full segment, which alone covers the
+    // retained window, so both older segments go -- whole files, never rows.
+    writeFileSync(livePath(proj), seedRows(MAX_LINES, "live"));
+    expect(runHookRaw(OBSERVE, proj, payload("s1", "ls")).status).toBe(0);
+    expect(existsSync(old1)).toBe(false);
+    expect(existsSync(old2)).toBe(false);
+    const left = readdirSync(obsDir(proj)).sort();
+    expect(left).toHaveLength(2);
+    expect(allRows(proj)).toHaveLength(MAX_LINES + 1);
+  });
+
+  it("two atomicWriteJson callers leave a valid file and neither throws", async () => {
+    const dir = freshDir("cairn-atomic-");
+    const target = join(dir, "state.json");
+    const script = `import { atomicWriteJson } from ${JSON.stringify(pathToFileURL(LIB).href)};
+for (let i = 0; i < 300; i++) atomicWriteJson(${JSON.stringify(target)}, { writer: process.argv[1], i, pad: "x".repeat(4096) });`;
+    const run = (writer: string) => new Promise<{ code: number | null; stderr: string }>((done) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script, writer], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (b) => { stderr += String(b); });
+      child.on("close", (code) => done({ code, stderr }));
+    });
+    const results = await Promise.all([run("A"), run("B")]);
+    for (const r of results) {
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+    }
+    const final = JSON.parse(readFileSync(target, "utf8"));
+    expect(["A", "B"]).toContain(final.writer);
+    expect(final.i).toBe(299);
+    expect(readdirSync(dir)).toEqual(["state.json"]); // no stray tmp files
   });
 });
 

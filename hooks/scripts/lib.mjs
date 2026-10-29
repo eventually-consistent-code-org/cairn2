@@ -10,7 +10,7 @@
  * Author(s): John Reed
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -95,10 +95,16 @@ export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-/** Same tmp+rename atomic write as writeHandoff in server/src/core/continuity.ts. */
+/**
+ * Same tmp+rename atomic write as writeHandoff in server/src/core/continuity.ts.
+ * The tmp name carries the pid and a random suffix (#351): with one fixed
+ * `${path}.tmp`, two concurrent writers shared it, the first rename took the
+ * second's bytes and the second rename threw ENOENT. Now each writer renames
+ * its own whole file -- last writer wins, and nobody throws.
+ */
 export function atomicWriteJson(path, data) {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
   renameSync(tmp, path);
 }

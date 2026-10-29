@@ -16,16 +16,21 @@ milestone (including just-archived `milestones/v<N>/`).
    provenance = the files+commits from the ledger range that prove it,
    confidence: `high` = verified by this scope's events, `medium` =
    plausible inference, `low` = hunch worth recording.
-   - **Observation review:** read `.cairn/observations/observations.jsonl`
+   - **Observation review:** the log is `.cairn/observations/observations.jsonl`
+     plus its closed segments `observations.<stamp>.jsonl` beside it
      (passive capture from the PostToolUse hook — tool, target, error flag
-     per call). Look for candidate patterns the ledger can't show: repeated
+     per call). First close the live file: rename it to a segment in the
+     same `observations.<yyyymmdd-hhmmss>-NN.jsonl` shape (the hook starts
+     a fresh one on its next append), then read every closed segment. Look
+     for candidate patterns the ledger can't show: repeated
      error→retry churn on one file or command (a gotcha hiding there),
      hotspot files edited far more than their diff size explains. A pattern
      worth keeping becomes a draft card like any other — confidence `low`
      unless the ledger corroborates it, provenance pointing at the real
      files. Observations NEVER become cards without this review, and after
-     the batch is approved, truncate the reviewed observations file —
-     retro is the gate and the garbage collector. How deep the pile is
+     the batch is approved, delete exactly the segments you reviewed —
+     never truncate or rewrite the live file, hooks may be appending to it.
+     Retro is the gate and the single consumer (#351). How deep the pile is
      comes from `mem_stats`' `observations` block (count, oldest-entry
      age); past `memory.observationWarnThreshold` the session banner has
      already been asking for this run.
