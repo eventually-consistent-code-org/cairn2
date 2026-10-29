@@ -45,8 +45,10 @@ Cairn never stores secrets in config files — only the *names* of environment
 variables. Create a token for your backend and export it in your shell
 profile:
 
-- **GitHub**: `gh auth login`, or export `GITHUB_TOKEN` with a PAT that has
-  repo + issues scope.
+- **GitHub**: in Claude Code the plugin asks for the token when you enable
+  it (`/config` → cairn → GitHub token; a PAT with repo + issues scope),
+  or leave that blank and `gh auth login` once. Other harnesses read
+  `GITHUB_TOKEN` from the environment.
 - **GitLab / Asana / Azure Boards / ClickUp**: create a personal access
   token in the product's settings and export it under the env var named in
   your config (`GITLAB_TOKEN`, `ASANA_TOKEN`, `AZURE_DEVOPS_PAT`,
