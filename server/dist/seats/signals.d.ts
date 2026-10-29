@@ -79,17 +79,31 @@ export declare function selectSeats(roster: Roster, signals: string[], opts: {
     dial: DispatchDial;
     yields?: Record<string, YieldCounters>;
 }): SeatSelection;
-/** Work class of the output a seat is producing, per the cairn-planning
- * model-routing rubric: `gate` = output that gates a lifecycle transition
- * (verify/ship); `synthesis` = briefs/analysis; `mechanical` =
+/** Work class of the output a seat is producing, per the four-class
+ * cairn-planning model-routing rubric: `gate` = judgment gates (output that
+ * gates a lifecycle transition: verify/ship); `complex` = complex synthesis
+ * (architecture trade-offs, a change that adds a mechanism or a seam);
+ * `routine` = routine synthesis (briefs, analysis, docs); `mechanical` =
  * enumerate/locate. */
-export type WorkClass = "mechanical" | "synthesis" | "gate";
+export type WorkClass = "mechanical" | "routine" | "complex" | "gate";
+/** A routed model: a named tier, or `strongest` = the strongest model
+ * available (as of 2026-10, Fable, a tier above opus) — the caller passes
+ * that model's id, or omits the model when the session already runs it. */
+export type RoutedModel = "haiku" | "sonnet" | "opus" | "strongest";
 export interface ModelResolution {
-    model: "haiku" | "sonnet" | "opus";
+    model: RoutedModel;
     /** True when the rubric overrode the seat's declared preference. */
     overrode: boolean;
     reason: string;
 }
+/** The server-side copy of the rubric table. `label` is the row's work-class
+ * cell in skills/cairn-planning/SKILL.md; a test pins this table equal to
+ * that one so the two cannot drift. */
+export declare const ROUTING_TABLE: Record<WorkClass, {
+    label: string;
+    model: RoutedModel;
+    effort: "low" | "medium" | "high";
+}>;
 /**
  * Resolves the model a seat's work routes to. The seat's `model` field is
  * ADVISORY ONLY — the cairn-planning blast-radius rule always wins:
@@ -101,7 +115,7 @@ export interface ModelResolution {
  * not re-derived in prose.
  *
  * :param seat: validated seat definition (its `model` is the preference)
- * :param workClass: mechanical | synthesis | gate
+ * :param workClass: mechanical | routine | complex | gate
  * :returns: the routed model + whether the seat's preference was overridden
  */
 export declare function resolveSeatModel(seat: Seat, workClass: WorkClass): ModelResolution;
