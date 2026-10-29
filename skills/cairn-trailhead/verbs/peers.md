@@ -24,7 +24,10 @@ tasks), with "full pass — no particular focus" as the first, recommended
 option; free text arrives via the built-in Other. The chosen focus is
 woven verbatim into every peer prompt AND into cairn's own first pass, so
 the whole run targets what the user cares about instead of a generic
-sweep. One question, asked once per run — never re-asked between rounds,
+sweep. A seat whose `peer_list()` entry carries `lastLimitedAt` gets
+one line in the question body ("codex: limited 12 min ago", from
+`limitedMinutesAgo`) so the user knows before dispatch that it may
+skip. One question, asked once per run — never re-asked between rounds,
 never asked at all for bare `peers` (status is read-only). `council`
 folds this ask into its dimension ask (below) — still one question, not
 two.
@@ -50,6 +53,22 @@ the records, never from what the conversation remembers. `start`
 refuses a slug that already has an unfinished run — resume it (below)
 or `op: "abandon"` it explicitly; nothing gets silently clobbered.
 
+### A rate-limited seat is skipped, not failed
+
+`peer_run` answers a CLI that refused on a usage limit with
+`RATE_LIMITED` instead of a result. Record its message as that seat's
+round-1 output (`record_output`, the message verbatim — it carries the
+marker the store reads) and carry on with the remaining seats; the run
+files the seat `skipped (rate limited)`. Cairn does not retry it: say
+which seat was skipped and that the owner can re-run it once the limit
+window passes, or leave it off the next roster. A skipped seat is
+outside the lab count and never blocks `close`; its summary lists it
+in `skippedSeats`. When no seat is left to count, `close` returns
+`verdict: no-quorum` with `noQuorumReason` — say that reason plainly,
+let cairn's own pass stand as the run's result, and skip the peers
+`audit_record` (it takes only pass or findings, and a run nobody
+reviewed is neither).
+
 ### Resuming an interrupted run
 
 A run that died mid-flight (crash, `/clear`, timeout) resumes instead
@@ -62,7 +81,8 @@ normal flow to `close`.
 ## Bare `peers` — status
 
 `peer_list()` rendered plainly: each peer's provider, on PATH or not,
-enabled or not, input cap, exec-capable or not, plus the run-wide
+enabled or not, input cap, exec-capable or not, when it last hit a
+usage limit if it ever did ("limited 12 min ago"), plus the run-wide
 `maxConcurrent` fan-out budget. No workspace-wide judgment here, just the
 facts a caller needs before deciding whether `review`/`plan`/`council`
 will have anyone to talk to. Zero
@@ -232,7 +252,9 @@ mutates before that gate, in any mode.
    — one that never answered, or exited non-zero with no findings
    (`status` names it with its stderr tail) — is outside that count, and
    `close` refuses over it unless `allowIncomplete` stamps it into the
-   record as deliberately degraded coverage. A single-peer claim
+   record as deliberately degraded coverage. A skipped (rate-limited)
+   seat is outside the count too, but needs no flag — see "A
+   rate-limited seat is skipped, not failed" above. A single-peer claim
    stands or falls on its evidence (the templates' evidence-or-discarded
    rule is the floor). Adjudicate every claim against the actual
    artifacts — the docs, the transcripts, spot-checkable competitor
@@ -316,7 +338,9 @@ plainly that no peers were available, and record the run exactly as
 usual. A missing external CLI NEVER blocks any mode from completing —
 peers are an augmentation, and the verb's job is to degrade gracefully to
 "cairn reviewed this alone" rather than stall waiting on a CLI nobody
-installed.
+installed. The same holds when every seat that did dispatch came back
+`RATE_LIMITED`: the run closes `no-quorum`, and cairn's own judgment
+is the answer.
 
 ## Mirror rules
 
