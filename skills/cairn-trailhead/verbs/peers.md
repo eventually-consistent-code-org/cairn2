@@ -72,7 +72,8 @@ suggest installing anything unasked.
 ## `peers review [target]`
 
 1. Run cairn's own five-axis review FIRST, in full — same target
-   resolution, same five axes, same finding discipline as the `review`
+   resolution (the default target includes untracked files, per
+   `review`'s table), same five axes, same finding discipline as the `review`
    verb. This is not optional and not skimmed: peers augment cairn's
    review, they don't stand in for it.
 2. **Leak-scan the outbound content** (see below) before step 3 ever

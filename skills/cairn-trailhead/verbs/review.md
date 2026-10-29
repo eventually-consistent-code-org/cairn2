@@ -13,12 +13,15 @@ for anything that matters.
 
 | target | resolves to |
 |---|---|
-| (none) | the working diff — `git diff` plus whatever's staged |
+| (none) | the working diff, staged, and untracked files git does not ignore — `git diff HEAD` plus every path from `git ls-files --others --exclude-standard`, each rendered as a new-file diff (`git diff --no-index /dev/null <path>`) so the panel reads one shape for tracked and untracked changes. A binary or oversized untracked file is listed by name and size, not inlined; the large-diff handling decides the cutoff |
 | a branch name | the range between that branch and `main` |
 | a phase number | that phase's ledgered commit ranges (read `LEDGER.md` for the phase — the base/head commits recorded there, not a guess at the range) |
 
 No target means the working diff, full stop — don't go hunting for a
-"more interesting" target when the caller didn't name one.
+"more interesting" target when the caller didn't name one. The reviewer
+sees what the author made, not what git tracks: a new module or test
+file nobody ran `git add` on is part of the default target (asserted by
+`sweep-surface.test.ts`).
 
 ## The panel — the axes come from the roster
 
@@ -207,7 +210,9 @@ nothing and the flow is exactly today's.
    every run of characters outside `[a-z0-9]` to a single hyphen (e.g.,
    `feature/ABC-123` becomes `feature-abc-123`, `HEAD~3` becomes
    `head-3`). A clean pass is still a finding worth recording — it's the
-   proof the review ran.
+   proof the review ran. On the default target, the one-line report that
+   accompanies the record states `untracked files included: <n>` (0 when
+   none), so a reader knows whether the reviewer saw them.
 2. For each SURVIVING finding rated **critical** or **important**:
    `issue_create` with label `cairn:review`, the severity as the literal
    first line of the body (`Critical: …` / `Important: …`), plain
