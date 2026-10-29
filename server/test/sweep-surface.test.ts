@@ -573,3 +573,58 @@ describe("the spine's readers (#398)", () => {
       .toEqual({ state: "reaches", detail: "AGENTS.md carries the fragment" });
   });
 });
+
+describe("review target includes untracked files (#360)", () => {
+  const review = () => read("skills/cairn-trailhead/verbs/review.md");
+
+  it("the default-target row names untracked files git does not ignore", () => {
+    expect(review()).toContain("working diff, staged, and untracked files git does not ignore");
+    expect(review()).toContain("git ls-files --others --exclude-standard");
+    expect(review()).toContain("git diff --no-index /dev/null");
+  });
+
+  it("the review record notes how many untracked files the pass included", () => {
+    expect(review()).toContain("untracked files included: <n>");
+  });
+
+  it("peers review and audit simplify inherit by reference, no second table", () => {
+    expect(read("skills/cairn-trailhead/verbs/peers.md")).toMatch(/untracked/);
+    expect(read("skills/cairn-trailhead/verbs/audit.md")).toMatch(/untracked/);
+  });
+
+  it("the documented recipe resolves modified, staged and untracked, never ignored", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-untracked-"));
+    const git = (...a: string[]) => {
+      const r = spawnSync("git", a, { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0 && r.status !== 1) throw new Error(`git ${a.join(" ")}: ${r.stderr}`);
+      return r.stdout;
+    };
+    try {
+      git("init", "-q");
+      git("config", "user.email", "t@example.com");
+      git("config", "user.name", "t");
+      writeFileSync(join(dir, ".gitignore"), "ignored.txt\n");
+      writeFileSync(join(dir, "tracked.txt"), "one\n");
+      git("add", "-A");
+      git("commit", "-qm", "base");
+      writeFileSync(join(dir, "tracked.txt"), "two\n");
+      writeFileSync(join(dir, "staged.txt"), "staged\n");
+      git("add", "staged.txt");
+      writeFileSync(join(dir, "fresh.txt"), "fresh\n");
+      writeFileSync(join(dir, "ignored.txt"), "ignored\n");
+
+      const tracked = git("diff", "HEAD");
+      const untracked = git("ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean);
+      const rendered = untracked.map((p) => git("diff", "--no-index", "/dev/null", p)).join("");
+      const target = tracked + rendered;
+
+      expect(untracked).toEqual(["fresh.txt"]);
+      expect(target).toContain("tracked.txt");
+      expect(target).toContain("staged.txt");
+      expect(target).toContain("+fresh");
+      expect(target).not.toContain("ignored");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
