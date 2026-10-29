@@ -6,7 +6,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isFrozenByBreaker, readRunManifest } from "../src/planning/run-manifest.js";
 
@@ -3731,9 +3731,10 @@ describe("posttooluse-observe", () => {
 // #351: the observation log is appended by every session's hook at once. A
 // read-slice-rewrite trim lost whatever another hook appended between the read
 // and the write; the log now rotates (rename) and never rewrites the live
-// file.
+// file. Same hardening class: atomicWriteJson's tmp name is per writer.
 describe("observation log rotation and atomic writers (#351)", () => {
   const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const LIB = join(scriptsDir, "lib.mjs");
   // Read from the hook so the test follows the constant. An empty match is a
   // failure, never a silent zero-row pass.
   const capMatch = /const MAX_LINES = (\d+);/.exec(readFileSync(OBSERVE, "utf8"));
@@ -3836,6 +3837,30 @@ describe("observation log rotation and atomic writers (#351)", () => {
     const left = readdirSync(obsDir(proj)).sort();
     expect(left).toHaveLength(2);
     expect(allRows(proj)).toHaveLength(MAX_LINES + 1);
+  });
+
+  it("two atomicWriteJson callers leave a valid file and neither throws", async () => {
+    const dir = freshDir("cairn-atomic-");
+    const target = join(dir, "state.json");
+    const script = `import { atomicWriteJson } from ${JSON.stringify(pathToFileURL(LIB).href)};
+for (let i = 0; i < 300; i++) atomicWriteJson(${JSON.stringify(target)}, { writer: process.argv[1], i, pad: "x".repeat(4096) });`;
+    const run = (writer: string) => new Promise<{ code: number | null; stderr: string }>((done) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script, writer], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (b) => { stderr += String(b); });
+      child.on("close", (code) => done({ code, stderr }));
+    });
+    const results = await Promise.all([run("A"), run("B")]);
+    for (const r of results) {
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+    }
+    const final = JSON.parse(readFileSync(target, "utf8"));
+    expect(["A", "B"]).toContain(final.writer);
+    expect(final.i).toBe(299);
+    expect(readdirSync(dir)).toEqual(["state.json"]); // no stray tmp files
   });
 });
 

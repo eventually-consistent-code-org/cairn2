@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -158,7 +158,10 @@ export function writeHandoff(projectDir, patch) {
     if (existing && isRich(existing) && !isRich(merged))
         return; // silently keep the richer file
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
+    // Per-writer tmp name (#351): a fixed `${path}.tmp` let two concurrent
+    // writers share one tmp, so the second rename threw ENOENT. Mirrored in
+    // hooks/scripts/lib.mjs atomicWriteJson.
+    const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     writeFileSync(tmp, JSON.stringify(merged, null, 2) + "\n");
     renameSync(tmp, path);
 }
