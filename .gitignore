@@ -8,3 +8,9 @@ node_modules/
 
 # local checkout of the evals-archive branch (eval suite, review corpus, planning history)
 /evals-archive/
+
+# OS cruft -- the plugin directory scan blocks a submission that ships these
+.DS_Store
+Thumbs.db
+desktop.ini
+__MACOSX/

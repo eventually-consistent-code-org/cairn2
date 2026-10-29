@@ -21,6 +21,23 @@ Tool count holds at 87. Suite 2256 → 2358. Footprint 13145 → 13142 of a
 13145 pin. Two config keys (`verify.rerun`, `auto.breaker`), one typed
 error code (`RUN_FROZEN`), no new tool.
 
+### directory listing
+
+- The plugin manifest carries the fields Anthropic's directory reads for
+  a listing: `displayName`, `documentationUrl`, `supportUrl`,
+  `privacyPolicyUrl`. New `PRIVACY.md` (what runs, what is stored
+  where, what leaves the machine, how to remove it) and `SECURITY.md`
+  (private reporting channel, supported versions) back the two policy
+  links; README gains "Try it" (four example prompts), "Data handling"
+  and "Support and troubleshooting". The `github_token` option's help
+  text no longer tells users to export an environment variable — the
+  plugin substitutes the option, so the shell variable was never read.
+- Every MCP tool declares an annotation `title` beside its
+  `readOnlyHint`/`destructiveHint` (directory policy §5.E).
+  Annotations never reach the model, so the footprint pin is unchanged.
+- `.gitignore` excludes the OS files the directory scan blocks on
+  (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `__MACOSX`).
+
 ### axioms
 
 - Six clauses open `docs/ARCHITECTURE.md` under `## Axioms`: tracker

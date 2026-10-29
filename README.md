@@ -119,6 +119,20 @@ plugin update`) fetches a released tree, never `main` — see
 Then the [quickstart](docs/00-quickstart.md): credentials, `cairn.json`,
 first phase.
 
+### Try it
+
+Four prompts that exercise the core loop, in a repo with a `cairn.json`:
+
+- `/cairn:new "my-service"` — interview, roadmap, tracker milestones and
+  issues for the first phase.
+- `/cairn:plan 1` then `/cairn:work 1` — research the phase, write
+  PLAN.md, claim each issue, do the work, close on verified done.
+- `/cairn:status` — phases, issue states, plan↔tracker drift, unplanned
+  commits, in one view.
+- `/cairn:remember "the retry budget is 3 because the GitHub API throttles
+  at 4"` then `/cairn:recall "retry budget"` — a memory card with a source
+  commit, and a recall that says `STALE` when that code moves.
+
 ## Beyond Claude Code
 
 The server speaks plain MCP over stdio and the verbs are markdown — cairn
@@ -280,6 +294,19 @@ plans, and competitive research. The spec/plan/research history and the
 behavioral eval suite live on the orphan
 [`evals-archive`](https://github.com/eventually-consistent-code-org/cairn2/tree/evals-archive) branch,
 so the tree the marketplace ships is the plugin alone (#403).
+
+## Data handling
+
+Local-first: the server and hooks run on your machine, and data leaves it
+only to the tracker, docs connector, and peer CLIs **you** configure. No
+telemetry, no analytics, no account. What runs, what is stored where, what
+is sent, and how to remove it: **[PRIVACY.md](PRIVACY.md)**.
+
+## Support and troubleshooting
+
+- Error codes and fixes: [runbook §11](docs/01-runbook.md#11-error-codes--troubleshooting).
+- Bugs and questions: [GitHub issues](https://github.com/eventually-consistent-code-org/cairn2/issues).
+- Security reports, privately: [SECURITY.md](SECURITY.md).
 
 ## License
 
