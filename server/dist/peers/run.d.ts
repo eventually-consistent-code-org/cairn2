@@ -16,7 +16,11 @@
  * element; stdin-mode peers get input piped instead, per each CLI's
  * verified prompt convention. A peer's non-zero exit is a result, not an
  * error: peers are advisory, and the caller (the `peers` verb) is the one
- * that judges what they say. Missing binaries and disabled providers
+ * that judges what they say -- with one exception, a non-zero exit in the
+ * CLI's own usage-limit shape (#364, shapes in providers.ts), which is a
+ * typed RATE_LIMITED: the seat is skipped, the run goes on, and the time
+ * lands where peerList can report it. No retry loop lives here; the owner
+ * decides when to re-run. Missing binaries and disabled providers
  * degrade to PRECONDITION_FAILED — nothing here assumes a peer CLI is
  * actually installed.
  * Author(s): John Reed
@@ -79,7 +83,10 @@ export type PeerCwdMode = "scratch" | "project";
  * reads both in one call — a live 16-seat all-at-once dispatch exhausted
  * the host's memory on 2026-08-12, so batching is not optional.
  */
-export declare function peerList(projectDir: string): {
+export declare function peerList(projectDir: string, opts?: {
+    home?: string;
+    now?: Date;
+}): {
     peers: Array<{
         provider: Provider;
         onPath: boolean;
@@ -90,6 +97,10 @@ export declare function peerList(projectDir: string): {
         model?: string;
         /** Who trained the model this seat speaks for (#341); convergence counts distinct labs. */
         lab: Lab;
+        /** When this seat's CLI last refused on a usage limit (#364), machine-wide; absent = never seen. */
+        lastLimitedAt?: string;
+        /** Whole minutes since lastLimitedAt, for "codex: limited 12 min ago" at the focus ask. */
+        limitedMinutesAgo?: number;
     }>;
     maxConcurrent: number;
 };
@@ -118,8 +129,15 @@ export declare function peerList(projectDir: string): {
  * peerChildEnv) — containment covers what the peer can READ from its
  * own process, not only what it can see on disk.
  *
+ * A non-zero exit in the provider's usage-limit shape (#364) rejects with
+ * RATE_LIMITED instead of resolving: the message carries cairn's marker
+ * so the recorded refusal files the seat as skipped, and the time is
+ * stamped for peerList. Never retried here.
+ *
  * :param opts.cwdMode: "scratch" (default) or "project"
+ * :param opts.home: where the last-limit store lives (default: the user's home)
  */
 export declare function peerRun(projectDir: string, provider: Provider, input: string, timeoutMs?: number, opts?: {
     cwdMode?: PeerCwdMode;
+    home?: string;
 }): Promise<PeerResult>;

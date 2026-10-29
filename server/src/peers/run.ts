@@ -16,19 +16,26 @@
  * element; stdin-mode peers get input piped instead, per each CLI's
  * verified prompt convention. A peer's non-zero exit is a result, not an
  * error: peers are advisory, and the caller (the `peers` verb) is the one
- * that judges what they say. Missing binaries and disabled providers
+ * that judges what they say -- with one exception, a non-zero exit in the
+ * CLI's own usage-limit shape (#364, shapes in providers.ts), which is a
+ * typed RATE_LIMITED: the seat is skipped, the run goes on, and the time
+ * lands where peerList can report it. No retry loop lives here; the owner
+ * decides when to re-run. Missing binaries and disabled providers
  * degrade to PRECONDITION_FAILED — nothing here assumes a peer CLI is
  * actually installed.
  * Author(s): John Reed
  */
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { CairnError } from "../errors.js";
 import { loadConfig } from "../config.js";
-import { PROVIDERS, type Provider } from "./providers.js";
+import { PROVIDERS, RATE_LIMIT_MARKER, isRateLimited, type Provider } from "./providers.js";
 import { concurrencyBudget } from "./throttle.js";
 import { scanForLeaks, type LeakHit } from "./leak-scan.js";
 
@@ -281,6 +288,64 @@ function onPath(bin: string): boolean {
   return dirs.some((dir) => existsSync(join(dir, bin)));
 }
 
+// Last-limit store (#364). A usage limit belongs to the CLI's login, not to
+// this checkout or this run: two worktrees -- or two projects -- driving
+// the same codex account hit the same window. So the time lives
+// machine-wide, <home>/.cairn/peer-limits/<provider>.json, one file per
+// seat, and peerList reads it back as "limited N min ago".
+//
+// Concurrency, at this handoff (peerRun writes, peerList reads):
+//   atomicity  -- one write is a whole file at a tmp name carrying the pid
+//                 and a random suffix, then a rename; never edited in place;
+//   visibility -- the rename is the publish point, and a reader takes a
+//                 missing or unparsable file as "never limited";
+//   ordering   -- two seats of one provider limited at once race on the
+//                 rename and the last one wins, which is fine: either time
+//                 is a true "last limited at". No read-modify-write exists,
+//                 so there is no lost update to lose.
+const limitsDir = (home: string): string => join(home, ".cairn", "peer-limits");
+
+function recordLimit(home: string, provider: Provider, at: Date): void {
+  try {
+    const dir = limitsDir(home);
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${provider}.json`);
+    const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ limitedAt: at.toISOString() })}\n`);
+    renameSync(tmp, file);
+  } catch {
+    // best-effort: an unwritable home costs peer_list its "limited N min
+    // ago" hint, never the RATE_LIMITED answer itself
+  }
+}
+
+function lastLimit(home: string, provider: Provider): string | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(limitsDir(home), `${provider}.json`), "utf8")) as
+      { limitedAt?: unknown };
+    const at = raw.limitedAt;
+    return typeof at === "string" && !Number.isNaN(Date.parse(at)) ? at : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The refusal a limited seat gets: plain line first, cairn's marker in the
+// message (state.ts reads it back off the recorded output to file the seat
+// as skipped), and the CLI's own words as a one-line tail.
+const LIMIT_TAIL_CHARS = 200;
+function rateLimited(provider: Provider, exitCode: number, said: string): CairnError {
+  const flat = said.replace(/\s+/g, " ").trim();
+  const tail = !flat ? "(no output)"
+    : flat.length > LIMIT_TAIL_CHARS ? `...${flat.slice(-LIMIT_TAIL_CHARS)}` : flat;
+  return new CairnError("RATE_LIMITED",
+    `peer '${provider}' is rate limited (exit ${exitCode}) ${RATE_LIMIT_MARKER}: ${tail}`,
+    `skip this seat and go on with the remaining seats -- record this message as ${provider}'s `
+      + "round-1 output (peer_state record_output) and the run files it as skipped (rate limited), "
+      + `never failed. No retry from cairn: re-run ${provider} after its limit window resets, or `
+      + "leave it off the next run's roster");
+}
+
 // Head-truncates input to maxChars and appends the truncation marker line
 // verbatim. Marker text is part of the security contract — don't reword it.
 function capInput(input: string, maxChars: number): { text: string; truncated: boolean } {
@@ -312,7 +377,7 @@ function leakRefusal(provider: Provider, hits: LeakHit[]): CairnError {
  * reads both in one call — a live 16-seat all-at-once dispatch exhausted
  * the host's memory on 2026-08-12, so batching is not optional.
  */
-export function peerList(projectDir: string): {
+export function peerList(projectDir: string, opts: { home?: string; now?: Date } = {}): {
   peers: Array<{
     provider: Provider;
     onPath: boolean;
@@ -323,12 +388,19 @@ export function peerList(projectDir: string): {
     model?: string;
     /** Who trained the model this seat speaks for (#341); convergence counts distinct labs. */
     lab: Lab;
+    /** When this seat's CLI last refused on a usage limit (#364), machine-wide; absent = never seen. */
+    lastLimitedAt?: string;
+    /** Whole minutes since lastLimitedAt, for "codex: limited 12 min ago" at the focus ask. */
+    limitedMinutesAgo?: number;
   }>;
   maxConcurrent: number;
 } {
   const cfg = loadConfig(projectDir);
+  const home = opts.home ?? homedir();
+  const now = (opts.now ?? new Date()).getTime();
   const peers = PROVIDERS.map((provider) => {
     const peerCfg = cfg.peers?.[provider] ?? {};
+    const lastLimitedAt = lastLimit(home, provider);
     return {
       provider,
       onPath: onPath(TEMPLATES[provider].argv[0]),
@@ -338,6 +410,10 @@ export function peerList(projectDir: string): {
       execCapable: peerCfg.execCapable ?? false,
       ...(TEMPLATES[provider].model ? { model: peerModel(cfg, provider) } : {}),
       lab: peerLab(cfg, provider),
+      ...(lastLimitedAt ? {
+        lastLimitedAt,
+        limitedMinutesAgo: Math.max(0, Math.floor((now - Date.parse(lastLimitedAt)) / 60_000)),
+      } : {}),
     };
   });
   return {
@@ -371,11 +447,17 @@ export function peerList(projectDir: string): {
  * peerChildEnv) — containment covers what the peer can READ from its
  * own process, not only what it can see on disk.
  *
+ * A non-zero exit in the provider's usage-limit shape (#364) rejects with
+ * RATE_LIMITED instead of resolving: the message carries cairn's marker
+ * so the recorded refusal files the seat as skipped, and the time is
+ * stamped for peerList. Never retried here.
+ *
  * :param opts.cwdMode: "scratch" (default) or "project"
+ * :param opts.home: where the last-limit store lives (default: the user's home)
  */
 export async function peerRun(projectDir: string, provider: Provider,
   input: string, timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  opts: { cwdMode?: PeerCwdMode } = {}): Promise<PeerResult> {
+  opts: { cwdMode?: PeerCwdMode; home?: string } = {}): Promise<PeerResult> {
   const cwdMode = opts.cwdMode ?? "scratch";
   const cfg = loadConfig(projectDir);
   const peerCfg = cfg.peers?.[provider] ?? {};
@@ -487,6 +569,13 @@ export async function peerRun(projectDir: string, provider: Provider,
           return;
         }
         const exitCode = typeof rawCode === "number" ? rawCode : 0;
+        // #364: a limit refusal is the one non-zero exit that is not a
+        // passthrough -- skipped seat, typed code, time stamped, no retry.
+        if (isRateLimited(provider, exitCode, stderr, stdout)) {
+          recordLimit(opts.home ?? homedir(), provider, new Date());
+          reject(rateLimited(provider, exitCode, stderr || stdout));
+          return;
+        }
         const output = stderr ? `${stdout}\n--- stderr ---\n${stderr}` : stdout;
         resolve({ provider, output, exitCode, truncatedInput, durationMs });
       });

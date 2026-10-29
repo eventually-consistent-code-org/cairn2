@@ -17,6 +17,7 @@ import {
 import { join } from "node:path";
 import { CairnError } from "../errors.js";
 import { FindingSchema, type Finding } from "./findings.js";
+import { PROVIDERS, RATE_LIMIT_MARKER, isRateLimited, type Provider } from "./providers.js";
 
 // Mirrors the divider run.ts stitches between a child's stdout and stderr
 // (and findings.ts strips) -- the stderr tail is the reason a failed seat
@@ -62,14 +63,18 @@ export interface OutputRecord {
 /**
  * A seat the run cannot count on (#339): `silent` never answered round 1;
  * `failed` answered with a non-zero exit and raised no findings -- the
- * shape a not-logged-in, rate-limited or credit-capped CLI produces, which
- * parses to empty piles and would otherwise read exactly like a clean
- * pass. `reason` is plain language for the status line; for a failed
- * seat it ends with the stderr tail the child left.
+ * shape a not-logged-in or credit-capped CLI produces, which parses to
+ * empty piles and would otherwise read exactly like a clean pass;
+ * `skipped` (#364) is the rate-limited case of the same shape -- the
+ * recorded output carries peer_run's RATE_LIMITED marker, or the CLI's
+ * own limit shape on a non-zero exit. A skipped seat is out of the count
+ * but never blocks close: the run goes on with the seats it has. `reason`
+ * is plain language for the status line; for a failed or skipped seat it
+ * ends with the tail of what the child said.
  */
 export interface IncompleteSeat {
   peer: string;
-  kind: "silent" | "failed";
+  kind: "silent" | "failed" | "skipped";
   exitCode?: number;
   reason: string;
 }
@@ -91,8 +96,9 @@ interface RunState {
 
 export interface RunResumable {
   peersMissingRound1: string[];
-  /** Silent AND failed seats, each with its reason (#339) -- a superset of
-   *  peersMissingRound1, which stays for callers that only knew silence. */
+  /** Silent, failed and skipped seats, each with its reason (#339, #364) --
+   *  a superset of peersMissingRound1, which stays for callers that only
+   *  knew silence. */
   incompleteSeats: IncompleteSeat[];
   disputedAwaitingRound2: string[];
   unresolved: string[];   // finding ids still disputed or never judged
@@ -109,7 +115,10 @@ export interface RunStatusReport {
 
 export interface CloseSummary {
   slug: string;
-  verdict: "pass" | "findings";
+  /** "no-quorum" (#364): no rostered seat was left to count -- every one
+   *  was skipped (rate limited), or incomplete and waived. noQuorumReason
+   *  says which and why; it is never a pass. */
+  verdict: "pass" | "findings" | "no-quorum";
   findings: Array<{
     severity: Finding["severity"];
     title: string;
@@ -135,6 +144,14 @@ export interface CloseSummary {
   /** One plain line per incomplete seat ("grok exited 1 with no findings
    *  -- see stderr: ..."), same order as incompleteSeats. */
   incompleteDetail?: string[];
+  /** Rostered peers skipped because their CLI hit a usage limit (#364) --
+   *  present whenever any was, no flag needed: a limited seat is a skipped
+   *  seat, never a failed run. */
+  skippedSeats?: string[];
+  /** One plain line per skipped seat, same order as skippedSeats. */
+  skippedDetail?: string[];
+  /** Present only on a no-quorum close: why no seat was left, in plain words. */
+  noQuorumReason?: string;
 }
 
 
@@ -458,19 +475,36 @@ function stderrTail(raw: string): string {
   return text.length > STDERR_TAIL_CHARS ? `...${text.slice(-STDERR_TAIL_CHARS)}` : text;
 }
 
-// Every seat the run cannot count on (#339), silent first, then failed:
-// a round-1 record carrying a non-zero exit code for a peer that raised
-// no findings in any round. A non-zero exit WITH findings is a seat that
-// spoke and then died -- its findings stand, the run goes on. A zero exit
-// with no findings is a clean "nothing to report". Absent exit code is
-// never read as failed. One definition, shared by runStatus and runClose,
-// so the resume map and the close gate cannot disagree.
+// Whether a round-1 record is a rate-limited seat (#364). Two ways in:
+// the verb recorded peer_run's RATE_LIMITED refusal (cairn's marker,
+// with or without an exit code -- the refusal is cairn's own verdict), or
+// it recorded the raw reply of a CLI whose non-zero exit matches that
+// provider's limit shape. A zero exit is never a limit, whatever the
+// reply says: a reviewer may well be talking about rate limits.
+function rateLimitedRecord(o: OutputRecord, raw: string): boolean {
+  if (o.exitCode === 0) return false;
+  if (raw.includes(RATE_LIMIT_MARKER)) return true;
+  const at = raw.indexOf(STDERR_DIVIDER);
+  const stdout = at === -1 ? raw : raw.slice(0, at);
+  const stderr = at === -1 ? "" : raw.slice(at + STDERR_DIVIDER.length);
+  const provider = (PROVIDERS as readonly string[]).includes(o.peer) ? o.peer as Provider : undefined;
+  return isRateLimited(provider, o.exitCode, stderr, stdout);
+}
+
+// Every seat the run cannot count on (#339), silent first, then failed or
+// skipped in record order: a round-1 record for a peer that raised no
+// findings in any round, carrying a non-zero exit code (failed) or a
+// rate-limit shape (skipped, #364). A non-zero exit WITH findings is a
+// seat that spoke and then died -- its findings stand, the run goes on. A
+// zero exit with no findings is a clean "nothing to report". Absent exit
+// code is never read as failed. One definition, shared by runStatus and
+// runClose, so the resume map and the close gate cannot disagree.
 function incompleteSeats(projectDir: string, slug: string, state: RunState): IncompleteSeat[] {
   const out: IncompleteSeat[] = missingRound1(state).map((peer) => ({
     peer, kind: "silent", reason: `${peer} never answered round 1`,
   }));
   for (const o of state.outputs) {
-    if (o.round !== 1 || typeof o.exitCode !== "number" || o.exitCode === 0) continue;
+    if (o.round !== 1 || o.exitCode === 0) continue;
     if (state.findings.some((f) => f.peer === o.peer)) continue;
     let raw = "";
     try {
@@ -478,6 +512,15 @@ function incompleteSeats(projectDir: string, slug: string, state: RunState): Inc
     } catch {
       // the verbatim file is gone -- the exit code alone still makes the case
     }
+    const exit = typeof o.exitCode === "number" ? { exitCode: o.exitCode } : {};
+    if (rateLimitedRecord(o, raw)) {
+      out.push({
+        peer: o.peer, kind: "skipped", ...exit,
+        reason: `${o.peer} skipped (rate limited) -- re-run it after its limit window: ${stderrTail(raw)}`,
+      });
+      continue;
+    }
+    if (typeof o.exitCode !== "number") continue;
     out.push({
       peer: o.peer, kind: "failed", exitCode: o.exitCode,
       reason: `${o.peer} exited ${o.exitCode} with no findings -- see stderr: ${stderrTail(raw)}`,
@@ -502,6 +545,9 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
 
   const peersMissingRound1 = missingRound1(state);
   const incomplete = incompleteSeats(projectDir, s, state);
+  // A skipped seat is nothing to resume -- cairn never retries a limit;
+  // only silent and failed seats keep the run from complete.
+  const blockingSeats = incomplete.filter((i) => i.kind !== "skipped");
   const disputedAwaitingRound2 = state.findings
     .filter((f) => f.verdict === "disputed" && !answered(f.peer, 2))
     .map((f) => f.id);
@@ -520,7 +566,7 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
       disputedAwaitingRound2,
       unresolved,
       complete: !isFinished(state.meta)
-        && incomplete.length === 0
+        && blockingSeats.length === 0
         && disputedAwaitingRound2.length === 0
         && unresolved.length === 0,
     },
@@ -545,6 +591,11 @@ export function runStatus(projectDir: string, slug: string): RunStatusReport {
  * summary's incompleteSeats (+ incompleteDetail) so provenance shows the
  * degradation was deliberate. allowIncomplete never waives unresolved
  * findings — those always block.
+ *
+ * A SKIPPED seat (#364, rate limited) blocks nothing: close goes through
+ * and stamps it in skippedSeats + skippedDetail. When no rostered seat is
+ * left to count -- every one skipped, or incomplete and waived -- the
+ * verdict is "no-quorum" with noQuorumReason saying why, never "pass".
  */
 export function runClose(projectDir: string, slug: string,
   opts?: { allowIncomplete?: boolean }): CloseSummary {
@@ -561,7 +612,9 @@ export function runClose(projectDir: string, slug: string,
       "every finding must end verified, dead, or open-disagreement before close");
   }
 
-  const incomplete = incompleteSeats(projectDir, s, state);
+  const seats = incompleteSeats(projectDir, s, state);
+  const skipped = seats.filter((i) => i.kind === "skipped");
+  const incomplete = seats.filter((i) => i.kind !== "skipped");
   if (incomplete.length > 0 && opts?.allowIncomplete !== true) {
     throw new CairnError("CONFIG_INVALID",
       `cannot close peers run '${s}' — incomplete seat(s): ${
@@ -578,10 +631,13 @@ export function runClose(projectDir: string, slug: string,
 
   const survived = state.findings
     .some((f) => f.verdict === "verified" || f.verdict === "open-disagreement");
+  // Quorum (#364): a rostered seat that is neither skipped nor incomplete.
+  const counted = state.meta.peers.filter((p) => !seats.some((i) => i.peer === p));
+  const noQuorum = counted.length === 0;
 
   return {
     slug: s,
-    verdict: survived ? "findings" : "pass",
+    verdict: noQuorum ? "no-quorum" : survived ? "findings" : "pass",
     findings: state.findings.map((f) => ({
       severity: f.finding.severity,
       title: f.finding.claim,
@@ -600,6 +656,12 @@ export function runClose(projectDir: string, slug: string,
     closedAt,
     ...(incomplete.length > 0
       ? { incompleteSeats: incompleteNames, incompleteDetail: incomplete.map((i) => i.reason) }
+      : {}),
+    ...(skipped.length > 0
+      ? { skippedSeats: skipped.map((i) => i.peer), skippedDetail: skipped.map((i) => i.reason) }
+      : {}),
+    ...(noQuorum
+      ? { noQuorumReason: `no seat left to count -- ${seats.map((i) => i.reason).join("; ")}` }
       : {}),
   };
 }

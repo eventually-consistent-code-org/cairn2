@@ -1,10 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, realpathSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { peerList, peerRun, peerChildEnv, peerModel, peerLab, labOfModel, PEER_ENV_DROP, PROVIDERS } from "../src/peers/run.js";
 import { parseFindings } from "../src/peers/findings.js";
-import { runStart, runStatus, recordPeerOutput } from "../src/peers/state.js";
+import {
+  runStart, runStatus, runClose, recordPeerOutput, recordFindings, recordVerdict,
+} from "../src/peers/state.js";
+import { isRateLimited, RATE_LIMIT_MARKER } from "../src/peers/providers.js";
 
 // Stub CLIs are shell scripts prepended onto PATH per test, so no real
 // codex/opencode/agy/grok binary is ever assumed. Restore PATH after
@@ -823,5 +826,145 @@ describe("labs, not seats (#341)", () => {
     expect(two.size).toBe(2);
     const three = new Set(["codex", "copilot", "grok", "antigravity"].map((p) => peerLab(cfg, p as "codex")));
     expect(three.size).toBe(3);
+  });
+});
+
+
+// #364: a seat whose CLI refuses on a usage limit is SKIPPED, never a
+// failed run. Each provider's limit shape (see the providers.ts header for
+// where each phrase came from) maps to the typed RATE_LIMITED; the refusal
+// carries cairn's marker so the run store files the recorded message as a
+// skipped seat; peerList reports when each seat last hit its limit.
+describe("rate-limited seats (#364)", () => {
+  // One stderr line per provider, in that CLI's own wording -- exit 1, the
+  // way every one of them exits on a limit.
+  const LIMIT_STDERR: Record<string, string> = {
+    codex: "ERROR: Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.",
+    grok: "Error: Rate limited -- rate limit exceeded, try again later",
+    antigravity: "Error: You have exhausted your quota on this model.",
+    opencode: "AI_APICallError: Rate limit exceeded (Too Many Requests)",
+    copilot: "Error: You've been rate limited on the current model.",
+  };
+  const BIN: Record<string, string> = {
+    codex: "codex", grok: "grok", antigravity: "agy", opencode: "opencode", copilot: "copilot",
+  };
+  const limitedStub = (line: string): string =>
+    `#!/bin/sh\ncat > /dev/null\necho '${line.replace(/'/g, "'\\''")}' 1>&2\nexit 1\n`;
+  const freshHome = (): string => mkdtempSync(join(tmpdir(), "cairn-home-"));
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: its limit shape (exit 1 + its own stderr phrase) is RATE_LIMITED, marker and next action included`, async () => {
+      runnableStubPath({ [BIN[provider]]: limitedStub(LIMIT_STDERR[provider]) });
+      const err = await peerRun(projectDir(), provider, "hello", undefined, { home: freshHome() })
+        .then(() => undefined, (e: unknown) => e as { code?: string; message?: string; nextAction?: string });
+      expect(err?.code).toBe("RATE_LIMITED");
+      expect(err?.message).toContain(`peer '${provider}' is rate limited (exit 1)`);
+      expect(err?.message).toContain(RATE_LIMIT_MARKER);
+      expect(err?.nextAction).toMatch(/remaining seats/);
+      expect(err?.nextAction).toMatch(/no retry/i);
+    });
+  }
+
+  it("every phrase in each provider's documented shape matches its own classifier", () => {
+    const samples: Record<string, string[]> = {
+      codex: ["Usage limit reached.", "You've reached your usage limit.", "error kind usage_limit_reached",
+        "workspace_owner_credits_depleted", "Quota exceeded. Check your plan and billing details.",
+        "stream error: exceeded retry limit, last status: 429 Too Many Requests"],
+      grok: ["Rate limited", "rate limit exceeded; sleeping", "usage limit reached", "usage balance exhausted",
+        "out of credits", "spending limit"],
+      antigravity: ["You have exhausted your quota on this model.", "rpc error: code = RESOURCE_EXHAUSTED"],
+      opencode: ["Rate limit exceeded", "Too Many Requests", "throttling error: slow down",
+        "You exceeded your current quota", "insufficient_quota"],
+      copilot: ["You've been rate limited on the current model.", "rate-limited", "Rate limit exceeded",
+        "usage limit reached"],
+    };
+    for (const provider of PROVIDERS) {
+      for (const s of samples[provider]) expect(isRateLimited(provider, 1, s), `${provider}: ${s}`).toBe(true);
+    }
+  });
+
+  it("a JSON error field on stdout counts, for any provider", () => {
+    const body = '{"error":{"type":"usage_limit_reached","message":"try again in 2h"}}';
+    for (const provider of PROVIDERS) expect(isRateLimited(provider, 1, "", body), provider).toBe(true);
+    expect(isRateLimited(undefined, 1, "", '{"code": "RESOURCE_EXHAUSTED"}')).toBe(true);
+  });
+
+  it("never a limit: exit 0 that talks about rate limits, a login failure, a bare line number 429, a full disk", () => {
+    expect(isRateLimited("grok", 0, "Rate limited")).toBe(false);
+    expect(isRateLimited("grok", undefined, "Rate limited")).toBe(false);
+    expect(isRateLimited("grok", 1, "error: not logged in -- run grok login")).toBe(false);
+    expect(isRateLimited("codex", 1, "panic at src/main.rs:429:12")).toBe(false);
+    expect(isRateLimited("antigravity", 1, "write failed: disc quota exceeded")).toBe(false);
+  });
+
+  it("no retry loop: a limited CLI is spawned exactly once per peerRun", async () => {
+    const tally = join(mkdtempSync(join(tmpdir(), "cairn-tally-")), "calls");
+    runnableStubPath({ grok: `#!/bin/sh\ncat > /dev/null\necho x >> '${tally}'\n`
+      + "echo 'Error: Rate limited' 1>&2\nexit 1\n" });
+    await expect(peerRun(projectDir(), "grok", "hello", undefined, { home: freshHome() }))
+      .rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(readFileSync(tally, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("a healthy reply that discusses rate limiting (exit 0) is a result, not a refusal", async () => {
+    runnableStubPath({ grok: "#!/bin/sh\ncat > /dev/null\necho 'the retry loop ignores 429 Too Many Requests'\n" });
+    const result = await peerRun(projectDir(), "grok", "hello", undefined, { home: freshHome() });
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("peerList carries each seat's last limit time; a seat never limited carries none", async () => {
+    const home = freshHome();
+    const d = projectDir();
+    runnableStubPath({ codex: limitedStub(LIMIT_STDERR.codex) });
+    const before = Date.now();
+    await expect(peerRun(d, "codex", "hello", undefined, { home })).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    const list = peerList(d, { home }).peers;
+    const codex = list.find((p) => p.provider === "codex");
+    expect(Date.parse(codex?.lastLimitedAt ?? "")).toBeGreaterThanOrEqual(before - 1000);
+    expect(codex?.limitedMinutesAgo).toBe(0);
+    expect(list.find((p) => p.provider === "grok")?.lastLimitedAt).toBeUndefined();
+    expect(peerList(d, { home: freshHome() }).peers.find((p) => p.provider === "codex")?.lastLimitedAt)
+      .toBeUndefined();
+  });
+
+  it("one limited + one healthy seat: the run completes with the healthy findings and a skipped record", async () => {
+    const home = freshHome();
+    const d = projectDir();
+    runnableStubPath({
+      grok: limitedStub(LIMIT_STDERR.grok),
+      codex: "#!/bin/sh\ncat > /dev/null\necho '```json'\n"
+        + "echo '{\"claim\": \"retry loop has no cap\", \"evidence\": \"src/x.ts:12\", \"severity\": \"important\", \"recommendation\": \"cap at 3\"}'\n"
+        + "echo '```'\n",
+    });
+    runStart(d, "run", { mode: "review", target: "t", peers: ["codex", "grok"] });
+    const healthy = await peerRun(d, "codex", "hello", undefined, { home });
+    recordPeerOutput(d, "run", "codex", 1, healthy.output, healthy.exitCode);
+    recordFindings(d, "run", "codex", 1, parseFindings(healthy.output).findings);
+    recordVerdict(d, "run", "f1", "verified");
+    // The verb's move on RATE_LIMITED: record the refusal message, go on.
+    const limited = await peerRun(d, "grok", "hello", undefined, { home })
+      .then(() => "", (e: Error) => e.message);
+    recordPeerOutput(d, "run", "grok", 1, limited);
+    expect(runStatus(d, "run").resumable.incompleteSeats).toEqual([
+      expect.objectContaining({ peer: "grok", kind: "skipped" }),
+    ]);
+    const summary = runClose(d, "run");
+    expect(summary.verdict).toBe("findings");
+    expect(summary.findings.map((f) => f.title)).toEqual(["retry loop has no cap"]);
+    expect(summary.skippedSeats).toEqual(["grok"]);
+  });
+
+  it("every seat limited: the run closes no-quorum and says why", async () => {
+    const home = freshHome();
+    const d = projectDir();
+    runnableStubPath({ grok: limitedStub(LIMIT_STDERR.grok), codex: limitedStub(LIMIT_STDERR.codex) });
+    runStart(d, "run", { mode: "review", target: "t", peers: ["codex", "grok"] });
+    for (const peer of ["codex", "grok"] as const) {
+      const msg = await peerRun(d, peer, "hello", undefined, { home }).then(() => "", (e: Error) => e.message);
+      recordPeerOutput(d, "run", peer, 1, msg);
+    }
+    const summary = runClose(d, "run");
+    expect(summary.verdict).toBe("no-quorum");
+    expect(summary.noQuorumReason).toMatch(/codex skipped \(rate limited\).*grok skipped \(rate limited\)/);
   });
 });

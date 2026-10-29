@@ -8,6 +8,7 @@ import {
   runStart, runAbandon, runStatus, runClose,
   recordPeerOutput, recordFindings, recordVerdict,
 } from "../src/peers/state.js";
+import { RATE_LIMIT_MARKER } from "../src/peers/providers.js";
 
 
 // A known-good finding, reused across the matrix.
@@ -514,5 +515,90 @@ describe("exit codes and incomplete seats (#339)", () => {
     expect(summary.incompleteSeats).toEqual(["grok"]);
     expect(summary.incompleteDetail?.[0]).toContain("see stderr: error: not logged in");
     expect(summary.verdict).toBe("findings");
+  });
+});
+
+
+// #364: a rate-limited seat is a SKIPPED seat, never a failed run. peer_run
+// refuses a limited CLI with RATE_LIMITED and a message carrying cairn's
+// marker; the verb records that message and goes on. Status names the seat
+// skipped, close goes through without allowIncomplete and stamps it, and a
+// run with no seat left closes no-quorum and says why.
+describe("rate-limited seats are skipped, not failed (#364)", () => {
+  const LIMITED = `peer 'grok' is rate limited (exit 1) ${RATE_LIMIT_MARKER}: Error: Rate limited`;
+  const RAW_CODEX_LIMIT = "\n--- stderr ---\nERROR: You've reached your usage limit. "
+    + "Increase your limits to continue using codex.\n";
+  function started(): string {
+    const dir = freshDir();
+    runStart(dir, "x", META);
+    return dir;
+  }
+
+  it("a recorded RATE_LIMITED message is a skipped seat, even with no exit code; the run stays complete", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordFindings(dir, "x", "codex", 1, [GOOD]);
+    recordVerdict(dir, "x", "f1", "verified");
+    recordPeerOutput(dir, "x", "grok", 1, LIMITED);
+    const status = runStatus(dir, "x");
+    expect(status.resumable.incompleteSeats).toHaveLength(1);
+    expect(status.resumable.incompleteSeats[0]).toMatchObject({ peer: "grok", kind: "skipped" });
+    expect(status.resumable.incompleteSeats[0].reason).toContain("grok skipped (rate limited)");
+    expect(status.resumable.complete).toBe(true);
+  });
+
+  it("a raw non-zero exit in the provider's own limit shape is skipped too; exit 0 never is", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, RAW_CODEX_LIMIT, 1);
+    recordPeerOutput(dir, "x", "grok", 1, `${LIMITED}\n`, 0);
+    const seats = runStatus(dir, "x").resumable.incompleteSeats;
+    expect(seats).toEqual([expect.objectContaining({ peer: "codex", kind: "skipped", exitCode: 1 })]);
+  });
+
+  it("one limited + one healthy seat: close needs no allowIncomplete, keeps the healthy findings, stamps the skip", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordFindings(dir, "x", "codex", 1, [GOOD]);
+    recordVerdict(dir, "x", "f1", "verified");
+    recordPeerOutput(dir, "x", "grok", 1, LIMITED);
+    const summary = runClose(dir, "x");
+    expect(summary.verdict).toBe("findings");
+    expect(summary.findings.map((f) => f.title)).toEqual([GOOD.claim]);
+    expect(summary.skippedSeats).toEqual(["grok"]);
+    expect(summary.skippedDetail?.[0]).toContain("grok skipped (rate limited)");
+    expect(summary.incompleteSeats).toBeUndefined();
+    expect(summary.noQuorumReason).toBeUndefined();
+  });
+
+  it("every seat limited: close goes through as no-quorum and says why", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, RAW_CODEX_LIMIT, 1);
+    recordPeerOutput(dir, "x", "grok", 1, LIMITED);
+    const summary = runClose(dir, "x");
+    expect(summary.verdict).toBe("no-quorum");
+    expect(summary.findings).toEqual([]);
+    expect(summary.skippedSeats).toEqual(["codex", "grok"]);
+    expect(summary.noQuorumReason).toContain("no seat left");
+    expect(summary.noQuorumReason).toContain("codex skipped (rate limited)");
+    expect(summary.noQuorumReason).toContain("grok skipped (rate limited)");
+  });
+
+  it("a failed seat still blocks close beside a skipped one; allowIncomplete over both leaves no quorum", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "\n--- stderr ---\nerror: not logged in\n", 1);
+    recordPeerOutput(dir, "x", "grok", 1, LIMITED);
+    expect(errCode(() => runClose(dir, "x"))).toBe("CONFIG_INVALID");
+    const summary = runClose(dir, "x", { allowIncomplete: true });
+    expect(summary.verdict).toBe("no-quorum");
+    expect(summary.incompleteSeats).toEqual(["codex"]);
+    expect(summary.skippedSeats).toEqual(["grok"]);
+  });
+
+  it("a limited seat that still raised findings is not skipped -- its findings stand", () => {
+    const dir = started();
+    recordPeerOutput(dir, "x", "codex", 1, "out", 0);
+    recordPeerOutput(dir, "x", "grok", 1, LIMITED, 1);
+    recordFindings(dir, "x", "grok", 1, [GOOD]);
+    expect(runStatus(dir, "x").resumable.incompleteSeats).toEqual([]);
   });
 });
