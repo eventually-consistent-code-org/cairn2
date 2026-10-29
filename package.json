@@ -1,6 +1,6 @@
 {
   "name": "@eventually-consistent/cairn",
-  "version": "2.9.1",
+  "version": "2.9.2",
   "description": "cairn 2.0 — tracker-first project management for AI coding agents. Distribution mirror: the supported install is the Claude Code plugin (or cairn-setup for other harnesses).",
   "type": "module",
   "license": "MIT",

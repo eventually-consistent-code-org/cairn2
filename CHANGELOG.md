@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.2 — the null byte (2026-10-29)
+
+One-line fix for the plugin directory's "files the validator couldn't
+inspect" hold. `server/src/memory/compaction.ts` carried a raw 0x00 byte
+inside the string literal of its pair-key separator, so the source and
+its compiled `server/dist/memory/compaction.js` read as binary to
+`file(1)` and to the directory scan. The byte is now the `"\u0000"`
+escape; the runtime string is identical, and no tracked text file holds
+a NUL (verified with a byte scan over `git ls-files`). The lockfile and
+file-count holds are unchanged and documented in the v2.9.1 entry.
+
 ## v2.9.1 — the constitution (2026-10-29)
 
 Cairn's standing rules become derivations instead of reactions. Six
