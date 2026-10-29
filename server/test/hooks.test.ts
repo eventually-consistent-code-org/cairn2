@@ -173,7 +173,7 @@ function handoffPathForEnvDir(home: string, projectDir: string): string {
  * `reset` runs between samples but outside the timed region, so a hook
  * with its own throttle still does real work on every sample.
  */
-function marginalHookMs(run: () => void, reset?: () => void, samples = 5): number {
+function hookTimingMs(run: () => void, reset?: () => void, samples = 5): { baseline: number; subject: number } {
   const best = (f: () => void): number => {
     let min = Infinity;
     for (let i = 0; i < samples; i++) {
@@ -185,12 +185,26 @@ function marginalHookMs(run: () => void, reset?: () => void, samples = 5): numbe
     return min;
   };
   const baseline = best(() => execFileSync(process.execPath, ["-e", ""], { encoding: "utf8" }));
-  return best(run) - baseline;
+  return { baseline, subject: best(run) };
 }
 
-/** A hook doing real work costs single-digit ms over a spawn; 50 catches a
- *  hook that started shelling out or reaching the network, and nothing else. */
+/** A hook doing real work costs single-digit ms over a spawn. The bound is a
+ *  RATIO against a bare `node -e ""` start measured in the same run, so load
+ *  that slows the baseline slows the subject with it (#397: a flat 50 ms was
+ *  red at 62/87/118 ms on four loaded baselines). A hook that started shelling
+ *  out or reaching the network would be 3x or worse; 3 catches that and
+ *  nothing else. The absolute 50 ms bound is opt-in: CI sets
+ *  CAIRN_TIMING_TESTS=1 on a quiet runner; it is skipped otherwise. */
+const MAX_SPAWN_RATIO = 3;
 const MARGINAL_BUDGET_MS = 50;
+
+function expectCheapHook(run: () => void, reset?: () => void): void {
+  const { baseline, subject } = hookTimingMs(run, reset);
+  expect(subject).toBeLessThan(baseline * MAX_SPAWN_RATIO);
+  if (process.env.CAIRN_TIMING_TESTS === "1") {
+    expect(subject - baseline).toBeLessThan(MARGINAL_BUDGET_MS);
+  }
+}
 
 function backdateMtime(path: string, msAgo: number): void {
   const t = (Date.now() - msAgo) / 1000;
@@ -292,11 +306,10 @@ describe("posttooluse-breadcrumb", () => {
 
     // Backdating between samples defeats the 60s throttle, so every timed
     // run takes the real write path rather than the early return.
-    const marginal = marginalHookMs(
+    expectCheapHook(
       () => runHook(BREADCRUMB, proj, home),
       () => backdateMtime(path, 70_000),
     );
-    expect(marginal).toBeLessThan(MARGINAL_BUDGET_MS);
   });
 
   it("CLAUDE_PROJECT_DIR, not cwd, governs the handoff path when both are set", () => {
@@ -513,9 +526,8 @@ describe("leak guard hook", () => {
     writeFileSync(join(proj, "cairn.json"),
       JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     stageFile(proj, "clean.ts", "const ok = true;\n");
-    const marginal = marginalHookMs(
+    expectCheapHook(
       () => runHookRaw(LEAKGUARD, proj, payload("git commit -m x")));
-    expect(marginal).toBeLessThan(MARGINAL_BUDGET_MS);
   });
 
   // #140 path-scoped exemption -- fixture strings are concatenated so this
@@ -3443,11 +3455,10 @@ describe("stop-costtracker + cost-report", () => {
     const transcript = transcriptWithReports(proj);
     const metrics = metricsPathFor(proj);
     const payload = JSON.stringify({ session_id: "s-perf", transcript_path: transcript });
-    const marginal = marginalHookMs(
+    expectCheapHook(
       () => runHookRaw(COSTTRACKER, proj, payload),
       () => rmSync(metrics, { force: true }),
     );
-    expect(marginal).toBeLessThan(MARGINAL_BUDGET_MS);
     rmSync(metrics, { force: true });
   });
 
