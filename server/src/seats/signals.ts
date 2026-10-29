@@ -309,28 +309,43 @@ export function selectSeats(
 
 // Model resolution — blast-radius supremacy
 
-/** Work class of the output a seat is producing, per the cairn-planning
- * model-routing rubric: `gate` = output that gates a lifecycle transition
- * (verify/ship); `synthesis` = briefs/analysis; `mechanical` =
+/** Work class of the output a seat is producing, per the four-class
+ * cairn-planning model-routing rubric: `gate` = judgment gates (output that
+ * gates a lifecycle transition: verify/ship); `complex` = complex synthesis
+ * (architecture trade-offs, a change that adds a mechanism or a seam);
+ * `routine` = routine synthesis (briefs, analysis, docs); `mechanical` =
  * enumerate/locate. */
-export type WorkClass = "mechanical" | "synthesis" | "gate";
+export type WorkClass = "mechanical" | "routine" | "complex" | "gate";
+
+/** A routed model: a named tier, or `strongest` = the strongest model
+ * available (as of 2026-10, Fable, a tier above opus) — the caller passes
+ * that model's id, or omits the model when the session already runs it. */
+export type RoutedModel = "haiku" | "sonnet" | "opus" | "strongest";
 
 export interface ModelResolution {
-  model: "haiku" | "sonnet" | "opus";
+  model: RoutedModel;
   /** True when the rubric overrode the seat's declared preference. */
   overrode: boolean;
   reason: string;
 }
 
-const CLASS_FLOOR: Record<WorkClass, "haiku" | "sonnet" | "opus"> = {
-  mechanical: "haiku",
-  synthesis: "sonnet",
-  gate: "opus",
+/** The server-side copy of the rubric table. `label` is the row's work-class
+ * cell in skills/cairn-planning/SKILL.md; a test pins this table equal to
+ * that one so the two cannot drift. */
+export const ROUTING_TABLE: Record<
+  WorkClass,
+  { label: string; model: RoutedModel; effort: "low" | "medium" | "high" }
+> = {
+  mechanical: { label: "mechanical", model: "haiku", effort: "low" },
+  routine: { label: "routine synthesis", model: "sonnet", effort: "medium" },
+  complex: { label: "complex synthesis", model: "opus", effort: "high" },
+  gate: { label: "judgment gates", model: "strongest", effort: "high" },
 };
-const TIER: Record<"haiku" | "sonnet" | "opus", number> = {
+const TIER: Record<RoutedModel, number> = {
   haiku: 0,
   sonnet: 1,
   opus: 2,
+  strongest: 3,
 };
 
 /**
@@ -344,22 +359,22 @@ const TIER: Record<"haiku" | "sonnet" | "opus", number> = {
  * not re-derived in prose.
  *
  * :param seat: validated seat definition (its `model` is the preference)
- * :param workClass: mechanical | synthesis | gate
+ * :param workClass: mechanical | routine | complex | gate
  * :returns: the routed model + whether the seat's preference was overridden
  */
 export function resolveSeatModel(
   seat: Seat,
   workClass: WorkClass,
 ): ModelResolution {
-  const floor = CLASS_FLOOR[workClass];
+  const floor = ROUTING_TABLE[workClass].model;
   const pref = seat.model;
   if (workClass === "gate") {
     return {
-      model: "opus",
-      overrode: pref !== undefined && pref !== "opus",
+      model: "strongest",
+      overrode: pref !== undefined,
       reason:
         "output gates a lifecycle transition — routes to the strongest tier" +
-        (pref && pref !== "opus"
+        (pref
           ? ` (seat preference '${pref}' overridden by the blast-radius rule)`
           : ""),
     };

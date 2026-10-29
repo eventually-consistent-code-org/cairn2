@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
@@ -14,6 +15,7 @@ import {
   deriveSignals,
   selectSeats,
   resolveSeatModel,
+  ROUTING_TABLE,
 } from "../src/seats/signals.js";
 import {
   loadYield,
@@ -1138,33 +1140,71 @@ describe("blast-radius model resolution (resolveSeatModel)", () => {
 
   it("gate work routes to the strongest tier REGARDLESS of seat preference", () => {
     const r = resolveSeatModel(seatWith("haiku"), "gate");
-    expect(r.model).toBe("opus");
+    expect(r.model).toBe("strongest");
     expect(r.overrode).toBe(true);
     expect(r.reason).toContain("gates a lifecycle transition");
     expect(r.reason).toContain("blast-radius");
+    // opus is below the strongest tier, so it is overridden too
+    const o = resolveSeatModel(seatWith("opus"), "gate");
+    expect(o.model).toBe("strongest");
+    expect(o.overrode).toBe(true);
   });
 
   it("gate work with no preference still routes up, without an override flag", () => {
     const r = resolveSeatModel(seatWith(), "gate");
-    expect(r.model).toBe("opus");
+    expect(r.model).toBe("strongest");
     expect(r.overrode).toBe(false);
   });
 
-  it("downgrade only mechanical work: a haiku preference on synthesis bumps up", () => {
-    const r = resolveSeatModel(seatWith("haiku"), "synthesis");
+  it("downgrade only mechanical work: a haiku preference on routine synthesis bumps up", () => {
+    const r = resolveSeatModel(seatWith("haiku"), "routine");
     expect(r.model).toBe("sonnet");
     expect(r.overrode).toBe(true);
+    const c = resolveSeatModel(seatWith("sonnet"), "complex");
+    expect(c.model).toBe("opus");
+    expect(c.overrode).toBe(true);
   });
 
   it("a preference at or above the class floor is honored", () => {
-    expect(resolveSeatModel(seatWith("opus"), "synthesis").model).toBe("opus");
+    expect(resolveSeatModel(seatWith("opus"), "routine").model).toBe("opus");
+    expect(resolveSeatModel(seatWith("opus"), "complex").model).toBe("opus");
     expect(resolveSeatModel(seatWith("haiku"), "mechanical").model).toBe("haiku");
     expect(resolveSeatModel(seatWith("sonnet"), "mechanical").model).toBe("sonnet");
   });
 
   it("no preference: the rubric default per work class", () => {
     expect(resolveSeatModel(seatWith(), "mechanical").model).toBe("haiku");
-    expect(resolveSeatModel(seatWith(), "synthesis").model).toBe("sonnet");
+    expect(resolveSeatModel(seatWith(), "routine").model).toBe("sonnet");
+    expect(resolveSeatModel(seatWith(), "complex").model).toBe("opus");
+    expect(resolveSeatModel(seatWith(), "gate").model).toBe("strongest");
+  });
+
+  it("the server-side table equals the cairn-planning SKILL.md table", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const skill = readFileSync(
+      join(root, "skills", "cairn-planning", "SKILL.md"),
+      "utf8",
+    );
+    // Rows: | work class | signals | routed model | effort |
+    const rows = skill
+      .split("\n")
+      .map((l) => l.split("|").map((c) => c.trim()))
+      .filter((c) => c.length === 6)
+      .map((c) => ({
+        label: c[1],
+        model: c[3].replace(/`/g, ""),
+        effort: c[4],
+      }));
+    const entries = Object.values(ROUTING_TABLE);
+    expect(entries.length).toBe(4);
+    for (const e of entries) {
+      const row = rows.find((r) => r.label === e.label);
+      expect(row, `SKILL.md has no row for '${e.label}'`).toBeDefined();
+      expect(row!.model).toBe(
+        e.model === "strongest" ? "strongest available" : e.model,
+      );
+      expect(row!.effort).toBe(e.effort);
+    }
   });
 });
 
