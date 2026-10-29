@@ -419,7 +419,9 @@ export function buildServer(deps: {
       for (const line of raw.split("\n")) {
         if (!line.trim()) continue;
         try {
-          rows.push(JSON.parse(line));
+          const row = JSON.parse(line);
+          // a row with no session (the #362 rekey record) is no session's spend
+          if (typeof row?.session_id === "string") rows.push(row);
         } catch {
           // corrupt line -- skip, never guess
         }

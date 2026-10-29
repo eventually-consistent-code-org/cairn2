@@ -1,31 +1,27 @@
 import { z } from "zod";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CairnError } from "../errors.js";
 import { loadConfig } from "../config.js";
 import { isValidPhaseNumber } from "../planning/artifacts.js";
+import { repositoryPath, worktreeKey } from "../planning/run-manifest.js";
 const STALE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
-/** Same per-machine hashing scheme as indexDbPath: sha256(resolve(dir)).slice(0,16), keyed off basename. */
-function pathHash(projectDir) {
-    const abs = resolve(projectDir);
-    const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-    return { base: basename(abs), hash };
-}
+/** One session's task in flight -- per worktree, keyed by the checkout
+ *  folder, never shared across a repository's worktrees (#362). */
 export function handoffPath(projectDir) {
-    const { base, hash } = pathHash(projectDir);
-    return join(homedir(), ".cairn", "handoff", `${base}-${hash}.json`);
+    return join(homedir(), ".cairn", "handoff", `${worktreeKey(projectDir)}.json`);
 }
+/** The session banner -- per worktree, like the handoff it renders. */
 export function bannerPath(projectDir) {
-    const { base, hash } = pathHash(projectDir);
-    return join(homedir(), ".cairn", "banner", `${base}-${hash}.md`);
+    return join(homedir(), ".cairn", "banner", `${worktreeKey(projectDir)}.md`);
 }
 /** The Stop hook's cumulative cost log (stop-costtracker.mjs writes it; the
- *  token estimator reads it). Scheme mirrored in hooks/scripts/lib.mjs. */
+ *  token estimator reads it) -- per repository (#362). Scheme mirrored in
+ *  hooks/scripts/lib.mjs. */
 export function metricsPath(projectDir) {
-    const { base, hash } = pathHash(projectDir);
-    return join(homedir(), ".cairn", "metrics", `${base}-${hash}.jsonl`);
+    return repositoryPath(projectDir, "metrics", ".jsonl");
 }
 /** The one definition of who wrote a handoff -- the MCP input schema in
  *  index.ts imports this rather than restating it (#370 collapsed the copy). */

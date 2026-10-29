@@ -1,12 +1,15 @@
 /**
  * The observation buffer's own state (#173). The PostToolUse hook appends a
- * row per Edit/Write/Bash call to `.cairn/observations/observations.jsonl`
- * and retro is the only reader — so when retro never runs, the buffer grows
+ * row per Edit/Write/Bash call to `observations/<projectKey>.jsonl` in the
+ * cairn home -- outside the checkout and shared by every worktree of the
+ * repository (#362), so the rows a wave worker's hooks write in a linked
+ * worktree are the rows retro reads from the main one -- and retro is the
+ * only reader. So when retro never runs, the buffer grows
  * silently until the hook's retention guard quietly drops the oldest closed
  * segment. Work that was never reviewed disappears without anyone being told.
  *
  * The log is segmented (#351): past its cap the hook renames the live file to
- * a stamped closed segment (`observations.<stamp>.jsonl`) and appends to a
+ * a stamped closed segment (`<projectKey>.<stamp>.jsonl`) and appends to a
  * fresh one, so the buffer is the live file plus every closed segment, in the
  * same shape as the metrics log (`metricsSegments`).
  * Invariant: retro is the single consumer — the only thing that deletes rows —
@@ -24,8 +27,24 @@
  */
 /** Rows in the buffer before the banner starts asking for a retro. */
 export declare const OBSERVATION_WARN_THRESHOLD = 25;
-/** The live file the PostToolUse observe hook appends to. Single source of truth. */
-export declare const observationsPath: (projectDir: string) => string;
+/**
+ * The one-shot move of a checkout's pre-#362 in-repo log into the shared one.
+ * A closed segment keeps its stamp under the project key; the old live file
+ * becomes a closed segment stamped now, because the shared live file may
+ * already exist (another worktree got there first) and is never replaced.
+ * Every row survives; readers age rows by their own ts, never position.
+ * The moved files are gone from the checkout afterwards, so nothing moves
+ * twice; the emptied folder is left alone. Mirrored in hooks/scripts/lib.mjs.
+ *
+ * :param projectDir: the checkout
+ * :param baseDir: the cairn home
+ * :returns: `observations/<old name>` for each file moved
+ */
+export declare function migrateLegacyObservations(projectDir: string, baseDir?: string): string[];
+/** The live file the PostToolUse observe hook appends to, after the one-shot
+ *  move of any in-repo log. Single source of truth; the hook's copy is
+ *  lib.mjs's observationsPath. */
+export declare function observationsPath(projectDir: string, baseDir?: string): string;
 export interface ObservationBacklog {
     /** Rows currently in the buffer, live file plus closed segments — every
      *  non-blank line, parseable or not. */
@@ -38,6 +57,10 @@ export interface ObservationBacklog {
     threshold: number;
     /** count >= threshold — the banner speaks up only past this line. */
     overThreshold: boolean;
+    /** The live file this was read from; its closed segments sit beside it as
+     *  `<stem>.<stamp>.jsonl`. Where retro finds the log (#362) -- the name is
+     *  a hash, so this field is the only handle a reader has to it. */
+    path: string;
 }
 /**
  * The configured warn threshold, falling back to the shipped default for a

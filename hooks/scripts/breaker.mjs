@@ -82,7 +82,8 @@ import {
   renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { migrateRepositoryState, projectKey, repositoryPath, worktreeKey } from "./lib.mjs";
 
 // Constants
 
@@ -106,20 +107,15 @@ export function cairnHome() {
   return process.env.CAIRN_HOME || join(homedir(), ".cairn");
 }
 
-/** `<base>-<hash>`, the same per-machine project key the server and every hook use. */
-export function projectKey(projectDir) {
-  const abs = resolve(projectDir);
-  return `${basename(abs)}-${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
-}
-
-/** The project's refusal log. */
+/** The repository's refusal log -- per repository (#362), keyed by lib.mjs's
+ *  projectKey like every other file a batch run shares across worktrees. */
 export function refusalLogPath(projectDir, home = cairnHome()) {
-  return join(home, "refusals", `${projectKey(projectDir)}.jsonl`);
+  return repositoryPath(projectDir, "refusals", ".jsonl", home);
 }
 
 /** Where the breaker remembers it already said it was off for a run. */
 function offMarkerPath(projectDir, home) {
-  return join(home, "state", `${projectKey(projectDir)}-breaker-off.json`);
+  return repositoryPath(projectDir, "state", "-breaker-off.json", home);
 }
 
 // Run manifests
@@ -141,7 +137,11 @@ export function isFrozen(state) {
  * own checks down with it -- change one and the other must follow.
  */
 export function runManifests(projectDir, home = cairnHome()) {
-  const prefix = `${projectKey(projectDir)}-`;
+  migrateRepositoryState(projectDir, home);
+  // The project key's manifests, then any the one-shot move left under the
+  // worktree key (#362) whose run has no project-key twin.
+  const prefixes = [`${projectKey(projectDir)}-`, `${worktreeKey(projectDir)}-`];
+  const seen = new Set();
   const dir = join(home, "runs");
   const live = [];
   const frozen = [];
@@ -152,8 +152,17 @@ export function runManifests(projectDir, home = cairnHome()) {
     // no runs dir -- this machine has never staged a batch run
     return { live, frozen, unreadable: e?.code === "ENOENT" ? null : `${dir} (${e?.code ?? e})` };
   }
-  for (const name of entries) {
-    if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+  const named = [];
+  for (const prefix of prefixes) {
+    for (const name of entries) {
+      if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+      const run = name.slice(prefix.length);
+      if (seen.has(run)) continue;
+      seen.add(run);
+      named.push({ name, prefix });
+    }
+  }
+  for (const { name, prefix } of named) {
     const path = join(dir, name);
     try {
       const state = JSON.parse(readFileSync(path, "utf8"));

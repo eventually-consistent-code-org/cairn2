@@ -20,6 +20,8 @@ export interface IndexStats {
     approxBytes: number;
     approxTokens: number;
 }
+/** ~/.cairn/index/<projectKey>.db -- one FTS index per repository (#362), so
+ *  a linked worktree searches the memory the main checkout built. */
 export declare function indexDbPath(projectDir: string): string;
 export declare class MemoryIndex {
     private db;

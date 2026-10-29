@@ -54,8 +54,8 @@ export interface YieldDelta {
     findingsRaised?: number;
     findingsSurvived?: number;
 }
-/** ~/.cairn/yield/<project>-<hash>.json — one store per project, outside
- * the repo. baseDir injectable for tests (budget-ledger convention). */
+/** ~/.cairn/yield/<projectKey>.json — one store per repository (#362),
+ * outside the repo. baseDir injectable for tests (budget-ledger convention). */
 export declare function yieldStatePath(projectDir: string, baseDir?: string): string;
 /**
  * Loads the project's yield store. Missing file = fresh empty state.

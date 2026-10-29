@@ -2,10 +2,10 @@ import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { DriftItem } from "../src/planning/mirror.js";
-import { runManifestPath } from "../src/planning/run-manifest.js";
+import { projectKey, runManifestPath } from "../src/planning/run-manifest.js";
 import { driftIsClean, shipGateStampPath, writeShipGateStamp } from "../src/planning/ship-gate.js";
 
 // The ship-gate stamp plan_drift leaves for the run guard (#251). Every
@@ -63,14 +63,16 @@ describe("ship-gate stamp (#251)", () => {
     expect(driftIsClean([])).toBe(true);
   });
 
-  it("keys beside the run manifests with the same project hash the hook derives", () => {
+  it("keys beside the run manifests with the same project key the hook derives", async () => {
     const { proj } = repo();
     const home = freshDir("cairn-shipgate-home-");
-    const abs = resolve(proj);
-    const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-    expect(shipGateStampPath(proj, home))
-      .toBe(join(home, "ship-gate", `${basename(abs)}-${hash}.json`));
-    expect(runManifestPath(proj, "r", home)).toContain(`${basename(abs)}-${hash}-`);
+    // The hook side's copy (#362) -- the run guard reads the stamp by it.
+    const lib = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)),
+      "..", "..", "hooks", "scripts", "lib.mjs")).href);
+    const key: string = lib.projectKey(proj);
+    expect(key).toBe(projectKey(proj));
+    expect(shipGateStampPath(proj, home)).toBe(join(home, "ship-gate", `${key}.json`));
+    expect(runManifestPath(proj, "r", home)).toContain(`${key}-`);
   });
 
   it("never throws -- no repo or an unwritable home just skips the stamp", () => {

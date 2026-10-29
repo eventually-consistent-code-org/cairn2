@@ -45,7 +45,8 @@ export interface OutlookSnapshot {
     frozen?: OutlookFrozen;
 }
 export declare const OutlookSnapshotSchema: z.ZodType<OutlookSnapshot>;
-/** The machine-wide mirror the aggregate reads (never walks repos). */
+/** The machine-wide mirror the aggregate reads (never walks repos). One per
+ *  repository (#362): every worktree's emit lands on the same snapshot. */
 export declare function outlookMirrorPath(projectDir: string, home?: string): string;
 /** The in-repo copy -- travels with the project, diffable when committed. */
 export declare function outlookLocalPath(projectDir: string): string;
@@ -115,7 +116,7 @@ export interface OutlookCard {
     costUsd?: number;
     costByKind?: Record<string, number>;
 }
-/** Metrics file for a project -- same basename+hash scheme as the mirror.
+/** Metrics file for a project -- same project key as the mirror (#362).
  *  This join is WHY the registry keeps absolute paths: the hash alone is
  *  not reversible. */
 export declare function metricsPathFor(projectDir: string, home?: string): string;

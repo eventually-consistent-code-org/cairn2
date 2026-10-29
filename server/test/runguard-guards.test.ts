@@ -2,9 +2,9 @@ import { describe, it, expect, afterEach } from "vitest";
 import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { projectKey } from "../src/planning/run-manifest.js";
 
 // The always-on destructive-git refusals (#249, #250) and the live-run push
 // authority gate (#252) in the PreToolUse run guard. Commands are only ever
@@ -53,10 +53,10 @@ function expectOwnerTail(stderr: string, label: string, env?: string): void {
   if (env) expect(stderr, label).toContain(`start the session with ${env} set to 1`);
 }
 
-/** Same plain-resolve() project hash the guard derives from CLAUDE_PROJECT_DIR. */
+/** The project key the guard derives from CLAUDE_PROJECT_DIR -- the
+ *  repository's, read through git (#362); the server's definition. */
 function projKey(proj: string): string {
-  const abs = resolve(proj);
-  return `${basename(abs)}-${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
+  return projectKey(proj);
 }
 
 // A fixed identity for every temp repo: a fresh clone inherits no user.* config, and a CI runner has none (#306).

@@ -38,10 +38,12 @@
 
 // Imports
 import { z } from "zod";
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import {
-  mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync,
+  appendFileSync, constants as fsConstants, copyFileSync, existsSync, linkSync, mkdirSync,
+  readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CairnError } from "../errors.js";
@@ -56,15 +58,198 @@ const STATUS_TRANSITIONS: Record<RunStatus, RunStatus[]> = {
   stopped: [],
 };
 
-// Paths
+// Project key (#362)
+//
+// Per-machine state outside the repo is keyed one of two ways, by what the
+// state is about rather than where it is written:
+//   - worktreeKey -- the resolved checkout folder. A session's task in
+//     flight: the handoff and the banner (active context lives in the
+//     checkout itself).
+//   - projectKey -- the repository, read as `git rev-parse --git-common-dir`.
+//     Every linked worktree of one repo shares it, so knowledge of the
+//     project (memory index, metrics, the meter, yield, loop state, the
+//     outlook mirror, refusals, run manifests, the ship-gate stamp, budget
+//     ledgers, observations) is one set of files, not one per folder.
+// Both read `<base>-<16 hex of sha256>`. This is the server's one
+// definition; hooks/scripts/lib.mjs mirrors it (hook scripts never import
+// server code) and project-key.test.ts pins the two byte for byte.
 
-/** Same per-machine hashing scheme as continuity.ts / budget-ledger.ts --
- * exported so the ship-gate stamp keys the same way the manifests do. */
-export function pathHash(projectDir: string): { base: string; hash: string } {
-  const abs = resolve(projectDir);
-  const hash = createHash("sha256").update(abs).digest("hex").slice(0, 16);
-  return { base: basename(abs), hash };
+/** The cairn home folders whose files belong to the repository, keyed by
+ *  projectKey. handoff/ and banner/ are absent on purpose: per worktree. */
+export const REPOSITORY_STATE_DIRS = [
+  "index", "metrics", "outlook", "yield", "loop", "state", "refusals", "runs", "ship-gate", "budget",
+] as const;
+
+/** Git location variables a hook can inherit from a git hook; any of them
+ *  would make rev-parse answer for some other repository than the folder. */
+const GIT_LOCATION_ENV = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+const KEY_CACHE = new Map<string, string>();
+
+/** `<base>-<first 16 hex of sha256(abs)>`. */
+function keyOf(abs: string, base: string): string {
+  return `${base}-${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
 }
+
+/** The checkout folder's key -- the scheme every file used before #362. */
+export function worktreeKey(projectDir: string): string {
+  const abs = resolve(projectDir);
+  return keyOf(abs, basename(abs));
+}
+
+/** The repository's common git dir, real path, or null outside a repository. */
+export function gitCommonDir(projectDir: string): string | null {
+  const cwd = resolve(projectDir);
+  const env = { ...process.env };
+  for (const k of GIT_LOCATION_ENV) delete env[k];
+  try {
+    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
+    }).trim();
+    return out ? realpathSync(resolve(cwd, out)) : null;
+  } catch {
+    return null; // not a repository, no git on PATH, or no such folder
+  }
+}
+
+/**
+ * The repository's key: `git rev-parse --git-common-dir` resolved to a real
+ * absolute path, hashed, named after the folder holding it (`repo/.git` reads
+ * `repo`; a bare `repo.git` reads `repo`). Outside a repository it degrades to
+ * worktreeKey, which is exactly the pre-#362 key. Cached per folder only on
+ * the git answer, so a folder that becomes a repository is re-read.
+ *
+ * :param projectDir: any checkout of the repository
+ * :returns: `<base>-<hash>`
+ */
+export function projectKey(projectDir: string): string {
+  const abs = resolve(projectDir);
+  const hit = KEY_CACHE.get(abs);
+  if (hit) return hit;
+  const common = gitCommonDir(abs);
+  if (common === null) return worktreeKey(abs);
+  const name = basename(common);
+  const base = name === ".git" ? basename(dirname(common)) : name.replace(/\.git$/, "") || name;
+  const key = keyOf(common, base);
+  KEY_CACHE.set(abs, key);
+  return key;
+}
+
+/**
+ * Moves `from` to `to` without ever replacing a `to` that exists: a hard
+ * link (fails EEXIST rather than clobbering) then unlink the old name; across
+ * devices, an exclusive copy then unlink. False when nothing moved.
+ *
+ * Concurrency -- the three handoff questions:
+ *   atomicity -- the link is one syscall and refuses an existing target, so
+ *     two processes moving the same file cannot both win or overwrite a
+ *     file a writer just created under the new name.
+ *   visibility -- between link and unlink both names are one inode; a
+ *     writer appending through the old name lands in the moved file. The
+ *     copy fallback has no such promise: a row appended mid-copy is lost.
+ *   ordering -- none needed; whoever links first moved it, the rest see
+ *     EEXIST or ENOENT and move nothing.
+ */
+export function moveNoClobber(from: string, to: string): boolean {
+  try {
+    linkSync(from, to);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST" || code === "ENOENT") return false;
+    try {
+      copyFileSync(from, to, fsConstants.COPYFILE_EXCL);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    unlinkSync(from);
+  } catch {
+    // the move landed; a leftover old name is clutter the next sweep skips
+  }
+  return true;
+}
+
+/**
+ * The one-shot rekey's record: one row on the project's metrics log naming
+ * what moved. It carries no session_id, so every latest-row-per-session
+ * reader skips it. One append of one line, so it never tears another row.
+ */
+export function recordRekey(baseDir: string, projectDir: string, moved: string[]): void {
+  if (moved.length === 0) return;
+  const key = projectKey(projectDir);
+  const path = join(baseDir, "metrics", `${key}.jsonl`);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, JSON.stringify({
+      ts: new Date().toISOString(), event: "rekey", from: worktreeKey(projectDir), to: key, moved,
+    }) + "\n");
+  } catch {
+    // the record is a measurement; a home it cannot write never fails the caller
+  }
+}
+
+/**
+ * Moves every repository-state file this folder kept under its worktree
+ * key to the project key (#362): a name is `<key><rest>` where rest starts
+ * with `.` or `-` (a closed metrics segment, a sqlite sidecar, a run id).
+ * A name whose project-key twin exists is left where it is -- a linked
+ * worktree that ran before the upgrade keeps its own leftovers, and the
+ * shared file is never replaced. Nothing to move, nothing logged, so the
+ * move is one-shot by construction: the old name is gone once it lands.
+ *
+ * :param projectDir: the checkout
+ * :param baseDir: the cairn home
+ * :returns: `<dir>/<old name>` for each file moved
+ */
+export function migrateRepositoryState(
+  projectDir: string, baseDir: string = join(homedir(), ".cairn"),
+): string[] {
+  const key = projectKey(projectDir);
+  const legacy = worktreeKey(projectDir);
+  if (key === legacy) return [];
+  const moved: string[] = [];
+  for (const sub of REPOSITORY_STATE_DIRS) {
+    const dir = join(baseDir, sub);
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue; // never written on this machine
+    }
+    for (const name of names) {
+      const rest = name.slice(legacy.length);
+      if (!name.startsWith(legacy) || !(rest.startsWith(".") || rest.startsWith("-"))) continue;
+      if (rest.endsWith(".tmp")) continue; // a write in flight renames itself
+      if (moveNoClobber(join(dir, name), join(dir, `${key}${rest}`))) moved.push(`${sub}/${name}`);
+    }
+  }
+  recordRekey(baseDir, projectDir, moved);
+  return moved;
+}
+
+/**
+ * `<baseDir>/<dir>/<projectKey><suffix>`, after the one-shot move. When the
+ * new name is still absent but the old one survived (the move could not
+ * land), the old one is read instead -- nothing goes dark on an upgrade.
+ *
+ * :param projectDir: the checkout
+ * :param dir: one of REPOSITORY_STATE_DIRS
+ * :param suffix: what follows the key (`.jsonl`, `-<runId>.json`, ...)
+ * :param baseDir: the cairn home
+ */
+export function repositoryPath(
+  projectDir: string, dir: (typeof REPOSITORY_STATE_DIRS)[number], suffix: string,
+  baseDir: string = join(homedir(), ".cairn"),
+): string {
+  migrateRepositoryState(projectDir, baseDir);
+  const path = join(baseDir, dir, `${projectKey(projectDir)}${suffix}`);
+  if (existsSync(path)) return path;
+  const old = join(baseDir, dir, `${worktreeKey(projectDir)}${suffix}`);
+  return existsSync(old) ? old : path;
+}
+
+// Paths
 
 /** Filename-safe runId — exotic characters collapse to '-'; the raw run_id
  * stays inside the file and is verified on load. */
@@ -72,13 +257,13 @@ function safeRunId(runId: string): string {
   return runId.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
-/** ~/.cairn/runs/<project>-<hash>-<runId>.json — one manifest per run,
- * outside the repo. baseDir injectable for tests (budget-ledger convention). */
+/** ~/.cairn/runs/<projectKey>-<runId>.json — one manifest per run, outside
+ * the repo, per repository: a batch run spans worktrees (#362). baseDir
+ * injectable for tests (budget-ledger convention). */
 export function runManifestPath(
   projectDir: string, runId: string, baseDir: string = join(homedir(), ".cairn"),
 ): string {
-  const { base, hash } = pathHash(projectDir);
-  return join(baseDir, "runs", `${base}-${hash}-${safeRunId(runId)}.json`);
+  return repositoryPath(projectDir, "runs", `-${safeRunId(runId)}.json`, baseDir);
 }
 
 // Schema — versioned state file, z.literal(1) + safeParse like continuity's
@@ -515,17 +700,10 @@ export function setCurrentPhase(
  */
 export function listRunManifests(projectDir: string, baseDir?: string): RunManifestState[] {
   const base = baseDir ?? join(homedir(), ".cairn");
-  const { base: name, hash } = pathHash(projectDir);
-  const prefix = `${name}-${hash}-`;
-  let entries: string[];
-  try {
-    entries = readdirSync(join(base, "runs"));
-  } catch {
-    return [];
-  }
+  migrateRepositoryState(projectDir, base);
+  const entries = runFilesFor(projectDir, join(base, "runs"));
   const out: RunManifestState[] = [];
   for (const file of entries) {
-    if (!file.startsWith(prefix) || !file.endsWith(".json")) continue;
     try {
       const state = readManifestFile(join(base, "runs", file));
       if (state) out.push(state);
@@ -534,6 +712,32 @@ export function listRunManifests(projectDir: string, baseDir?: string): RunManif
     }
   }
   return out.sort((a, b) => b.created.localeCompare(a.created));
+}
+
+/**
+ * The project's manifest file names in `dir`: every `<projectKey>-*.json`,
+ * then any `<worktreeKey>-*.json` the one-shot move left behind whose run has
+ * no project-key twin (the old-name read fallback, #362).
+ */
+function runFilesFor(projectDir: string, dir: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const prefix of [`${projectKey(projectDir)}-`, `${worktreeKey(projectDir)}-`]) {
+    for (const name of names) {
+      if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+      const run = name.slice(prefix.length);
+      if (seen.has(run)) continue;
+      seen.add(run);
+      files.push(name);
+    }
+  }
+  return files;
 }
 
 /**
