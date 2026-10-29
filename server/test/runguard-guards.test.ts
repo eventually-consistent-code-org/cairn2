@@ -25,7 +25,7 @@ afterEach(() => {
 
 /** Hook run with a clean override env so the host shell can't leak one in. */
 function guard(proj: string, home: string, command: string, extraEnv: Record<string, string> = {},
-  cwd: string = proj): { status: number | null; stderr: string } {
+  cwd: string = proj): { status: number | null; stderr: string; stdout: string } {
   const env: Record<string, string | undefined> = {
     ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home, ...extraEnv,
   };
@@ -35,7 +35,7 @@ function guard(proj: string, home: string, command: string, extraEnv: Record<str
     cwd: proj, env, encoding: "utf8", timeout: 5000,
     input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
   });
-  return { status: r.status, stderr: r.stderr ?? "" };
+  return { status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
 }
 
 /**
@@ -325,6 +325,7 @@ describe("run guard: work-destroying equivalents refused in every session (#264)
     for (const c of [
       "git branch -D feature",
       "git branch -d feature",
+      // one worktree here; with a second, pop is refused (#363)
       "git stash",
       "git stash pop",
       "git checkout -",
@@ -2352,5 +2353,73 @@ describe("run guard: forced worktree remove refused in every session (#414)", ()
     ]) {
       expect(guard(proj, home, c).status, c).toBe(0);
     }
+  });
+});
+
+describe("run guard: no stash across linked worktrees (#363)", () => {
+  /** The fixture repository plus one linked worktree beside it -- two entries in `git worktree list`. */
+  function twoWorktrees(): { proj: string; home: string; linked: string } {
+    const { proj, home } = fixture();
+    const linked = join(freshDir("cairn-runguard-linked-"), "wt");
+    git(proj, "worktree", "add", "-q", "-b", "side", linked);
+    return { proj, home, linked };
+  }
+
+  for (const action of ["pop", "apply", "drop"]) {
+    it(`\`git stash ${action}\` passes with one worktree and is refused with two, naming the shared stash`, () => {
+      const c = `git stash ${action}`;
+      const single = fixture();
+      const r1 = guard(single.proj, single.home, c);
+      expect(r1.status, `${c}\n${r1.stderr}`).toBe(0);
+      expect(r1.stderr, c).toBe("");
+      expect(r1.stdout, c).toBe("");
+
+      const { proj, home, linked } = twoWorktrees();
+      for (const [label, cmd, cwd] of [["main checkout", c, proj], ["linked worktree", c, linked],
+        ["-C into the linked worktree", `git -C ${linked} stash ${action}`, proj]]) {
+        const r = guard(proj, home, cmd, {}, cwd);
+        expect(r.status, `${label}: ${cmd}`).toBe(2);
+        expect(r.stderr, label).toContain(`\`git stash ${action}\` is refused`);
+        expect(r.stderr, label).toContain("shared by every worktree");
+        expect(r.stderr, label).toContain("WIP commit");
+        expect(r.stderr, label).toContain("effect: discards-work, from `more than one worktree`.");
+        expectOwnerTail(r.stderr, label, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      }
+    });
+  }
+
+  it("stash list and show pass with one worktree or two, and say nothing", () => {
+    const single = fixture();
+    const { proj, home } = twoWorktrees();
+    for (const c of ["git stash list", "git stash show -p"]) {
+      for (const [p, h] of [[single.proj, single.home], [proj, home]]) {
+        const r = guard(p, h, c);
+        expect(r.status, c).toBe(0);
+        expect(r.stdout, c).toBe("");
+      }
+    }
+  });
+
+  it("stash push with two worktrees proceeds with an advisory; with one, nothing is said", () => {
+    const single = fixture();
+    const { proj, home } = twoWorktrees();
+    for (const c of ["git stash", "git stash push -m wip", "git stash save wip", "git stash -u"]) {
+      const quiet = guard(single.proj, single.home, c);
+      expect(quiet.status, c).toBe(0);
+      expect(quiet.stdout, c).toBe("");
+
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      const out = JSON.parse(r.stdout);
+      expect(out.hookSpecificOutput.hookEventName, c).toBe("PreToolUse");
+      expect(out.hookSpecificOutput.additionalContext, c).toContain("shared by every worktree");
+      expect(out.hookSpecificOutput.additionalContext, c).toContain("WIP commit");
+      expect(out.hookSpecificOutput, c).not.toHaveProperty("permissionDecision");
+    }
+  });
+
+  it("the owner's escape still lets a pop through with two worktrees", () => {
+    const { proj, home } = twoWorktrees();
+    expect(guard(proj, home, "git stash pop", { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status).toBe(0);
   });
 });

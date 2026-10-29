@@ -11,8 +11,9 @@
  *
  *   Pure functions, no imports and no I/O. What only the repository can
  *   answer -- a remote configured to mirror, a push that deletes the
- *   remote's HEAD branch -- comes in through `probe`, which the guard fills
- *   in per target and a test can stub.
+ *   remote's HEAD branch, a second worktree sharing the stash (#363) --
+ *   comes in through `probe`, which the guard fills in per target and a
+ *   test can stub.
  *
  * removeWhen: the run guard meets its own removeWhen -- it is this
  *   module's only reader.
@@ -82,6 +83,11 @@ const READS = {
 
 const DISCARDS = "it discards uncommitted work with no undo.";
 
+// Why a stash pop, apply or drop refuses once a repository has linked worktrees (#363)
+const SHARED_STASH = "the stash is shared by every worktree of this repository, so the entry it takes " +
+  "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
+  "branch instead, and squash it before the close.";
+
 /**
  * The effect table (#249, #250, #264, #296, #414, #359). Each row: the
  * effect, the subcommand, the first word it needs (`action`, read off
@@ -97,10 +103,18 @@ const DISCARDS = "it discards uncommitted work with no undo.";
  *   probe      the repository says so: probe[name](inv) is true
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours stay off the table because
- * they are routine or recoverable: a single-path checkout/restore, `stash
- * drop`, `branch -D` (its reflog keeps the commits), `restore --staged .`
- * (the index only, like a plain `git reset`), deleting a feature branch,
- * and `clean -n`.
+ * they are routine or recoverable: a single-path checkout/restore, `branch
+ * -D` (its reflog keeps the commits), `restore --staged .` (the index only,
+ * like a plain `git reset`), deleting a feature branch, and `clean -n`.
+ *
+ * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
+ * apply or drop can take another worktree's work -- those three rows ask
+ * the `linkedWorktrees` probe (`git worktree list --porcelain` reports more
+ * than one entry). With one worktree they never match and the guard is
+ * unchanged byte for byte. `stash push`, `save` and a bare `stash` are the
+ * recoverable half and have no row -- the table refuses, it doesn't advise;
+ * the run guard emits their advisory itself. `stash list|show` stay reads.
+ * Asserted by runguard-effects.test.ts and runguard-guards.test.ts (#363).
  */
 export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: "reset", when: "flag", names: ["--hard"],
@@ -119,6 +133,12 @@ export const EFFECT_TABLE = Object.freeze([
     what: "`git worktree remove --force`", why: DISCARDS },
   { effect: DISCARDS_WORK, sub: "stash", action: "clear", when: "always",
     what: "`git stash clear`", why: "it drops every stash at once." },
+  { effect: DISCARDS_WORK, sub: "stash", action: "pop", when: "probe", name: "linkedWorktrees",
+    cause: "more than one worktree", what: "`git stash pop`", why: SHARED_STASH },
+  { effect: DISCARDS_WORK, sub: "stash", action: "apply", when: "probe", name: "linkedWorktrees",
+    cause: "more than one worktree", what: "`git stash apply`", why: SHARED_STASH },
+  { effect: DISCARDS_WORK, sub: "stash", action: "drop", when: "probe", name: "linkedWorktrees",
+    cause: "more than one worktree", what: "`git stash drop`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "reflog", action: "expire", when: "always",
     what: "`git reflog expire`", why: "it erases the record git recovers lost commits from." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--force", "--force-with-lease", "--force-if-includes"],
