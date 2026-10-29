@@ -1839,17 +1839,21 @@ export function buildServer(deps) {
         const spec = KIND_SPECS[kind];
         server.registerTool(`${kind}_start`, {
             annotations: { title: titleOf(`${kind}_start`), readOnlyHint: false, destructiveHint: false },
-            description: `Open a persistent ${kind} session (.cairn/${kind}/<id>.md). Creates the tracker ` +
-                `issue (label ${label}) when no issueId is given. Survives /clear by construction`,
+            description: kind === "probe"
+                ? "Open a probe (.cairn/probe/<id>.md): creates the cairn:spike issue unless issueId " +
+                    "is given, posts the started comment"
+                : `Open a persistent ${kind} session (.cairn/${kind}/<id>.md). Creates the tracker ` +
+                    `issue (label ${label}) when no issueId is given. Survives /clear by construction`,
             inputSchema: z.object({
                 description: z.string(),
                 issueId: z.string().optional(),
             }),
         }, wrap(async (a) => {
             const d = dir();
+            const tracker = await getTracker(d);
             let issueId = a.issueId;
             if (!issueId) {
-                const issue = await (await getTracker(d)).createIssue({
+                const issue = await tracker.createIssue({
                     title: a.description,
                     labels: [label],
                 });
@@ -1859,6 +1863,16 @@ export function buildServer(deps) {
             const active = getCtx(d).get();
             const phase = active.phase !== undefined ? String(active.phase) : undefined;
             const { id } = startSession(d, kind, a.description, issueId, phase);
+            if (kind === "probe") {
+                try {
+                    // Mirror comment #1 rides the start (#396), composed here as trace_start
+                    // does. Best-effort: the session file is the state change that matters.
+                    await tracker.commentIssue(issueId, `Investigation started: ${a.description}`);
+                }
+                catch {
+                    // fail-open
+                }
+            }
             refreshHandoff({ source: "tool", issue: issueId }, d);
             return { id, issue: issueId };
         }));
