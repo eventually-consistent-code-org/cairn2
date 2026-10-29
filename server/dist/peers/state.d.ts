@@ -34,14 +34,18 @@ export interface OutputRecord {
 /**
  * A seat the run cannot count on (#339): `silent` never answered round 1;
  * `failed` answered with a non-zero exit and raised no findings -- the
- * shape a not-logged-in, rate-limited or credit-capped CLI produces, which
- * parses to empty piles and would otherwise read exactly like a clean
- * pass. `reason` is plain language for the status line; for a failed
- * seat it ends with the stderr tail the child left.
+ * shape a not-logged-in or credit-capped CLI produces, which parses to
+ * empty piles and would otherwise read exactly like a clean pass;
+ * `skipped` (#364) is the rate-limited case of the same shape -- the
+ * recorded output carries peer_run's RATE_LIMITED marker, or the CLI's
+ * own limit shape on a non-zero exit. A skipped seat is out of the count
+ * but never blocks close: the run goes on with the seats it has. `reason`
+ * is plain language for the status line; for a failed or skipped seat it
+ * ends with the tail of what the child said.
  */
 export interface IncompleteSeat {
     peer: string;
-    kind: "silent" | "failed";
+    kind: "silent" | "failed" | "skipped";
     exitCode?: number;
     reason: string;
 }
@@ -60,8 +64,9 @@ interface RunState {
 }
 export interface RunResumable {
     peersMissingRound1: string[];
-    /** Silent AND failed seats, each with its reason (#339) -- a superset of
-     *  peersMissingRound1, which stays for callers that only knew silence. */
+    /** Silent, failed and skipped seats, each with its reason (#339, #364) --
+     *  a superset of peersMissingRound1, which stays for callers that only
+     *  knew silence. */
     incompleteSeats: IncompleteSeat[];
     disputedAwaitingRound2: string[];
     unresolved: string[];
@@ -76,7 +81,10 @@ export interface RunStatusReport {
 }
 export interface CloseSummary {
     slug: string;
-    verdict: "pass" | "findings";
+    /** "no-quorum" (#364): no rostered seat was left to count -- every one
+     *  was skipped (rate limited), or incomplete and waived. noQuorumReason
+     *  says which and why; it is never a pass. */
+    verdict: "pass" | "findings" | "no-quorum";
     findings: Array<{
         severity: Finding["severity"];
         title: string;
@@ -106,6 +114,14 @@ export interface CloseSummary {
     /** One plain line per incomplete seat ("grok exited 1 with no findings
      *  -- see stderr: ..."), same order as incompleteSeats. */
     incompleteDetail?: string[];
+    /** Rostered peers skipped because their CLI hit a usage limit (#364) --
+     *  present whenever any was, no flag needed: a limited seat is a skipped
+     *  seat, never a failed run. */
+    skippedSeats?: string[];
+    /** One plain line per skipped seat, same order as skippedSeats. */
+    skippedDetail?: string[];
+    /** Present only on a no-quorum close: why no seat was left, in plain words. */
+    noQuorumReason?: string;
 }
 /**
  * Creates the run dir and state.json for a new convergence run. An
@@ -197,6 +213,11 @@ export declare function runStatus(projectDir: string, slug: string): RunStatusRe
  * summary's incompleteSeats (+ incompleteDetail) so provenance shows the
  * degradation was deliberate. allowIncomplete never waives unresolved
  * findings — those always block.
+ *
+ * A SKIPPED seat (#364, rate limited) blocks nothing: close goes through
+ * and stamps it in skippedSeats + skippedDetail. When no rostered seat is
+ * left to count -- every one skipped, or incomplete and waived -- the
+ * verdict is "no-quorum" with noQuorumReason saying why, never "pass".
  */
 export declare function runClose(projectDir: string, slug: string, opts?: {
     allowIncomplete?: boolean;

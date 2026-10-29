@@ -2192,14 +2192,14 @@ export function buildServer(deps) {
     }, wrap((a) => outlookAggregate(undefined, a.artifact ? { artifact: true } : undefined)));
     server.registerTool("peer_list", {
         annotations: { title: titleOf("peer_list"), readOnlyHint: true },
-        description: "Detected external AI peer CLIs (codex/opencode/antigravity/grok/copilot) — {peers: [on PATH, enabled, lab, " +
-            "input cap, execCapable (config-declared trust to execute the product during review)], maxConcurrent: " +
-            "resource-aware fan-out budget — dispatch peers in batches of at most this many, never all at once",
+        description: "Detected external peer CLIs (codex/opencode/antigravity/grok/copilot) — {peers: [on PATH, enabled, lab, " +
+            "input cap, execCapable (config trust to run the product in review), lastLimitedAt], maxConcurrent: " +
+            "resource-aware fan-out budget — dispatch in batches of at most this many, never all at once",
         inputSchema: z.object({}),
     }, wrap(() => peerList(dir())));
     server.registerTool("peer_run", {
         annotations: { title: titleOf("peer_run"), readOnlyHint: false, destructiveHint: false },
-        description: "Run one external peer CLI with capped stdin input — advisory output, non-zero exit is a result. " +
+        description: "Run one external peer CLI on capped input — advisory output, non-zero exit a result, a limit RATE_LIMITED. " +
             "Outbound content leaves the machine: the capped input is leak-scanned first and a hit refuses the run. " +
             "cwdMode 'scratch' (default) runs the child contained in a throwaway temp dir with the capped input " +
             "staged as packet.txt — the peer never sees the repo; 'project' runs from the project dir, refused " +
