@@ -47,6 +47,12 @@ Pre-ship gate, then ship:
    Any commit made after step 1 (plan docs, step-4 distill) moves HEAD
    past the drift stamp the run guard checks, so re-run `plan_drift()`
    just before the push — anything newly flagged stops the ship.
+   A rejected push (origin moved) merges `origin/main`, never rebases —
+   the ledger cites shas. BEFORE that merge, run `node
+   scripts/lib/merge-overlap.mjs HEAD origin/main` and lead the merge
+   message and the tracker note with its line (`overlap: 3 files — a, b,
+   c` or `overlap: none`); overlap names the files before the tree
+   changes (asserted by sweep-surface.test.ts, #223).
    `ship.confirm: false` in cairn.json skips the ask (silent flow).
    After the push: `outlook_emit(tracker: {open, inProgress, blocked,
    nextVerb, asOf})` FIRST — the snapshot outlives the handoff, so the

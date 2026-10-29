@@ -11,6 +11,7 @@ import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
+import { overlapFiles, overlapLead } from "../../scripts/lib/merge-overlap.mjs";
 import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
 /**
@@ -625,6 +626,82 @@ describe("review target includes untracked files (#360)", () => {
       expect(target).not.toContain("ignored");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("merge leads with file overlap (#223)", () => {
+  const scratch = () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-overlap-"));
+    const git = (...a: string[]) => {
+      const r = spawnSync("git", a, { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${a.join(" ")}: ${r.stderr}`);
+    };
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    const put = (f: string, body: string) => {
+      mkdirSync(dirname(join(dir, f)), { recursive: true });
+      writeFileSync(join(dir, f), body);
+    };
+    const commit = (msg: string) => {
+      git("add", "-A");
+      git("commit", "-qm", msg);
+    };
+    put("shared.ts", "base\n");
+    commit("base");
+    return { dir, git, put, commit };
+  };
+
+  it("two branches touching one shared file produce a lead naming it", () => {
+    const { dir, git, put, commit } = scratch();
+    try {
+      git("checkout", "-q", "-b", "a");
+      put("shared.ts", "a\n");
+      put("a-only.ts", "a\n");
+      commit("a");
+      git("checkout", "-q", "main");
+      git("checkout", "-q", "-b", "b");
+      put("shared.ts", "b\n");
+      put("b-only.ts", "b\n");
+      commit("b");
+      expect(overlapFiles(dir, "a", "b")).toEqual(["shared.ts"]);
+      expect(overlapLead(dir, "a", "b")).toBe("overlap: 1 file — shared.ts");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("disjoint branches produce overlap: none", () => {
+    const { dir, git, put, commit } = scratch();
+    try {
+      git("checkout", "-q", "-b", "a");
+      put("a-only.ts", "a\n");
+      commit("a");
+      git("checkout", "-q", "main");
+      git("checkout", "-q", "-b", "b");
+      put("b-only.ts", "b\n");
+      commit("b");
+      expect(overlapLead(dir, "a", "b")).toBe("overlap: none");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a bad ref is an error, never a quiet none", () => {
+    const { dir } = scratch();
+    try {
+      expect(() => overlapLead(dir, "main", "no-such-ref")).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("work.md and ship.md carry the lead and name the helper", () => {
+    for (const verb of ["work", "ship"]) {
+      const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
+      expect(t).toContain("overlap: none");
+      expect(t).toContain("scripts/lib/merge-overlap.mjs");
     }
   });
 });
