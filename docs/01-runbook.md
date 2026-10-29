@@ -28,6 +28,22 @@ and the rest of the system makes sense:
 | **Prose truth** | Git, inside your repo | Plans, phase context, verification records, memory cards, session files — everything written down |
 | **Disposable cache** | `~/.cairn/` on your machine | The full-text memory index, the session handoff, the recall banner — rebuildable, never git-tracked, safe to delete |
 
+**Worktrees share the cache, except for the task in flight.** Run cairn in
+several worktrees of one repository (a wave of parallel workers, or you
+beside a batch run) and they read one memory index, append to one metrics
+log and one observation log, count against one budget and one refusal log,
+and see the same run manifests: those files are keyed by the repository
+(`git rev-parse --git-common-dir`), not the folder. Only the handoff, the
+recall banner and the active phase/issue stay per worktree, because each
+checkout is its own task in flight. So a `retro` run from the main checkout
+reviews what the wave workers' hooks observed, and a memory index built
+once serves every worktree. Upgrading from an older cairn moves each file
+from its old per-folder name the first time it is used, once, and logs
+the move as one `rekey` row on the metrics log; an observation log kept in
+`.cairn/observations/` inside the checkout moves to the cairn home the same
+way. A folder that is not a git repository keeps exactly the old per-folder
+key. The full table is in ARCHITECTURE.md, "Per-machine state".
+
 On conflict, git plan docs (CONTEXT.md, PLAN.md) win over tracker issue text —
 cairn updates the issue rather than silently following it. One exception:
 a tracker edit detected by the delta cursor is provenance-known *newer* human
@@ -1494,12 +1510,13 @@ piling more work into one context. Advisory means advisory — the tool can't
 pause you; you act on the signal.
 
 **Observation backlog.** The PostToolUse observe hook appends a row per
-Edit/Write/Bash call to `.cairn/observations/observations.jsonl`, and retro
+Edit/Write/Bash call to the repository's shared log in the cairn home,
+`~/.cairn/observations/<project key>.jsonl`, and retro
 is the only thing that ever reads or clears it. Left alone, that buffer
 grows until the hook's retention cap quietly drops the oldest closed
 segment — work nobody reviewed, gone without a word. So memory announces its own state:
 `mem_stats` returns an `observations` block (row count, oldest-entry age in
-days, the threshold), and once the count reaches
+days, the threshold, and `path`, the live file it read), and once the count reaches
 `memory.observationWarnThreshold` (default 25) the recall banner carries a
 line directly under its header — `N unreviewed observations (oldest Xd) —
 run retro`. A backlog past the line is enough to render the banner on its
@@ -2037,8 +2054,8 @@ Two more rules close the ways around the gate:
 - **The gate checks the repository git will actually push.** The guard
   follows `cd` and `pushd` (every folder the line could end up in),
   `-C`, `--git-dir` / `--work-tree` and `GIT_DIR` / `GIT_WORK_TREE`.
-  Another clone or worktree needs its own stamp, and a folder the guard
-  can't work out refuses the push.
+  Another clone needs its own stamp (the worktrees of one repository
+  share one), and a folder the guard can't work out refuses the push.
 
 Other branches and tags are untouched. The refusal points at
 `/cairn:ship`, which runs the drift check and then pushes. This is the

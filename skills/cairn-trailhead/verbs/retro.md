@@ -16,11 +16,12 @@ milestone (including just-archived `milestones/v<N>/`).
    provenance = the files+commits from the ledger range that prove it,
    confidence: `high` = verified by this scope's events, `medium` =
    plausible inference, `low` = hunch worth recording.
-   - **Observation review:** the log is `.cairn/observations/observations.jsonl`
-     plus its closed segments `observations.<stamp>.jsonl` beside it
-     (passive capture from the PostToolUse hook — tool, target, error flag
-     per call). First close the live file: rename it to a segment in the
-     same `observations.<yyyymmdd-hhmmss>-NN.jsonl` shape (the hook starts
+   - **Observation review:** the log is the live file `mem_stats` names in
+     `observations.path` (one per repository in the cairn home, shared by
+     every worktree, #362) plus its closed segments `<stem>.<stamp>.jsonl`
+     beside it (passive capture from the PostToolUse hook — tool, target,
+     error flag per call). First close the live file: rename it to a segment
+     in the same `<stem>.<yyyymmdd-hhmmss>-NN.jsonl` shape (the hook starts
      a fresh one on its next append), then read every closed segment. Look
      for candidate patterns the ledger can't show: repeated
      error→retry churn on one file or command (a gotcha hiding there),

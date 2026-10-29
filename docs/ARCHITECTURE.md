@@ -350,6 +350,32 @@ upstream bar ships in a format seats load directly.
   framing lenses; the external peers council remains the adversarial
   mechanism.
 
+## Per-machine state: per worktree or per repository
+<!-- docs: done -->
+
+Three stores hold cairn's state: the tracker (work), git (prose), and
+the cairn home `~/.cairn/` on each machine (a disposable cache). Files in
+the cairn home are keyed one of two ways, by what the state is *about*
+rather than where it is written (#362):
+
+| Key | Files | Why |
+|---|---|---|
+| **Per worktree** — the checkout folder, hashed | `handoff/`, `banner/`; active context stays in the checkout itself | one session's task in flight: two worktrees are two tasks |
+| **Per repository** — `git rev-parse --git-common-dir`, hashed | `index/`, `metrics/`, `observations/`, `state/` (the meter, the breaker-off flag), `loop/`, `yield/`, `outlook/`, `refusals/`, `runs/`, `ship-gate/`, `budget/` | knowledge of the project: every linked worktree reads and appends the same files, so a wave worker's observations and spend are the ones `retro` and the board see from the main checkout |
+
+A folder outside git falls back to the folder key, so it behaves exactly
+as before. One definition lives in `server/src/planning/run-manifest.ts`
+(`projectKey`, `worktreeKey`) and the hooks carry a copy in
+`hooks/scripts/lib.mjs`; `project-key.test.ts` asserts the two agree
+byte for byte on a main checkout, a linked worktree and a plain folder.
+On the first run after the upgrade, a file still under the old folder key
+is moved to the repository key with a hard link that refuses an existing
+target, so the move happens once and never replaces a shared file
+(asserted: `project-key.test.ts`, "moves every repository file exactly
+once"). Each move is logged as one `event: "rekey"` row on the metrics
+log, which carries no session id, so spend readers skip it. A file whose
+move could not land is read under its old name until it can.
+
 ## Hook surface
 <!-- docs: done -->
 

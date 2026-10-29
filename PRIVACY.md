@@ -38,15 +38,18 @@ install time.
 
 **In your project (committed to git only if you choose to).**
 `.cairn/` holds plans, memory cards, probe/draft/thread session notes,
-the local tracker's issue files when `tracker.type` is `local`, and
-`observations/observations.jsonl`. An observation row is: timestamp,
-session id, tool name, a target label (file path, or the first 80
-characters of a shell command), and an error flag. No prompt or response
-text is recorded. The log is capped at about 2000 rows: past 1000 the
-live file is renamed to a closed segment, and only the newest 1000 or so
-closed rows are kept.
+and the local tracker's issue files when `tracker.type` is `local`.
 
-**In your home directory, `~/.cairn/`.**
+**In your home directory, `~/.cairn/`.** Files here are named per
+repository, shared by every worktree of it, except the handoff and the
+banner, which are per checkout folder.
+- `observations/<project>.jsonl` the tool-call observation log. An
+  observation row is: timestamp, session id, tool name, a target label
+  (file path, or the first 80 characters of a shell command), and an
+  error flag. No prompt or response text is recorded. The log is capped
+  at about 2000 rows: past 1000 the live file is renamed to a closed
+  segment, and only the newest 1000 or so closed rows are kept. A log an
+  older cairn kept inside the project is moved here on first use.
 - `handoff/` session continuity checkpoints (phase, issue, next step)
 - `metrics/<project>.jsonl` per-session token and cost totals, written
   by the Stop hook, which reads the session transcript Claude Code
