@@ -156,9 +156,11 @@ reason.
   phases the published documentation has not caught up with. The
   plan-quality scan reports contract drift, unanchored thresholds, a
   phase that never wrote down its design alternatives, a task that
-  never declared how it would be proved, and — read from the ledger
-  itself — a close with no red/green pair where one was owed, a close
-  with no evidence, and a closure a later line superseded.
+  never declared how it would be proved, a phase ledger missing its
+  union-merge attribute (the one `minor` finding the scan reports), and
+  — read from the ledger itself — a close with no red/green pair where
+  one was owed, a close with no evidence, and a closure a later line
+  superseded.
 
   Closing a task measures it as well. The close derives the duration
   from timestamps it already controls (the claim comment, else the
@@ -188,6 +190,18 @@ reason.
   owes is posted from here, once (ADR 0016, amendment). ADR 0026 —
   removeWhen: every harness runs a skill-declared tool sequence
   atomically, so a chain with one right order can live in the verb file.
+
+  The phase ledger is append-only, so the project and phase scaffolds
+  write a `merge=union` attribute for it into the planning root's git
+  attributes (idempotent; the write reports added-or-present), and the
+  ledger's own header records that line order across branches is a merge
+  artifact. One precondition holds that up and is stated rather than
+  assumed: no two branches append lines for the same task. A closure on
+  one branch and its evidence fix-up on another read as closed or as
+  retracted depending on which side was merged into which — the phase's
+  closing security audit reproduced it, and the fix is filed for the next
+  hardening pass. ADR 0028 — removeWhen: the tracker alone is the record
+  of closures and no ledger file is ever merged.
 - `memory/` — disposable FTS index + git-committed memory cards with
   provenance, staleness checking, and phase/issue/role scopes.
 - `docs/` — documentation connectors (below) plus the marked-section
@@ -201,7 +215,9 @@ reason.
 - `trace/` — debugging-session records (evidence → hypothesis → test →
   verdict). The trace tools own their tracker mirror — the started
   comment, the cause-identified comment — and the close writes the
-  lesson card with provenance derived from the session.
+  lesson card with provenance derived from the session. The probe tools
+  own their started comment the same way, fail-open on a refused
+  comment; the verb that opens a probe makes one call.
 - `audit/` — audit records: single-writer, date-scoped, immutable
   history. The record dedups findings on intake and files the surviving
   critical and important ones itself — severity first in the body,
@@ -221,14 +237,31 @@ reason.
   exit codes and names incomplete seats). ADR 0022 — removeWhen: the
   roster is composed by lab at dispatch, or every seated CLI exposes its
   model before the run.
+
+  A seat whose CLI answers with a usage-limit shape — a non-zero exit
+  plus the provider's own wording, read out of the installed binaries and
+  dated in the file header as the claim it is — is classified to the
+  typed `RATE_LIMITED` code, recorded as `skipped (rate limited)` rather
+  than failed, and the run continues with the seats that answered. Zero
+  counted seats closes the run `no-quorum` and says why in plain words;
+  the roster listing carries each seat's last limit time so the owner
+  sees "limited twelve minutes ago" before dispatch. No retry lives in
+  cairn: the owner decides when to run again. ADR 0030 — removeWhen:
+  every seated CLI exposes a typed, machine-readable usage-limit result.
 - `seats/` — the review roster: seat schema and roster resolution,
   dose-tiered brief composition (the wave brief carries the worker's
-  resolved model), signal dispatch with the yield store, and finding
-  dedup (see the Seats subsystem section below).
+  resolved model), signal dispatch with the yield store, finding dedup,
+  and the model-routing table: the same four work classes the planning
+  skill names — mechanical, routine synthesis, complex synthesis,
+  judgment gates — with `strongest` as the value for a gate, pinned equal
+  to the skill's table by a test that parses the skill file (see the
+  Seats subsystem section below).
 - `workspace/` — multi-project workspaces and the dispatch board.
 - `core/` — continuity, active context, project registry, outlook
   emission; the wave checkpoint composes its notes and resume verb,
-  writes the handoff and emits the outlook in one call.
+  writes the handoff and emits the outlook in one call. Which of these
+  files are per worktree and which per repository is the next section's
+  table (ADR 0027).
 
 ## Docs connector subsystem (v2)
 <!-- docs: done -->
@@ -295,7 +328,6 @@ pure and unit-tested without HTTP.
 ## Seats subsystem (v7)
 <!-- docs: done -->
 
-
 Named, reusable review viewpoints as data (v7). One Zod schema — name,
 one-line lens, rubric categories, anchored 0-10 scale with an honesty
 line, a REQUIRED injection dose (minimal | standard | full,
@@ -335,7 +367,11 @@ upstream bar ships in a format seats load directly.
   full-panel off dial is the default); a persisted per-seat yield
   store retires low-evidence seats, floored so security and full-dose
   seats are never gated; the blast-radius routing rule always beats a
-  seat's model preference (ADR 0011).
+  seat's model preference (ADR 0011). The routing table itself is the
+  planning skill's four-class rubric held as data, with `strongest` for
+  a judgment gate (inherit the session's model, never below it); a test
+  parses the skill's table and fails when the two disagree, so the
+  server never carries a second, drifting copy of the rubric.
 - **Dedup** (`server/src/seats/dedup.ts`) — location-and-claim merge
   producing one deterministic finding set crediting every raising
   seat, run before anything reaches the tracker (ADR 0012).
@@ -344,6 +380,15 @@ upstream bar ships in a format seats load directly.
   diff, file, plan, or question; plan's challenge round convenes
   plan-stage seats over a draft as proposed amendments, advisory
   never a gate.
+- **Target** — the default review target is the working diff, the
+  staged changes, and every untracked file git does not ignore, each
+  rendered as a new-file diff so the panel reads one shape; a binary or
+  oversized untracked file is listed by name and size. The review record
+  says how many untracked files the pass included, so a reader knows the
+  reviewer saw them. Peer review and the simplify audit inherit the same
+  target by reference. Target resolution is verb prose pinned by a
+  surface test, not a server module. ADR 0031 — removeWhen: the harness
+  hands reviewers the working tree rather than the index diff by default.
 - **Surface** — one `seat_roster` MCP tool (validate + list + dispatch
   dial); the roster also renders into every generated harness spine
   with a stage column under a CI drift rule. Internal seats are
@@ -354,9 +399,9 @@ upstream bar ships in a format seats load directly.
 <!-- docs: done -->
 
 Three stores hold cairn's state: the tracker (work), git (prose), and
-the cairn home `~/.cairn/` on each machine (a disposable cache). Files in
+the cairn home folder on each machine (a disposable cache). Files in
 the cairn home are keyed one of two ways, by what the state is *about*
-rather than where it is written (#362):
+rather than where it is written:
 
 | Key | Files | Why |
 |---|---|---|
@@ -368,13 +413,30 @@ as before. One definition lives in `server/src/planning/run-manifest.ts`
 (`projectKey`, `worktreeKey`) and the hooks carry a copy in
 `hooks/scripts/lib.mjs`; `project-key.test.ts` asserts the two agree
 byte for byte on a main checkout, a linked worktree and a plain folder.
+The observation log moved out of the checkout to the cairn home under the
+repository key, and rotates there: past a thousand rows the live file is
+renamed to a stamped closed segment and a fresh live file takes appends,
+so the live file is never rewritten; readers and `retro` read the live
+file plus the closed segments, and the retention guard prunes whole
+closed segments on rotation only. Every temp file in these stores carries
+the writer's pid and a random suffix, never a fixed name, so two writers
+cannot race on one rename.
+
 On the first run after the upgrade, a file still under the old folder key
 is moved to the repository key with a hard link that refuses an existing
-target, so the move happens once and never replaces a shared file
+target, so the move happens once and never replaces a shared file by name
 (asserted: `project-key.test.ts`, "moves every repository file exactly
 once"). Each move is logged as one `event: "rekey"` row on the metrics
-log, which carries no session id, so spend readers skip it. A file whose
-move could not land is read under its old name until it can.
+log, which carries no session id, so spend readers skip it. Two limits of
+that migration are known and filed rather than assumed away: a file whose
+move was blocked by an existing twin stays under its old name and is no
+longer read, and a database sidecar can be moved without the database it
+belongs to. The yield store and the outlook board share one file per
+repository but still update it read-modify-write, which the yield store's
+header answers in the three concurrency questions (atomic rename, last
+writer wins, accepted rather than locked). ADR 0027 — removeWhen: the
+harness hands every session one state directory per repository that its
+linked worktrees already share.
 
 ## Hook surface
 <!-- docs: done -->
@@ -387,7 +449,11 @@ distinction matters more than the count.
   breadcrumb that refreshes the session handoff, the observation
   capture, the session-start resume injection, and the stop-time cost
   tracker. Any error is a silent no-op — a recorder must never be the
-  reason a session stops.
+  reason a session stops. The observation capture appends one row to
+  the repository-keyed log and, past the cap, closes the live file by
+  renaming it to a stamped segment instead of rewriting it in place, so
+  a second hook writer loses nothing (one check-then-act window in the
+  rename remains and is filed; see the previous section).
 - **Refusers** block a tool call and say why. The leak guard stops a
   commit whose staged diff would carry internal references into source.
   The run guard keeps an unattended run out of the working directory a
@@ -410,7 +476,17 @@ The run guard reads its rules as data. A classifier beside it sorts each
 git invocation, from git's own option grammar, into three effects —
 discards-work, moves-shared-ref, touches-owner-checkout — with read-only
 the default, and every refusal names the effect and the flag that caused
-it, so a reader can audit why it fired (ADR 0016, amendment). The breaker
+it, so a reader can audit why it fired (ADR 0016, amendment). Some rows
+hold only under a probe the guard answers once per invocation — a
+configured mirror, a deleted default branch, and linked worktrees: when
+the repository has more than one worktree, `stash pop`, `apply` and
+`drop` are refused as discarding work, because one `.git` means one
+stash and the entry may be another worker's; `stash push` is advised and
+proceeds, since stashing is recoverable and popping is the destructive
+half; with a single worktree the guard is byte-identical to before. The
+wave brief carries the matching standing rule: never stash, park work in
+progress as a commit on your own branch. ADR 0029 — removeWhen: git
+gives each worktree its own stash. The breaker
 is the other shared library: the one call every refuser makes to append
 its row and, while a batch run is live, count toward the freeze. Each
 hook's header names the axiom it derives from, and a sweep test fails on
@@ -418,8 +494,9 @@ a header that names none. ADR 0025 — removeWhen: never; the
 classification is what makes the next unseen case recognizable.
 
 Two properties hold across all three. They import no server code — the
-path schemes they need are recomputed in a shared helper, so the server
-stays the source of truth without becoming a dependency. And their
+path schemes they need, including the repository key of the previous
+section, are recomputed in a shared helper, so the server stays the
+source of truth without becoming a dependency. And their
 escape hatches share one shape: an assignment prefixed to the command,
 prefix-only so that a mention elsewhere in the line cannot bypass the
 guard.

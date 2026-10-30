@@ -1,5 +1,106 @@
 # Changelog
 
+## Unreleased — the parallel path (phase 29, 2026-10-29)
+
+Two agents on one repository, in two worktrees, possibly two vendors,
+become a path cairn handles by construction rather than by luck. State
+under the cairn home is keyed by what it is about: knowledge of the
+project (memory index, cost log, observations, meter, yield, loop state,
+portfolio snapshot, refusals, run manifests, ship-gate stamp, budget
+ledger) is per repository, keyed by the shared git directory, so a wave
+worker's observations and spend are the ones retro and the board read
+from the main checkout; a task in flight (handoff, banner, active context)
+stays per worktree. The observation log leaves the checkout for the cairn
+home and rotates by rename instead of rewriting, so two hook writers lose
+nothing. The run guard refuses stash pop, apply and drop when the
+repository has more than one worktree. The phase ledger merges by union.
+The reviewer sees untracked files. A rate-limited peer seat is skipped,
+never a failed run. Three follow-ups from the previous phase ride along.
+
+Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
+13145 pin. No new tool, no new config key.
+
+### state
+
+- One `projectKey` — the hash of the resolved `git rev-parse
+  --git-common-dir` — defined once in the server and mirrored in the
+  hooks' shared helper, pinned byte-equal by ten tests across a main
+  checkout, a linked worktree and a plain folder. Eleven stores rekey to
+  it; the handoff, banner and active context keep the worktree key. A
+  one-shot migration moves a file under the old key with a hard link that
+  refuses an existing target and logs each move as a rekey row the spend
+  readers skip. The architecture document gains a table of which file is
+  keyed which way (ADR 0027).
+- The observation log lives at the cairn home under the repository key
+  and rotates: past a thousand rows the live file is renamed to a stamped
+  closed segment, a fresh live file takes appends, readers and retro read
+  live plus segments, and the retention guard prunes whole closed
+  segments on rotation only. Every atomic JSON temp file carries the
+  writer's pid and a random suffix instead of a fixed name. Five new
+  tests, each red against the old code first.
+
+### guards
+
+- Stash is the destructive half: with more than one worktree, `stash
+  pop`, `apply` and `drop` are refused as discarding work under a new
+  linked-worktrees probe in the effect table, naming the shared stash and
+  the commit-on-your-branch alternative; `stash push` is advised and
+  proceeds; one worktree is byte-identical to before. The wave brief gains
+  the standing rule: never stash (ADR 0029).
+- Hook timing tests bound the hook's cost by a ratio to a bare node start
+  measured in the same run; the absolute fifty-millisecond bound stays
+  behind an opt-in for a quiet CI runner. The tests keep proving the hooks
+  are cheap and stop proving the machine is idle.
+
+### planning
+
+- Project and phase scaffolds write `**/LEDGER.md merge=union` into the
+  planning root's git attributes, idempotently; the plan-quality scan
+  reports a ledger without it at a new `minor` severity; the ledger
+  header records that cross-branch order is a merge artifact, with the
+  precondition that no two branches append lines for the same task
+  (ADR 0028).
+- Before a wave merge or a rejected-push merge, a helper intersects the
+  files both sides changed since their merge base and the merge message
+  and tracker note lead with `overlap: N files — …` or `overlap: none`,
+  so a collision is read where it lives, before the conflict markers.
+
+### review and peers
+
+- The default review target is the working diff, the staged changes and
+  every untracked file git does not ignore, each rendered as a new-file
+  diff; the record notes how many untracked files it included; peer
+  review and the simplify audit inherit by reference (ADR 0031).
+- A peer seat whose CLI answers with a usage-limit shape — per-provider
+  patterns read out of the installed binaries, dated in the header as the
+  claim they are — classifies to the typed `RATE_LIMITED` code, is
+  recorded as skipped (rate limited), and the run continues; zero seats
+  left closes `no-quorum` and says why; the roster listing carries each
+  seat's last limit time; no retry (ADR 0030).
+- The server's seat routing table is the planning skill's four-class
+  rubric with a `strongest` value for judgment gates, pinned equal to the
+  skill's table by a test that parses the skill file.
+- The probe tools post their own "investigation started" comment the way
+  the trace tools do, fail-open on a refused comment; the probe verb's
+  opening step is one call. The tool's description was trimmed to pay for
+  the new text, taking the footprint from 13142 to 13131.
+
+### known and filed
+
+The phase's closing security audit (three read-only auditors over the
+diff, a two-seat refutation panel per important finding, nothing refuted)
+filed eight items for the next hardening pass: `git stash branch` matches
+no row; two writers rotating the observation log at the same instant can
+replace the segment one just closed; the rekey row can be written before
+the metrics folder migrates, orphaning the old cost history unlogged; the
+observation hook still gates on a cairn folder in the worktree; a database
+sidecar can be migrated without its database and corrupt the shared index;
+the merge-overlap helper is invoked by a path that only resolves inside
+cairn's own repository and is not in the npm package; its command entry is
+silent through a symlink or a path with a space; and the ledger's
+"correct by construction" is false when one branch closes a task and
+another retracts it. Each is stated beside its decision record.
+
 ## v2.9.2 — the null byte (2026-10-29)
 
 One-line fix for the plugin directory's "files the validator couldn't
