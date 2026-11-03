@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error untyped hook module
 import { buildPatterns, scanLines, isAllowedPath, patternsForFile } from "../../hooks/scripts/leak-patterns.mjs";
-import { buildLeakPatterns, scanForLeaks, type LeakScanConfig } from "../src/peers/leak-scan.js";
+import { buildLeakPatterns, redactLeaks, scanForLeaks, type LeakScanConfig } from "../src/peers/leak-scan.js";
 import { PEER_ENV_DROP } from "../src/peers/run.js";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -131,6 +131,42 @@ describe("leak patterns", () => {
     it("hits carry line + kind only — never the matched text", () => {
       const [hit] = scanForLeaks("x\nlabel cairn" + ":seed", null);
       expect(hit).toEqual({ line: 2, name: "cairn-label" });
+    });
+
+    // #374 -- the redacting form the server's own tracker comments go
+    // through: the whole token around a hit becomes a placeholder naming the
+    // KIND, never the text, and the kinds come back once each.
+    describe("redactLeaks", () => {
+      it("replaces the token around every hit with a kind-named placeholder", () => {
+        const text = "Declared verify: `cat .cairn" + "/plans/phases/01-core/PLAN.md && npm test`\n"
+          + "see phases" + "/03-switchback and DRILL" + "-42 too";
+        const out = redactLeaks(text, jiraCfg);
+        expect(out.text).toBe(
+          "Declared verify: `cat [redacted cairn-path] && npm test`\n"
+          + "see [redacted phase-ref] and [redacted tracker-id] too");
+        expect(out.redacted).toEqual(["cairn-path", "phase-ref", "tracker-id"]);
+        expect(scanForLeaks(out.text, jiraCfg)).toEqual([]);
+      });
+
+      it("clean text comes back byte-identical with nothing redacted", () => {
+        const text = "evidence: `npm test` → 1 passed";
+        expect(redactLeaks(text, jiraCfg)).toEqual({ text, redacted: [] });
+      });
+
+      it("leakGuard.enabled === false leaves the text alone, like scanForLeaks", () => {
+        const text = "see .cairn" + "/plans/x";
+        expect(redactLeaks(text, { leakGuard: { enabled: false } })).toEqual({ text, redacted: [] });
+      });
+
+      it("a hit that survives redaction is still a hit on the re-scan -- the caller refuses", () => {
+        // a user pattern that matches the placeholder itself can never be
+        // redacted away; redactLeaks replaces, scanForLeaks on the result
+        // is what the server posts on (index.ts screenComment)
+        const cfg = { leakGuard: { extraPatterns: ["redacted"] } };
+        const out = redactLeaks("fully unredacted", cfg);
+        expect(out.redacted).toEqual(["extra"]);
+        expect(scanForLeaks(out.text, cfg)).toEqual([{ line: 1, name: "extra" }]);
+      });
     });
   });
 

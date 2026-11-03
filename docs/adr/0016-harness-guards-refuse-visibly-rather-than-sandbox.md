@@ -143,3 +143,37 @@ record's derivation: the refusals and the freeze are written where the
 owner looks, not just shown once and lost. Asserted in
 `server/test/hooks.test.ts` ("circuit breaker"), with the server half in
 `server/test/run-breaker.test.ts` and `server/test/run-manifest.test.ts`.
+
+## Amendment 2026-11-03 — the server's own comments pass the leak screen (#374)
+
+The decision stands; this closes a gap it left open. The leak guard
+screens what an agent commits (the commit-time hook) and what it sends
+to an outside reviewer (`peer_run`'s outbound gate, #268). The claim and
+close comments used to be the agent's to write under that same
+discipline; when the server took them over (#343, #365) they walked out
+from under it, and a plan's verify line naming a planning-folder file
+reached a public tracker twice, as written, on one issue.
+
+Every comment the server composes now runs through the same pattern set
+before `commentIssue`. Where `peer_run` refuses a hit, the comments
+redact it: the private token becomes a kind-named placeholder
+(`[redacted cairn-path]`), and the post reports what it redacted
+(`claimCommentRedacted`, `commentRedacted`). Refusal was the wrong shape
+here for two reasons. The agent cannot rewrite its way around the hit —
+the plan's verify line *is* the bar, quoted back so it is visible up
+front, and the close evidence is that same line run — so a refusal
+would only trade the leak for a comment with no bar in it and a
+duration ladder that lost its first rung. And the exact text is not
+lost: the ledger line under the planning folder, git's record, keeps it
+verbatim; only the tracker copy is screened. The one refusal that
+remains is a hit the placeholder itself trips (a user pattern matching
+"redacted"), which cannot be redacted away and so is not posted — typed,
+naming the kind, never the text.
+
+Still not a sandbox: the screen is the hook's pattern set, so it catches
+planning paths, phase refs, cairn labels and a Jira project key, plus
+what `leakGuard.extraPatterns` adds, and nothing else; `leakGuard.
+enabled: false` switches it off here as everywhere. Asserted in
+`server/test/measured-duration.test.ts` ("server-composed comments pass
+the leak screen before posting") and `server/test/leak-patterns.test.ts`
+("redactLeaks"). The two live comments stay the owner's call to edit.

@@ -59,6 +59,7 @@ import { mapGet, mapQuery, mapSet, } from "./map/store.js";
 import { findWorkspace, resolveProjectDir, setFocus, } from "./workspace/context.js";
 import { boardGet, boardUpdate } from "./workspace/board.js";
 import { PROVIDERS, peerList, peerRun } from "./peers/run.js";
+import { redactLeaks, scanForLeaks } from "./peers/leak-scan.js";
 import { loadRoster } from "./seats/roster.js";
 import { VERDICTS, runStart, runAbandon, runStatus, runClose, recordPeerOutput, recordFindings, recordVerdict, } from "./peers/state.js";
 import { parseSections, flipSection, } from "./research/sections.js";
@@ -405,6 +406,30 @@ export function buildServer(deps) {
             throw runFrozenError(state);
         }
     };
+    // The leak screen over every comment the server composes (#374): the claim
+    // comment quotes the plan's verify line and the close comment quotes the
+    // evidence command, and either can name a file under the planning dir --
+    // on a public tracker that is the leak the commit-time guard exists to
+    // stop, and moving the comments server-side (#343, #365) had walked them
+    // out from under it. Same pattern set as peer_run's outbound gate; the
+    // private token becomes a kind-named placeholder rather than a refusal,
+    // because the plan's verify line IS the bar and the ledger keeps it exact
+    // (ADR 0016, amendment 2026-11-03). What was redacted is reported beside
+    // the post (`claimCommentRedacted` / `commentRedacted`) so the reader can
+    // see the comment is not the ledger's text. A hit the placeholder itself
+    // trips is the one refusal: nothing is posted, the typed error names the
+    // kinds -- never the text.
+    const screenComment = (d, text) => {
+        const cfg = loadConfig(d);
+        const { text: clean, redacted } = redactLeaks(text, cfg);
+        // Scan what would actually be posted, not what was composed
+        const residual = scanForLeaks(clean, cfg);
+        if (residual.length > 0) {
+            const kinds = [...new Set(residual.map((h) => h.name))].sort().join(", ");
+            throw new CairnError("PRECONDITION_FAILED", `the composed comment still hit the leak guard (${kinds}) after redaction — nothing was posted`, "check leakGuard.extraPatterns in cairn.json: a pattern that matches the placeholder can never be redacted away");
+        }
+        return { text: clean, redacted };
+    };
     const stampClaim = async (d, tracker, issue, claimAt, claim) => {
         // First claim wins; recordClaim never throws. A bare in_progress
         // transition (no claim block) still stamps the time, just no commit.
@@ -413,8 +438,12 @@ export function buildServer(deps) {
         if (!claim)
             return {};
         try {
-            await tracker.commentIssue(issue.id, composeClaimComment(claim));
-            return { claimCommented: true };
+            const screened = screenComment(d, composeClaimComment(claim));
+            await tracker.commentIssue(issue.id, screened.text);
+            return {
+                claimCommented: true,
+                ...(screened.redacted.length > 0 ? { claimCommentRedacted: screened.redacted } : {}),
+            };
         }
         catch (e) {
             return { claimCommented: false, claimCommentError: e instanceof Error ? e.message : String(e) };
@@ -496,6 +525,7 @@ export function buildServer(deps) {
                 ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
                 : {}),
             ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
+            ...(stamped.claimCommentRedacted ? { claimCommentRedacted: stamped.claimCommentRedacted } : {}),
             ...(claimError ? { claimError } : {}),
             ...(estimateSkipped ? { estimateSkipped } : {}),
         };
@@ -601,6 +631,7 @@ export function buildServer(deps) {
                 ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
                 : {}),
             ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
+            ...(stamped.claimCommentRedacted ? { claimCommentRedacted: stamped.claimCommentRedacted } : {}),
             ...(estimateSkipped ? { estimateSkipped } : {}),
             ...(phaseSkipped ? { phaseSkipped } : {}),
         };
@@ -821,14 +852,20 @@ export function buildServer(deps) {
         // range, this same block, the agent cost. Best-effort -- the close is
         // the state change that matters.
         let evidenceCommented = false;
+        let commentRedacted = [];
         try {
-            await tracker.commentIssue(a.id, fold
+            // Screened before it leaves (#374): the evidence command and the
+            // summary are quoted into a public comment; the ledger line below
+            // keeps them exact.
+            const screened = screenComment(d, fold
                 ? composeCloseComment({
                     summary: fold.entry.summary, baseCommit: fold.entry.baseCommit,
                     headCommit: fold.entry.headCommit, evidence: fold.entry.evidence,
                     measured, costUsd: issueCostUsd(metricsPath(d), a.id),
                 })
                 : closeEvidenceText(measured, a.evidence));
+            await tracker.commentIssue(a.id, screened.text);
+            commentRedacted = screened.redacted;
             if (a.evidence)
                 evidenceCommented = true;
         }
@@ -913,6 +950,7 @@ export function buildServer(deps) {
             worklogLogged,
             ...(worklogError ? { worklogError } : {}),
             ...(a.evidence ? { evidenceCommented } : {}),
+            ...(commentRedacted.length > 0 ? { commentRedacted } : {}),
             measured,
             claimedMinutes: a.timeSpentMinutes ?? null,
             receiptWritten,

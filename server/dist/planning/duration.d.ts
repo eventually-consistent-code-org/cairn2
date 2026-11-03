@@ -28,7 +28,10 @@ export declare function headCommit(projectDir: string): string | null;
  * The claim comment, composed server-side so its first line is always the
  * one `isClaimComment` recognises. The verify command is quoted back before
  * the work so the bar is visible up front, not negotiated after; the base
- * commit sits on its own line as a short ref.
+ * commit sits on its own line as a short ref. Composed here, screened in
+ * index.ts (screenComment, #374) before it is posted: a verify line that
+ * names a planning-dir file reaches the tracker as a placeholder, never
+ * as written.
  */
 export declare function composeClaimComment(c: ResolvedClaim): string;
 /**
@@ -77,7 +80,9 @@ export declare function closeEvidenceText(measured: Measured, evidence?: {
  * the commit range as short refs on its own line, then the standard
  * evidence + measured block, then the agent-cost line when the cost log has
  * spend for this issue (never a zero line: no rows means no line). No time
- * spent of the agent's own: the measured line is the duration.
+ * spent of the agent's own: the measured line is the duration. Screened by
+ * the same leak guard as the claim comment before posting (#374); the
+ * ledger line keeps the exact text.
  */
 export declare function composeCloseComment(c: {
     summary: string;

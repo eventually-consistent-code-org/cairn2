@@ -39,6 +39,12 @@ export interface LeakHit {
     line: number;
     name: string;
 }
+/** What redactLeaks hands back: the screened text and the pattern KINDS it
+ *  replaced, once each, sorted. */
+export interface Redaction {
+    text: string;
+    redacted: string[];
+}
 /**
  * Builds the pattern list, mirroring buildPatterns in the hook module:
  * three built-ins, a tracker-id pattern for a Jira project key, then the
@@ -61,3 +67,24 @@ export declare function buildLeakPatterns(config?: LeakScanConfig | null): LeakP
  * :returns hits in line order; empty when clean or disabled
  */
 export declare function scanForLeaks(text: string, config?: LeakScanConfig | null): LeakHit[];
+/**
+ * The redacting form of the scan (#374), for text the SERVER composes and
+ * posts to the tracker -- the claim and close comments. peer_run refuses a
+ * hit outright because the agent can rewrite its own input and retry; a
+ * server-composed comment quotes facts the server settled (the plan's
+ * verify line, the evidence command the close was handed), and the ledger
+ * under the planning dir keeps them exact, so the public copy swaps each
+ * private token for a kind-named placeholder instead. Same line-by-line
+ * unit and the same leakGuard.enabled switch as scanForLeaks.
+ *
+ * This replaces; it does not vouch. The caller scans the result again with
+ * scanForLeaks and refuses to post what still hits -- a user pattern that
+ * matches the placeholder itself ("redacted") can never be redacted away.
+ * Asserted in leak-patterns.test.ts ("a hit that survives redaction is
+ * still a hit"). A clean text comes back byte-identical.
+ *
+ * :param text: the comment about to be posted
+ * :param config: cairn.json (parsed or raw)
+ * :returns the screened text and the kinds redacted
+ */
+export declare function redactLeaks(text: string, config?: LeakScanConfig | null): Redaction;
