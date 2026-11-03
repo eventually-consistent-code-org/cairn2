@@ -35,6 +35,11 @@ export function waveNotes(wave) {
 export function waveNextVerb(wave) {
     return `work ${wave.phase} --wave — resume run ${wave.runId}`;
 }
+export const HandoffPauseSchema = z.object({
+    kind: z.enum(["paused", "stale", "stopped"]),
+    since: z.string(),
+    resetsAt: z.string().optional(),
+});
 export const HandoffSchema = z.object({
     version: z.literal(1),
     created: z.string(),
@@ -54,6 +59,7 @@ export const HandoffSchema = z.object({
     next_action: z.string(),
     notes: z.string(),
     partial: z.boolean(),
+    paused: HandoffPauseSchema.optional(),
 });
 /** Handoff with no task in flight and no next action -- the baseline every write patches over. */
 function blankHandoff(project, source) {

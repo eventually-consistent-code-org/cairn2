@@ -212,6 +212,24 @@ export function handoffPath(projectDir) {
   return join(homedir(), ".cairn", "handoff", `${worktreeKey(projectDir)}.json`);
 }
 
+/**
+ * The usage-limit pauses log (#379) -- per repository: a batch run spans
+ * worktrees, and the pause that stalls it is the run's, not the folder's.
+ * Append-only (#351): one line per event, never rewritten; a pause is a
+ * few rows a day at most, so the file never earns a rotation.
+ */
+export function pausesPath(projectDir, home = join(homedir(), ".cairn")) {
+  return join(home, "pauses", `${projectKey(projectDir)}.jsonl`);
+}
+
+/** "14:02" -- the UTC wall clock of an ISO stamp, for prose that names a time. */
+export function hhmmUtc(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "an unknown time";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
 /** The session banner -- per worktree, like the handoff. */
 export function bannerPath(projectDir) {
   return join(homedir(), ".cairn", "banner", `${worktreeKey(projectDir)}.md`);

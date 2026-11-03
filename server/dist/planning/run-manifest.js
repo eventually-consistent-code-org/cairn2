@@ -26,9 +26,12 @@
  *   sessions they came from). A frozen run is terminal like any stopped
  *   one, and more: every move on it refuses RUN_FROZEN (a re-stop is a
  *   no-op), and no server write may clobber a freeze that landed between
- *   its read and its rename -- the re-read in writeManifestFile. Hooks have
- *   no tracker access, so the one plain-language comment a freeze owes is
- *   the server's: markFreezeCommented records it, once.
+ *   its read and its rename -- the re-read in writeManifestFile. A freeze's
+ *   one plain-language comment goes on the issue in hand, which only a
+ *   tool call names, so it is the server's: markFreezeCommented records
+ *   it, once. (The pause recorder, hooks/scripts/notification-pause.mjs,
+ *   is the one hook that posts to the tracker itself -- #379 -- because
+ *   the stalled run it narrates makes no tool call at all.)
  *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who

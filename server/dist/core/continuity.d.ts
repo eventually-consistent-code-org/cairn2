@@ -32,6 +32,22 @@ export declare function waveNotes(wave: WaveRef): string;
 /** The outlook `nextVerb` for a wave checkpoint -- what a fresh session
  *  types to pick the run up where it stopped. */
 export declare function waveNextVerb(wave: WaveRef): string;
+/**
+ * A usage-limit pause the last session ended in (#379), written by the
+ * StopFailure/Notification recorder (hooks/scripts/notification-pause.mjs)
+ * and read by the SessionStart hook: `paused` is a rate_limit stop with the
+ * reset time when the platform's message named one; `stale` is an
+ * auto-resume that went stale (the machine slept across the reset) and a
+ * session left waiting for Enter; `stopped` is automatic continue switched
+ * off after repeated hits. The recorder clears it when the resume fires.
+ * `since` is the recorder's clock at the event, never the reset.
+ */
+export interface HandoffPause {
+    kind: "paused" | "stale" | "stopped";
+    since: string;
+    resetsAt?: string;
+}
+export declare const HandoffPauseSchema: z.ZodType<HandoffPause>;
 export interface Handoff {
     version: 1;
     created: string;
@@ -55,6 +71,9 @@ export interface Handoff {
     next_action: string;
     notes: string;
     partial: boolean;
+    /** Set by the pause recorder, cleared on resume; absent on a handoff no
+     *  pause ever touched. In the schema so a server write keeps it (#379). */
+    paused?: HandoffPause;
 }
 export declare const HandoffSchema: z.ZodType<Handoff>;
 /**

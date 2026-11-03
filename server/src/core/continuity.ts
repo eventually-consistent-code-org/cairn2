@@ -57,6 +57,28 @@ export function waveNextVerb(wave: WaveRef): string {
   return `work ${wave.phase} --wave — resume run ${wave.runId}`;
 }
 
+/**
+ * A usage-limit pause the last session ended in (#379), written by the
+ * StopFailure/Notification recorder (hooks/scripts/notification-pause.mjs)
+ * and read by the SessionStart hook: `paused` is a rate_limit stop with the
+ * reset time when the platform's message named one; `stale` is an
+ * auto-resume that went stale (the machine slept across the reset) and a
+ * session left waiting for Enter; `stopped` is automatic continue switched
+ * off after repeated hits. The recorder clears it when the resume fires.
+ * `since` is the recorder's clock at the event, never the reset.
+ */
+export interface HandoffPause {
+  kind: "paused" | "stale" | "stopped";
+  since: string;
+  resetsAt?: string;
+}
+
+export const HandoffPauseSchema: z.ZodType<HandoffPause> = z.object({
+  kind: z.enum(["paused", "stale", "stopped"]),
+  since: z.string(),
+  resetsAt: z.string().optional(),
+});
+
 export interface Handoff {
   version: 1;
   created: string;
@@ -74,6 +96,9 @@ export interface Handoff {
   next_action: string;
   notes: string;
   partial: boolean;
+  /** Set by the pause recorder, cleared on resume; absent on a handoff no
+   *  pause ever touched. In the schema so a server write keeps it (#379). */
+  paused?: HandoffPause;
 }
 
 export const HandoffSchema: z.ZodType<Handoff> = z.object({
@@ -95,6 +120,7 @@ export const HandoffSchema: z.ZodType<Handoff> = z.object({
   next_action: z.string(),
   notes: z.string(),
   partial: z.boolean(),
+  paused: HandoffPauseSchema.optional(),
 });
 
 /** Handoff with no task in flight and no next action -- the baseline every write patches over. */
