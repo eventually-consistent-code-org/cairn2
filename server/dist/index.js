@@ -23,6 +23,7 @@ import { makeDocsConnector } from "./docs/registry.js";
 import { defaultProjectName, publishTree } from "./docs/publish.js";
 import { scaffoldProject, scaffoldPhase, writePlanIssues, readPlanMeta, writePlanMeta, isValidPhaseNumber, parsePhaseDirName, PHASE_NUMBER_ERROR, } from "./planning/artifacts.js";
 import { projectStatus } from "./planning/status.js";
+import { worktreeSetup } from "./planning/worktree-setup.js";
 import { driftReport, ensurePhase, resolvePhaseParam, } from "./planning/mirror.js";
 import { writeShipGateStamp } from "./planning/ship-gate.js";
 import { unplannedReport } from "./planning/collab.js";
@@ -959,9 +960,17 @@ export function buildServer(deps) {
     }, wrap((a) => scaffoldPhase(dir(), a.number, a.name, { research: a.research })));
     server.registerTool("plan_status", {
         annotations: { title: titleOf("plan_status"), readOnlyHint: true },
-        description: "Phases, artifact presence, and referenced tracker issues",
+        description: "Phases, artifact presence, referenced tracker issues, fresh-worktree setup",
         inputSchema: z.object({}),
-    }, wrap(() => projectStatus(dir())));
+    }, 
+    // setup rides on this tool only (#352): the work and auto verbs read
+    // it here before dispatch, and projectStatus itself stays a pure
+    // folder read for the dozen callers (outlook, mirror, drift) that
+    // never need a git call
+    wrap(() => {
+        const d = dir();
+        return { ...projectStatus(d), setup: worktreeSetup(d) };
+    }));
     server.registerTool("plan_phase_ensure", {
         annotations: { title: titleOf("plan_phase_ensure"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Ensure the tracker has a phase named 'Phase N: <name>' (idempotent)",

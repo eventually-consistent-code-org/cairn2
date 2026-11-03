@@ -120,7 +120,14 @@ batch-specific loop.
    (`EnterWorktree` where the harness has it, else `git worktree add
    <dir> <base branch>` under the machine's cairn home, never inside
    the repo). Every checkout, merge, commit and push for the whole run
-   happens there. The owner keeps typing in their own directory while
+   happens there. A fresh worktree holds tracked files only, so right
+   after entering it apply the project's setup exactly as
+   `plan_status().setup.lines` reads it — the `.worktreeinclude` copies
+   first, then the frozen installer each tracked lockfile picks, then
+   the `.worktree-port` read before anything listens; the same lines
+   the `work` verb pastes into every wave brief. Empty lines mean
+   nothing to do, never a guessed install (worktree-setup.test.ts,
+   #352). The owner keeps typing in their own directory while
    the run works — the two never share a working tree. Remove the
    worktree on EVERY exit path: normal completion, ceiling hit, hard
    stop, and error; a run that leaves its worktree behind is a run the
