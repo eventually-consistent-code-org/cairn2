@@ -53,6 +53,164 @@ describe("ledger ordering is a merge artifact (#361)", () => {
   });
 });
 
+describe("closure-plus-evidence across a union merge reads the same answer in both directions (#445)", () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const short = (sha: string) => sha.slice(0, 7);
+
+  /**
+   * A tracked project (planning dir and its union attribute committed) with
+   * one phase planning PROJ-105. Returns the root commit every branch
+   * descends from.
+   */
+  function repo(): { d: string; phaseDir: string; base: string; root: string } {
+    const d = dir();
+    scaffoldProject(d, "P"); // writes the union attribute (#361)
+    const { dir: phaseDir } = scaffoldPhase(d, 1, "Core");
+    const base = join(d, ".cairn", "plans", "phases", phaseDir);
+    writeFileSync(join(base, "PLAN.md"),
+      "---\nissues: [PROJ-105]\n---\n# Phase 1\n\n## Tasks\n- **#PROJ-105 — thing** `verify: npm test`\n");
+    git(d, "init", "-q");
+    git(d, "config", "user.email", "t@t");
+    git(d, "config", "user.name", "t");
+    git(d, "add", "-A");
+    git(d, "commit", "-qm", "plan", "--no-gpg-sign");
+    return { d, phaseDir, base, root: git(d, "rev-parse", "HEAD") };
+  }
+  /** One code commit on the current branch, so a ledger line has a real head to cite. */
+  function work(d: string, name: string): string {
+    writeFileSync(join(d, `${name}.txt`), `${name}\n`);
+    git(d, "add", "-A");
+    git(d, "commit", "-qm", name, "--no-gpg-sign");
+    return git(d, "rev-parse", "HEAD");
+  }
+  const commitLedger = (d: string, msg: string) => {
+    git(d, "add", "-A");
+    git(d, "commit", "-qm", msg, "--no-gpg-sign");
+  };
+
+  /** What every reader says about PROJ-105 and the phase, read off the checked-out ledger. */
+  function readers(d: string, base: string) {
+    const parsed = parseLedger(base);
+    const findings = planCheck(d, 1).findings.filter((f) => f.type === "closure-superseded");
+    const m = distillManifest(d, 1);
+    return {
+      standing: parsed.entries.map((e) => e.issueId),
+      superseded: parsed.superseded.map((e) => e.issueId),
+      retracted: findings.length > 0,
+      range: m.commitRange,
+      distillClosed: m.ledgerEntries.map((e) => e.issueId),
+    };
+  }
+
+  /**
+   * Union-merge the two branches both ways on throwaway branches, assert
+   * both merges are clean and that the two files really do carry the lines
+   * in opposite orders, and hand back what the readers say on each side.
+   */
+  function bothWays(d: string, base: string) {
+    const ledger = join(base, "LEDGER.md");
+    const order = (): string[] => readFileSync(ledger, "utf8").split("\n")
+      .filter((l) => l.startsWith("- ")).map((l) => l.slice(0, 5));
+    git(d, "checkout", "-q", "-b", "m1", "close");
+    git(d, "merge", "-q", "--no-edit", "--no-gpg-sign", "fixup"); // clean: no conflict, exit 0
+    const first = { lines: order(), ...readers(d, base) };
+    git(d, "checkout", "-q", "-b", "m2", "fixup");
+    git(d, "merge", "-q", "--no-edit", "--no-gpg-sign", "close");
+    const second = { lines: order(), ...readers(d, base) };
+    expect(first.lines).toHaveLength(2);
+    expect(second.lines).toEqual([...first.lines].reverse());
+    return { first, second };
+  }
+
+  it("fix-up descends from the close: the task reads retracted on both sides, range head is the fix-up's", () => {
+    const { d, phaseDir, base, root } = repo();
+    // The close branch lands its work; the fix-up branches from that work
+    // (so its head descends from the close's head) and corrects the close
+    // before the close's own ledger line exists on its branch. The close
+    // line carries the LATER date, so only ancestry can settle this.
+    git(d, "checkout", "-q", "-b", "close");
+    const closeHead = work(d, "feature");
+    git(d, "checkout", "-q", "-b", "fixup");
+    const fixHead = work(d, "fix");
+    appendLedger(d, phaseDir, {
+      ...entry, baseCommit: closeHead, headCommit: fixHead, closedDate: "2026-07-14",
+      kind: "evidence", note: "the close claimed a pass the suite did not show",
+    });
+    commitLedger(d, "ledger: evidence");
+    git(d, "checkout", "-q", "close");
+    appendLedger(d, phaseDir, { ...entry, baseCommit: root, headCommit: closeHead, closedDate: "2026-07-15" });
+    commitLedger(d, "ledger: close");
+
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual([]);
+      expect(side.superseded).toEqual(["PROJ-105"]);
+      expect(side.retracted).toBe(true);
+      expect(side.distillClosed).toEqual([]);
+      expect(side.range).toEqual({ base: short(root), head: short(fixHead) });
+    }
+  });
+
+  it("fresh close descends from the fix-up: the task reads closed on both sides, range head is the close's", () => {
+    const { d, phaseDir, base, root } = repo();
+    // Mirror image: the fix-up's work lands first, the fresh close builds on
+    // it, and this time the evidence line carries the later date.
+    git(d, "checkout", "-q", "-b", "fixup");
+    const fixHead = work(d, "fix");
+    git(d, "checkout", "-q", "-b", "close");
+    const closeHead = work(d, "feature");
+    appendLedger(d, phaseDir, {
+      ...entry, baseCommit: fixHead, headCommit: closeHead, closedDate: "2026-07-14",
+    });
+    commitLedger(d, "ledger: close");
+    git(d, "checkout", "-q", "fixup");
+    appendLedger(d, phaseDir, {
+      ...entry, baseCommit: root, headCommit: fixHead, closedDate: "2026-07-15",
+      kind: "evidence", note: "still open",
+    });
+    commitLedger(d, "ledger: evidence");
+
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual(["PROJ-105"]);
+      expect(side.superseded).toEqual([]);
+      expect(side.retracted).toBe(false);
+      expect(side.distillClosed).toEqual(["PROJ-105"]);
+      expect(side.range).toEqual({ base: short(root), head: short(closeHead) });
+    }
+  });
+
+  it("no ancestry to read: the dates on the lines decide, and file order only breaks a dated tie", () => {
+    // Fake shas, no repository: git cannot place the heads, so the rule
+    // falls through to closedDate, then to position in the file.
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 3, "Ledger Phase");
+    const base = join(d, ".cairn", "plans", "phases", phaseDir);
+    const read = () => parseLedger(base);
+    // Evidence FIRST in the file but dated later than the close: retracted.
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-15" });
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
+    expect(read().entries).toEqual([]);
+    expect(read().superseded.map((e) => [e.line, e.supersededBy])).toEqual([[6, 5]]);
+    // Evidence LAST in the file but dated earlier than the close: the close stands.
+    rmSync(ledgerPath(d, phaseDir), { force: true });
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-13" });
+    expect(read().entries.map((e) => e.line)).toEqual([5]);
+    expect(read().superseded).toEqual([]);
+    // Same date: file order, as before -- the later line speaks.
+    rmSync(ledgerPath(d, phaseDir), { force: true });
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14" });
+    expect(read().entries).toEqual([]);
+    expect(read().superseded.map((e) => e.supersededBy)).toEqual([6]);
+    // The range is dated the same way: earliest base to latest head.
+    expect(read().range).toEqual({ base: "a1b2c3d", head: "d4e5f6a" });
+  });
+});
+
 describe("appendLedger", () => {
   it("creates the file with a header on first append", () => {
     const d = dir();

@@ -41,8 +41,10 @@ export interface DistillManifest {
         exit: string;
     })[];
     /** Union range the ledger lines span (closure and evidence lines alike --
-     *  both landed commits): first line's base to last line's head (the ledger is append-only, so file order IS chronological order).
-     *  Null when the ledger has no parsed entries. */
+     *  both landed commits): the base the other bases descend from, to the
+     *  head that descends from the other heads (#445) -- never "the last
+     *  line", which is a merge artifact. Null when the ledger has no parsed
+     *  entries. */
     commitRange: {
         base: string;
         head: string;
@@ -83,7 +85,41 @@ export interface ParsedLedger {
         base: string;
         head: string;
     } | null;
+    /** The line order this parse resolved by (#445), git answers cached, for
+     *  readers that still have lines of their own to rank. */
+    order: LedgerLineOrder;
 }
+/** The three fields the rule reads, present on closure and evidence lines alike. */
+export interface LedgerLineRef {
+    headCommit: string;
+    /** 1-indexed LEDGER.md line. */
+    line: number;
+    /** `closedDate` on a closure line, `loggedDate` on an evidence line. */
+    closedDate?: string;
+    loggedDate?: string;
+}
+/** Ancestry questions for one ledger's repository, answered by git and cached per parse. */
+export interface LedgerLineOrder {
+    /** True when `x` speaks after `y` by the rule above. */
+    later(x: LedgerLineRef, y: LedgerLineRef): boolean;
+    /** The commit range the given lines span, by the same rule; null for none. */
+    range(spans: LedgerSpan[]): {
+        base: string;
+        head: string;
+    } | null;
+}
+/** One ledger line's commits, with what the tie-breaks read. */
+export interface LedgerSpan extends LedgerLineRef {
+    baseCommit: string;
+}
+/**
+ * Build the line order for the repository that holds `cwd` (the phase dir;
+ * git discovers the repository upward, exactly as a hook run there would).
+ *
+ * :param cwd: the phase directory whose LEDGER.md is being read
+ * :returns the rule, with git's answers cached for this parse
+ */
+export declare function ledgerLineOrder(cwd: string): LedgerLineOrder;
 /**
  * Parse one phase dir's LEDGER.md -- the one ledger reader that
  * distill_manifest and plan_check's ledger gates share.
@@ -96,8 +132,9 @@ export declare function parseLedger(base: string): ParsedLedger;
 /**
  * Assemble the distill manifest for one phase: its PLAN.md issues, its
  * LEDGER.md entries (each carrying the commit range the task landed as), and
- * the union commit range those entries span. Pure filesystem reads -- no git,
- * no tracker, no LLM judgment; same repo state, same manifest.
+ * the union commit range those entries span. Filesystem reads plus git
+ * ancestry questions (#445) -- no tracker, no LLM judgment; same repo
+ * state, same manifest.
  *
  * :param projectDir: project root (the dir holding .cairn/)
  * :param phaseNumber: phase number, integer or one-decimal (1, 1.5, ...)

@@ -60,8 +60,9 @@ describe("distillManifest", () => {
         issueId: "GH-2", closedDate: "2026-01-02",
       },
     ]);
-    // union range: first entry's base to last entry's head -- the ledger is
-    // append-only, so file order is chronological order.
+    // union range: earliest base to latest head. Fake shas and no repository
+    // here, so git cannot place them and the dates on the lines decide
+    // (#445); the ancestry step has its own test in ledger.test.ts.
     expect(m.commitRange).toEqual({
       base: SHA_A.slice(0, 7), head: SHA_C.slice(0, 7),
     });
