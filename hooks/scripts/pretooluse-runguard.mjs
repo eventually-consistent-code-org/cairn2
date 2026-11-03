@@ -47,8 +47,8 @@
  *   force, mirror and prune pushes, or one deleting the default branch;
  *   forced or whole-tree checkout/restore; a discarding switch; clean; a
  *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
- *   worktree remove; a stash pop, apply or drop while more than one
- *   worktree shares the stash, #363),
+ *   worktree remove; a stash pop, apply, drop or branch while more than
+ *   one worktree shares the stash, #363, #438),
  *   options shortened as git allows (--har is --hard). Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
@@ -1172,7 +1172,7 @@ const parksStash = (inv) => inv.sub === "stash"
 const STASH_ADVICE = "cairn run guard: this repository has more than one worktree, and the stash is " +
   "shared by every worktree of it -- an entry pushed here shows in the others' `git stash list`, and " +
   "their pop can take it. Prefer a WIP commit on your own branch (squash it before the close); a " +
-  "stash pop, apply or drop is refused while the worktrees share the stash.";
+  "stash pop, apply, drop or branch is refused while the worktrees share the stash.";
 
 /**
  * Why this push may not land on the default branch yet, as [why, what to
@@ -1514,4 +1514,6 @@ try {
  *         effect; #359 landed first, so it ships as rows in its table.
  *         #435 (phase 30) adds its touches-owner-checkout condition on these
  *         same rows, not a second row set.
+ *   #438  `stash branch` is pop plus a checkout: one more row under the same
+ *         linkedWorktrees probe and the same shared-stash reason
  */

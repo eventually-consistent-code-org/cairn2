@@ -2406,9 +2406,10 @@ describe("run guard: no stash across linked worktrees (#363)", () => {
     return { proj, home, linked };
   }
 
-  for (const action of ["pop", "apply", "drop"]) {
+  // branch (#438) is pop plus a checkout: it takes the entry onto a new branch and drops it
+  for (const [action, rest] of [["pop", ""], ["apply", ""], ["drop", ""], ["branch", " topic"]]) {
     it(`\`git stash ${action}\` passes with one worktree and is refused with two, naming the shared stash`, () => {
-      const c = `git stash ${action}`;
+      const c = `git stash ${action}${rest}`;
       const single = fixture();
       const r1 = guard(single.proj, single.home, c);
       expect(r1.status, `${c}\n${r1.stderr}`).toBe(0);
@@ -2417,7 +2418,7 @@ describe("run guard: no stash across linked worktrees (#363)", () => {
 
       const { proj, home, linked } = twoWorktrees();
       for (const [label, cmd, cwd] of [["main checkout", c, proj], ["linked worktree", c, linked],
-        ["-C into the linked worktree", `git -C ${linked} stash ${action}`, proj]]) {
+        ["-C into the linked worktree", `git -C ${linked} stash ${action}${rest}`, proj]]) {
         const r = guard(proj, home, cmd, {}, cwd);
         expect(r.status, `${label}: ${cmd}`).toBe(2);
         expect(r.stderr, label).toContain(`\`git stash ${action}\` is refused`);

@@ -137,9 +137,10 @@ describe("git effects: the stash is shared across linked worktrees (#363)", () =
   const two = { linkedWorktrees: () => true };
   const one = { linkedWorktrees: () => false };
 
-  for (const action of ["pop", "apply", "drop"]) {
+  // branch (#438) is pop plus a checkout: it takes the entry onto a new branch and drops it
+  for (const [action, c] of [["pop", "git stash pop stash@{0}"], ["apply", "git stash apply stash@{0}"],
+    ["drop", "git stash drop stash@{0}"], ["branch", "git stash branch topic stash@{0}"]]) {
     it(`\`git stash ${action}\` discards work with more than one worktree, and not with one`, () => {
-      const c = `git stash ${action} stash@{0}`;
       expect(causes(c, DISCARDS_WORK, one), c).toEqual([]);
       const [hit, ...rest] = causes(c, DISCARDS_WORK, two);
       expect(rest, c).toEqual([]);
@@ -159,7 +160,7 @@ describe("git effects: the stash is shared across linked worktrees (#363)", () =
 
   it("adds no fourth effect -- the stash rows are discards-work", () => {
     const rows = EFFECT_TABLE.filter((r: { sub: string }) => r.sub === "stash");
-    expect(rows.map((r: { action: string }) => r.action)).toEqual(["clear", "pop", "apply", "drop"]);
+    expect(rows.map((r: { action: string }) => r.action)).toEqual(["clear", "pop", "apply", "drop", "branch"]);
     for (const r of rows) expect(r.effect).toBe(DISCARDS_WORK);
     expect(rows.slice(1).every((r: { when: string; name: string }) =>
       r.when === "probe" && r.name === "linkedWorktrees")).toBe(true);

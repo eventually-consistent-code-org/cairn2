@@ -75,8 +75,8 @@ deviations from the plan.
 - Never stash: every worktree of the repository shares one stash, so a pop
   can take another worker's half-finished work. Park work in progress with
   a WIP commit on your own branch and squash it before the close. (The run
-  guard refuses stash pop, apply and drop while more than one worktree
-  exists — runguard-guards.test.ts, #363.)
+  guard refuses stash pop, apply, drop and branch while more than one worktree
+  exists — runguard-guards.test.ts, #363, #438.)
 
 {{model}}
 

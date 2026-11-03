@@ -85,7 +85,7 @@ const READS = {
 
 const DISCARDS = "it discards uncommitted work with no undo.";
 
-// Why a stash pop, apply or drop refuses once a repository has linked worktrees (#363)
+// Why a stash pop, apply, drop or branch refuses once a repository has linked worktrees (#363, #438)
 const SHARED_STASH = "the stash is shared by every worktree of this repository, so the entry it takes " +
   "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
   "branch instead, and squash it before the close.";
@@ -114,13 +114,15 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * `git reset`), deleting a feature branch, and `clean -n`.
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
- * apply or drop can take another worktree's work -- those three rows ask
- * the `linkedWorktrees` probe (`git worktree list --porcelain` reports more
+ * apply or drop can take another worktree's work -- those rows, and the
+ * branch action, which is pop plus a checkout (#438), ask the
+ * `linkedWorktrees` probe (`git worktree list --porcelain` reports more
  * than one entry). With one worktree they never match and the guard is
  * unchanged byte for byte. `stash push`, `save` and a bare `stash` are the
- * recoverable half and have no row -- the table refuses, it doesn't advise;
- * the run guard emits their advisory itself. `stash list|show` stay reads.
- * Asserted by runguard-effects.test.ts and runguard-guards.test.ts (#363).
+ * recoverable half and have no discards-work row -- the table refuses, it
+ * doesn't advise; the run guard emits their advisory itself. `stash
+ * list|show` stay reads. Asserted by runguard-effects.test.ts and
+ * runguard-guards.test.ts (#363, #438).
  */
 export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: "reset", when: "flag", names: ["--hard"],
@@ -147,6 +149,8 @@ export const EFFECT_TABLE = Object.freeze([
     cause: "more than one worktree", what: "`git stash apply`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "stash", action: "drop", when: "probe", name: "linkedWorktrees",
     cause: "more than one worktree", what: "`git stash drop`", why: SHARED_STASH },
+  { effect: DISCARDS_WORK, sub: "stash", action: "branch", when: "probe", name: "linkedWorktrees",
+    cause: "more than one worktree", what: "`git stash branch`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "reflog", action: "expire", when: "always",
     what: "`git reflog expire`", why: "it erases the record git recovers lost commits from." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--force", "--force-with-lease", "--force-if-includes"],
