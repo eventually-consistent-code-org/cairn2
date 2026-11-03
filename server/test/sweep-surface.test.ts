@@ -11,7 +11,7 @@ import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
-import { overlapFiles, overlapLead } from "../../scripts/lib/merge-overlap.mjs";
+import { overlapFiles, overlapLead } from "../../hooks/scripts/merge-overlap.mjs";
 import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
 /**
@@ -771,7 +771,26 @@ describe("merge leads with file overlap (#223)", () => {
     for (const verb of ["work", "ship"]) {
       const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
       expect(t).toContain("overlap: none");
-      expect(t).toContain("scripts/lib/merge-overlap.mjs");
+      expect(t).toContain('"$CLAUDE_PLUGIN_ROOT/hooks/scripts/merge-overlap.mjs"');
+    }
+  });
+
+  // #443: the helper used to be named by a project-relative path that only
+  // resolved inside cairn's own checkout, from a folder the npm package did
+  // not ship and setup did not copy. The path each verb names must go
+  // through the plugin root (as status.md does) into a directory that both
+  // package.json ships and cairn-setup copies to pluginless harnesses.
+  it("the command both verbs name resolves inside a directory the package ships and setup copies (#443)", () => {
+    const shipped: string[] = JSON.parse(read("package.json")).files;
+    expect(shipped).toContain("hooks");
+    for (const verb of ["work", "ship"]) {
+      const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
+      const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
+      expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
+      const rel = m![1];
+      expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
+      expect(rel.startsWith("hooks/scripts/"), `${rel} sits in the folder cairn-setup copies`).toBe(true);
+      expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
     }
   });
 });
