@@ -81,15 +81,20 @@ export const ConfigSchema = z.object({
     // followed by a colon. An override REPLACES the list, never merges with
     // it, so a project that wants an extra word restates the defaults beside
     // it. An empty list is refused: a debt scan with no words is a scan of
-    // nothing, and a silent no-op is worse than a one-line refusal. The
-    // default array is complete, so .default is right on `markers` (see the
-    // note above); the enclosing objects prefault like continuity does.
+    // nothing, and a silent no-op is worse than a one-line refusal. Each word
+    // is substituted straight into the grep's -E group, so it is held to
+    // letters, digits, underscore and dash (#390): a quote or a paren in a
+    // marker word would reshape the pattern, and a word that needs them is
+    // not a marker word. The default array is complete, so .default is right
+    // on `markers` (see the note above); the enclosing objects prefault like
+    // continuity does.
     audit: z
         .object({
         debt: z
             .object({
             markers: z
-                .array(z.string().min(1, "a marker word must be non-empty"))
+                .array(z.string().min(1, "a marker word must be non-empty")
+                .regex(/^[A-Za-z0-9_-]+$/, "a marker word is letters, digits, underscore or dash only — it lands inside the grep pattern"))
                 .min(1, "audit.debt.markers needs at least one marker word — an empty list scans for nothing")
                 .default(["shortcut", "TODO", "FIXME", "HACK", "XXX"]),
         })

@@ -24,4 +24,7 @@ export function withRetry<T>(fn: () => T): T {
   throw last;
 }
 
+// A marker written to break a shell line: a double quote, a semicolon and a
+// backtick in one comment (#390). It must travel as one argument, verbatim.
+// HACK: keep the "legacy" path; see `echo pwned` for why
 export const backendCount = BACKENDS.length;

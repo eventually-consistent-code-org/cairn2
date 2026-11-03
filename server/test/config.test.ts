@@ -264,6 +264,20 @@ describe("audit.debt.markers (#355)", () => {
     expect(() => loadConfig(dir)).toThrowError(
       expect.objectContaining({ code: "CONFIG_INVALID" }));
   });
+
+  // The words land inside the grep's -E group verbatim (#390), so a word
+  // carrying a quote, a paren or a space is refused with a one-line reason;
+  // underscore and dash are the only punctuation a marker word may carry.
+  it("a word with shell or regex punctuation is refused; underscore and dash pass", () => {
+    for (const bad of ['TO"DO', "FIX(ME", "a b", "x;y", "`XXX`", "a|b"]) {
+      const dir = writeTmpConfig({ ...base, audit: { debt: { markers: ["TODO", bad] } } });
+      expect(() => loadConfig(dir), bad).toThrowError(
+        expect.objectContaining({ code: "CONFIG_INVALID" }));
+      expect(() => loadConfig(dir), bad).toThrow(/letters, digits, underscore or dash/);
+    }
+    const ok = writeTmpConfig({ ...base, audit: { debt: { markers: ["short-cut", "to_do", "XXX2"] } } });
+    expect(loadConfig(ok).audit.debt.markers).toEqual(["short-cut", "to_do", "XXX2"]);
+  });
 });
 
 describe("verify.rerun (#357)", () => {
