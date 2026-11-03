@@ -37,8 +37,25 @@ function readStdin() {
 /** Sources whose conversation the platform restores itself -- nothing to inject. */
 const RESTORED = new Set(["compact", "resume", "fork"]);
 
-/** Compact resume block: phase, issue, current task, next_action, age. Phrasing depends on mode. */
-function buildResumeBlock(handoff, mode) {
+/**
+ * The closing line when the last session ended in a usage-limit pause (#379,
+ * written by notification-pause.mjs), or null when it did not or the prose
+ * module is missing. Loaded on demand: pause-prose.mjs holds the lines so
+ * check-footprint, which counts THIS file's fixed literals as standing
+ * rent, never charges every session for prose only a post-pause one reads.
+ */
+async function pausedText(handoff) {
+  if (!handoff.paused?.kind) return null;
+  try {
+    return (await import("./pause-prose.mjs")).pausedLine(handoff.paused);
+  } catch {
+    return null; // the ordinary nudge still stands
+  }
+}
+
+/** Compact resume block: phase, issue, current task, next_action, age. Phrasing depends on mode;
+ *  a pause line (#379) replaces the nudge when the last session ended in one. */
+function buildResumeBlock(handoff, mode, paused = null) {
   const age = humanizeAge(handoff.created);
   const ageLabel = age === "just now" ? age : `${age} ago`;
   const lines = [`## cairn session handoff (${ageLabel})`];
@@ -50,13 +67,16 @@ function buildResumeBlock(handoff, mode) {
   }
   if (handoff.next_action) lines.push(`- next action: ${handoff.next_action}`);
   lines.push("");
-  lines.push(mode === "auto"
-    ? "A previous session handoff exists -- resume it now: pick up the next action above without asking the user first."
-    : "A previous session handoff exists. Ask the user whether to resume this task before starting anything else.");
+  if (paused) lines.push(paused);
+  else {
+    lines.push(mode === "auto"
+      ? "A previous session handoff exists -- resume it now: pick up the next action above without asking the user first."
+      : "A previous session handoff exists. Ask the user whether to resume this task before starting anything else.");
+  }
   return lines.join("\n");
 }
 
-function main() {
+async function main() {
   // A restored session already holds everything below (#328).
   const source = readStdin().source;
   if (typeof source === "string" && RESTORED.has(source)) return;
@@ -74,7 +94,7 @@ function main() {
   const mode = resumeMode(projectDir);
   if (mtimeMs(hp) !== null && mode !== "off") {
     const handoff = readJson(hp);
-    parts.push(buildResumeBlock(handoff, mode));
+    parts.push(buildResumeBlock(handoff, mode, await pausedText(handoff)));
   }
 
   // Tracker-delta staleness nudge — local read only, never network.
@@ -100,7 +120,7 @@ function main() {
 }
 
 try {
-  main();
+  await main();
 } catch {
   // swallowed by design -- hook failures must be invisible.
 }

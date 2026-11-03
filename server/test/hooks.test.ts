@@ -4279,5 +4279,286 @@ describe("harness guard protects git hooks (#353)", () => {
     expect(run(p, home, "Write", { file_path: join(p, ".git", "hooks", "pre-commit") }, { PATH: "/nonexistent" }).status).toBe(2);
     expect(run(p, home, "Write", { file_path: hook }, { CAIRN_HARNESS_EDIT: "1" }).status).toBe(0);
     expect(run(p, home, "Bash", { command: "CAIRN_HARNESS_EDIT=1 echo x > scripts/hooks/post-checkout" }).status).toBe(0);
+
+// The usage-limit pause recorder (#379): StopFailure rate_limit and the quota
+// Notification types land one row each in the machine's pauses log; a
+// running batch manifest adds one plain-language comment on the run's
+// umbrella issue; stale and disabled mark the handoff so the next
+// SessionStart says what the last session was waiting for.
+describe("pause recorder hook (#379)", () => {
+  const RECORDER = join(SCRIPTS, "notification-pause.mjs");
+  const RUN_ID = "run-7f3a9c";
+
+  /** Project with a cairn.json, an isolated HOME, optionally a manifest + handoff. */
+  function fixture(opts: { manifest?: string; tracker?: unknown; handoff?: boolean } = {}) {
+    const proj = freshDir("cairn-hooks-pause-");
+    const home = freshDir("cairn-hooks-pause-home-");
+    const tracker = opts.tracker ?? { type: "github", config: { repo: "acme/widgets" } };
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ tracker }));
+    if (opts.manifest) {
+      const { base, hash } = hashAndBaseForEnvDir(proj);
+      mkdirSync(join(home, ".cairn", "runs"), { recursive: true });
+      writeFileSync(join(home, ".cairn", "runs", `${base}-${hash}-${RUN_ID}.json`),
+        JSON.stringify({ version: 1, runId: RUN_ID, status: opts.manifest, created: "2026-10-16T10:00:00.000Z" }));
+    }
+    if (opts.handoff) {
+      const hp = handoffPathForEnvDir(home, proj);
+      mkdirSync(dirname(hp), { recursive: true });
+      writeFileSync(hp, JSON.stringify(baseHandoff(), null, 2) + "\n");
+    }
+    return { proj, home };
+  }
+
+  const notification = (type: string, message = "", title = "Claude Code") =>
+    JSON.stringify({ session_id: "s-1", hook_event_name: "Notification", notification_type: type, message, title });
+  const stopFailure = (error: string, details = "") =>
+    JSON.stringify({ session_id: "s-1", hook_event_name: "StopFailure", error, error_details: details, last_assistant_message: "" });
+
+  function pauseRows(home: string, proj: string): Array<Record<string, unknown>> {
+    const { base, hash } = hashAndBaseForEnvDir(proj);
+    const path = join(home, ".cairn", "pauses", `${base}-${hash}.jsonl`);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  }
+
+  function handoffOf(home: string, proj: string): Record<string, unknown> | null {
+    const hp = handoffPathForEnvDir(home, proj);
+    return existsSync(hp) ? JSON.parse(readFileSync(hp, "utf8")) : null;
+  }
+
+  /** Isolated HOME and cairn home; GITHUB_TOKEN set so the gh fallback never runs. */
+  const envFor = (home: string, extra: Record<string, string>) =>
+    ({ HOME: home, CAIRN_HOME: join(home, ".cairn"), GITHUB_TOKEN: "t", ...extra });
+
+  /** Sync run through the shared raw runner. */
+  const record = (proj: string, home: string, payload: string, extra: Record<string, string> = {}) =>
+    runHookRaw(RECORDER, proj, payload, envFor(home, extra));
+
+  /** Async run -- the fake tracker below serves from this process, which a spawnSync would block. */
+  function recordAsync(proj: string, home: string, payload: string, extra: Record<string, string> = {}): Promise<number | null> {
+    return new Promise((resolveRun, reject) => {
+      const child = spawn(process.execPath, [RECORDER], {
+        cwd: proj,
+        env: { ...process.env, CLAUDE_PROJECT_DIR: proj, ...envFor(home, extra) },
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => resolveRun(code));
+      child.stdin.end(payload);
+    });
+  }
+
+  type Hit = { method: string; url: string; auth: string | undefined; body: string };
+  const servers: import("node:http").Server[] = [];
+  afterEach(() => { for (const s of servers.splice(0)) s.close(); });
+
+  /** A fake GitHub API: lists the open batch-run issues given, accepts comments, records every hit. */
+  async function fakeTracker(issues: Array<{ number: number; title: string }>): Promise<{ url: string; hits: Hit[] }> {
+    const { createServer } = await import("node:http");
+    const hits: Hit[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        hits.push({ method: req.method ?? "", url: req.url ?? "", auth: req.headers.authorization, body });
+        res.setHeader("content-type", "application/json");
+        if (req.method === "GET") {
+          res.end(JSON.stringify(issues.map((i) => ({ ...i, state: "open", labels: [{ name: "batch-run" }] }))));
+        } else {
+          res.statusCode = 201;
+          res.end(JSON.stringify({ id: 9 }));
+        }
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    return { url: `http://127.0.0.1:${port}`, hits };
+  }
+
+  const comments = (hits: Hit[]) => hits.filter((h) => h.method === "POST").map((h) => JSON.parse(h.body).body as string);
+
+  it("payload matrix: every pause kind appends one row with the right kind; unknown types append nothing", () => {
+    const cases: Array<[string, string, string]> = [
+      [stopFailure("rate_limit", "You've hit your usage limit. Resets at 2:30pm."), "paused", "rate_limit"],
+      [notification("quota_auto_resume_fired", "Usage limit reset, continuing."), "resumed", "quota_auto_resume_fired"],
+      [notification("quota_auto_resume_stale", "Auto-resume is stale, press Enter to continue."), "stale", "quota_auto_resume_stale"],
+      [notification("quota_auto_resume_disabled", "Automatic continue stopped after repeated usage-limit hits."), "stopped", "quota_auto_resume_disabled"],
+      [notification("agent_needs_input", "Claude needs your input"), "needs_input", "agent_needs_input"],
+      [notification("elicitation_url_dialog", "Open this URL to continue"), "needs_input", "elicitation_url_dialog"],
+    ];
+    for (const [payload, kind, type] of cases) {
+      const { proj, home } = fixture();
+      expect(record(proj, home, payload).status, kind).toBe(0);
+      const rows = pauseRows(home, proj);
+      expect(rows, kind).toHaveLength(1);
+      expect(rows[0].kind, kind).toBe(kind);
+      expect(rows[0].type, kind).toBe(type);
+      expect(rows[0].session_id, kind).toBe("s-1");
+      expect(Number.isNaN(Date.parse(String(rows[0].observedAt))), kind).toBe(false);
+      expect(rows[0], kind).not.toHaveProperty("run");
+      expect(rows[0], kind).not.toHaveProperty("comment");
+    }
+    for (const payload of [notification("permission_prompt", "Claude needs permission"), stopFailure("max_turns"), "", "not json"]) {
+      const { proj, home } = fixture();
+      expect(record(proj, home, payload).status).toBe(0);
+      expect(pauseRows(home, proj)).toEqual([]);
+    }
+  });
+
+  it("a rate_limit row carries the reset time only when the message names one; stale never calls its clock the reset", () => {
+    const timed = fixture();
+    record(timed.proj, timed.home, stopFailure("rate_limit", "Usage limit reached. Resets at 2:30pm (America/New_York)."));
+    expect(pauseRows(timed.home, timed.proj)[0].resetsAt).toBe("2:30pm");
+
+    const untimed = fixture();
+    record(untimed.proj, untimed.home, stopFailure("rate_limit", "Usage limit reached."));
+    expect(pauseRows(untimed.home, untimed.proj)[0]).not.toHaveProperty("resetsAt");
+
+    const stale = fixture();
+    record(stale.proj, stale.home, notification("quota_auto_resume_stale", "The limit reset at 3:00pm while the machine slept."));
+    expect(pauseRows(stale.home, stale.proj)[0]).not.toHaveProperty("resetsAt");
+  });
+
+  it("a running manifest yields one umbrella-issue comment per event, in plain language", async () => {
+    const { proj, home } = fixture({ manifest: "running" });
+    const api = await fakeTracker([
+      { number: 40, title: "batch run run-other — phases 1–2" },
+      { number: 41, title: `batch run ${RUN_ID} — phases 30–31` },
+    ]);
+    const env = { GITHUB_API_URL: api.url };
+    expect(await recordAsync(proj, home, stopFailure("rate_limit", "Resets at 2:30pm"), env)).toBe(0);
+    expect(await recordAsync(proj, home, notification("quota_auto_resume_fired"), env)).toBe(0);
+    expect(await recordAsync(proj, home, notification("quota_auto_resume_stale"), env)).toBe(0);
+    expect(await recordAsync(proj, home, notification("quota_auto_resume_disabled"), env)).toBe(0);
+    expect(await recordAsync(proj, home, notification("agent_needs_input", "", "Claude needs your input"), env)).toBe(0);
+
+    const posted = comments(api.hits);
+    expect(posted).toHaveLength(5);
+    expect(posted[0]).toContain("paused on usage limit, resets at 2:30pm");
+    expect(posted[1]).toContain("resumed");
+    expect(posted[2]).toContain("waiting for a human to press Enter");
+    expect(posted[3]).toContain("stopped after repeated usage-limit hits, restart by hand");
+    expect(posted[4]).toContain("needs input");
+    // every comment went to the umbrella whose title names this run, with the token
+    for (const h of api.hits.filter((x) => x.method === "POST")) {
+      expect(h.url).toBe("/repos/acme/widgets/issues/41/comments");
+      expect(h.auth).toBe("Bearer t");
+    }
+    // the rows say which run and where the comment landed -- never a path
+    const rows = pauseRows(home, proj);
+    expect(rows).toHaveLength(5);
+    for (const r of rows) {
+      expect(r.run).toBe(RUN_ID);
+      expect((r.comment as { on: string }).on).toBe("#41");
+      expect(JSON.stringify(r)).not.toContain(home);
+    }
+  });
+
+  it("a rate_limit with no time in its message posts without one and says so", async () => {
+    const { proj, home } = fixture({ manifest: "running" });
+    const api = await fakeTracker([{ number: 41, title: `batch run ${RUN_ID}` }]);
+    expect(await recordAsync(proj, home, stopFailure("rate_limit", "Usage limit reached."), { GITHUB_API_URL: api.url })).toBe(0);
+    const [text] = comments(api.hits);
+    expect(text).toContain("paused on usage limit");
+    expect(text).not.toContain("resets at");
+    expect(text).toMatch(/named no reset time/);
+  });
+
+  it("no manifest, or one that is not running, yields the row only -- no comment, no request", async () => {
+    for (const manifest of [undefined, "staged", "complete", "stopped"]) {
+      const { proj, home } = fixture({ manifest });
+      const api = await fakeTracker([{ number: 41, title: `batch run ${RUN_ID}` }]);
+      expect(await recordAsync(proj, home, notification("quota_auto_resume_stale"), { GITHUB_API_URL: api.url }), String(manifest)).toBe(0);
+      expect(api.hits, String(manifest)).toEqual([]);
+      const rows = pauseRows(home, proj);
+      expect(rows, String(manifest)).toHaveLength(1);
+      expect(rows[0], String(manifest)).not.toHaveProperty("comment");
+    }
+  });
+
+  it("a tracker the hook cannot post to, or no umbrella issue, keeps the row and states why", async () => {
+    const jira = fixture({ manifest: "running", tracker: { type: "jira", config: {} } });
+    const api = await fakeTracker([{ number: 41, title: `batch run ${RUN_ID}` }]);
+    expect(await recordAsync(jira.proj, jira.home, notification("quota_auto_resume_stale"), { GITHUB_API_URL: api.url })).toBe(0);
+    expect(api.hits).toEqual([]);
+    expect(pauseRows(jira.home, jira.proj)[0].commentSkipped).toContain("jira");
+
+    const orphan = fixture({ manifest: "running" });
+    const empty = await fakeTracker([{ number: 40, title: "batch run run-other" }]);
+    expect(await recordAsync(orphan.proj, orphan.home, notification("quota_auto_resume_stale"), { GITHUB_API_URL: empty.url })).toBe(0);
+    expect(empty.hits.filter((h) => h.method === "POST")).toEqual([]);
+    expect(pauseRows(orphan.home, orphan.proj)[0].commentSkipped).toContain("umbrella");
+  });
+
+  it("the handoff carries paused after stale, stopped after disabled, and is cleared on fired", () => {
+    const { proj, home } = fixture({ handoff: true });
+    record(proj, home, notification("quota_auto_resume_stale"));
+    let h = handoffOf(home, proj)!;
+    expect((h.paused as { kind: string }).kind).toBe("stale");
+    expect(Number.isNaN(Date.parse((h.paused as { since: string }).since))).toBe(false);
+    expect(h.task).toEqual({ current: "t1", title: "first task" }); // the rest survives the patch
+
+    record(proj, home, notification("quota_auto_resume_disabled"));
+    expect((handoffOf(home, proj)!.paused as { kind: string }).kind).toBe("stopped");
+
+    record(proj, home, stopFailure("rate_limit", "Resets at 2:30pm"));
+    h = handoffOf(home, proj)!;
+    expect(h.paused).toMatchObject({ kind: "paused", resetsAt: "2:30pm" });
+
+    record(proj, home, notification("quota_auto_resume_fired"));
+    expect(handoffOf(home, proj)!).not.toHaveProperty("paused");
+
+    // a project with no handoff never gets one scaffolded by a pause
+    const bare = fixture();
+    record(bare.proj, bare.home, notification("quota_auto_resume_stale"));
+    expect(handoffOf(bare.home, bare.proj)).toBeNull();
+  });
+
+  it("SessionStart after a stale resume says waiting since HH:MM instead of the ordinary nudge", () => {
+    const home = freshDir("cairn-hooks-pause-ss-home-");
+    const proj = freshDir("cairn-hooks-pause-ss-");
+    writeHandoffFixture(home, proj, baseHandoff({ paused: { kind: "stale", since: "2026-10-16T10:05:00.000Z" } }));
+    const stale = runHook(SESSIONSTART, proj, home);
+    expect(stale).toContain("waiting since 10:05");
+    expect(stale).not.toContain("Ask the user whether to resume");
+
+    writeHandoffFixture(home, proj, baseHandoff({ paused: { kind: "stopped", since: "2026-10-16T11:00:00.000Z" } }));
+    const stopped = runHook(SESSIONSTART, proj, home);
+    expect(stopped).toContain("stopped after repeated usage-limit hits");
+    expect(stopped).toContain("11:00");
+    expect(stopped).toContain("resume path");
+    expect(stopped).not.toContain("Ask the user whether to resume");
+
+    writeHandoffFixture(home, proj, baseHandoff({ paused: { kind: "paused", since: "2026-10-16T12:00:00.000Z", resetsAt: "2:30pm" } }));
+    expect(runHook(SESSIONSTART, proj, home)).toContain("paused on usage limit since 12:00");
+  });
+
+  it("hooks.json carries both entries and auto.md says what the platform does and does not resume", () => {
+    const hooks = JSON.parse(readFileSync(join(scriptsDir, "..", "hooks.json"), "utf8")).hooks;
+    expect(hooks.StopFailure).toHaveLength(1);
+    expect(hooks.StopFailure[0].matcher).toBe("rate_limit");
+    expect(hooks.StopFailure[0].hooks[0].command).toContain("notification-pause.mjs");
+    expect(hooks.Notification).toHaveLength(1);
+    expect(hooks.Notification[0].matcher)
+      .toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled|agent_needs_input|elicitation_url_dialog");
+    expect(hooks.Notification[0].hooks[0].command).toContain("notification-pause.mjs");
+
+    const auto = readFileSync(join(scriptsDir, "..", "..", "skills", "cairn-trailhead", "verbs", "auto.md"), "utf8");
+    expect(auto).not.toContain("no longer loses them");
+    expect(auto).toContain("no wait");
+    expect(auto).toContain("caffeinate -w");
+    // cairn never touches power settings: the advisory is prose, no script
+    // runs caffeinate or pmset -- neither as a spawned program nor inside a
+    // shell string. (shell-words.mjs NAMES caffeinate as a program runner the
+    // guards must see through; naming is not running.)
+    const invokes = /(?:\bexec(?:File)?(?:Sync)?|\bspawn(?:Sync)?)\(\s*["'`](?:caffeinate|pmset)\b|["'`](?:caffeinate|pmset)\s+-/;
+    const dirs = [scriptsDir, join(scriptsDir, "..", "..", "setup")];
+    for (const dir of dirs) {
+      for (const f of readdirSync(dir).filter((n) => n.endsWith(".mjs"))) {
+        expect(readFileSync(join(dir, f), "utf8"), f).not.toMatch(invokes);
+      }
+    }
   });
 });
