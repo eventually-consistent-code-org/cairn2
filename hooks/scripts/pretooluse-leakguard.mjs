@@ -37,7 +37,11 @@ const BREAKER = await import("./breaker.mjs").catch(() => null);
 // Best-effort shell tokenizer -- splits on whitespace and chain operators
 // (&&, ||, ;, |, &) while keeping quoted strings intact. Only used to decide
 // whether a `git commit` invocation is "widened" (see isWidenedCommit); not
-// a general-purpose shell parser, and this whole module fails open.
+// a general-purpose shell parser, and this whole module fails open on its
+// own error. That is the guard's half only: since Claude Code 2.1.299 the
+// platform fails closed when it cannot reach the guard or read its answer
+// (onFailure stays unset in hooks.json by design, ADR 0016; dated claim
+// about the harness, 2026-10-14, #371).
 function tokenizeShell(command) {
   const re = /"(?:[^"\\]|\\.)*"|'[^']*'|&&|\|\||[;|&]|\S+/g;
   const tokens = [];

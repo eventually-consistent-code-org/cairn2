@@ -56,6 +56,23 @@ Cost: an operator who genuinely wants a harness edit pays one flag. That
 is the intended friction, and the refusal text is written to make the
 question — did you actually ask for this? — the thing they read first.
 
+Fail-open is half cairn's and half the platform's, and the two halves
+now point different ways. A guard's own error exits 0 — a broken guard
+never blocks work (asserted: `server/test/runguard-effects.test.ts`
+"fails open", `server/test/runguard-guards.test.ts` "garbage stdin
+fails open"). Claude Code's command hooks have offered `onFailure:
+"block"` since 2.1.295 — a hook that cannot start, times out or exits
+with an unexpected code then blocks the action — and `hooks/hooks.json`
+leaves it unset by design: setting it would invert this decision, so
+the absence is the decision, not a gap. Since 2.1.299 the platform
+fails closed on the delivery half regardless: when it cannot hand a
+guard its payload or read its answer back, an action the guard could
+have blocked is refused, and on Windows a PreToolUse hook with no shell
+blocks the call. The sentence to carry is "fails open on its own error;
+the platform fails closed when it cannot reach the guard or read its
+answer." The platform half is a claim about the harness, dated
+2026-10-14 from the 2.1.299 changelog (#371).
+
 ## Amendment 2026-10-21 — the run guard is described by effect (#359)
 
 The decision stands; this changes how the run guard is described and

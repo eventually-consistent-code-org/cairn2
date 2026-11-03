@@ -2296,6 +2296,27 @@ permission rules: list its tools under `ask` (or `deny`) in your
 settings, as `mcp__<server>` or `mcp__<server>__<tool>`, so every call
 waits for you.
 
+**What happens when a guard cannot run.** "Fails open" has two halves,
+and only one of them is cairn's. A guard's own internal error — a
+payload it can't parse, a classifier that throws — exits 0 and the call
+goes through, because a broken guard must never be the reason work
+stops (ADR 0016; asserted in `server/test/runguard-effects.test.ts`
+"fails open" and `server/test/runguard-guards.test.ts` "garbage stdin
+fails open"). Claude Code's command hooks have carried an `onFailure:
+"block"` setting since 2.1.295 — set it and a hook that cannot start,
+times out or exits with an unexpected code blocks the action instead.
+`hooks/hooks.json` leaves it unset on purpose: it would invert the
+rule above, and the next sweep should read the absence as the decision
+it is, not an oversight. The other half is the platform's. Since
+2.1.299, when Claude Code cannot hand a hook its payload or cannot read
+its answer back, an action the hook could have blocked is refused rather
+than let through, and on Windows a PreToolUse hook with no shell blocks
+the call instead of failing open — regardless of `onFailure`. So the
+honest sentence is: a guard fails open on its own error; the platform
+fails closed when it cannot reach the guard or read its answer. Both
+halves of that platform behaviour are claims about the harness, dated
+2026-10-14 from the 2.1.299 changelog, and can expire (#371).
+
 One more hook worth knowing, on the advisory side rather than the
 refusing side: the **loop check** notices when the same tool is called
 with the same input three times in a row and says so, once. An agent
