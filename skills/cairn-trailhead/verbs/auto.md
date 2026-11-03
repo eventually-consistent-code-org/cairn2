@@ -96,7 +96,12 @@ Staging sequence, in order:
    (hard at boundaries — no new phase/wave starts past the ceiling, an
    in-flight wave finishes; bounded overshoot ≤ one wave). Then
    `run_manifest(action: "set_status", status: "running")` and report
-   "staged — run starts now."
+   "staged — run starts now." On darwin, one advisory line with it: the
+   run outlives a usage-limit pause only while the machine stays awake
+   across the reset — consider `caffeinate -w <pid>` on the session's
+   pid from another terminal. Say it, never run it: cairn never touches
+   power settings (asserted: hooks.test.ts sweeps the hook and setup
+   scripts for a caffeinate or pmset invocation).
 6. **Execution.** The run starts — the sequence below consumes the
    manifest from here. Everything above this line happened with the user
    present; everything below runs without them.
@@ -154,12 +159,28 @@ batch-specific loop.
    the phase list as staged, the ceiling, push authority granted or
    declined. Then `continuity_checkpoint(source: "auto", notes:
    "batch run <runId> — phase <first>")` so a killed run leaves a trail.
-   A usage limit is NOT a kill: the run pauses when it hits the ceiling
-   and resumes itself when the window rolls over, so nothing is dropped
-   and nothing needs restarting by hand. The checkpoint is for real
-   deaths — a crash, a reboot, a closed session — and batch mode carries
-   no defences against limit-time agent loss, because the platform no
-   longer loses them.
+   A usage limit inside the TUI session is a pause, not a kill, as long
+   as the machine stays awake: the platform waits for the window to roll
+   over and continues by itself. A sleep across the reset is limit-time
+   loss — the auto-resume goes stale and the session sits waiting for
+   Enter, and after repeated hits the platform stops re-arming the wait
+   altogether. Both reach the tracker (#379): the `StopFailure` /
+   `Notification` pause recorder appends every event to the machine's
+   pauses log and, while this manifest reads `running`, posts one
+   plain-language comment on the umbrella issue — paused on usage limit
+   with the reset time when the platform's message named one (no payload
+   carries it as a field; absence is stated), resumed, waiting for a
+   human to press Enter, stopped after repeated usage-limit hits — and
+   marks the handoff so the next SessionStart says "waiting since HH:MM"
+   instead of the ordinary nudge (asserted: hooks.test.ts, the pause
+   recorder block). Under `claude -p` and background sessions there is
+   no wait at all (the platform's interactive-mode docs, "Wait for a
+   usage limit to reset", as of 2026-10): a rate-limit stop is a stop,
+   and the checkpoint resume path below is the only defence. Whether
+   the quota notifications fire under `-p` is undocumented; the recorder
+   assumes nothing and records whatever arrives. The checkpoint is for
+   real deaths — a crash, a reboot, a closed session, a `-p` run that
+   hit its limit.
    **Resume path — a killed run re-enters HERE.** The checkpoint notes
    hold the runId; `run_manifest(action: "read")` is the authority on
    what was approved (a resumed run never widens scope or push
