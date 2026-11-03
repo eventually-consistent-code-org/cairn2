@@ -565,6 +565,22 @@ describe("cairn MCP server", () => {
     expect(relevant.map((p) => p.number)).toEqual([1, 1.5, 2]);
   });
 
+  it("plan_status carries the fresh-worktree setup the repo derives — empty with no lockfile, the installer once one is tracked (#352)", async () => {
+    const before = await call("plan_status", {});
+    expect(before.json.setup).toEqual({ installs: [], include: [], port: false, lines: [] });
+    const lock = join(projectDir, "package-lock.json");
+    writeFileSync(lock, "{}");
+    try {
+      const after = await call("plan_status", {});
+      expect(after.json.setup.installs).toEqual([
+        { dir: ".", lockfile: "package-lock.json", command: "npm ci" },
+      ]);
+      expect(after.json.setup.lines[0]).toContain("at the repo root `npm ci`");
+    } finally {
+      rmSync(lock, { force: true });
+    }
+  });
+
   it("plan_issues_set on a decimal phaseDir round-trips the phase number into the handoff (not the slice(0,2) bug)", async () => {
     await call("plan_scaffold_phase", { number: 1.5, name: "Handoff Check" });
     const made = await call("issue_create", { title: "decimal handoff req" });
