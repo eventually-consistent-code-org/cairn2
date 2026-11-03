@@ -189,7 +189,7 @@ if (checkMode) {
   // Readers leg (#398): can every harness actually load what we just compared?
   const setupPath = join(root, "setup", "cairn-setup.mjs");
   const harnesses = parseHarnesses(readFileSync(setupPath, "utf8"));
-  const mech = mechanismLeg({ table: READERS, harnesses, setupPath });
+  const mech = mechanismLeg({ table: READERS, harnesses, setupPath, fragment });
   const proj = projectLeg({ table: READERS, projectDir: root, fragment });
   console.log("readers (harness, session-start file, path to the fragment, status):");
   for (const line of formatReaders(mech, proj)) console.log(line);

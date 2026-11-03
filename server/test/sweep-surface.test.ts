@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
 import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
-import { overlapFiles, overlapLead } from "../../scripts/lib/merge-overlap.mjs";
+import { overlapFiles, overlapLead } from "../../hooks/scripts/merge-overlap.mjs";
 import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
 /**
@@ -465,6 +465,76 @@ describe("the spine's readers (#398)", () => {
     }
   });
 
+  // #429: the one-file layout, CLAUDE.md a symlink to AGENTS.md. Setup used
+  // to install the fragment into AGENTS.md, then open CLAUDE.md -- the same
+  // file -- find the fragment's own markers and replace the whole spine with
+  // the three-line import block; --check then read the self-import as green
+  // because it accepted any marker span. These pin both halves of the fix.
+  describe("CLAUDE.md as a symlink to AGENTS.md (#429)", () => {
+    const claudeRow = TABLE.find((r) => r.harness === "claude")!;
+    const linked = () => {
+      const s = scratch();
+      writeFileSync(join(s.proj, "AGENTS.md"), "# my project\n\nhouse rules\n");
+      symlinkSync("AGENTS.md", join(s.proj, "CLAUDE.md"));
+      return s;
+    };
+    const claudeLines = (out: string) => out.split("\n").filter((l) => l.includes("CLAUDE.md"));
+
+    it("setup refuses the import in one line, keeps the spine, and a second run says nothing new", () => {
+      const s = linked();
+      try {
+        const first = setup(s.home, "claude", "--project", s.proj);
+        expect(first.status).toBe(0);
+        const agents = readFileSync(join(s.proj, "AGENTS.md"), "utf8");
+        expect(agents.startsWith(IMPORT_BLOCK)).toBe(false);
+        expect(agents).toContain(FRAGMENT.trimEnd());
+        expect(agents).toContain("house rules");
+        expect(claudeLines(first.stdout).join("\n")).toContain("is AGENTS.md by another name");
+
+        const again = setup(s.home, "claude", "--project", s.proj);
+        expect(again.status).toBe(0);
+        expect(readFileSync(join(s.proj, "AGENTS.md"), "utf8")).toBe(agents);
+        expect(claudeLines(again.stdout)).toEqual(claudeLines(first.stdout));
+
+        const green = setup(s.home, "claude", "--project", s.proj, "--check");
+        expect(green.status).toBe(0);
+        expect(green.stdout).toContain("CLAUDE.md is AGENTS.md by another name, which carries the fragment");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("--check is red on the erased layout: a span holding only the import block does not reach", () => {
+      const s = linked();
+      try {
+        // what the pre-fix setup left behind: AGENTS.md importing itself, no rules
+        writeFileSync(join(s.proj, "AGENTS.md"), `${IMPORT_BLOCK}\n# my project\n\nhouse rules\n`);
+        const red = setup(s.home, "claude", "--project", s.proj, "--check");
+        expect(red.status).toBe(1);
+        expect(red.stdout).toContain("carries only the @AGENTS.md import block");
+        expect(reachFrom(s.proj, claudeRow, { fragment: FRAGMENT }).state).toBe("broken");
+        expect(reachFrom(s.proj, claudeRow).state).toBe("broken");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a CLAUDE.md that resolves outside the project is refused and left as written", () => {
+      const s = scratch();
+      try {
+        const outside = join(s.dir, "elsewhere.md");
+        writeFileSync(outside, "# dotfiles claude\n");
+        symlinkSync(outside, join(s.proj, "CLAUDE.md"));
+        const r = setup(s.home, "grok", "--project", s.proj);
+        expect(r.status).toBe(0);
+        expect(readFileSync(outside, "utf8")).toBe("# dotfiles claude\n");
+        expect(claudeLines(r.stdout).join("\n")).toContain("resolves outside the project");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("an import inside a code fence or HTML comment does not count", () => {
     const s = scratch();
     try {
@@ -701,7 +771,73 @@ describe("merge leads with file overlap (#223)", () => {
     for (const verb of ["work", "ship"]) {
       const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
       expect(t).toContain("overlap: none");
-      expect(t).toContain("scripts/lib/merge-overlap.mjs");
+      expect(t).toContain('"$CLAUDE_PLUGIN_ROOT/hooks/scripts/merge-overlap.mjs"');
+    }
+  });
+
+  // #444: the command entry compared the percent-encoded, symlink-resolved
+  // module URL to the raw argv[1], so through a symlinked plugin folder or a
+  // path with a space the body never ran: empty line, exit 0, which reads as
+  // "no overlap". Spawn it as a command through both shapes.
+  it("run as a command through a symlink or a path with a space, it prints the lead (#444)", () => {
+    const { dir, git, put, commit } = scratch();
+    const plug = mkdtempSync(join(tmpdir(), "cairn-444-"));
+    try {
+      git("checkout", "-q", "-b", "a");
+      put("shared.ts", "a\n");
+      commit("a");
+      git("checkout", "-q", "main");
+      git("checkout", "-q", "-b", "b");
+      put("shared.ts", "b\n");
+      commit("b");
+
+      const real = join(ROOT, "hooks", "scripts", "merge-overlap.mjs");
+      symlinkSync(join(ROOT, "hooks"), join(plug, "hooks"));
+      mkdirSync(join(plug, "my plugin", "hooks", "scripts"), { recursive: true });
+      writeFileSync(join(plug, "my plugin", "hooks", "scripts", "merge-overlap.mjs"), readFileSync(real));
+      const shapes = {
+        direct: real,
+        symlink: join(plug, "hooks", "scripts", "merge-overlap.mjs"),
+        space: join(plug, "my plugin", "hooks", "scripts", "merge-overlap.mjs"),
+      };
+      for (const [name, path] of Object.entries(shapes)) {
+        const r = spawnSync(process.execPath, [path, "a", "b"], { cwd: dir, encoding: "utf8" });
+        expect(r.status, `${name}: exit`).toBe(0);
+        expect(r.stdout.trim(), `${name}: stdout`).toBe("overlap: 1 file — shared.ts");
+      }
+      // Nothing to say is never a silent success: no args and a bad ref both
+      // exit non-zero with one plain line, no stack trace.
+      const none = spawnSync(process.execPath, [shapes.symlink], { cwd: dir, encoding: "utf8" });
+      expect(none.status).not.toBe(0);
+      expect(none.stdout).toBe("");
+      expect(none.stderr).toContain("usage:");
+      const bad = spawnSync(process.execPath, [shapes.space, "a", "no-such-ref"], { cwd: dir, encoding: "utf8" });
+      expect(bad.status).not.toBe(0);
+      expect(bad.stdout).toBe("");
+      expect(bad.stderr).not.toContain("    at ");
+      expect(bad.stderr.trim().split("\n")).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(plug, { recursive: true, force: true });
+    }
+  });
+
+  // #443: the helper used to be named by a project-relative path that only
+  // resolved inside cairn's own checkout, from a folder the npm package did
+  // not ship and setup did not copy. The path each verb names must go
+  // through the plugin root (as status.md does) into a directory that both
+  // package.json ships and cairn-setup copies to pluginless harnesses.
+  it("the command both verbs name resolves inside a directory the package ships and setup copies (#443)", () => {
+    const shipped: string[] = JSON.parse(read("package.json")).files;
+    expect(shipped).toContain("hooks");
+    for (const verb of ["work", "ship"]) {
+      const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
+      const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
+      expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
+      const rel = m![1];
+      expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
+      expect(rel.startsWith("hooks/scripts/"), `${rel} sits in the folder cairn-setup copies`).toBe(true);
+      expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
     }
   });
 });

@@ -44,7 +44,7 @@ pairing overlay applies:
    (claim → work → close → ledger) — the dispatch mechanism and who
    holds each step change; the lifecycle never does. Wave N+1 starts
    only when every wave-N issue is closed and merged. Before each
-   branch merges after another, run `node scripts/lib/merge-overlap.mjs
+   branch merges after another, run `node "$CLAUDE_PLUGIN_ROOT/hooks/scripts/merge-overlap.mjs"
    <merged-so-far> <next-branch>` and lead the merge message and the
    tracker note with its line: `overlap: 3 files — a, b, c` or
    `overlap: none`. No overlap merges silently; overlap names the files
