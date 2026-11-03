@@ -564,6 +564,96 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       expect(again.json.observed).toEqual({ skipped: "command-differs" });
     });
   });
+
+  // #374 -- the server composes the claim and close comments, so the leak
+  // screen peer_run runs over outbound text runs here too: a promised check
+  // naming a planning-dir file never reaches the tracker as written. The
+  // private path is redacted to a placeholder rather than refused -- the
+  // plan's verify line IS the bar, and the ledger (git-side) keeps it exact
+  // (ADR 0016, amendment 2026-11-03). Fixture strings are concatenated so
+  // this file's own diff never trips the live guard when committed.
+  describe("server-composed comments pass the leak screen before posting (#374)", () => {
+    const PLAN_PATH = ".cairn" + "/plans/phases/01-core/PLAN.md";
+    const VERIFY = `cd server && npx vitest run && cat ${PLAN_PATH}`;
+    const PLACEHOLDER = "[redacted cairn-path]";
+
+    it("a claim's verify command naming a planning-dir file is redacted, and the result says so", async () => {
+      const tracker = new FakeTracker();
+      const { call } = await harness(tracker);
+      const made = await call("issue_create", { title: "screened" });
+      const wip = await call("issue_update", {
+        id: made.json.id,
+        claim: { baseCommit: "a1b2c3d4e5f6", wave: "2", task: "screen", verifyCommand: VERIFY },
+      });
+      const posted = tracker.comments(made.json.id).map((c) => c.text);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).not.toContain(".cairn" + "/");
+      expect(posted[0]).toContain(`Declared verify: \`cd server && npx vitest run && cat ${PLACEHOLDER}\``);
+      expect(wip.json.claimCommented).toBe(true);
+      expect(wip.json.claimCommentRedacted).toEqual(["cairn-path"]);
+      // still the claim comment rung one keys on
+      expect(isClaimComment(posted[0])).toBe(true);
+    });
+
+    it("a clean claim comment carries no redacted field", async () => {
+      const tracker = new FakeTracker();
+      const { call } = await harness(tracker);
+      const made = await call("issue_create", { title: "clean" });
+      const wip = await call("issue_update", {
+        id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6", verifyCommand: "npm test" },
+      });
+      expect(wip.json.claimCommented).toBe(true);
+      expect(wip.json).not.toHaveProperty("claimCommentRedacted");
+    });
+
+    it("a close's evidence command is screened the same way", async () => {
+      const tracker = new FakeTracker();
+      const { call } = await harness(tracker);
+      const made = await call("issue_create", { title: "screened close" });
+      await call("issue_update", { id: made.json.id, state: "in_progress" });
+      const closed = await call("issue_close", {
+        id: made.json.id, evidence: { command: VERIFY, result: "1 passed" },
+      });
+      expect(closed.json.evidenceCommented).toBe(true);
+      expect(closed.json.commentRedacted).toEqual(["cairn-path"]);
+      const last = tracker.comments(made.json.id).at(-1)!.text;
+      expect(last).not.toContain(".cairn" + "/");
+      expect(last).toContain(`evidence: \`cd server && npx vitest run && cat ${PLACEHOLDER}\` → 1 passed`);
+    });
+
+    it("the fold's comment is screened; the ledger line keeps the exact text", async () => {
+      const tracker = new FakeTracker();
+      const h = await harness(tracker, { git: true });
+      const made = await h.call("issue_create", {
+        title: "fold screened", claim: { wave: "2", task: "fold", verifyCommand: VERIFY },
+      });
+      await h.call("context_set", { phase: 1, issueId: made.json.id });
+      const closed = await h.call("issue_close", {
+        id: made.json.id, summary: `Shipped; see ${PLAN_PATH}`,
+        evidence: { command: VERIFY, result: "1 passed" },
+      });
+      expect(closed.json.category).toBe("closed");
+      expect(closed.json.commentRedacted).toEqual(["cairn-path"]);
+      for (const c of tracker.comments(made.json.id)) expect(c.text).not.toContain(".cairn" + "/");
+      // the planning dir is git's record, not the tracker's: exact there
+      expect(closed.json.ledger.line).toContain(PLAN_PATH);
+    });
+
+    it("leakGuard.enabled: false posts the comment as composed", async () => {
+      const tracker = new FakeTracker();
+      const { call, projectDir } = await harness(tracker);
+      writeFileSync(join(projectDir, "cairn.json"), JSON.stringify({
+        tracker: { type: "github", config: { repo: "o/r" } }, leakGuard: { enabled: false },
+      }));
+      const made = await call("issue_create", { title: "guard off" });
+      const wip = await call("issue_update", {
+        id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6", verifyCommand: VERIFY },
+      });
+      expect(wip.json.claimCommented).toBe(true);
+      expect(wip.json).not.toHaveProperty("claimCommentRedacted");
+      expect(tracker.comments(made.json.id)[0].text).toContain(PLAN_PATH);
+    });
+  });
 });
 
 describe("composeCloseComment and issueCostUsd (#365)", () => {

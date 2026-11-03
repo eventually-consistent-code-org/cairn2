@@ -171,6 +171,7 @@ import {
 } from "./workspace/context.js";
 import { boardGet, boardUpdate, type Workstream } from "./workspace/board.js";
 import { PROVIDERS, peerList, peerRun, type Provider } from "./peers/run.js";
+import { redactLeaks, scanForLeaks } from "./peers/leak-scan.js";
 import { loadRoster } from "./seats/roster.js";
 import {
   VERDICTS,
@@ -601,16 +602,47 @@ export function buildServer(deps: {
     }
   };
 
+  // The leak screen over every comment the server composes (#374): the claim
+  // comment quotes the plan's verify line and the close comment quotes the
+  // evidence command, and either can name a file under the planning dir --
+  // on a public tracker that is the leak the commit-time guard exists to
+  // stop, and moving the comments server-side (#343, #365) had walked them
+  // out from under it. Same pattern set as peer_run's outbound gate; the
+  // private token becomes a kind-named placeholder rather than a refusal,
+  // because the plan's verify line IS the bar and the ledger keeps it exact
+  // (ADR 0016, amendment 2026-11-03). What was redacted is reported beside
+  // the post (`claimCommentRedacted` / `commentRedacted`) so the reader can
+  // see the comment is not the ledger's text. A hit the placeholder itself
+  // trips is the one refusal: nothing is posted, the typed error names the
+  // kinds -- never the text.
+  const screenComment = (d: string, text: string): { text: string; redacted: string[] } => {
+    const cfg = loadConfig(d);
+    const { text: clean, redacted } = redactLeaks(text, cfg);
+    // Scan what would actually be posted, not what was composed
+    const residual = scanForLeaks(clean, cfg);
+    if (residual.length > 0) {
+      const kinds = [...new Set(residual.map((h) => h.name))].sort().join(", ");
+      throw new CairnError("PRECONDITION_FAILED",
+        `the composed comment still hit the leak guard (${kinds}) after redaction — nothing was posted`,
+        "check leakGuard.extraPatterns in cairn.json: a pattern that matches the placeholder can never be redacted away");
+    }
+    return { text: clean, redacted };
+  };
+
   const stampClaim = async (
     d: string, tracker: Tracker, issue: Issue, claimAt: string, claim?: ResolvedClaim,
-  ): Promise<{ claimCommented?: boolean; claimCommentError?: string }> => {
+  ): Promise<{ claimCommented?: boolean; claimCommentError?: string; claimCommentRedacted?: string[] }> => {
     // First claim wins; recordClaim never throws. A bare in_progress
     // transition (no claim block) still stamps the time, just no commit.
     if (issue.category === "in_progress") recordClaim(d, issue.id, claimAt, claim?.baseCommit);
     if (!claim) return {};
     try {
-      await tracker.commentIssue(issue.id, composeClaimComment(claim));
-      return { claimCommented: true };
+      const screened = screenComment(d, composeClaimComment(claim));
+      await tracker.commentIssue(issue.id, screened.text);
+      return {
+        claimCommented: true,
+        ...(screened.redacted.length > 0 ? { claimCommentRedacted: screened.redacted } : {}),
+      };
     } catch (e) {
       return { claimCommented: false, claimCommentError: e instanceof Error ? e.message : String(e) };
     }
@@ -709,6 +741,7 @@ export function buildServer(deps: {
             ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
             : {}),
           ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
+          ...(stamped.claimCommentRedacted ? { claimCommentRedacted: stamped.claimCommentRedacted } : {}),
           ...(claimError ? { claimError } : {}),
           ...(estimateSkipped ? { estimateSkipped } : {}),
         };
@@ -846,6 +879,7 @@ export function buildServer(deps: {
             ? { claimAt, baseCommit: resolved.baseCommit, claimCommented: stamped.claimCommented ?? false }
             : {}),
           ...(stamped.claimCommentError ? { claimCommentError: stamped.claimCommentError } : {}),
+          ...(stamped.claimCommentRedacted ? { claimCommentRedacted: stamped.claimCommentRedacted } : {}),
           ...(estimateSkipped ? { estimateSkipped } : {}),
           ...(phaseSkipped ? { phaseSkipped } : {}),
         };
@@ -1142,14 +1176,20 @@ export function buildServer(deps: {
       // range, this same block, the agent cost. Best-effort -- the close is
       // the state change that matters.
       let evidenceCommented = false;
+      let commentRedacted: string[] = [];
       try {
-        await tracker.commentIssue(a.id, fold
+        // Screened before it leaves (#374): the evidence command and the
+        // summary are quoted into a public comment; the ledger line below
+        // keeps them exact.
+        const screened = screenComment(d, fold
           ? composeCloseComment({
             summary: fold.entry.summary, baseCommit: fold.entry.baseCommit,
             headCommit: fold.entry.headCommit, evidence: fold.entry.evidence!,
             measured, costUsd: issueCostUsd(metricsPath(d), a.id),
           })
           : closeEvidenceText(measured, a.evidence));
+        await tracker.commentIssue(a.id, screened.text);
+        commentRedacted = screened.redacted;
         if (a.evidence) evidenceCommented = true;
       } catch { /* the ledger line still carries both */ }
       const result = await tracker.closeIssue(a.id);
@@ -1231,6 +1271,7 @@ export function buildServer(deps: {
         worklogLogged,
         ...(worklogError ? { worklogError } : {}),
         ...(a.evidence ? { evidenceCommented } : {}),
+        ...(commentRedacted.length > 0 ? { commentRedacted } : {}),
         measured,
         claimedMinutes: a.timeSpentMinutes ?? null,
         receiptWritten,
@@ -1344,14 +1385,17 @@ export function buildServer(deps: {
   server.registerTool(
     "plan_drift",
     {
-      annotations: { title: titleOf("plan_drift"), readOnlyHint: true },
+      // A check-and-repair tool, not a read (#375): every run stamps the ship
+      // gate the run guard reads, and a verified phase's roadmap row still
+      // saying planned is rewritten. The label used to say read-only, so the
+      // permission layer was told not to look at a tool that writes.
+      annotations: { title: titleOf("plan_drift"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Flag plan-referenced issues that are missing or closed-unverified, a stale " +
-        "security audit (latest security record written dirty or before code commits since " +
-        "its stamp), and work that has gone quiet (an issue held in progress with no tracker " +
-        "update and no commit naming it, or a branch with no recent commit); also repairs " +
-        "roadmap.md Status cells that still say 'planned' for a phase with VERIFICATION.md, " +
-        "reporting each as a 'roadmap-row' item",
+        "Check-and-repair. Flags plan-referenced issues missing or closed-unverified, a stale " +
+        "security audit (latest record written dirty or before later code commits), and quiet " +
+        "work (an in-progress issue with no tracker update and no commit naming it, or a branch " +
+        "with no recent commit); repairs roadmap.md Status cells still 'planned' for a phase with " +
+        "VERIFICATION.md ('roadmap-row' items); stamps the ship gate the push guard reads",
       inputSchema: z.object({}),
     },
     wrap(async () => {
@@ -1420,6 +1464,19 @@ export function buildServer(deps: {
     }
     return idx;
   };
+  // The readers' opener (#375): opening the index CREATES it (file, schema,
+  // migration), which made a first mem_search on a project a write under the
+  // cairn home from a tool labelled read-only. A reader takes the index only
+  // when it already exists -- cached or on disk -- and otherwise sees an
+  // empty one, which is what the db would hold. The binding is still probed
+  // on that path, so a broken install fails typed instead of reading as
+  // "nothing indexed" (#108). Writers keep getMemIndex.
+  const peekMemIndex = (d: string = dir()): MemoryIndex | undefined => {
+    const path = indexDbPath(d);
+    if (memIndexes.has(path) || existsSync(path)) return getMemIndex(d);
+    MemoryIndex.probe(deps.loadSqlite);
+    return undefined;
+  };
 
   server.registerTool(
     "mem_index",
@@ -1485,11 +1542,11 @@ export function buildServer(deps: {
         limit?: number;
       }) => {
         assertValidPhase(a.phase);
-        return getMemIndex().search(
+        return peekMemIndex()?.search(
           a.query,
           { phase: a.phase, issueId: a.issueId, role: a.role },
           a.limit ?? 10,
-        );
+        ) ?? [];
       },
     ),
   );
@@ -1517,7 +1574,11 @@ export function buildServer(deps: {
       const observations = observationBacklog(d);
       let index: Record<string, unknown>;
       try {
-        index = { ...getMemIndex(d).stats(), ...bannerStats(d) };
+        const idx = peekMemIndex(d);
+        index = {
+          ...(idx ? idx.stats() : { chunkCount: 0, approxBytes: 0, approxTokens: 0 }),
+          ...bannerStats(d),
+        };
       } catch (e) {
         index = { indexUnavailable: (e as Error).message ?? String(e) };
       }
@@ -1722,7 +1783,7 @@ export function buildServer(deps: {
         anchorCreatedAt = card.frontmatter.created;
         anchorCardId = card.id;
       } catch {
-        const chunkCreatedAt = getMemIndex(d).sourceCreatedAt(a.anchor);
+        const chunkCreatedAt = peekMemIndex(d)?.sourceCreatedAt(a.anchor);
         if (chunkCreatedAt === undefined) {
           throw new CairnError(
             "NOT_FOUND",
@@ -1760,11 +1821,11 @@ export function buildServer(deps: {
         isAfterAnchor(c.created, c.id),
       );
 
-      const chunkNeighbors: SearchResult[] = getMemIndex(d).timeline(
+      const chunkNeighbors: SearchResult[] = peekMemIndex(d)?.timeline(
         anchorCreatedAt,
         before,
         after,
-      );
+      ) ?? [];
       const chunksBefore: TimelineChunkItem[] = chunkNeighbors
         .filter((c) => c.createdAt < anchorCreatedAt)
         .map((c) => ({ source: c.source, createdAt: c.createdAt }));
@@ -1977,7 +2038,9 @@ export function buildServer(deps: {
   server.registerTool(
     "budget_check",
     {
-      annotations: { title: titleOf("budget_check"), readOnlyHint: true },
+      // Writes the run ledger on every call (opening it persists the state),
+      // and a boundary appends a row -- not read-only, not idempotent (#375)
+      annotations: { title: titleOf("budget_check"), readOnlyHint: false, destructiveHint: false },
       description:
         "Spend ledger gate for headless batch runs — re-reads actual spend (latest metrics row per session; "
         + "sessions since the run opened count in full, pre-existing sessions count as the delta past their "
@@ -3080,7 +3143,8 @@ export function buildServer(deps: {
   server.registerTool(
     "outlook_get",
     {
-      annotations: { title: titleOf("outlook_get"), readOnlyHint: true },
+      // artifact: true writes the board under the cairn home (#375)
+      annotations: { title: titleOf("outlook_get"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
         "Portfolio aggregate (#55): every registered cairn project on this machine as a " +
         "card — snapshot (phases/sessions/tracker block), staleness vs live git HEAD, per-project " +
@@ -3303,7 +3367,8 @@ export function buildServer(deps: {
   server.registerTool(
     "research_sections",
     {
-      annotations: { title: titleOf("research_sections"), readOnlyHint: true },
+      // flip rewrites a section marker in place (#375)
+      annotations: { title: titleOf("research_sections"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
         "Parse a research artifact's ##+ section markers " +
         "(<!-- namespace: done|pending|failed [date] [model] [— note] -->) for one " +

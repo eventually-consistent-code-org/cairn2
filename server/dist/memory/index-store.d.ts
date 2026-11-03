@@ -25,6 +25,14 @@ export interface IndexStats {
 export declare function indexDbPath(projectDir: string): string;
 export declare class MemoryIndex {
     private db;
+    /**
+     * Loads the binding and nothing else -- no file, no schema. The readers
+     * (#375) call this when a project has no index yet, so a broken binding
+     * still surfaces as the same typed NATIVE_MODULE_BROKEN the constructor
+     * raises (asserted in mcp.test.ts, "broken native binding (#108)"),
+     * while a healthy one leaves the cairn home untouched.
+     */
+    static probe(load?: SqliteLoader): void;
     constructor(dbPath: string, load?: SqliteLoader);
     index(chunk: Chunk): void;
     search(query: string, filter?: {

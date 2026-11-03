@@ -15,8 +15,9 @@ purpose column and dispatch.
    full panel.
 3. Read-only verb with a clear match → run it directly. Read-only means
    every server tool the verb calls carries `readOnlyHint: true` in its
-   MCP annotations (`status`, `recall`, `help` are the everyday cases);
-   the annotation is the source, not this list.
+   MCP annotations (`recall`, `help` are the everyday cases; `status` is
+   not one — it runs `plan_drift`, a check-and-repair tool that stamps the
+   ship gate); the annotation is the source, not this list.
 4. Mutating verb — one that calls any tool without `readOnlyHint` (`new
    plan work verify ship import remember` and most others) — or low
    confidence → confirm first: "Sounds like `/cairn:plan 4 --deep` — run it?"

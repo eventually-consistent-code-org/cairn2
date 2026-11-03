@@ -9,8 +9,9 @@ import {
   chmodSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, delimiter } from "node:path";
+import { join, delimiter, relative } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
@@ -20,6 +21,7 @@ import { readClaim } from "../src/planning/close-receipt.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { listSessions } from "../src/sessions/store.js";
 import { PROVIDERS } from "../src/peers/run.js";
+import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
 
 // Controllable failure injection for the continuity resilience test below.
 // Mocks ONLY writeHandoff (everything else passes through to the real module)
@@ -98,8 +100,18 @@ describe("cairn MCP server", () => {
   it("no *_get / *_list tool is marked mutating, and the deleting/finalizing tools are destructive (#344)", async () => {
     const tools = (await client.listTools()).tools;
     const byName = new Map(tools.map((t) => [t.name, t.annotations ?? {}]));
+    // outlook_get(artifact: true) writes the board, so the name rule stops
+    // there (#375); the effect test at the end of this file is the check
     for (const [name, a] of byName) {
+      if (name === "outlook_get") continue;
       if (/_(get|list)$/.test(name)) expect(a.readOnlyHint, `${name} should be read-only`).toBe(true);
+    }
+    // check-and-repair and the opt-in writers say so (#375): plan_drift
+    // stamps the ship gate every run, budget_check persists the run ledger,
+    // outlook_get and research_sections write when a flag asks
+    for (const name of ["plan_drift", "budget_check", "outlook_get", "research_sections"]) {
+      expect(byName.get(name)?.readOnlyHint, `${name} writes; it is not read-only`).toBe(false);
+      expect(byName.get(name)?.destructiveHint, `${name} has no destructiveHint`).toBe(false);
     }
     for (const name of [
       "issue_close", "tracker_migrate", "mem_compact", "continuity_clear", "outlook_forget",
@@ -2716,4 +2728,146 @@ describe("run_manifest set_phase over MCP (#260)", () => {
     expect(read.json.currentPhase).toBe(8);
     expect(read.json.path.startsWith(join(home, ".cairn", "runs"))).toBe(true);
   });
+});
+
+// A tool that says readOnlyHint: true is a tool a harness's permission
+// layer is told not to look at (#344). The label used to be checked by name
+// pattern alone; this block checks it by effect (#375): every read-only
+// tool runs against a scratch project and a scratch cairn home, in the two
+// shapes it can be called -- required arguments only, and every argument
+// filled (so an opt-in writer's flag is set) -- and both folders must come
+// back byte-identical. An empty read-only set is a failure, not a pass.
+describe("readOnlyHint: true tools leave the planning dir and the cairn home untouched (#375)", () => {
+  let projectDir: string;
+  let home: string;
+  let savedHome: string | undefined;
+  let client: Client;
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "cairn-readonly-home-"));
+    process.env.HOME = home;
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-readonly-"));
+    writeFileSync(
+      join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+    scaffoldProject(projectDir, "P");
+    scaffoldPhase(projectDir, 1, "Core");
+    // a repository with one commit, so a stamp keyed on HEAD has a HEAD
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    git("init", "-q");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    git("add", "-A");
+    git("commit", "-qm", "base", "--no-gpg-sign");
+    const server = buildServer({
+      projectDir, tracker: new FakeTracker(), fetchLatestVersion: async () => "9.9.9",
+    });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-readonly", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // path -> content, every file under root (the repository's own metadata
+  // dir skipped: it refreshes its index on a read, and it is not the
+  // planning dir)
+  const snapshot = (root: string): Map<string, Buffer> => {
+    const out = new Map<string, Buffer>();
+    if (!existsSync(root)) return out;
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === ".git") continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else out.set(relative(root, full), readFileSync(full));
+      }
+    };
+    walk(root);
+    return out;
+  };
+  const changed = (before: Map<string, Buffer>, after: Map<string, Buffer>): string[] => {
+    const keys = new Set([...before.keys(), ...after.keys()]);
+    return [...keys].filter((k) => {
+      const a = before.get(k);
+      const b = after.get(k);
+      return a === undefined || b === undefined || !a.equals(b);
+    }).sort();
+  };
+  // Put root back the way `before` saw it, so one offender does not hide
+  // the next (a cache created by the first tool is "already there" for the
+  // second). Added files go; changed ones get their old bytes back.
+  const restore = (root: string, before: Map<string, Buffer>, after: Map<string, Buffer>): void => {
+    for (const k of after.keys()) if (!before.has(k)) rmSync(join(root, k), { force: true });
+    for (const [k, bytes] of before) {
+      if (!after.get(k)?.equals(bytes)) {
+        mkdirSync(join(root, k, ".."), { recursive: true });
+        writeFileSync(join(root, k), bytes);
+      }
+    }
+  };
+
+  // A sample value for a JSON-schema node; `full` fills every property and
+  // sets every boolean, `minimal` fills the required ones only.
+  type Schema = Record<string, unknown>;
+  const sample = (schema: Schema | undefined, full: boolean): unknown => {
+    if (!schema) return "x";
+    if (Array.isArray(schema.enum)) return (schema.enum as unknown[])[0];
+    if ("const" in schema) return schema.const;
+    const union = (schema.anyOf ?? schema.oneOf) as Schema[] | undefined;
+    if (union?.length) return sample(union[0], full);
+    const type = Array.isArray(schema.type) ? (schema.type as string[])[0] : schema.type;
+    switch (type) {
+      case "string": return "x";
+      case "number": case "integer": return 1;
+      case "boolean": return true;
+      case "array": return full ? [sample(schema.items as Schema, full)] : [];
+      case "object": {
+        const props = (schema.properties ?? {}) as Record<string, Schema>;
+        const required = new Set((schema.required ?? []) as string[]);
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(props)) {
+          if (full || required.has(k)) out[k] = sample(v, full);
+        }
+        return out;
+      }
+      default: return "x";
+    }
+  };
+
+  it("every read-only tool, called minimal and full, writes nothing under either folder", async () => {
+    const tools = (await client.listTools()).tools;
+    const readOnly = tools.filter((t) => t.annotations?.readOnlyHint === true);
+    expect(readOnly.length).toBeGreaterThan(0);
+
+    const planningDir = join(projectDir, ".cairn");
+    const offenders: Array<{ tool: string; shape: string; changed: string[] }> = [];
+    for (const t of readOnly) {
+      for (const shape of ["minimal", "full"] as const) {
+        const args = sample(t.inputSchema as Schema, shape === "full") as Record<string, unknown>;
+        const before = { plan: snapshot(planningDir), home: snapshot(home) };
+        // errors are fine -- a NOT_FOUND on a sample id is still a read
+        await client.callTool({ name: t.name, arguments: args });
+        const after = { plan: snapshot(planningDir), home: snapshot(home) };
+        const diff = [
+          ...changed(before.plan, after.plan).map((p) => `planning/${p}`),
+          ...changed(before.home, after.home).map((p) => `home/${p}`),
+        ];
+        if (diff.length > 0) {
+          offenders.push({ tool: t.name, shape, changed: diff });
+          restore(planningDir, before.plan, after.plan);
+          restore(home, before.home, after.home);
+        }
+      }
+    }
+    expect(offenders, "a tool labelled read-only wrote a file").toEqual([]);
+  }, 60_000);
 });

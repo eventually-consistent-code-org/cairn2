@@ -45,6 +45,24 @@ export interface LeakHit {
   name: string;
 }
 
+/** What redactLeaks hands back: the screened text and the pattern KINDS it
+ *  replaced, once each, sorted. */
+export interface Redaction {
+  text: string;
+  redacted: string[];
+}
+
+// The placeholder names the kind, never the text, for the same reason the
+// hits do: the result travels back through the agent and into the tracker.
+const placeholder = (name: string): string => `[redacted ${name}]`;
+
+// The redaction unit is the whitespace-delimited token (backticks excluded,
+// so a quoted command keeps its quotes). The hook's cairn-path pattern only
+// matches the ".cairn/" prefix; replacing the prefix alone would leave the
+// rest of the path behind for the phase-ref pattern to find.
+const tokenAround = (re: RegExp): RegExp =>
+  new RegExp(`[^\\s\`]*(?:${re.source})[^\\s\`]*`, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+
 /**
  * Builds the pattern list, mirroring buildPatterns in the hook module:
  * three built-ins, a tracker-id pattern for a Jira project key, then the
@@ -102,4 +120,44 @@ export function scanForLeaks(text: string, config?: LeakScanConfig | null): Leak
     }
   });
   return hits;
+}
+
+/**
+ * The redacting form of the scan (#374), for text the SERVER composes and
+ * posts to the tracker -- the claim and close comments. peer_run refuses a
+ * hit outright because the agent can rewrite its own input and retry; a
+ * server-composed comment quotes facts the server settled (the plan's
+ * verify line, the evidence command the close was handed), and the ledger
+ * under the planning dir keeps them exact, so the public copy swaps each
+ * private token for a kind-named placeholder instead. Same line-by-line
+ * unit and the same leakGuard.enabled switch as scanForLeaks.
+ *
+ * This replaces; it does not vouch. The caller scans the result again with
+ * scanForLeaks and refuses to post what still hits -- a user pattern that
+ * matches the placeholder itself ("redacted") can never be redacted away.
+ * Asserted in leak-patterns.test.ts ("a hit that survives redaction is
+ * still a hit"). A clean text comes back byte-identical.
+ *
+ * :param text: the comment about to be posted
+ * :param config: cairn.json (parsed or raw)
+ * :returns the screened text and the kinds redacted
+ */
+export function redactLeaks(text: string, config?: LeakScanConfig | null): Redaction {
+  if (config?.leakGuard?.enabled === false) return { text, redacted: [] };
+
+  const patterns = buildLeakPatterns(config);
+  const redacted = new Set<string>();
+
+  // Each line against every pattern, the whole surrounding token replaced
+  const out = text.split("\n").map((line) => {
+    let l = line;
+    for (const { name, re } of patterns) {
+      if (!re.test(l)) continue;
+      l = l.replace(tokenAround(re), placeholder(name));
+      redacted.add(name);
+    }
+    return l;
+  }).join("\n");
+
+  return { text: out, redacted: [...redacted].sort() };
 }
