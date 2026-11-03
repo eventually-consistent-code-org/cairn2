@@ -66,7 +66,7 @@ const PUSH_SWEEPS = ["--all", "--branches", "--mirror", "--tags", "--delete"];
 // How each subcommand's args are read: short letters that take a value, long
 // options git may see shortened, which of those take a value, short aliases.
 const READS = {
-  reset: { longs: ["--hard"] },
+  reset: { longs: ["--hard", "--merge", "--keep"] },
   checkout: { short: "bB", alias: { f: "--force" },
     longs: ["--force", "--orphan", "--conflict", "--pathspec-from-file"],
     valued: ["--orphan", "--conflict", "--pathspec-from-file"] },
@@ -77,24 +77,34 @@ const READS = {
     longs: ["--source", "--staged", "--worktree", "--pathspec-from-file", "--conflict"],
     valued: ["--source", "--pathspec-from-file", "--conflict"] },
   clean: { short: "e", alias: { n: "--dry-run" }, longs: ["--dry-run", "--exclude"], valued: ["--exclude"] },
+  rm: { alias: { f: "--force", n: "--dry-run" },
+    longs: ["--force", "--cached", "--dry-run", "--pathspec-from-file"], valued: ["--pathspec-from-file"] },
   worktree: { alias: { f: "--force" }, longs: ["--force"] },
   push: PUSH_READ,
 };
 
 const DISCARDS = "it discards uncommitted work with no undo.";
 
-// Why a stash pop, apply or drop refuses once a repository has linked worktrees (#363)
+// Why a touches-owner-checkout row refuses mid-run in the owner's checkout (#216, #435)
+const REWRITES = "it rewrites the files or HEAD of the checkout it runs in.";
+
+// Why a stash pop, apply, drop or branch refuses once a repository has linked worktrees (#363, #438)
 const SHARED_STASH = "the stash is shared by every worktree of this repository, so the entry it takes " +
   "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
   "branch instead, and squash it before the close.";
 
 /**
- * The effect table (#249, #250, #264, #296, #414, #359). Each row: the
- * effect, the subcommand, the first word it needs (`action`, read off
- * before the flags are), and `when` -- one of:
+ * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438).
+ * Each row: the effect, the subcommand, the first word it needs (`action`,
+ * read off before the flags are -- one word or a list, where "" is git's
+ * default action: no word, or an option first, as in a bare `git stash`),
+ * and `when` -- one of:
  *   flag       any of `names` is set (spelled out, shortened, or a short alias)
  *   wholeTree  a pathspec names the whole tree, or --pathspec-from-file
- *              hides it; `stagedOnly` leaves a restore of only the index alone
+ *              hides it; `sparesTree` names the flags that keep the write
+ *              off the work tree (`restore --staged`, `rm --cached`, a dry
+ *              run), and `needs` the flag the row also wants and names (a
+ *              forced rm, #434: unforced, git refuses a modified file itself)
  *   unlessOn   always, unless `name` is on at the end (a dry run)
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
@@ -103,18 +113,32 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  *   probe      the repository says so: probe[name](inv) is true
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours stay off the table because
- * they are routine or recoverable: a single-path checkout/restore, `branch
- * -D` (its reflog keeps the commits), `restore --staged .` (the index only,
- * like a plain `git reset`), deleting a feature branch, and `clean -n`.
+ * they are routine or recoverable: a single-path checkout/restore, a forced
+ * single-path `rm` (#434), `branch -D` (its reflog keeps the commits),
+ * `restore --staged .` and `rm --cached .` (the index only, like a plain
+ * `git reset`), deleting a feature branch, and `clean -n`.
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
- * apply or drop can take another worktree's work -- those three rows ask
- * the `linkedWorktrees` probe (`git worktree list --porcelain` reports more
+ * apply or drop can take another worktree's work -- those rows, and the
+ * branch action, which is pop plus a checkout (#438), ask the
+ * `linkedWorktrees` probe (`git worktree list --porcelain` reports more
  * than one entry). With one worktree they never match and the guard is
  * unchanged byte for byte. `stash push`, `save` and a bare `stash` are the
- * recoverable half and have no row -- the table refuses, it doesn't advise;
- * the run guard emits their advisory itself. `stash list|show` stay reads.
- * Asserted by runguard-effects.test.ts and runguard-guards.test.ts (#363).
+ * recoverable half and have no discards-work row -- the table refuses, it
+ * doesn't advise; the run guard emits their advisory itself. `stash
+ * list|show` stay reads. Asserted by runguard-effects.test.ts and
+ * runguard-guards.test.ts (#363, #438).
+ *
+ * Owner checkout (#216, #435): a command touches the checkout it runs in
+ * when it rewrites the working files, or replaces the checked-out commit
+ * with another -- checkout, switch, merge, pull, rebase, cherry-pick,
+ * revert, am, mv, the stash actions that write the tree (push, save, a
+ * bare stash, pop, apply, branch), and reset in its hard, merge and keep
+ * forms. A commit adds to the branch and leaves the files as the human
+ * left them; add, rm --cached and a soft or mixed reset touch the index
+ * only; the reads touch nothing -- none has a row. The run guard refuses
+ * the effect only mid-run, aimed at the owner's checkout. Asserted by
+ * runguard-effects.test.ts and runguard-guards.test.ts (#435).
  */
 export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: "reset", when: "flag", names: ["--hard"],
@@ -125,8 +149,10 @@ export const EFFECT_TABLE = Object.freeze([
     what: "a whole-tree `git checkout`", why: DISCARDS },
   { effect: DISCARDS_WORK, sub: "switch", when: "flag", names: ["--discard-changes", "--force"],
     what: "`git switch --discard-changes`", why: DISCARDS },
-  { effect: DISCARDS_WORK, sub: "restore", when: "wholeTree", stagedOnly: true,
+  { effect: DISCARDS_WORK, sub: "restore", when: "wholeTree", sparesTree: ["--staged"],
     what: "a whole-tree `git restore`", why: DISCARDS },
+  { effect: DISCARDS_WORK, sub: "rm", when: "wholeTree", needs: ["--force"], sparesTree: ["--cached", "--dry-run"],
+    what: "a forced whole-tree `git rm`", why: DISCARDS },
   { effect: DISCARDS_WORK, sub: "clean", when: "unlessOn", name: "--dry-run",
     what: "`git clean`", why: "it deletes untracked files, which git never had a copy of." },
   { effect: DISCARDS_WORK, sub: "worktree", action: "remove", when: "flag", names: ["--force"],
@@ -139,6 +165,8 @@ export const EFFECT_TABLE = Object.freeze([
     cause: "more than one worktree", what: "`git stash apply`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "stash", action: "drop", when: "probe", name: "linkedWorktrees",
     cause: "more than one worktree", what: "`git stash drop`", why: SHARED_STASH },
+  { effect: DISCARDS_WORK, sub: "stash", action: "branch", when: "probe", name: "linkedWorktrees",
+    cause: "more than one worktree", what: "`git stash branch`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "reflog", action: "expire", when: "always",
     what: "`git reflog expire`", why: "it erases the record git recovers lost commits from." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--force", "--force-with-lease", "--force-if-includes"],
@@ -157,12 +185,27 @@ export const EFFECT_TABLE = Object.freeze([
     what: "a push deleting the default branch", why: "everyone's shared history hangs off it." },
   { effect: MOVES_SHARED_REF, sub: "push", when: "pushTo",
     what: "`git push`", why: "it changes refs other clones fetch." },
-  { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout", when: "always",
-    what: "`git checkout`", why: "it rewrites the files and HEAD of the checkout it runs in." },
-  { effect: TOUCHES_OWNER_CHECKOUT, sub: "switch", when: "always",
-    what: "`git switch`", why: "it rewrites the files and HEAD of the checkout it runs in." },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout", when: "always", what: "`git checkout`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "switch", when: "always", what: "`git switch`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "reset", when: "flag", names: ["--hard"],
-    what: "`git reset --hard`", why: "it rewrites the files and HEAD of the checkout it runs in." },
+    what: "`git reset --hard`", why: REWRITES },
+  // #435 -- the rest of the commands the definition names
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "reset", when: "flag", names: ["--merge"],
+    what: "`git reset --merge`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "reset", when: "flag", names: ["--keep"],
+    what: "`git reset --keep`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "merge", when: "always", what: "`git merge`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "pull", when: "always", what: "`git pull`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "rebase", when: "always", what: "`git rebase`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "cherry-pick", when: "always", what: "`git cherry-pick`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "revert", when: "always", what: "`git revert`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "am", when: "always", what: "`git am`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "mv", when: "always", what: "`git mv`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: ["", "push", "save"], when: "always",
+    what: "`git stash push`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "pop", when: "always", what: "`git stash pop`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "apply", when: "always", what: "`git stash apply`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "branch", when: "always", what: "`git stash branch`", why: REWRITES },
 ]);
 
 /**
@@ -283,13 +326,17 @@ export function parseInvocation(words) {
  */
 function rowCause(row, inv, probe) {
   if (row.sub !== inv.sub) return null;
-  if (row.action !== undefined && inv.args[0] !== row.action) return null;
-  const args = row.action !== undefined ? inv.args.slice(1) : inv.args;
+  // the action word: the first arg, or "" when there is none or it is an
+  // option -- git's default action, as in a bare `git stash` (#435)
+  const first = inv.args[0] === undefined || inv.args[0].startsWith("-") ? "" : inv.args[0];
+  if (row.action !== undefined && ![].concat(row.action).includes(first)) return null;
+  const args = row.action !== undefined && first !== "" ? inv.args.slice(1) : inv.args;
   // past a bare `--` a push's words are still refspecs, not paths
   const parsed = () => (inv.sub === "push" ? pushArgs(inv) : readArgs(args, READS[inv.sub]));
   switch (row.when) {
     case "always":
-      return row.action ?? inv.sub;
+      // the action word it matched, or the subcommand for a row without one or a bare stash
+      return row.action === undefined ? inv.sub : first || inv.sub;
     case "flag": {
       const { flags, typed } = parsed();
       const hit = row.names.find((n) => flags.has(n));
@@ -299,11 +346,16 @@ function rowCause(row, inv, probe) {
       return parsed().on.get(row.name) === true ? null : inv.sub;
     case "wholeTree": {
       const { flags, on, typed, words } = parsed();
-      // a restore writes the work tree unless only --staged is asked for,
-      // and --no-staged takes that back
-      if (row.stagedOnly && !flags.has("--worktree") && on.get("--staged") === true) return null;
-      if (flags.has("--pathspec-from-file")) return typed.get("--pathspec-from-file");
-      return [...words, ...inv.paths].find(wholeTree) ?? null;
+      // the write stays off the work tree: `restore --staged` (unless
+      // --worktree is on too), `rm --cached`, a dry run (#434); a --no-
+      // takes any of them back
+      if (row.sparesTree?.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+      // a row that also needs a flag names it: `-rf`, not `.` (#434)
+      const need = row.needs?.find((n) => flags.has(n));
+      if (row.needs && need === undefined) return null;
+      const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
+        : [...words, ...inv.paths].find(wholeTree) ?? null;
+      return tree === null || need === undefined ? tree : typed.get(need) ?? need;
     }
     case "pushTo": {
       // what decides where it lands: the push-everything flags, then remote and refspecs

@@ -49,9 +49,10 @@
  *
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch;
- *   forced or whole-tree checkout/restore; a discarding switch; clean;
- *   stash clear; reflog expire; a forced worktree remove; a stash pop,
- *   apply or drop while more than one worktree shares the stash, #363),
+ *   forced or whole-tree checkout/restore; a discarding switch; clean; a
+ *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
+ *   worktree remove; a stash pop, apply, drop or branch while more than
+ *   one worktree shares the stash, #363, #438),
  *   options shortened as git allows (--har is --hard). Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
@@ -74,12 +75,18 @@
  *   authority is the owner's staging decision (ADR 0007).
  *
  *   touches-owner-checkout, while a batch run is live or the run list
- *   can't be read: `git checkout`, `git switch` and the hard reset (even
- *   with discards-work overridden) aimed at the owner's own checkout (see
- *   ownerCheckout) are refused -- they change the human's files underneath
- *   them, mid-edit. CAIRN_RUN_OK=1 as the leading assignment overrides
- *   that once. A hard reset there carries both effects; the refusal names
- *   both.
+ *   can't be read: every command that rewrites the working files, or
+ *   replaces the checked-out commit, of the checkout it runs in --
+ *   checkout, switch, merge, pull, rebase, cherry-pick, revert, am, mv,
+ *   the stash actions that write the tree (push, save, a bare stash, pop,
+ *   apply, branch) and reset in its hard, merge and keep forms (#435; the
+ *   hard reset even with discards-work overridden) -- aimed at the owner's
+ *   own checkout (see ownerCheckout) is refused: it changes the human's
+ *   files underneath them, mid-edit. A commit adds to their branch and
+ *   leaves the files as they left them, add and a soft or mixed reset
+ *   touch the index only, and the reads touch nothing: those pass.
+ *   CAIRN_RUN_OK=1 as the leading assignment overrides that once. A hard
+ *   reset there carries both effects; the refusal names both.
  *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
@@ -100,8 +107,8 @@
  *   checkout writing the owner's work tree, or moving their HEAD, is the
  *   owner's checkout. A folder or path only the shell can work out (cd
  *   "$X", cd -, GIT_DIR=$(...)) refuses any push -- what it lands can't be
- *   told -- unless the ship gate's escape is set, and mid-run, a checkout,
- *   switch or hard reset.
+ *   told -- unless the ship gate's escape is set, and mid-run, any
+ *   command that touches the owner's checkout (#435).
  *
  *   Commands are read by shell-words.mjs, shared with the harness guard
  *   (#270), so rules see through wrappers and their flag values (sudo -u
@@ -229,6 +236,10 @@ const MAX_TARGETS = 16;
  * read, or touch only the index, the work tree or the config (whose push
  * settings linePushConfig watches). Any other subcommand can: an alias,
  * a third-party git-foo, or a typo help.autocorrect runs as the real thing.
+ * "Read" here means refs only: rm, mv, clean and restore are on this list
+ * because they move no ref, not because they are harmless -- whether one
+ * discards work is the effect table's question (a forced whole-tree rm
+ * refuses there, #434).
  */
 const GIT_READS = new Set(["", "status", "log", "diff", "show", "add", "rm", "mv", "restore", "grep",
   "blame", "annotate", "shortlog", "describe", "rev-parse", "rev-list", "ls-files", "ls-tree",
@@ -1161,8 +1172,9 @@ const repoProbe = (at) => ({
 /**
  * True for the stash's parking half (#363): a bare `git stash`, `stash
  * push`, `stash save`, or options with no action (`git stash -u`). It has
- * no effect-table row -- stashing is recoverable -- so the run guard only
- * advises on it, and only when worktrees share the stash.
+ * no discards-work row -- stashing is recoverable -- so the run guard only
+ * advises on it, and only when worktrees share the stash. (Its
+ * touches-owner-checkout row, #435, is the mid-run rule, judged below.)
  */
 const parksStash = (inv) => inv.sub === "stash"
   && (inv.args[0] === undefined || ["push", "save"].includes(inv.args[0]) || inv.args[0].startsWith("-"));
@@ -1171,7 +1183,7 @@ const parksStash = (inv) => inv.sub === "stash"
 const STASH_ADVICE = "cairn run guard: this repository has more than one worktree, and the stash is " +
   "shared by every worktree of it -- an entry pushed here shows in the others' `git stash list`, and " +
   "their pop can take it. Prefer a WIP commit on your own branch (squash it before the close); a " +
-  "stash pop, apply or drop is refused while the worktrees share the stash.";
+  "stash pop, apply, drop or branch is refused while the worktrees share the stash.";
 
 /**
  * Why this push may not land on the default branch yet, as [why, what to
@@ -1386,7 +1398,8 @@ function judgeLine(line, start, ctx) {
     const owner = known.some(ownerCheckout);
     if (!lost && !owner) continue;
 
-    const name = inv.sub === "reset" ? "git reset --hard" : `git ${inv.sub}`;
+    // the row's own name for it: `git reset --keep`, `git stash pop` (#435)
+    const name = touch.what.replace(/`/g, "");
     if (unreadable) {
       refuse([
         `cairn run guard: can't read the batch-run list at ${unreadable}, so this \`${name}\` of ` +
@@ -1499,6 +1512,9 @@ try {
  *   #322  a heredoc body is data; the substitutions it runs are commands
  *   #359  classified by effect; refusals derived from the effects
  *   #414  forced worktree remove refused in every session
+ *   #434  a forced whole-tree rm discards work (git refuses a modified file
+ *         itself unless forced); --cached, a dry run and a single path stay
+ *         the everyday neighbours
  *   #358  every refusal recorded and counted; a frozen run's sessions push nothing
  *         (hooks.test.ts, "circuit breaker")
  *   #363  no stash across linked worktrees: stash pop, apply and drop are
@@ -1508,6 +1524,14 @@ try {
  *         (the table refuses, it doesn't advise) -- the advisory stays a run
  *         guard emit, STASH_ADVICE. The issue asked #359 to carry this as an
  *         effect; #359 landed first, so it ships as rows in its table.
- *         #435 (phase 30) adds its touches-owner-checkout condition on these
- *         same rows, not a second row set.
+ *         #435 adds touches-owner-checkout rows for the stash actions that
+ *         write the tree, beside these -- one effect per row, as the hard
+ *         reset has had since #359.
+ *   #438  `stash branch` is pop plus a checkout: one more row under the same
+ *         linkedWorktrees probe and the same shared-stash reason
+ *   #435  the owner-checkout effect covers every command its definition
+ *         names: merge, pull, rebase, cherry-pick, revert, am, mv, the stash
+ *         push / save / pop / apply / branch actions and reset --merge /
+ *         --keep join checkout, switch and reset --hard. The definition line
+ *         is in the rules above and on the table.
  */
