@@ -52,7 +52,10 @@ export interface CloseReceipt {
  *  later reader pooling them as if they were one. */
 export type DurationSource = "claim_comment" | "observed_claim" | "git_span" | "none";
 
-export interface Measured { minutes: number | null; source: DurationSource }
+/** `minutes` is the span less any usage-limit wait inside it; `pausedMinutes`
+ *  is that wait, present ONLY when there was one (#380) -- a close with no
+ *  pause writes the same receipt it always did. */
+export interface Measured { minutes: number | null; source: DurationSource; pausedMinutes?: number }
 
 /** Why the append is working without a receipt. Always named, never implied. */
 export type ReceiptDegraded = "no_receipt" | "receipt_unreadable";
@@ -177,9 +180,12 @@ function minutes(n: number | null): string {
 }
 
 // `wall=12m:claim_comment` -- the number never travels without its rung.
+// `wall=42m:claim_comment paused=310m` when a usage-limit wait came off it
+// (#380): the pause is stated, not implied, and absent when there was none.
 function wallField(w: Measured): string {
-  return w.minutes === null || w.source === "none"
-    ? "wall=none" : `wall=${w.minutes}m:${w.source}`;
+  if (w.minutes === null || w.source === "none") return "wall=none";
+  const paused = w.pausedMinutes ? ` paused=${w.pausedMinutes}m` : "";
+  return `wall=${w.minutes}m:${w.source}${paused}`;
 }
 
 function estimateField(e: ReceiptEstimate): string {

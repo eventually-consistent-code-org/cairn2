@@ -121,9 +121,13 @@ function minutes(n) {
     return n === null ? "none" : `${n}m`;
 }
 // `wall=12m:claim_comment` -- the number never travels without its rung.
+// `wall=42m:claim_comment paused=310m` when a usage-limit wait came off it
+// (#380): the pause is stated, not implied, and absent when there was none.
 function wallField(w) {
-    return w.minutes === null || w.source === "none"
-        ? "wall=none" : `wall=${w.minutes}m:${w.source}`;
+    if (w.minutes === null || w.source === "none")
+        return "wall=none";
+    const paused = w.pausedMinutes ? ` paused=${w.pausedMinutes}m` : "";
+    return `wall=${w.minutes}m:${w.source}${paused}`;
 }
 function estimateField(e) {
     const parts = [];

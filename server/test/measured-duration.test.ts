@@ -9,7 +9,7 @@ import { FakeTracker } from "../src/tracker/fake.js";
 import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
 import {
   claimCommentTime, closeEvidenceText, composeClaimComment, composeCloseComment, gitSpan,
-  headCommit, isClaimComment, measureAtClose, measuredText,
+  headCommit, isClaimComment, measureAtClose, measuredText, pausedMinutesFromLog, pausesPath,
 } from "../src/planning/duration.js";
 import { metricsPath } from "../src/core/continuity.js";
 import { issueCostUsd } from "../src/core/metrics.js";
@@ -652,6 +652,146 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       expect(wip.json.claimCommented).toBe(true);
       expect(wip.json).not.toHaveProperty("claimCommentRedacted");
       expect(tracker.comments(made.json.id)[0].text).toContain(PLAN_PATH);
+    });
+  });
+
+  describe("a usage-limit wait inside the span is subtracted (#380)", () => {
+    // The pauses log lives under the cairn home, so HOME is a temp folder
+    // for this block -- a fixture log, and no real one touched.
+    let savedHome: string | undefined;
+    beforeAll(() => {
+      savedHome = process.env.HOME;
+      process.env.HOME = mkdtempSync(join(tmpdir(), "cairn-pause-home-"));
+    });
+    afterAll(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    });
+
+    const pauseRow = (kind: string, min: number) =>
+      JSON.stringify({ kind, type: "x", event: "Notification", observedAt: at(min), session_id: "s1" });
+
+    it("the worklog gets the measured minutes less the pause, not the span", async () => {
+      const tracker = new WorklogFake();
+      const { call, advance, projectDir } = await harness(tracker);
+      const made = await call("issue_create", { title: "paused" });
+      await call("issue_update", { id: made.json.id, state: "in_progress" });
+      const log = pausesPath(projectDir, join(process.env.HOME!, ".cairn"));
+      mkdirSync(dirname(log), { recursive: true });
+      writeFileSync(log, [pauseRow("paused", 2), pauseRow("resumed", 5)].join("\n") + "\n");
+      advance(11);
+      const closed = await call("issue_close", { id: made.json.id, timeSpentMinutes: 90 });
+      expect(closed.json.measured).toEqual({ minutes: 8, source: "observed_claim", pausedMinutes: 3 });
+      expect(closed.json.claimedMinutes).toBe(90);
+      expect(tracker.logged).toEqual([8]);
+    });
+  });
+});
+
+describe("usage-limit pauses inside the claim-to-close span (#380)", () => {
+  const CLOSE = at(120);
+  const row = (kind: string, min: number, session = "s1", extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ kind, type: "x", event: "Notification", observedAt: at(min), session_id: session, ...extra });
+  const log = (...rows: string[]) => rows.join("\n") + "\n";
+
+  it("one window inside the span is subtracted; windows outside it are ignored", () => {
+    expect(pausedMinutesFromLog(log(row("paused", 30), row("resumed", 50)), T0, CLOSE)).toBe(20);
+    expect(pausedMinutesFromLog(log(row("paused", 130), row("resumed", 150)), T0, CLOSE)).toBe(0);
+    expect(pausedMinutesFromLog(log(row("paused", -30), row("resumed", -10)), T0, CLOSE)).toBe(0);
+  });
+
+  it("a window straddling the span counts only the part inside it", () => {
+    expect(pausedMinutesFromLog(log(row("paused", -10), row("resumed", 10)), T0, CLOSE)).toBe(10);
+    expect(pausedMinutesFromLog(log(row("paused", 110), row("resumed", 130)), T0, CLOSE)).toBe(10);
+  });
+
+  it("an unclosed stale or stopped window closes at the close", () => {
+    expect(pausedMinutesFromLog(log(row("paused", 30), row("stale", 40)), T0, CLOSE)).toBe(90);
+    expect(pausedMinutesFromLog(log(row("paused", 30), row("stopped", 40)), T0, CLOSE)).toBe(90);
+    // a stale row with no rate_limit row before it still opens the window
+    expect(pausedMinutesFromLog(log(row("stale", 30)), T0, CLOSE)).toBe(90);
+    // so does a rate_limit stop whose resume never got recorded
+    expect(pausedMinutesFromLog(log(row("paused", 100)), T0, CLOSE)).toBe(20);
+  });
+
+  it("a stale window closes at the session's next recorded event -- the first sign of a turn", () => {
+    expect(pausedMinutesFromLog(
+      log(row("paused", 30), row("stale", 40), row("paused", 60), row("resumed", 70)), T0, CLOSE,
+    )).toBe(40);
+    // another session's event is not this session's turn
+    expect(pausedMinutesFromLog(
+      log(row("paused", 30), row("stale", 40), row("paused", 60, "s2"), row("resumed", 70, "s2")), T0, CLOSE,
+    )).toBe(90);
+  });
+
+  it("overlapping windows from two sessions are one wait, not two", () => {
+    expect(pausedMinutesFromLog(
+      log(row("paused", 30), row("paused", 40, "s2"), row("resumed", 50), row("resumed", 60, "s2")), T0, CLOSE,
+    )).toBe(30);
+  });
+
+  it("needs_input and unknown kinds are not pauses; a resume with no window is ignored", () => {
+    expect(pausedMinutesFromLog(log(row("needs_input", 30), row("resumed", 50)), T0, CLOSE)).toBe(0);
+    expect(pausedMinutesFromLog(log(row("something_new", 30)), T0, CLOSE)).toBe(0);
+  });
+
+  it("a malformed row is skipped, never fatal; an empty or reversed span is 0", () => {
+    const clean = log(row("paused", 30), row("resumed", 50));
+    const dirty = log(
+      "{ corrupt", "", JSON.stringify({ kind: 7, observedAt: at(10) }),
+      JSON.stringify({ kind: "paused", observedAt: "yesterday-ish" }), "[]", "null",
+      row("paused", 30), row("resumed", 50),
+    );
+    expect(pausedMinutesFromLog(dirty, T0, CLOSE)).toBe(pausedMinutesFromLog(clean, T0, CLOSE));
+    expect(pausedMinutesFromLog("", T0, CLOSE)).toBe(0);
+    expect(pausedMinutesFromLog(clean, CLOSE, T0)).toBe(0);
+    expect(pausedMinutesFromLog(clean, "not a date", CLOSE)).toBe(0);
+  });
+
+  describe("measureAtClose reads the log for the first two rungs", () => {
+    const home = mkdtempSync(join(tmpdir(), "cairn-pauses-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "cairn-pauses-project-"));
+    const write = (...rows: string[]) => {
+      const p = pausesPath(projectDir, home);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, log(...rows));
+    };
+    const plain = { comments: [{ id: "c1", text: CLAIM, at: T0 }], observedClaimAt: null, closedAt: CLOSE };
+    const pauses = { projectDir, home };
+
+    it("no pauses file: byte-identical to today, no pausedMinutes field", () => {
+      const m = measureAtClose({ ...plain, pauses });
+      expect(m).toEqual(measureAtClose(plain));
+      expect(m).not.toHaveProperty("pausedMinutes");
+    });
+
+    it("a window outside the span leaves measured and pausedMinutes untouched", () => {
+      write(row("paused", 130), row("resumed", 150));
+      expect(measureAtClose({ ...plain, pauses })).toEqual(measureAtClose(plain));
+    });
+
+    it("a window inside the span reduces measured and records pausedMinutes; rung label unchanged", () => {
+      write(row("paused", 30), row("resumed", 50));
+      expect(measureAtClose({ ...plain, pauses })).toEqual({
+        minutes: 100, source: "claim_comment", pausedMinutes: 20, claimedAt: T0,
+      });
+      // rung two subtracts the same way
+      expect(measureAtClose({ comments: undefined, observedClaimAt: at(10), closedAt: CLOSE, pauses })).toEqual({
+        minutes: 90, source: "observed_claim", pausedMinutes: 20, claimedAt: at(10),
+      });
+    });
+
+    it("a pause longer than the span floors at zero rather than going negative", () => {
+      write(row("paused", -10), row("resumed", 130));
+      expect(measureAtClose({ ...plain, pauses })).toEqual({
+        minutes: 0, source: "claim_comment", pausedMinutes: 120, claimedAt: T0,
+      });
+    });
+
+    it("nothing derivable stays none -- no pause is subtracted from no number", () => {
+      write(row("paused", 30), row("resumed", 50));
+      expect(measureAtClose({ comments: [], observedClaimAt: null, closedAt: CLOSE, pauses }))
+        .toEqual({ minutes: null, source: "none", claimedAt: null });
     });
   });
 });

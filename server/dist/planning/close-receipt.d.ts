@@ -28,9 +28,13 @@ export interface CloseReceipt {
  *  different measurements of different spans -- the label is what stops a
  *  later reader pooling them as if they were one. */
 export type DurationSource = "claim_comment" | "observed_claim" | "git_span" | "none";
+/** `minutes` is the span less any usage-limit wait inside it; `pausedMinutes`
+ *  is that wait, present ONLY when there was one (#380) -- a close with no
+ *  pause writes the same receipt it always did. */
 export interface Measured {
     minutes: number | null;
     source: DurationSource;
+    pausedMinutes?: number;
 }
 /** Why the append is working without a receipt. Always named, never implied. */
 export type ReceiptDegraded = "no_receipt" | "receipt_unreadable";
