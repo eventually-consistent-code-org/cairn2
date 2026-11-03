@@ -17,23 +17,30 @@ import { projectStatus } from "./status.js";
 //   - [x] <taskRef> — <summary> — commits <base7>..<head7> — [tdd <r>..<g> — ]
 //     [evidence <cmd> => <result> — | waived <reason> — ][observed <k=v ...> — ]
 //     [actuals <k=v ...> — ]<issueId> closed <date>
-// taskRef and summary match lazily so the "commits <sha>..<sha>" anchor, not
-// an em dash inside a summary, decides where the fields end. The evidence
-// segment (phase 23) is optional so pre-gate lines keep parsing; the writer
-// strips em dashes from evidence text so the segment can't swallow issueId.
-// The actuals segment (phase 24.7) is optional for the same reason, and so
-// is the observed segment (#357), written only when `verify.rerun` is on.
+// taskRef matches lazily (up to the first em dash) and summary GREEDILY, so
+// the LAST "commits <sha>..<sha>" run from which the rest of the grammar
+// still matches is the anchor, never the first (#426). The segments the
+// server writes -- evidence, observed, actuals -- sit after the real anchor,
+// so a summary carrying its own fake run (the writer neutralises em dashes
+// there now; a line written before #426 or by hand does not) is swallowed
+// whole into the summary slot and the server's observation is the one
+// read. Asserted by test/distill-manifest.test.ts "the parser binds the
+// LAST segment run". The evidence segment (phase 23) is optional so
+// pre-gate lines keep parsing; the writer strips em dashes from evidence
+// text so the segment can't swallow issueId. The actuals segment (phase
+// 24.7) is optional for the same reason, and so is the observed segment
+// (#357), written only when `verify.rerun` is on.
 //
 // An evidence line (#256) makes no closure claim: unchecked box, optional
 // note segment, and an "evidence for <issueId> <date>" tail. It is matched
 // FIRST -- its free-text note could otherwise satisfy the closure pattern.
-const EVIDENCE_LINE_RE = new RegExp("^- \\[ \\] (.+?) — (.+?) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
+const EVIDENCE_LINE_RE = new RegExp("^- \\[ \\] (.+?) — (.+) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
     + "(?:tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
     + "(?:(?:evidence|waived) [^—]*? — )?(?:note [^—]*? — )?evidence for (.+?) (.+)$");
 // The closure pattern also captures its gate segments (groups 5, 6 and 7:
 // tdd, evidence, observed) so plan_check's ledger gates read the same parse
 // distill does -- one grammar, one parser.
-const LEDGER_LINE_RE = new RegExp("^- \\[x\\] (.+?) — (.+?) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
+const LEDGER_LINE_RE = new RegExp("^- \\[x\\] (.+?) — (.+) — commits ([0-9a-f]{7,40})\\.\\.([0-9a-f]{7,40}) — "
     + "(tdd [0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40} — )?"
     + "((?:evidence|waived) [^—]*? — )?(observed [^—]*? — )?(?:actuals [^—]*? — )?(.+?) closed (.+)$");
 // Inside an observed segment: the exit it recorded, and the mismatch marker.

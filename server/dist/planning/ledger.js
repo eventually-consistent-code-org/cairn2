@@ -30,9 +30,14 @@ function shortSha(commit) {
 function sanitize(field) {
     return field.replace(/\s*\n\s*/g, " ").trim();
 }
-/** Evidence text additionally loses em dashes — " — " is the ledger line's
- *  field separator, so one inside a command or result would shift every
- *  field after it for the readers (distill-manifest, resync). */
+/** Free-text slots additionally lose em dashes — " — " is the ledger line's
+ *  field separator, so one inside a command, result, task reference or
+ *  summary would shift every field after it for the readers
+ *  (distill-manifest, resync). The task reference and summary go through
+ *  it too (#426): a summary carrying its own "commits .. — observed exit=0
+ *  — closed" run would otherwise sit ahead of the server's real
+ *  observation on the line. Asserted by test/ledger.test.ts "a summary
+ *  shaped like a passing ledger tail cannot forge the observation". */
 function sanitizeSegment(field) {
     return sanitize(field).replace(/—/g, "-");
 }
@@ -92,11 +97,11 @@ function formatEntry(entry, actuals, observed = "") {
         // in place of "<issueId> closed". The readers key off exactly this tail.
         const note = entry.note !== undefined && sanitizeSegment(entry.note)
             ? `note ${sanitizeSegment(entry.note)} — ` : "";
-        return `- [ ] ${sanitize(entry.taskRef)} — ${sanitize(entry.summary)} — commits `
+        return `- [ ] ${sanitizeSegment(entry.taskRef)} — ${sanitizeSegment(entry.summary)} — commits `
             + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
             + `${tdd}${evidence}${note}evidence for ${sanitize(entry.issueId)} ${sanitize(entry.closedDate)}\n`;
     }
-    return `- [x] ${sanitize(entry.taskRef)} — ${sanitize(entry.summary)} — commits `
+    return `- [x] ${sanitizeSegment(entry.taskRef)} — ${sanitizeSegment(entry.summary)} — commits `
         + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
         + `${tdd}${evidence}${observed}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
 }
