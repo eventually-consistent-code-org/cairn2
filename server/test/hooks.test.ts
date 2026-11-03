@@ -4279,6 +4279,8 @@ describe("harness guard protects git hooks (#353)", () => {
     expect(run(p, home, "Write", { file_path: join(p, ".git", "hooks", "pre-commit") }, { PATH: "/nonexistent" }).status).toBe(2);
     expect(run(p, home, "Write", { file_path: hook }, { CAIRN_HARNESS_EDIT: "1" }).status).toBe(0);
     expect(run(p, home, "Bash", { command: "CAIRN_HARNESS_EDIT=1 echo x > scripts/hooks/post-checkout" }).status).toBe(0);
+  });
+});
 
 // The usage-limit pause recorder (#379): StopFailure rate_limit and the quota
 // Notification types land one row each in the machine's pauses log; a
