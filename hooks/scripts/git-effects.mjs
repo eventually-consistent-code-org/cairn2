@@ -77,6 +77,8 @@ const READS = {
     longs: ["--source", "--staged", "--worktree", "--pathspec-from-file", "--conflict"],
     valued: ["--source", "--pathspec-from-file", "--conflict"] },
   clean: { short: "e", alias: { n: "--dry-run" }, longs: ["--dry-run", "--exclude"], valued: ["--exclude"] },
+  rm: { alias: { f: "--force", n: "--dry-run" },
+    longs: ["--force", "--cached", "--dry-run", "--pathspec-from-file"], valued: ["--pathspec-from-file"] },
   worktree: { alias: { f: "--force" }, longs: ["--force"] },
   push: PUSH_READ,
 };
@@ -94,7 +96,10 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * before the flags are), and `when` -- one of:
  *   flag       any of `names` is set (spelled out, shortened, or a short alias)
  *   wholeTree  a pathspec names the whole tree, or --pathspec-from-file
- *              hides it; `stagedOnly` leaves a restore of only the index alone
+ *              hides it; `sparesTree` names the flags that keep the write
+ *              off the work tree (`restore --staged`, `rm --cached`, a dry
+ *              run), and `needs` the flag the row also wants and names (a
+ *              forced rm, #434: unforced, git refuses a modified file itself)
  *   unlessOn   always, unless `name` is on at the end (a dry run)
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
@@ -103,9 +108,10 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  *   probe      the repository says so: probe[name](inv) is true
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours stay off the table because
- * they are routine or recoverable: a single-path checkout/restore, `branch
- * -D` (its reflog keeps the commits), `restore --staged .` (the index only,
- * like a plain `git reset`), deleting a feature branch, and `clean -n`.
+ * they are routine or recoverable: a single-path checkout/restore, a forced
+ * single-path `rm` (#434), `branch -D` (its reflog keeps the commits),
+ * `restore --staged .` and `rm --cached .` (the index only, like a plain
+ * `git reset`), deleting a feature branch, and `clean -n`.
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
  * apply or drop can take another worktree's work -- those three rows ask
@@ -125,8 +131,10 @@ export const EFFECT_TABLE = Object.freeze([
     what: "a whole-tree `git checkout`", why: DISCARDS },
   { effect: DISCARDS_WORK, sub: "switch", when: "flag", names: ["--discard-changes", "--force"],
     what: "`git switch --discard-changes`", why: DISCARDS },
-  { effect: DISCARDS_WORK, sub: "restore", when: "wholeTree", stagedOnly: true,
+  { effect: DISCARDS_WORK, sub: "restore", when: "wholeTree", sparesTree: ["--staged"],
     what: "a whole-tree `git restore`", why: DISCARDS },
+  { effect: DISCARDS_WORK, sub: "rm", when: "wholeTree", needs: ["--force"], sparesTree: ["--cached", "--dry-run"],
+    what: "a forced whole-tree `git rm`", why: DISCARDS },
   { effect: DISCARDS_WORK, sub: "clean", when: "unlessOn", name: "--dry-run",
     what: "`git clean`", why: "it deletes untracked files, which git never had a copy of." },
   { effect: DISCARDS_WORK, sub: "worktree", action: "remove", when: "flag", names: ["--force"],
@@ -299,11 +307,16 @@ function rowCause(row, inv, probe) {
       return parsed().on.get(row.name) === true ? null : inv.sub;
     case "wholeTree": {
       const { flags, on, typed, words } = parsed();
-      // a restore writes the work tree unless only --staged is asked for,
-      // and --no-staged takes that back
-      if (row.stagedOnly && !flags.has("--worktree") && on.get("--staged") === true) return null;
-      if (flags.has("--pathspec-from-file")) return typed.get("--pathspec-from-file");
-      return [...words, ...inv.paths].find(wholeTree) ?? null;
+      // the write stays off the work tree: `restore --staged` (unless
+      // --worktree is on too), `rm --cached`, a dry run (#434); a --no-
+      // takes any of them back
+      if (row.sparesTree?.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+      // a row that also needs a flag names it: `-rf`, not `.` (#434)
+      const need = row.needs?.find((n) => flags.has(n));
+      if (row.needs && need === undefined) return null;
+      const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
+        : [...words, ...inv.paths].find(wholeTree) ?? null;
+      return tree === null || need === undefined ? tree : typed.get(need) ?? need;
     }
     case "pushTo": {
       // what decides where it lands: the push-everything flags, then remote and refspecs

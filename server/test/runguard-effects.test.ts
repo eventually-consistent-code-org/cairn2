@@ -166,6 +166,41 @@ describe("git effects: the stash is shared across linked worktrees (#363)", () =
   });
 });
 
+describe("git effects: a forced whole-tree rm discards work (#434)", () => {
+  // git itself refuses to remove a modified file unless forced, so the
+  // forced whole-tree form is the one that throws edits away; each row is
+  // [the command, the force word the refusal names]
+  const refused: Array<[string, string]> = [
+    ["git rm -rf .", "-rf"],
+    ["git rm -r --force .", "--force"],
+    ["git rm -r --forc :/", "--forc"],
+    ["git rm -fr ./", "-fr"],
+    ["git rm -f *", "-f"],
+    ["git rm -rf -- .", "-rf"],
+    ["git rm -q -r -f ../..", "-f"],
+    ["git rm -rf --pathspec-from-file=paths.txt", "-rf"],
+  ];
+
+  it("each forced whole-tree spelling discards work and names the force word", () => {
+    for (const [c, flag] of refused) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.flag, c).toBe(flag);
+      expect(hit?.what, c).toBe("a forced whole-tree `git rm`");
+      expect(effects(c), c).toEqual([DISCARDS_WORK]);
+    }
+  });
+
+  it("the unforced, cached, dry-run and single-path forms stay read-only", () => {
+    for (const c of ["git rm -r .", "git rm .", "git rm --cached -r .", "git rm -rf --cached .",
+      "git rm -r -f --cached :/", "git rm -rfn .", "git rm -rf --dry-run .", "git rm -rf src/a.ts",
+      "git rm -rf src", "git rm -f seed.txt", "git rm --cached seed.txt", "git rm -rf *.log"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+});
+
 describe("git effects: moves-shared-ref, three spellings (#359)", () => {
   it("a push of every branch, spelled --all, -u with main, and --branc, moves a shared ref", () => {
     for (const [c, flag] of [["git push --all origin", "push --all origin"],

@@ -2356,6 +2356,47 @@ describe("run guard: forced worktree remove refused in every session (#414)", ()
   });
 });
 
+describe("run guard: forced whole-tree rm refused in every session (#434)", () => {
+  it("refuses a forced rm of the whole tree, naming the owner's ways to approve", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git rm -rf .",
+      "git rm -r --force .",
+      "git rm --forc -r :/",
+      "git rm -f '*'",
+      "git rm -rf -- .",
+      "git -C . rm -rf ./",
+      "cd sub && git rm -rf ../..",
+      "timeout 5 git rm -rf .",
+      "git rm -rf --pathspec-from-file=paths.txt",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("a forced whole-tree `git rm` is refused in every session");
+      expect(r.stderr, c).toContain("effect: discards-work, from `");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("the unforced form (git refuses a modified file itself), --cached, a dry run and a single path pass", () => {
+    const { proj, home } = fixture();
+    for (const c of [
+      "git rm -r .",
+      "git rm --cached -r .",
+      "git rm -rf --cached .",
+      "git rm -rfn .",
+      "git rm -rf seed.txt",
+      "git rm -rf src",
+      "git rm -f '*.log'",
+      "echo git rm -rf .",
+    ]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+    expect(guard(proj, home, "git rm -rf .", { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git rm -rf .").status).toBe(0);
+  });
+});
+
 describe("run guard: no stash across linked worktrees (#363)", () => {
   /** The fixture repository plus one linked worktree beside it -- two entries in `git worktree list`. */
   function twoWorktrees(): { proj: string; home: string; linked: string } {

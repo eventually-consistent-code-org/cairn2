@@ -45,9 +45,10 @@
  *
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch;
- *   forced or whole-tree checkout/restore; a discarding switch; clean;
- *   stash clear; reflog expire; a forced worktree remove; a stash pop,
- *   apply or drop while more than one worktree shares the stash, #363),
+ *   forced or whole-tree checkout/restore; a discarding switch; clean; a
+ *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
+ *   worktree remove; a stash pop, apply or drop while more than one
+ *   worktree shares the stash, #363),
  *   options shortened as git allows (--har is --hard). Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
@@ -225,6 +226,10 @@ const MAX_TARGETS = 16;
  * read, or touch only the index, the work tree or the config (whose push
  * settings linePushConfig watches). Any other subcommand can: an alias,
  * a third-party git-foo, or a typo help.autocorrect runs as the real thing.
+ * "Read" here means refs only: rm, mv, clean and restore are on this list
+ * because they move no ref, not because they are harmless -- whether one
+ * discards work is the effect table's question (a forced whole-tree rm
+ * refuses there, #434).
  */
 const GIT_READS = new Set(["", "status", "log", "diff", "show", "add", "rm", "mv", "restore", "grep",
   "blame", "annotate", "shortlog", "describe", "rev-parse", "rev-list", "ls-files", "ls-tree",
@@ -1495,6 +1500,9 @@ try {
  *   #322  a heredoc body is data; the substitutions it runs are commands
  *   #359  classified by effect; refusals derived from the effects
  *   #414  forced worktree remove refused in every session
+ *   #434  a forced whole-tree rm discards work (git refuses a modified file
+ *         itself unless forced); --cached, a dry run and a single path stay
+ *         the everyday neighbours
  *   #358  every refusal recorded and counted; a frozen run's sessions push nothing
  *         (hooks.test.ts, "circuit breaker")
  *   #363  no stash across linked worktrees: stash pop, apply and drop are
