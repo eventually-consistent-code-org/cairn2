@@ -441,8 +441,9 @@ linked worktrees already share.
 ## Hook surface
 <!-- docs: done -->
 
-Nine dependency-free Node scripts, fired by the harness around tool
-calls and session boundaries. They divide into three kinds, and the
+Dependency-free Node scripts (the hook entries `hooks/hooks.json`
+names, plus the shared helpers beside them), fired by the harness around
+tool calls and session boundaries. They divide into three kinds, and the
 distinction matters more than the count.
 
 - **Recorders** write state and are invisible by construction: the
@@ -502,7 +503,11 @@ classification is what makes the next unseen case recognizable.
 Two properties hold across all three. They import no server code — the
 path schemes they need, including the repository key of the previous
 section, are recomputed in a shared helper, so the server stays the
-source of truth without becoming a dependency. And their
+source of truth without becoming a dependency (asserted:
+`server/test/hooks.test.ts`, "plugin layer imports no server code" —
+every import in `hooks/scripts`, `scripts` and `scripts/lib`, followed
+transitively, is a `node:` builtin or a relative path inside the plugin
+layer, and a walk that matches no files fails; #391). And their
 escape hatches share one shape: an assignment prefixed to the command,
 prefix-only so that a mention elsewhere in the line cannot bypass the
 guard.
