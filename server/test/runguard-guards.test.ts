@@ -1812,7 +1812,9 @@ describe("run guard: a commit or ref move earlier in the line can't slip past th
     const { proj, home } = fixture({ status: "running", phases, pushAuth, currentPhase: 3 });
     for (const c of [
       "git commit -am x && git push origin runbranch",
-      "git rebase main; git push -u origin runbranch",
+      // the rebase in the owner's checkout is itself refused mid-run (#435);
+      // CAIRN_RUN_OK lifts that one, so the push-step rule is what's left
+      "CAIRN_RUN_OK=1 git rebase main; git push -u origin runbranch",
       "make release && git push origin runbranch",
     ]) {
       const r = push(proj, home, c);
@@ -2406,8 +2408,12 @@ describe("run guard: no stash across linked worktrees (#363)", () => {
     return { proj, home, linked };
   }
 
-  // branch (#438) is pop plus a checkout: it takes the entry onto a new branch and drops it
-  for (const [action, rest] of [["pop", ""], ["apply", ""], ["drop", ""], ["branch", " topic"]]) {
+  // branch (#438) is pop plus a checkout: it takes the entry onto a new
+  // branch and drops it. The ones that write the tree also touch the
+  // checkout (#435), and the effect line says so; drop leaves it alone.
+  const also = "; also touches-owner-checkout.";
+  for (const [action, rest, tail] of [["pop", "", also], ["apply", "", also], ["drop", "", "."],
+    ["branch", " topic", also]]) {
     it(`\`git stash ${action}\` passes with one worktree and is refused with two, naming the shared stash`, () => {
       const c = `git stash ${action}${rest}`;
       const single = fixture();
@@ -2424,7 +2430,7 @@ describe("run guard: no stash across linked worktrees (#363)", () => {
         expect(r.stderr, label).toContain(`\`git stash ${action}\` is refused`);
         expect(r.stderr, label).toContain("shared by every worktree");
         expect(r.stderr, label).toContain("WIP commit");
-        expect(r.stderr, label).toContain("effect: discards-work, from `more than one worktree`.");
+        expect(r.stderr, label).toContain(`effect: discards-work, from \`more than one worktree\`${tail}`);
         expectOwnerTail(r.stderr, label, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
       }
     });
@@ -2463,5 +2469,104 @@ describe("run guard: no stash across linked worktrees (#363)", () => {
   it("the owner's escape still lets a pop through with two worktrees", () => {
     const { proj, home } = twoWorktrees();
     expect(guard(proj, home, "git stash pop", { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status).toBe(0);
+  });
+});
+
+describe("run guard: the owner-checkout effect covers every command its definition names (#435)", () => {
+  const LIVE = { status: "running", phases: [], pushAuth: { granted: false } };
+
+  /** The fixture repository with a live run, plus one linked worktree -- the run's own place to work. */
+  function liveWithWorktree(): { proj: string; home: string; linked: string } {
+    const { proj, home } = fixture(LIVE);
+    const linked = join(freshDir("cairn-runguard-linked-"), "wt");
+    git(proj, "worktree", "add", "-q", "-b", "side", linked);
+    return { proj, home, linked };
+  }
+
+  // Each row: [the command, the word the refusal's effect line names, what the refusal calls it].
+  // Before #435 every one of them read read-only and ran in the owner's checkout mid-run.
+  const rows: Array<[command: string, flag: string, name: string]> = [
+    ["git merge side", "merge", "git merge"],
+    ["git merge --abort", "merge", "git merge"],
+    ["git pull", "pull", "git pull"],
+    ["git pull --ff-only origin main", "pull", "git pull"],
+    ["git rebase main", "rebase", "git rebase"],
+    ["git rebase --continue", "rebase", "git rebase"],
+    ["git cherry-pick abc123", "cherry-pick", "git cherry-pick"],
+    ["git revert --no-edit HEAD", "revert", "git revert"],
+    ["git am fix.patch", "am", "git am"],
+    ["git mv seed.txt moved.txt", "mv", "git mv"],
+    ["git stash", "stash", "git stash push"],
+    ["git stash -u", "stash", "git stash push"],
+    ["git stash push -m wip", "push", "git stash push"],
+    ["git stash save wip", "save", "git stash push"],
+    ["git stash pop", "pop", "git stash pop"],
+    ["git stash apply stash@{0}", "apply", "git stash apply"],
+    ["git stash branch topic", "branch", "git stash branch"],
+    ["git reset --merge", "--merge", "git reset --merge"],
+    ["git reset --keep HEAD~1", "--keep", "git reset --keep"],
+    ["git reset --mer ORIG_HEAD", "--mer", "git reset --merge"],
+    ["git -C . reset -q --ke HEAD~1", "--ke", "git reset --keep"],
+  ];
+
+  it("each is refused in the owner's checkout while a run is live, naming the run and the effect", () => {
+    const { proj, home } = fixture(LIVE);
+    for (const [c, flag, name] of rows) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+      expect(r.stderr, c).toContain(`this \`${name}\` targets the checkout you work in`);
+      expect(r.stderr, c).toContain(`effect: touches-owner-checkout, from \`${flag}\`.`);
+      expectOwnerTail(r.stderr, c);
+    }
+  });
+
+  it("each passes in the run's own worktree, and in the owner's checkout once no run is live", () => {
+    const { proj, home, linked } = liveWithWorktree();
+    // the linked worktree makes a stash pop, apply or branch discards-work
+    // (#363); that isn't the rule under test, so the owner's escape lifts it
+    const lifted = { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" };
+    for (const [c] of rows) {
+      const r = guard(proj, home, c, lifted, linked);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      expect(guard(proj, home, `git -C ${linked} ${c.replace(/^git (-C \. )?/, "")}`, lifted).status, c).toBe(0);
+    }
+    const idle = fixture();
+    for (const [c] of rows) {
+      const r = guard(idle.proj, idle.home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("CAIRN_RUN_OK=1 as the leading assignment lifts each one once", () => {
+    const { proj, home } = fixture(LIVE);
+    for (const [c] of rows) {
+      expect(guard(proj, home, `CAIRN_RUN_OK=1 ${c}`).status, c).toBe(0);
+    }
+  });
+
+  it("a commit, the index-only commands and the reads still pass in the owner's checkout mid-run", () => {
+    const { proj, home } = fixture(LIVE);
+    for (const c of [
+      "git commit --allow-empty -m wip",
+      "git add -A",
+      "git rm --cached seed.txt",
+      "git reset",
+      "git reset --soft HEAD~1",
+      "git reset --mixed HEAD~1",
+      "git stash list",
+      "git stash show -p",
+      "git stash drop",
+      "git tag v1",
+      "git fetch origin",
+      "git status",
+      "git log --oneline -3",
+      "git log $(git merge-base HEAD main)..HEAD",
+      'git commit -m "explain git rebase main"',
+      "echo git pull",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
   });
 });

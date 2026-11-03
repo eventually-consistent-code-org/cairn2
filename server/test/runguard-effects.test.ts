@@ -158,10 +158,11 @@ describe("git effects: the stash is shared across linked worktrees (#363)", () =
     }
   });
 
-  it("adds no fourth effect -- the stash rows are discards-work", () => {
-    const rows = EFFECT_TABLE.filter((r: { sub: string }) => r.sub === "stash");
+  it("adds no fourth effect -- the stash rows are discards-work, or owner-checkout (#435)", () => {
+    const stash = EFFECT_TABLE.filter((r: { sub: string }) => r.sub === "stash");
+    for (const r of stash) expect([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]).toContain(r.effect);
+    const rows = stash.filter((r: { effect: string }) => r.effect === DISCARDS_WORK);
     expect(rows.map((r: { action: string }) => r.action)).toEqual(["clear", "pop", "apply", "drop", "branch"]);
-    for (const r of rows) expect(r.effect).toBe(DISCARDS_WORK);
     expect(rows.slice(1).every((r: { when: string; name: string }) =>
       r.when === "probe" && r.name === "linkedWorktrees")).toBe(true);
   });
@@ -228,6 +229,50 @@ describe("git effects: touches-owner-checkout, three spellings (#359)", () => {
       expect(causes(c, DISCARDS_WORK).map((h) => h.flag), c).toEqual([flag]);
     }
   });
+
+  // #435 -- the effect covers every command its definition names: one that
+  // rewrites the working files, or replaces the checked-out commit, of the
+  // checkout it runs in. Each row: [the command, the word the cause names].
+  it("merge, pull, rebase, cherry-pick, revert, am and mv touch the checkout they run in (#435)", () => {
+    for (const [c, flag] of [["git merge topic", "merge"], ["git merge --abort", "merge"],
+      ["git pull", "pull"], ["git pull --rebase origin main", "pull"], ["git rebase -i main", "rebase"],
+      ["git rebase --continue", "rebase"], ["git cherry-pick abc123", "cherry-pick"],
+      ["git revert --no-edit HEAD", "revert"], ["git am fix.patch", "am"], ["git mv a.ts b.ts", "mv"]]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT).map((h) => h.flag), c).toEqual([flag]);
+      expect(effects(c), c).toEqual([TOUCHES_OWNER_CHECKOUT]);
+    }
+  });
+
+  it("the stash actions that write the tree touch it: push, save, a bare stash, pop, apply, branch (#435)", () => {
+    for (const [c, flag, what] of [["git stash", "stash", "`git stash push`"], ["git stash -u", "stash", "`git stash push`"],
+      ["git stash push -m wip", "push", "`git stash push`"], ["git stash save wip", "save", "`git stash push`"],
+      ["git stash pop", "pop", "`git stash pop`"], ["git stash apply stash@{0}", "apply", "`git stash apply`"],
+      ["git stash branch topic", "branch", "`git stash branch`"]]) {
+      const hits = causes(c, TOUCHES_OWNER_CHECKOUT);
+      expect(hits.map((h) => h.flag), c).toEqual([flag]);
+      expect(hits[0].what, c).toBe(what);
+      expect(effects(c), c).toEqual([TOUCHES_OWNER_CHECKOUT]);
+    }
+    for (const c of ["git stash list", "git stash show -p", "git stash drop", "git stash clear"]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT), c).toEqual([]);
+    }
+  });
+
+  it("reset --merge and --keep, spelled out and shortened, touch the checkout and discard nothing (#435)", () => {
+    for (const [c, flag] of [["git reset --merge", "--merge"], ["git reset --keep HEAD~1", "--keep"],
+      ["git reset --mer ORIG_HEAD", "--mer"], ["git reset -q --ke HEAD~1", "--ke"]]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT).map((h) => h.flag), c).toEqual([flag]);
+      expect(effects(c), c).toEqual([TOUCHES_OWNER_CHECKOUT]);
+    }
+  });
+
+  it("a commit, the index-only commands and the reads leave the checkout as the human left it (#435)", () => {
+    for (const c of ["git commit -m wip", "git commit --amend --no-edit", "git add -A", "git rm --cached -r .",
+      "git reset", "git reset --soft HEAD~1", "git reset --mixed HEAD~1", "git tag v1", "git branch -D topic",
+      "git fetch origin", "git status", "git diff", "git log", "git merge-base HEAD main"]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT), c).toEqual([]);
+    }
+  });
 });
 
 describe("git effects: everyday git stays allowed (#359)", () => {
@@ -239,15 +284,18 @@ describe("git effects: everyday git stays allowed (#359)", () => {
     ["git add -A", [READ_ONLY]],
     ["git commit -m wip", [READ_ONLY]],
     ["git fetch origin", [READ_ONLY]],
-    ["git pull --ff-only", [READ_ONLY]],
+    // a pull, like a merge, rewrites the checkout it runs in (#435): refused
+    // only mid-run, in the owner's checkout
+    ["git pull --ff-only", [TOUCHES_OWNER_CHECKOUT]],
     ["git branch", [READ_ONLY]],
     ["git branch -D topic", [READ_ONLY]],
     ["git worktree list", [READ_ONLY]],
     // statically, and in a repository with one worktree; a second worktree
-    // makes pop/apply/drop discard work (#363, below)
-    ["git stash push -m wip", [READ_ONLY]],
-    ["git stash pop", [READ_ONLY]],
-    ["git stash apply", [READ_ONLY]],
+    // makes pop/apply/drop discard work (#363, below). The ones that write
+    // the tree touch the checkout (#435); drop leaves it alone
+    ["git stash push -m wip", [TOUCHES_OWNER_CHECKOUT]],
+    ["git stash pop", [TOUCHES_OWNER_CHECKOUT]],
+    ["git stash apply", [TOUCHES_OWNER_CHECKOUT]],
     ["git stash drop", [READ_ONLY]],
     ["git push origin topic", [MOVES_SHARED_REF]],
     ["git reset --soft HEAD~1", [READ_ONLY]],
