@@ -124,8 +124,15 @@ export function recordRekey(home, projectDir, moved) {
   }
 }
 
+/** A sqlite database's sidecars: rollback journal, write-ahead log, shared memory. */
+const DB_SIDECAR = /-(journal|wal|shm)$/;
+
 /** One-shot move of every `<worktreeKey><rest>` repository-state file to
- *  `<projectKey><rest>`; a name whose twin exists stays put. */
+ *  `<projectKey><rest>`; a name whose twin exists stays put. A database
+ *  sidecar moves only in the pass that moves its database (#442) -- set
+ *  beside the shared index, another checkout's hot journal is replayed
+ *  into it on the next open. Databases first; a sidecar whose database
+ *  stayed, or has none, stays too. */
 export function migrateRepositoryState(projectDir, home = join(homedir(), ".cairn")) {
   const key = projectKey(projectDir);
   const legacy = worktreeKey(projectDir);
@@ -139,11 +146,18 @@ export function migrateRepositoryState(projectDir, home = join(homedir(), ".cair
     } catch {
       continue; // never written on this machine
     }
-    for (const name of names) {
+    const ours = names.filter((name) => {
       const rest = name.slice(legacy.length);
-      if (!name.startsWith(legacy) || !(rest.startsWith(".") || rest.startsWith("-"))) continue;
-      if (rest.endsWith(".tmp")) continue; // a write in flight renames itself
-      if (moveNoClobber(join(dir, name), join(dir, `${key}${rest}`))) moved.push(`${sub}/${name}`);
+      if (!name.startsWith(legacy) || !(rest.startsWith(".") || rest.startsWith("-"))) return false;
+      return !rest.endsWith(".tmp"); // a write in flight renames itself
+    });
+    const move = (name) => {
+      if (moveNoClobber(join(dir, name), join(dir, `${key}${name.slice(legacy.length)}`))) moved.push(`${sub}/${name}`);
+    };
+    // Databases before their sidecars, so a sidecar can ask whether its database moved in this pass.
+    for (const name of ours) if (!DB_SIDECAR.test(name)) move(name);
+    for (const name of ours) {
+      if (DB_SIDECAR.test(name) && moved.includes(`${sub}/${name.replace(DB_SIDECAR, "")}`)) move(name);
     }
   }
   recordRekey(home, projectDir, moved);

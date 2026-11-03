@@ -89,6 +89,16 @@ export declare function recordRekey(baseDir: string, projectDir: string, moved: 
  * shared file is never replaced. Nothing to move, nothing logged, so the
  * move is one-shot by construction: the old name is gone once it lands.
  *
+ * A database sidecar (`-journal`, `-wal`, `-shm`) moves only in the pass
+ * that moves its database (#442). Set beside the shared index, a hot
+ * rollback journal from another checkout's killed commit is replayed into
+ * it on the next open as if it were its own -- the file is never replaced
+ * by name and destroyed by content. So databases go first, and a sidecar
+ * whose database stayed, or has none, stays too. Asserted:
+ * project-key.test.ts, "a database sidecar moves only with its database".
+ * The moment between a database landing and its journal following is the
+ * same window the readdir order always left; accepted, not locked.
+ *
  * :param projectDir: the checkout
  * :param baseDir: the cairn home
  * :returns: `<dir>/<old name>` for each file moved

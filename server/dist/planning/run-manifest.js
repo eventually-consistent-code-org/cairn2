@@ -165,6 +165,8 @@ export function moveNoClobber(from, to) {
     }
     return true;
 }
+/** A sqlite database's sidecars: rollback journal, write-ahead log, shared memory. */
+const DB_SIDECAR = /-(journal|wal|shm)$/;
 /**
  * The one-shot rekey's record: one row on the project's metrics log naming
  * what moved. It carries no session_id, so every latest-row-per-session
@@ -194,6 +196,16 @@ export function recordRekey(baseDir, projectDir, moved) {
  * shared file is never replaced. Nothing to move, nothing logged, so the
  * move is one-shot by construction: the old name is gone once it lands.
  *
+ * A database sidecar (`-journal`, `-wal`, `-shm`) moves only in the pass
+ * that moves its database (#442). Set beside the shared index, a hot
+ * rollback journal from another checkout's killed commit is replayed into
+ * it on the next open as if it were its own -- the file is never replaced
+ * by name and destroyed by content. So databases go first, and a sidecar
+ * whose database stayed, or has none, stays too. Asserted:
+ * project-key.test.ts, "a database sidecar moves only with its database".
+ * The moment between a database landing and its journal following is the
+ * same window the readdir order always left; accepted, not locked.
+ *
  * :param projectDir: the checkout
  * :param baseDir: the cairn home
  * :returns: `<dir>/<old name>` for each file moved
@@ -213,14 +225,23 @@ export function migrateRepositoryState(projectDir, baseDir = join(homedir(), ".c
         catch {
             continue; // never written on this machine
         }
-        for (const name of names) {
+        const ours = names.filter((name) => {
             const rest = name.slice(legacy.length);
             if (!name.startsWith(legacy) || !(rest.startsWith(".") || rest.startsWith("-")))
-                continue;
-            if (rest.endsWith(".tmp"))
-                continue; // a write in flight renames itself
-            if (moveNoClobber(join(dir, name), join(dir, `${key}${rest}`)))
+                return false;
+            return !rest.endsWith(".tmp"); // a write in flight renames itself
+        });
+        const move = (name) => {
+            if (moveNoClobber(join(dir, name), join(dir, `${key}${name.slice(legacy.length)}`)))
                 moved.push(`${sub}/${name}`);
+        };
+        // Databases before their sidecars, so a sidecar can ask whether its database moved in this pass.
+        for (const name of ours)
+            if (!DB_SIDECAR.test(name))
+                move(name);
+        for (const name of ours) {
+            if (DB_SIDECAR.test(name) && moved.includes(`${sub}/${name.replace(DB_SIDECAR, "")}`))
+                move(name);
         }
     }
     recordRekey(baseDir, projectDir, moved);
