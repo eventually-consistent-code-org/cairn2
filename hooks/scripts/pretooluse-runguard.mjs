@@ -3,7 +3,11 @@
 /**
  * Purpose: PreToolUse run guard -- classifies every git invocation by what
  *   it does, and refuses by effect. Exit 2 blocks; ANY internal error exits
- *   0 -- a broken guard (or classifier) never blocks work.
+ *   0 -- a broken guard (or classifier) never blocks work. That is the
+ *   guard's own half of "fails open" only: since Claude Code 2.1.299 the
+ *   platform fails closed when it cannot reach the guard or read its
+ *   answer (onFailure stays unset in hooks.json by design, ADR 0016;
+ *   dated claim about the harness, 2026-10-14, #371).
  *
  * Effects (git-effects.mjs classifies; its EFFECT_TABLE is the data):
  *   discards-work           uncommitted or unpushed work lost with no undo.

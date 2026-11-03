@@ -120,6 +120,13 @@
  *   program a hook or an MCP server starts by name off PATH. An MCP server
  *   that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
+ *
+ *   Fails open on its own error only (exit 0 above): since Claude Code
+ *   2.1.299 the platform fails closed when it cannot reach the guard or
+ *   read its answer -- an action this guard could have blocked is refused,
+ *   not let through, and on Windows a PreToolUse hook with no shell blocks
+ *   the call. onFailure stays unset in hooks.json by design (ADR 0016).
+ *   Dated claim about the harness, 2026-10-14, #371.
  */
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";

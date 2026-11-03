@@ -461,8 +461,14 @@ distinction matters more than the count.
   decides what the agent may do at all — the hook directory, the tool
   server config, the settings cascade, the plugin manifests — from the
   agent it configures. Each refuses in one plain line naming the file
-  and the way to proceed deliberately, and each fails open: an error
-  inside a guard exits zero rather than blocking work. Their refusals
+  and the way to proceed deliberately, and each fails open on its own
+  error: an error inside a guard exits zero rather than blocking work,
+  and `hooks/hooks.json` leaves the platform's `onFailure: "block"`
+  unset so the harness does not invert that. The delivery half is the
+  platform's: since Claude Code 2.1.299 it fails closed when it
+  cannot reach the guard or read its answer — an action the guard
+  could have blocked is refused, not let through (a dated claim about
+  the harness, 2026-10-14; ADR 0016, #371). Their refusals
   also add up: each appends an audit row (a digest of the input, never
   the command), and a headless batch run refused `auto.breaker` times
   is frozen by the circuit breaker, which writes the stop into the run

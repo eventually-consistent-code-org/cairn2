@@ -87,6 +87,14 @@ jobs:
       # version.
       # CI-only: this installs the CLI on the runner. The plugin never runs
       # it — nothing shipped at the marketplace ref fetches or executes code.
+      #
+      # git floor (#371): from Claude Code 2.1.283, `plugin eval` refuses to
+      # run on git older than 2.31 — the run stops before any case with a
+      # message naming the version, nothing is graded, and the step exits
+      # non-zero. The pin below predates that release, so the floor bites
+      # the day the pin moves past it; ubuntu-latest clears it, and a
+      # self-hosted runner that doesn't needs its git upgraded before this
+      # step. A claim about the harness, as of 2026-10-14 (docs/EVALS.md).
       - name: install claude code
         run: |
           npm install -g @anthropic-ai/claude-code@2.1.267
