@@ -332,7 +332,7 @@ doesn't support.
    neither does the report.
 5. **Write the file — beside the manifest, never in the repo.** The
    `path` field on `run_manifest(action: "read")` names the manifest's
-   real location under `~/.cairn/runs/`; the report is that same
+   real location in the runs folder under the cairn home; the report is that same
    filename with `.json` replaced by `-report.md`, so the runId rides
    along in the name. Run artifacts live under `~/.cairn`: never
    committed, never referenced from repo docs.

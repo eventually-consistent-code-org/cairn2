@@ -13,8 +13,9 @@
  *   batch run that hits one of these goes silent, and its umbrella issue
  *   said nothing about why -- so this hook writes each event where the
  *   run's readers look:
- *     1. one row in the machine's pauses log (~/.cairn/pauses/<projectKey>.jsonl,
- *        append-only, #351): kind, observedAt from this clock, the raw type,
+ *     1. one row in the machine's pauses log (pauses/<projectKey>.jsonl under
+ *        the cairn home folder, append-only, #351): kind, observedAt from this
+ *        clock, the raw type,
  *        the session id, the reset time when the platform's message named
  *        one, and where any comment landed;
  *     2. while a batch manifest reads `running`, one plain-language comment
