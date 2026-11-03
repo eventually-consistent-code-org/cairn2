@@ -4564,3 +4564,529 @@ describe("pause recorder hook (#379)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// #383 -- every refused shape has an allowed twin, and holds from a subfolder
+// ---------------------------------------------------------------------------
+//
+// The blocks above assert what the three PreToolUse guards refuse, with
+// allowed cases scattered through them. Two things nothing above checks: a
+// guard that refused EVERYTHING would still be green on every refusal row,
+// and every refusal runs from the project root -- not one runs with the
+// shell standing in a subfolder, which is where `../../hooks/hooks.json`,
+// `$(pwd)`, a relative core.hooksPath and the leak guard's project-root
+// lookup all get a second chance to go wrong. The v2.8.2 sweep caught three
+// over-matches by hand (#383); each refused shape carrying its harmless twin,
+// run from the root and again from a nested cwd, is the cheaper net.
+//
+// Audit, 2026-11-03, before this block landed -- every refused shape the
+// three guard headers and the test names in this file name, against two
+// columns: did this file assert a harmless neighbour of it passes (twin),
+// and did it assert the refusal from a nested cwd (sub). Each line below
+// is one row of TABLE; the row's `shape` is the audit's shape name.
+//
+//   run guard (pretooluse-runguard.mjs header: Effects, and the rules)
+//     hard reset ...................................... twin no   sub no
+//     force push ...................................... twin no   sub no
+//     push deleting the default branch ................ twin no   sub no
+//     forced checkout ................................. twin no   sub no
+//     whole-tree checkout ............................. twin no   sub no
+//     whole-tree restore .............................. twin no   sub no
+//     clean ........................................... twin no   sub no
+//     stash clear ..................................... twin no   sub no
+//     reflog expire ................................... twin no   sub no
+//     forced worktree remove .......................... twin no   sub no
+//     forced whole-tree rm ............................ twin no   sub no
+//     default-branch push without a stamp ............. twin no   sub no
+//     mid-run checkout ................................ twin YES  sub no
+//     mid-run switch .................................. twin YES  sub no
+//     mid-run merge ................................... twin no   sub no
+//     mid-run rebase .................................. twin no   sub no
+//     mid-run stash ................................... twin no   sub no
+//     mid-run reset --merge ........................... twin no   sub no
+//     mid-run push without the grant .................. twin no   sub no
+//     a line nested deeper than the reader reads ...... twin YES  sub no
+//     an unreadable run list .......................... twin YES  sub no
+//     git -C into the owner's checkout ................ twin YES  sub no
+//     the override quoted in a message ................ twin YES  sub no
+//     a reset inside a process substitution ........... twin YES  sub no
+//     --hard after an unquoted $(...) ................. twin YES  sub no
+//   harness guard (pretooluse-harnessguard.mjs header: Purpose, Coverage)
+//     Edit on the hook directory ...................... twin YES  sub no
+//     Write on a hook script .......................... twin YES  sub no
+//     NotebookEdit under the hook directory ........... twin no   sub no
+//     Edit on the MCP server config ................... twin YES  sub no
+//     Edit on the project settings .................... twin YES  sub no
+//     Edit on the local settings ...................... twin YES  sub no
+//     Edit on the plugin manifest ..................... twin no   sub no
+//     Edit on the marketplace manifest ................ twin no   sub no
+//     Edit on .claude/hooks ........................... twin YES  sub no
+//     Edit on .claude/agents .......................... twin YES  sub no
+//     Edit on .claude/skills .......................... twin YES  sub no
+//     Edit on .claude/commands ........................ twin YES  sub no
+//     Edit on Cursor's hook config .................... twin YES  sub no
+//     Edit on Cursor's hook scripts ................... twin YES  sub no
+//     Edit on Cursor's MCP config ..................... twin YES  sub no
+//     a redirect into the hook config ................. twin YES  sub no
+//     an append onto the MCP config ................... twin no   sub no
+//     sed -i on the settings .......................... twin no   sub no
+//     cp onto the plugin manifest ..................... twin YES  sub no
+//     mv onto a hook script ........................... twin no   sub no
+//     rm of a hook script ............................. twin no   sub no
+//     tee onto the MCP config ......................... twin no   sub no
+//     rm -rf of a protected folder .................... twin no   sub no
+//     mkdir into a protected folder ................... twin YES  sub no
+//     a clone into a protected folder ................. twin YES  sub no
+//     a clone from inside a protected folder .......... twin YES  sub no
+//     a write handed to another shell ................. twin YES  sub no
+//     chmod of a protected folder ..................... twin YES  sub no
+//     git checkout -- of a hook file .................. twin YES  sub no
+//     git -C onto a hook file ......................... twin YES  sub no
+//     claude mcp add .................................. twin YES  sub no
+//     claude plugin install ........................... twin YES  sub no
+//     the machine-wide settings ....................... twin YES  sub no
+//     the machine-wide MCP config ..................... twin YES  sub no
+//     the plugin registry ............................. twin YES  sub no
+//     .git/hooks ...................................... twin YES  sub no
+//     the core.hooksPath folder ....................... twin YES  sub no
+//     a script the settings run ....................... twin YES  sub no
+//     a script an MCP config launches ................. twin YES  sub no
+//     a folder an MCP config runs a server from ....... twin YES  sub no
+//     the ship-gate stamp ............................. twin YES  sub no
+//     a run manifest .................................. twin YES  sub no
+//     the refusal log ................................. twin YES  sub no
+//     the plugin root ................................. twin YES  sub no
+//     a wildcard onto the plugin manifest ............. twin YES  sub no
+//     a heredoc redirected onto the hook config ....... twin YES  sub no
+//     a $(...) an unquoted heredoc body runs .......... twin YES  sub no
+//     a target under $(pwd) ........................... twin YES  sub no
+//     a line nested deeper than the reader reads ...... twin no   sub no
+//     an MCP write onto the MCP config ................ twin YES  sub no
+//     an MCP command line writing the hook config ..... twin YES  sub no
+//     an MCP move into the hook directory ............. twin YES  sub no
+//   leak guard (pretooluse-leakguard.mjs header, leak-patterns.mjs)
+//     a planning-folder path in a staged source file .. twin YES  sub no
+//     the same path, server source exempt ............. twin YES  sub no
+//     a tracker id in server source ................... twin no   sub no
+//     a phase ref ..................................... twin no   sub no
+//     a cairn label ................................... twin no   sub no
+//     a widened commit catching an unstaged leak ...... twin YES  sub no
+//     the override quoted in the message .............. twin no   sub no
+//     a planning-folder path in a non-server script ... twin YES  sub no
+//
+//   Gaps: 30 shapes with no twin; 85 of 85 with no subfolder run. The
+//   meta-test at the end keeps both columns full from here on.
+//
+// The twin the issue sketched for the leak guard -- "the same path inside a
+// code comment the guard already exempts" -- does not exist: leak-patterns
+// exempts by PATH (markdown, docs/, server/src and server/dist), never by
+// comment syntax, so the leak twins here use those exemptions. One
+// under-match the subfolder runs surfaced is out of this issue's scope and
+// reported with it, not fixed here: with CLAUDE_PROJECT_DIR unset, the leak
+// and harness guards take the payload cwd as the project root, so from a
+// subfolder the leak guard finds no cairn.json and the harness guard sees
+// `../../hooks/hooks.json` as outside the project. Claude Code sets the
+// variable for every hook (dated claim, 2026-11, per the hooks reference),
+// so every row here runs with it set, as the platform does.
+describe("every refused shape has an allowed twin, and holds from a subfolder (#383)", () => {
+  type Guard = "run" | "harness" | "leak";
+  type Cwd = "root" | "nested";
+
+  /** Where the shell stands for one call. `rel` climbs from the shell's folder back to the project root: "" at the root, "../../" from pkg/lib. */
+  type Ctx = {
+    root: string; cwd: string; rel: string;
+    home: string; cairnHome: string; plugin: string;
+  };
+
+  /** One side of a row: the payload the guard judges, fixture work it needs first, env it adds. */
+  type Side = {
+    payload: (c: Ctx) => Record<string, unknown>;
+    setup?: (c: Ctx) => void;
+    env?: Record<string, string>;
+  };
+
+  /** One refused shape. `twin: null` is the gap the meta-test reports -- a refusal with no harmless neighbour. */
+  type Row = {
+    guard: Guard;
+    shape: string;
+    refused: Side;
+    twin: Side | null;
+    cwds: readonly Cwd[];
+  };
+
+  const GUARD: Record<Guard, string> = { run: RUNGUARD, harness: HARNESSGUARD, leak: LEAKGUARD };
+  const BOTH: readonly Cwd[] = ["root", "nested"];
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  // spelled apart so no line of this file reads as a planning-folder path or
+  // a phase ref to the commit leak guard that scans it
+  const PLAN_PATH = ".cairn" + "/plans/x";
+  const PHASE_REF = "phases/" + "03-foo";
+  const SEED_LABEL = "cairn:" + "seed";
+
+  // Payload builders. File tools take the absolute path the harness hands
+  // them; shell lines take `rel`, since a relative path is what an agent
+  // types and what a nested cwd changes the meaning of.
+  const sh = (line: (c: Ctx) => string): Side =>
+    ({ payload: (c) => ({ tool_name: "Bash", tool_input: { command: line(c) } }) });
+  const file = (tool: string, path: (c: Ctx) => string, field = "file_path"): Side =>
+    ({ payload: (c) => ({ tool_name: tool, tool_input: { [field]: path(c) } }) });
+  const mcp = (tool: string, input: (c: Ctx) => Record<string, unknown>): Side =>
+    ({ payload: (c) => ({ tool_name: tool, tool_input: input(c) }) });
+  const withSetup = (side: Side, setup: (c: Ctx) => void): Side => ({ ...side, setup });
+  const inProj = (rel: string) => (c: Ctx) => join(c.root, rel);
+  const nestedLine = (depth: number, inner: string) => "echo " + "$(a ".repeat(depth) + inner + ")".repeat(depth);
+
+  // Fixture work the rows share.
+  const liveRun = (c: Ctx) => {
+    const { base, hash } = hashAndBaseForEnvDir(c.root);
+    mkdirSync(join(c.cairnHome, "runs"), { recursive: true });
+    writeFileSync(join(c.cairnHome, "runs", `${base}-${hash}-run-abc123.json`),
+      JSON.stringify({ version: 1, runId: "run-abc123", status: "running" }));
+  };
+  const unreadableRuns = (c: Ctx) => writeFileSync(join(c.cairnHome, "runs"), "a file where the folder should be");
+  const stampAndManifests = (c: Ctx) => {
+    mkdirSync(join(c.cairnHome, "ship-gate"), { recursive: true });
+    mkdirSync(join(c.cairnHome, "runs"), { recursive: true });
+    writeFileSync(join(c.cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+    writeFileSync(join(c.cairnHome, "runs", "proj-0123456789abcdef-r1.json"), "{}");
+    writeFileSync(join(c.cairnHome, "runs", "proj-0123456789abcdef-r1-report.md"), "# run\n");
+  };
+  const hooksPath = (c: Ctx) => {
+    mkdirSync(join(c.root, "scripts", "hooks"), { recursive: true });
+    execFileSync("git", ["config", "core.hooksPath", "scripts/hooks"], { cwd: c.root });
+  };
+  const settingsRunScript = (c: Ctx) => {
+    mkdirSync(join(c.root, ".claude"), { recursive: true });
+    mkdirSync(join(c.root, "tools"), { recursive: true });
+    writeFileSync(join(c.root, ".claude", "settings.local.json"), JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "node \"$CLAUDE_PROJECT_DIR\"/tools/check.mjs" }] }] },
+    }));
+  };
+  const mcpLaunches = (c: Ctx) => {
+    mkdirSync(join(c.home, "repos", "gmail", "dist"), { recursive: true });
+    mkdirSync(join(c.home, "weather"), { recursive: true });
+    writeFileSync(join(c.home, "repos", "gmail", "dist", "index.js"), "// server\n");
+    writeFileSync(join(c.home, ".claude.json"), JSON.stringify({ mcpServers: {
+      gmail: { type: "stdio", command: "node", args: [join(c.home, "repos", "gmail", "dist", "index.js")] },
+      weather: { command: "uv", args: ["--directory", join(c.home, "weather"), "run", "weather.py"] },
+    } }));
+  };
+  const stage = (name: string, content: string) => (c: Ctx) => {
+    mkdirSync(dirname(join(c.root, name)), { recursive: true });
+    stageFile(c.root, name, content);
+  };
+  const jiraAnd = (name: string, content: string) => (c: Ctx) => {
+    writeFileSync(join(c.root, "cairn.json"),
+      JSON.stringify({ tracker: { type: "jira", config: { projectKey: "DRILL" } }, auto: { breaker: 0 } }));
+    stage(name, content)(c);
+  };
+  const committedThenDirty = (c: Ctx) => {
+    stageFile(c.root, "app.ts", "const ok = true;\n");
+    execFileSync("git", ["commit", "-q", "-m", "app", "--no-gpg-sign"], { cwd: c.root });
+    writeFileSync(join(c.root, "app.ts"), `const p = "${PLAN_PATH}";\n`);
+  };
+
+  const TABLE: readonly Row[] = [
+    // -- run guard: discards-work, refused in every session --------------
+    { guard: "run", shape: "hard reset", cwds: BOTH,
+      refused: sh(() => "git reset --hard HEAD~1"), twin: sh(() => "git reset --soft HEAD~1") },
+    { guard: "run", shape: "force push", cwds: BOTH,
+      refused: sh(() => "git push --force origin feature"), twin: sh(() => "git push origin feature") },
+    { guard: "run", shape: "push deleting the default branch", cwds: BOTH,
+      refused: sh(() => "git push origin :main"), twin: sh(() => "git push origin :feature") },
+    { guard: "run", shape: "forced checkout", cwds: BOTH,
+      refused: sh(() => "git checkout -f main"), twin: sh(() => "git checkout -b feature") },
+    { guard: "run", shape: "whole-tree checkout", cwds: BOTH,
+      refused: sh(() => "git checkout -- ."), twin: sh(() => "git checkout -- seed.txt") },
+    { guard: "run", shape: "whole-tree restore", cwds: BOTH,
+      refused: sh(() => "git restore ."), twin: sh(() => "git restore seed.txt") },
+    { guard: "run", shape: "clean", cwds: BOTH,
+      refused: sh(() => "git clean -fd"), twin: sh(() => "git clean -n") },
+    { guard: "run", shape: "stash clear", cwds: BOTH,
+      refused: sh(() => "git stash clear"), twin: sh(() => "git stash list") },
+    { guard: "run", shape: "reflog expire", cwds: BOTH,
+      refused: sh(() => "git reflog expire --expire=now --all"), twin: sh(() => "git reflog show") },
+    { guard: "run", shape: "forced worktree remove", cwds: BOTH,
+      refused: sh(() => "git worktree remove --force x"), twin: sh(() => "git worktree list") },
+    { guard: "run", shape: "forced whole-tree rm", cwds: BOTH,
+      refused: sh(() => "git rm -rf ."), twin: sh(() => "git rm --cached seed.txt") },
+    // -- run guard: moves-shared-ref onto the default branch ---------------
+    { guard: "run", shape: "default-branch push without a stamp", cwds: BOTH,
+      refused: sh(() => "git push origin main"), twin: sh(() => "git push origin feature") },
+    // -- run guard: touches-owner-checkout and pushes while a run is live --
+    { guard: "run", shape: "mid-run checkout", cwds: BOTH,
+      refused: withSetup(sh(() => "git checkout -b feature"), liveRun), twin: sh(() => 'git commit -m "checkout the docs"') },
+    { guard: "run", shape: "mid-run switch", cwds: BOTH,
+      refused: withSetup(sh(() => "git switch main"), liveRun), twin: sh(() => "git status") },
+    { guard: "run", shape: "mid-run merge", cwds: BOTH,
+      refused: withSetup(sh(() => "git merge feature"), liveRun), twin: sh(() => "git log --oneline") },
+    { guard: "run", shape: "mid-run rebase", cwds: BOTH,
+      refused: withSetup(sh(() => "git rebase main"), liveRun), twin: sh(() => "git diff") },
+    { guard: "run", shape: "mid-run stash", cwds: BOTH,
+      refused: withSetup(sh(() => "git stash"), liveRun), twin: sh(() => "git add seed.txt") },
+    { guard: "run", shape: "mid-run reset --merge", cwds: BOTH,
+      refused: withSetup(sh(() => "git reset --merge"), liveRun), twin: sh(() => "git reset --soft HEAD~1") },
+    { guard: "run", shape: "mid-run push without the grant", cwds: BOTH,
+      refused: withSetup(sh(() => "git push origin feature"), liveRun), twin: sh(() => "git fetch origin") },
+    // -- run guard: the reader's edges -------------------------------------
+    { guard: "run", shape: "a line nested deeper than the reader reads", cwds: BOTH,
+      refused: sh(() => nestedLine(9, "rm -rf hooks")), twin: sh(() => nestedLine(8, "rm -rf hooks")) },
+    { guard: "run", shape: "an unreadable run list", cwds: BOTH,
+      refused: withSetup(sh(() => "git checkout main"), unreadableRuns), twin: sh(() => "git status") },
+    { guard: "run", shape: "git -C into the owner's checkout", cwds: BOTH,
+      refused: withSetup(sh((c) => `git -C ${c.root} checkout main`), liveRun), twin: sh((c) => `git -C ${c.root} status`) },
+    { guard: "run", shape: "the override quoted in a message", cwds: BOTH,
+      refused: withSetup(sh(() => 'git checkout main -m "CAIRN_RUN_OK=1"'), liveRun),
+      twin: sh(() => "CAIRN_RUN_OK=1 git checkout main") },
+    { guard: "run", shape: "a reset inside a process substitution", cwds: BOTH,
+      refused: sh(() => "diff <(git reset --hard) /dev/null"), twin: sh(() => "diff <(sort a) <(sort b)") },
+    { guard: "run", shape: "--hard after an unquoted $(...)", cwds: BOTH,
+      refused: sh(() => "git reset $(git rev-parse HEAD~1) --hard"), twin: sh(() => "git diff $(git rev-parse HEAD~1)") },
+
+    // -- harness guard: the file tools on each protected surface -----------
+    { guard: "harness", shape: "Edit on the hook directory", cwds: BOTH,
+      refused: file("Edit", inProj("hooks/hooks.json")), twin: file("Edit", inProj("server/hooks/helper.ts")) },
+    { guard: "harness", shape: "Write on a hook script", cwds: BOTH,
+      refused: file("Write", inProj("hooks/scripts/lib.mjs")), twin: file("Write", inProj("hooksy/thing.json")) },
+    { guard: "harness", shape: "NotebookEdit under the hook directory", cwds: BOTH,
+      refused: file("NotebookEdit", inProj("hooks/x.ipynb"), "notebook_path"),
+      twin: file("NotebookEdit", inProj("notebooks/x.ipynb"), "notebook_path") },
+    { guard: "harness", shape: "Edit on the MCP server config", cwds: BOTH,
+      refused: file("Edit", inProj(".mcp.json")), twin: file("Edit", inProj("mcp.example.json")) },
+    { guard: "harness", shape: "Edit on the project settings", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/settings.json")), twin: file("Edit", inProj("settings.json")) },
+    { guard: "harness", shape: "Edit on the local settings", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/settings.local.json")), twin: file("Edit", inProj(".claude/notes.md")) },
+    { guard: "harness", shape: "Edit on the plugin manifest", cwds: BOTH,
+      refused: file("Edit", inProj(".claude-plugin/plugin.json")), twin: file("Edit", inProj("plugin.json")) },
+    { guard: "harness", shape: "Edit on the marketplace manifest", cwds: BOTH,
+      refused: file("Edit", inProj(".claude-plugin/marketplace.json")), twin: file("Edit", inProj("docs/marketplace.json")) },
+    { guard: "harness", shape: "Edit on .claude/hooks", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/hooks/x.sh")), twin: file("Edit", inProj(".claude/worktrees/wt/a.ts")) },
+    { guard: "harness", shape: "Edit on .claude/agents", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/agents/a.md")), twin: file("Edit", inProj("agents/a.md")) },
+    { guard: "harness", shape: "Edit on .claude/skills", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/skills/s/SKILL.md")), twin: file("Edit", inProj("skills/s/SKILL.md")) },
+    { guard: "harness", shape: "Edit on .claude/commands", cwds: BOTH,
+      refused: file("Edit", inProj(".claude/commands/c.md")), twin: file("Edit", inProj("commands/c.md")) },
+    { guard: "harness", shape: "Edit on Cursor's hook config", cwds: BOTH,
+      refused: file("Edit", inProj(".cursor/hooks.json")), twin: file("Edit", inProj(".cursor/rules/style.mdc")) },
+    { guard: "harness", shape: "Edit on Cursor's hook scripts", cwds: BOTH,
+      refused: file("Edit", inProj(".cursor/hooks/x.sh")), twin: file("Edit", inProj(".cursor/mcp.json.bak")) },
+    { guard: "harness", shape: "Edit on Cursor's MCP config", cwds: BOTH,
+      refused: file("Edit", inProj(".cursor/mcp.json")), twin: file("Edit", inProj(".cursor/rules/style.mdc")) },
+    // -- harness guard: the shell write shapes, each beside the same write elsewhere
+    { guard: "harness", shape: "a redirect into the hook config", cwds: BOTH,
+      refused: sh((c) => `echo '{}' > ${c.rel}hooks/hooks.json`), twin: sh((c) => `echo '{}' > ${c.rel}hooks-notes.json`) },
+    { guard: "harness", shape: "an append onto the MCP config", cwds: BOTH,
+      refused: sh((c) => `cat x >> ${c.rel}.mcp.json`), twin: sh((c) => `cat x >> ${c.rel}mcp.example.json`) },
+    { guard: "harness", shape: "sed -i on the settings", cwds: BOTH,
+      refused: sh((c) => `sed -i '' 's/a/b/' ${c.rel}.claude/settings.json`), twin: sh((c) => `sed -i '' 's/a/b/' ${c.rel}settings.json`) },
+    { guard: "harness", shape: "cp onto the plugin manifest", cwds: BOTH,
+      refused: sh((c) => `cp /tmp/evil.json ${c.rel}.claude-plugin/plugin.json`), twin: sh((c) => `cp /tmp/evil.json ${c.rel}plugin.json`) },
+    { guard: "harness", shape: "mv onto a hook script", cwds: BOTH,
+      refused: sh((c) => `mv /tmp/x ${c.rel}hooks/scripts/pretooluse-leakguard.mjs`),
+      twin: sh((c) => `mv /tmp/x ${c.rel}server/scripts/leakguard.mjs`) },
+    { guard: "harness", shape: "rm of a hook script", cwds: BOTH,
+      refused: sh((c) => `rm ${c.rel}hooks/scripts/lib.mjs`), twin: sh((c) => `rm ${c.rel}server/lib.mjs`) },
+    { guard: "harness", shape: "tee onto the MCP config", cwds: BOTH,
+      refused: sh((c) => `tee ${c.rel}.mcp.json < /tmp/x`), twin: sh((c) => `tee ${c.rel}mcp.example.json < /tmp/x`) },
+    { guard: "harness", shape: "rm -rf of a protected folder", cwds: BOTH,
+      refused: sh((c) => `rm -rf ${c.rel}.claude/agents`), twin: sh((c) => `rm -rf ${c.rel}.claude/worktrees`) },
+    { guard: "harness", shape: "mkdir into a protected folder", cwds: BOTH,
+      refused: sh((c) => `mkdir -p ${c.rel}.claude/skills/new`), twin: sh((c) => `mkdir -p ${c.rel}.claude/worktrees/new`) },
+    { guard: "harness", shape: "a clone into a protected folder", cwds: BOTH,
+      refused: sh((c) => `git clone https://x/y ${c.rel}.claude/skills/y`), twin: sh((c) => `git clone https://x/y ${c.rel}vendor/y`) },
+    { guard: "harness", shape: "a clone from inside a protected folder", cwds: BOTH,
+      refused: sh((c) => `cd ${c.rel}.claude/skills && git clone https://x/y`), twin: sh((c) => `cd ${c.rel}pkg && git clone https://x/y`) },
+    { guard: "harness", shape: "a write handed to another shell", cwds: BOTH,
+      refused: sh((c) => `bash -c "echo > ${c.rel}hooks/hooks.json"`), twin: sh((c) => `bash -c "cat ${c.rel}hooks/hooks.json | head"`) },
+    { guard: "harness", shape: "chmod of a protected folder", cwds: BOTH,
+      refused: sh((c) => `chmod -R 777 ${c.rel}hooks`), twin: sh((c) => `chmod -R 777 ${c.rel}pkg`) },
+    { guard: "harness", shape: "git checkout -- of a hook file", cwds: BOTH,
+      refused: sh((c) => `git checkout -- ${c.rel}hooks/hooks.json`), twin: sh((c) => `git diff --stat -- ${c.rel}hooks/hooks.json`) },
+    { guard: "harness", shape: "git -C onto a hook file", cwds: BOTH,
+      refused: sh((c) => `git -C ${c.root} checkout -- hooks/hooks.json`), twin: sh((c) => `git -C ${c.root} diff -- hooks/hooks.json`) },
+    { guard: "harness", shape: "claude mcp add", cwds: BOTH,
+      refused: sh(() => "claude mcp add x -- node s.js"), twin: sh(() => "claude mcp list") },
+    { guard: "harness", shape: "claude plugin install", cwds: BOTH,
+      refused: sh(() => "claude plugin install foo"), twin: sh(() => "claude plugin list") },
+    // -- harness guard: surfaces outside the project ----------------------
+    { guard: "harness", shape: "the machine-wide settings", cwds: BOTH,
+      refused: sh(() => "echo x > $HOME/.claude/settings.json"), twin: sh(() => "echo x > $HOME/.claude/notes.md") },
+    { guard: "harness", shape: "the machine-wide MCP config", cwds: BOTH,
+      refused: sh(() => "echo x > $HOME/.claude.json"), twin: sh(() => "echo x > $HOME/.claude.json.bak") },
+    { guard: "harness", shape: "the plugin registry", cwds: BOTH,
+      refused: sh(() => "echo x > $HOME/.claude/plugins/installed_plugins.json"), twin: sh(() => "echo x > $HOME/.claude/todo.md") },
+    { guard: "harness", shape: ".git/hooks", cwds: BOTH,
+      refused: sh((c) => `echo x > ${c.rel}.git/hooks/pre-commit`), twin: sh((c) => `echo x > ${c.rel}.git/info/exclude`) },
+    { guard: "harness", shape: "the core.hooksPath folder", cwds: BOTH,
+      refused: withSetup(sh((c) => `echo x > ${c.rel}scripts/hooks/pre-commit`), hooksPath),
+      twin: sh((c) => `echo x > ${c.rel}scripts/other.sh`) },
+    { guard: "harness", shape: "a script the settings run", cwds: BOTH,
+      refused: withSetup(sh((c) => `echo x > ${c.rel}tools/check.mjs`), settingsRunScript),
+      twin: sh((c) => `echo x > ${c.rel}tools/other.mjs`) },
+    { guard: "harness", shape: "a script an MCP config launches", cwds: BOTH,
+      refused: withSetup(sh(() => "echo x > $HOME/repos/gmail/dist/index.js"), mcpLaunches),
+      twin: sh(() => "echo x > $HOME/repos/gmail/README.md") },
+    { guard: "harness", shape: "a folder an MCP config runs a server from", cwds: BOTH,
+      refused: withSetup(sh(() => "echo x > $HOME/weather/weather.py"), mcpLaunches),
+      twin: sh(() => "echo x > $HOME/other.py") },
+    { guard: "harness", shape: "the ship-gate stamp", cwds: BOTH,
+      refused: withSetup(sh((c) => `echo x > ${c.cairnHome}/ship-gate/proj-0123456789abcdef.json`), stampAndManifests),
+      twin: sh((c) => `echo x > ${c.cairnHome}/runs/proj-0123456789abcdef-r1-report.md`) },
+    { guard: "harness", shape: "a run manifest", cwds: BOTH,
+      refused: withSetup(file("Write", (c) => join(c.cairnHome, "runs", "proj-0123456789abcdef-r1.json")), stampAndManifests),
+      twin: file("Write", (c) => join(c.cairnHome, "runs", "proj-0123456789abcdef-r1-report.md")) },
+    { guard: "harness", shape: "the refusal log", cwds: BOTH,
+      refused: sh((c) => `: > ${c.cairnHome}/refusals/${projectKey(c.root)}.jsonl`),
+      twin: sh((c) => `cat ${c.cairnHome}/refusals/${projectKey(c.root)}.jsonl`) },
+    { guard: "harness", shape: "the plugin root", cwds: BOTH,
+      refused: file("Write", (c) => join(c.plugin, "hooks", "hooks.json")),
+      twin: sh((c) => `cat ${c.plugin}/hooks/hooks.json`) },
+    // -- harness guard: the reader's edges ----------------------------------
+    { guard: "harness", shape: "a wildcard onto the plugin manifest", cwds: BOTH,
+      refused: sh((c) => `rm ${c.rel}.claude-plugin/*.json`), twin: sh((c) => `rm ${c.rel}docs/*.json`) },
+    { guard: "harness", shape: "a heredoc redirected onto the hook config", cwds: BOTH,
+      refused: sh((c) => `cat <<'EOF' > ${c.rel}hooks/hooks.json\n{}\nEOF`),
+      twin: sh((c) => `git commit -F - <<'EOF'\nfix: tidy ${c.rel}hooks/scripts/lib.mjs > old wording\nEOF`) },
+    { guard: "harness", shape: "a $(...) an unquoted heredoc body runs", cwds: BOTH,
+      refused: sh((c) => `cat <<EOF > out.txt\n$(rm -rf ${c.rel}hooks)\nEOF`),
+      twin: sh((c) => `cat <<'EOF' > out.txt\n$(rm -rf ${c.rel}hooks)\nEOF`) },
+    { guard: "harness", shape: "a target under $(pwd)", cwds: BOTH,
+      refused: sh((c) => `echo x > $(pwd)/${c.rel}hooks/hooks.json`), twin: sh(() => "echo x > $(pwd)/notes.txt") },
+    { guard: "harness", shape: "a line nested deeper than the reader reads", cwds: BOTH,
+      refused: sh((c) => nestedLine(9, `ls ${c.rel}hooks`)), twin: sh((c) => nestedLine(8, `ls ${c.rel}hooks`)) },
+    // -- harness guard: MCP tools -------------------------------------------
+    { guard: "harness", shape: "an MCP write onto the MCP config", cwds: BOTH,
+      refused: mcp(`${DC}write_file`, (c) => ({ path: join(c.root, ".mcp.json"), content: "x" })),
+      twin: mcp(`${DC}write_file`, (c) => ({ path: join(c.root, "notes.md"), content: "x" })) },
+    { guard: "harness", shape: "an MCP command line writing the hook config", cwds: BOTH,
+      refused: mcp(`${DC}start_process`, (c) => ({ command: `echo x > ${c.rel}hooks/hooks.json`, timeout_ms: 1000 })),
+      twin: mcp(`${DC}start_process`, (c) => ({ command: `cat ${c.rel}hooks/hooks.json`, timeout_ms: 1000 })) },
+    { guard: "harness", shape: "an MCP move into the hook directory", cwds: BOTH,
+      refused: mcp(`${DC}move_file`, (c) => ({ source: join(c.root, "a.mjs"), destination: join(c.root, "hooks", "scripts", "a.mjs") })),
+      twin: mcp(`${DC}move_file`, (c) => ({ source: join(c.root, "a.mjs"), destination: join(c.root, "pkg", "a.mjs") })) },
+
+    // -- leak guard: each pattern, beside the exemption that lets it through
+    { guard: "leak", shape: "a planning-folder path in a staged source file", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), stage("app.ts", `const p = "${PLAN_PATH}";\n`)),
+      twin: withSetup(sh(() => "git commit -m x"), stage("notes.md", `see ${PLAN_PATH}\n`)) },
+    { guard: "leak", shape: "the same path, server source exempt", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), stage("scripts/gen.sh", `DIR="${PLAN_PATH}"\n`)),
+      twin: withSetup(sh(() => "git commit -m x"), stage("server/src/planning/ledger.ts", `const dir = "${PLAN_PATH}";\n`)) },
+    { guard: "leak", shape: "a tracker id in server source", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), jiraAnd("server/src/x.ts", "// tracked as DRILL" + "-42\n")),
+      twin: withSetup(sh(() => "git commit -m x"), jiraAnd("server/src/x.ts", "// tracked as OTHER" + "-42\n")) },
+    { guard: "leak", shape: "a phase ref", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), stage("app.ts", `const p = "${PHASE_REF}";\n`)),
+      twin: withSetup(sh(() => "git commit -m x"), stage("app.ts", 'const p = "phase 3 of the plan";\n')) },
+    { guard: "leak", shape: "a cairn label", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), stage("app.ts", `const l = "${SEED_LABEL}";\n`)),
+      twin: withSetup(sh(() => "git commit -m x"), stage("app.ts", 'const l = "cairn:status";\n')) },
+    { guard: "leak", shape: "a widened commit catching an unstaged leak", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -am x"), committedThenDirty), twin: sh(() => "git commit -m x") },
+    { guard: "leak", shape: "the override quoted in the message", cwds: BOTH,
+      refused: withSetup(sh(() => 'git commit -m "add CAIRN_LEAK_OK=1 feature flag"'), stage("app.ts", `const p = "${PLAN_PATH}";\n`)),
+      twin: sh(() => "CAIRN_LEAK_OK=1 git commit -m x") },
+    { guard: "leak", shape: "a planning-folder path in a non-server script", cwds: BOTH,
+      refused: withSetup(sh(() => "git commit -m x"), stage("scripts/gen.sh", `DIR="${PLAN_PATH}"\n`)),
+      twin: withSetup(sh(() => "git commit -m x"), stage("docs/gen.sh", `DIR="${PLAN_PATH}"\n`)) },
+  ];
+
+  /** The audit's row count per guard: the table never shrinks below it, so a deleted row is noticed too. */
+  const AUDIT_ROWS: Record<Guard, number> = { run: 25, harness: 52, leak: 8 };
+
+  /** A project (a repo with one commit, a cairn.json, a nested pkg/lib), a home, a cairn home and a plugin root, all fresh. */
+  function fixture(): Omit<Ctx, "cwd" | "rel"> {
+    const root = freshDir("cairn-hooks-twins-");
+    const home = freshDir("cairn-hooks-twins-home-");
+    const cairnHome = freshDir("cairn-hooks-twins-cairnhome-");
+    const plugin = freshDir("cairn-hooks-twins-plugin-");
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: root });
+    stageFile(root, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init", "--no-gpg-sign"], { cwd: root });
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    // the breaker (#358) would freeze a live run three refusals in; these rows judge one rule each
+    writeFileSync(join(root, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } }, auto: { breaker: 0 } }));
+    mkdirSync(join(plugin, "hooks", "scripts"), { recursive: true });
+    writeFileSync(join(plugin, "hooks", "hooks.json"), "{}");
+    return { root, home, cairnHome, plugin };
+  }
+
+  /** The fixture seen from one cwd: the project root, or two folders down. */
+  function at(f: Omit<Ctx, "cwd" | "rel">, where: Cwd): Ctx {
+    return where === "root"
+      ? { ...f, cwd: f.root, rel: "" }
+      : { ...f, cwd: join(f.root, "pkg", "lib"), rel: "../../" };
+  }
+
+  /**
+   * One guard, one call, from where the shell stands. CLAUDE_PROJECT_DIR is
+   * the project root whatever the cwd, as the platform sets it; the payload's
+   * cwd and the child's cwd are the shell's folder. Every owner escape, the
+   * real plugin root and any git env the runner carries are stripped, so the
+   * only thing a row can lean on is what the row itself set up.
+   */
+  function judge(guard: Guard, c: Ctx, side: Side): { status: number | null; stderr: string } {
+    const env: Record<string, string | undefined> = {
+      ...process.env, HOME: c.home, CLAUDE_PROJECT_DIR: c.root, CAIRN_HOME: c.cairnHome,
+      CLAUDE_PLUGIN_ROOT: c.plugin, GIT_CONFIG_NOSYSTEM: "1", ...side.env,
+    };
+    for (const k of Object.keys(env)) {
+      const strip = (k.startsWith("CAIRN_") && k !== "CAIRN_HOME") || k === "CDPATH"
+        || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL";
+      if (strip && !(k in (side.env ?? {}))) delete env[k];
+    }
+    const r = spawnSync(process.execPath, [GUARD[guard]], {
+      cwd: c.cwd, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ ...side.payload(c), cwd: c.cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  for (const row of TABLE) {
+    it(`${row.guard} guard: ${row.shape} -- refused from the root and from a subfolder; its allowed twin passes from both`, () => {
+      if (row.twin === null) return; // the meta-test below reports the gap; nothing to judge against
+      // A twin with fixture work of its own (the leak rows stage different
+      // files) gets its own project; otherwise both sides share one, so the
+      // twin is judged under exactly the state that refused its sibling.
+      const shared = !row.twin.setup;
+      let f = fixture();
+      let staged = false;
+      for (const where of row.cwds) {
+        const c = at(f, where);
+        if (!staged) { row.refused.setup?.(c); staged = true; }
+        const r = judge(row.guard, c, row.refused);
+        expect(r.status, `${row.shape}: refused payload from ${where} (${where === "nested" ? "pkg/lib" : "project root"}) -- ${r.stderr.split("\n")[0]}`).toBe(2);
+      }
+      if (!shared) { f = fixture(); staged = false; }
+      for (const where of row.cwds) {
+        const c = at(f, where);
+        if (!staged) { row.twin.setup?.(c); staged = true; }
+        const r = judge(row.guard, c, row.twin);
+        expect(r.status, `${row.shape}: allowed twin from ${where} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+      }
+    });
+  }
+
+  // The one new assertion the issue asks for: the table's columns stay
+  // full. A shape added with `twin: null`, a row without a nested cwd, a
+  // duplicate shape name, or a deleted row each fail here by name.
+  it("meta: every refused shape row carries an allowed twin and a subfolder (nested cwd) entry", () => {
+    expect(TABLE.length).toBeGreaterThan(0);
+    const noTwin = TABLE.filter((r) => r.twin === null).map((r) => `${r.guard}: ${r.shape}`);
+    expect(noTwin, "refused shapes with no allowed twin").toEqual([]);
+    const noSubfolder = TABLE.filter((r) => !r.cwds.includes("root") || !r.cwds.includes("nested"))
+      .map((r) => `${r.guard}: ${r.shape}`);
+    expect(noSubfolder, "refused shapes not run from both the root and a subfolder").toEqual([]);
+    const names = TABLE.map((r) => `${r.guard}: ${r.shape}`);
+    expect(new Set(names).size, "duplicate shape names").toBe(names.length);
+    for (const guard of Object.keys(AUDIT_ROWS) as Guard[]) {
+      expect(TABLE.filter((r) => r.guard === guard).length, `${guard} guard rows`).toBeGreaterThanOrEqual(AUDIT_ROWS[guard]);
+    }
+  });
+});
