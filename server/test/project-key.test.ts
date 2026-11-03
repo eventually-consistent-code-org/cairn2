@@ -198,11 +198,16 @@ describe("the one-shot move off the folder key (#362)", () => {
     // Second run, either runtime: nothing left to move, nothing logged again.
     expect(migrateRepositoryState(main, base)).toEqual([]);
     expect(lib.migrateRepositoryState(main, base)).toEqual([]);
-    // An old name that turns up again beside its twin is left alone.
+    // An old name that turns up again beside its twin is left alone...
     writeFileSync(join(base, "index", `${old}.db`), "stale");
     expect(migrateRepositoryState(main, base)).toEqual([]);
     expect(readFileSync(join(base, "index", `${key}.db`), "utf8")).toBe("sqlite");
-    expect(rekeys()).toHaveLength(1);
+    // ...and the skip goes on the record, once, by either runtime (#440)
+    expect(rekeys()).toHaveLength(2);
+    expect(rekeys()[1]).toMatchObject({ from: old, to: key, moved: [], skipped: [`index/${old}.db`] });
+    expect(lib.migrateRepositoryState(main, base)).toEqual([]);
+    expect(migrateRepositoryState(main, base)).toEqual([]);
+    expect(rekeys()).toHaveLength(2);
   });
 
   it("the hook side moves the same files the same way", () => {
@@ -317,6 +322,10 @@ describe("a database sidecar moves only with its database (#442)", () => {
     }
     expect(rowCount(shared, "shared")).toBe(ROWS);
     expect(rowCount(oldDb, "old")).toBe(OLD_ROWS); // its own journal rolls its own pages back
+    // both leftovers are on the record as skipped, once (#440)
+    const rekeys = jsonl(join(base, "metrics", `${projectKey(main)}.jsonl`)).filter((r) => r.event === "rekey");
+    expect(rekeys).toHaveLength(1);
+    expect(rekeys[0]).toMatchObject({ moved: [], skipped: [`index/${pathKey(main)}.db`, `index/${pathKey(main)}.db-journal`] });
   });
 
   it("a sidecar moves in the same pass as its database", () => {
@@ -394,5 +403,41 @@ describe("the shared observation log (#362)", () => {
     expect(observe(main, "again").status).toBe(0);
     expect(observationBacklog(main).count).toBe(4);
     expect(rekeys()).toHaveLength(1);
+  });
+
+  it("migrates the metrics folder before its rekey row, so the old cost history is still read (#440)", () => {
+    const { main } = repoWithWorktree();
+    const old = pathKey(main);
+    // the in-checkout observation log the observe hook moves on the first tool call...
+    const oldDir = join(main, ".cairn", "observations");
+    mkdirSync(oldDir, { recursive: true });
+    writeFileSync(join(oldDir, "observations.jsonl"),
+      `${JSON.stringify({ ts: "2026-10-01T00:00:00.000Z", tool: "Edit", target: "t" })}\n`);
+    // ...and the whole cost history, still under the folder key
+    const metricsDir = join(home, ".cairn", "metrics");
+    mkdirSync(metricsDir, { recursive: true });
+    const oldMetrics = join(metricsDir, `${old}.jsonl`);
+    writeFileSync(oldMetrics, `${JSON.stringify({ session_id: "s1", est_cost_usd: 1 })}\n`);
+
+    // the hook order the plugin ships: observe first, the cost tracker's metricsPath at session end
+    expect(observe(main, "first-call").status).toBe(0);
+    const live = metricsPath(main);
+    expect(live).toBe(join(metricsDir, `${projectKey(main)}.jsonl`));
+    expect(lib.metricsPath(main)).toBe(live);
+    expect(existsSync(oldMetrics)).toBe(false);
+    const rows = jsonl(live);
+    expect(rows[0]).toMatchObject({ session_id: "s1" }); // the history leads, the rekey rows follow it
+    const rekeys = () => jsonl(live).filter((r) => r.event === "rekey");
+    expect(rekeys().map((r) => r.moved)).toEqual([[`metrics/${old}.jsonl`], ["observations/observations.jsonl"]]);
+    expect(rekeys().every((r) => Array.isArray(r.skipped) && r.skipped.length === 0)).toBe(true);
+
+    // Forced: an old name beside its twin stays, and the skip is logged once, by either runtime.
+    writeFileSync(oldMetrics, `${JSON.stringify({ session_id: "s0" })}\n`);
+    expect(migrateRepositoryState(main)).toEqual([]);
+    expect(lib.migrateRepositoryState(main)).toEqual([]);
+    const skips = rekeys().filter((r) => (r.skipped as string[]).length > 0);
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toMatchObject({ moved: [], skipped: [`metrics/${old}.jsonl`] });
+    expect(jsonl(oldMetrics)).toEqual([{ session_id: "s0" }]); // untouched, recoverable by hand
   });
 });

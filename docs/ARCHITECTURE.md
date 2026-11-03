@@ -427,11 +427,16 @@ is moved to the repository key with a hard link that refuses an existing
 target, so the move happens once and never replaces a shared file by name
 (asserted: `project-key.test.ts`, "moves every repository file exactly
 once"). Each move is logged as one `event: "rekey"` row on the metrics
-log, which carries no session id, so spend readers skip it. Two limits of
-that migration are known and filed rather than assumed away: a file whose
-move was blocked by an existing twin stays under its old name and is no
-longer read, and a database sidecar can be moved without the database it
-belongs to. The yield store and the outlook board share one file per
+log, which carries no session id, so spend readers skip it. The state
+folders migrate before any rekey row is written, so the row never creates
+the twin that would block the old cost history's move; a file a twin does
+block stays under its old name, no longer read, and the row names it under
+`skipped`, once; and a database sidecar (`-journal`, `-wal`, `-shm`) moves
+only in the pass that moves its database, so another checkout's hot
+journal is never replayed into the shared index (asserted:
+`project-key.test.ts`, "migrates the metrics folder before its rekey row"
+and "a database sidecar moves only with its database"). The yield store
+and the outlook board share one file per
 repository but still update it read-modify-write, which the yield store's
 header answers in the three concurrency questions (atomic rename, last
 writer wins, accepted rather than locked). ADR 0027 — removeWhen: the

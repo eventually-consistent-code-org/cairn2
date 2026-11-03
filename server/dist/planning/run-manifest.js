@@ -169,23 +169,58 @@ export function moveNoClobber(from, to) {
 const DB_SIDECAR = /-(journal|wal|shm)$/;
 /**
  * The one-shot rekey's record: one row on the project's metrics log naming
- * what moved. It carries no session_id, so every latest-row-per-session
- * reader skips it. One append of one line, so it never tears another row.
+ * what moved and what stayed behind a twin (#440). It carries no
+ * session_id, so every latest-row-per-session reader skips it. One append
+ * of one line, so it never tears another row. Every writer of this row
+ * runs migrateRepositoryState first, so the row never creates the
+ * metrics file whose existence would block the old cost history's move.
  */
-export function recordRekey(baseDir, projectDir, moved) {
-    if (moved.length === 0)
+export function recordRekey(baseDir, projectDir, moved, skipped = []) {
+    if (moved.length === 0 && skipped.length === 0)
         return;
     const key = projectKey(projectDir);
     const path = join(baseDir, "metrics", `${key}.jsonl`);
     try {
         mkdirSync(dirname(path), { recursive: true });
         appendFileSync(path, JSON.stringify({
-            ts: new Date().toISOString(), event: "rekey", from: worktreeKey(projectDir), to: key, moved,
+            ts: new Date().toISOString(), event: "rekey", from: worktreeKey(projectDir), to: key, moved, skipped,
         }) + "\n");
     }
     catch {
         // the record is a measurement; a home it cannot write never fails the caller
     }
+}
+/**
+ * The skipped names no rekey row on the live metrics segment names yet, so
+ * a leftover is logged once rather than on every hook call. The segment is
+ * read only by a pass that left something behind, which a checkout with no
+ * leftovers never pays; a skip already logged in a segment since closed is
+ * logged once more -- a duplicate row no reader counts, accepted over
+ * reading every segment on every call.
+ */
+function unloggedSkips(baseDir, key, skipped) {
+    if (skipped.length === 0)
+        return skipped;
+    const logged = new Set();
+    try {
+        for (const line of readFileSync(join(baseDir, "metrics", `${key}.jsonl`), "utf8").split("\n")) {
+            if (!line.includes("\"rekey\""))
+                continue;
+            try {
+                const row = JSON.parse(line);
+                if (row.event === "rekey" && Array.isArray(row.skipped))
+                    for (const s of row.skipped)
+                        logged.add(String(s));
+            }
+            catch {
+                // a torn or foreign line is no record
+            }
+        }
+    }
+    catch {
+        // no live segment yet -- nothing is logged
+    }
+    return skipped.filter((s) => !logged.has(s));
 }
 /**
  * Moves every repository-state file this folder kept under its worktree
@@ -195,6 +230,10 @@ export function recordRekey(baseDir, projectDir, moved) {
  * worktree that ran before the upgrade keeps its own leftovers, and the
  * shared file is never replaced. Nothing to move, nothing logged, so the
  * move is one-shot by construction: the old name is gone once it lands.
+ * A name a twin blocks is logged as skipped (#440), once, so the leftover
+ * is visible to every reader of the log rather than silently unread.
+ * Asserted: project-key.test.ts, "migrates the metrics folder before its
+ * rekey row".
  *
  * A database sidecar (`-journal`, `-wal`, `-shm`) moves only in the pass
  * that moves its database (#442). Set beside the shared index, a hot
@@ -216,6 +255,7 @@ export function migrateRepositoryState(projectDir, baseDir = join(homedir(), ".c
     if (key === legacy)
         return [];
     const moved = [];
+    const skipped = [];
     for (const sub of REPOSITORY_STATE_DIRS) {
         const dir = join(baseDir, sub);
         let names;
@@ -232,19 +272,26 @@ export function migrateRepositoryState(projectDir, baseDir = join(homedir(), ".c
             return !rest.endsWith(".tmp"); // a write in flight renames itself
         });
         const move = (name) => {
-            if (moveNoClobber(join(dir, name), join(dir, `${key}${name.slice(legacy.length)}`)))
+            const to = join(dir, `${key}${name.slice(legacy.length)}`);
+            if (moveNoClobber(join(dir, name), to))
                 moved.push(`${sub}/${name}`);
+            else if (existsSync(to))
+                skipped.push(`${sub}/${name}`); // a twin; any other failure is retried next pass
         };
         // Databases before their sidecars, so a sidecar can ask whether its database moved in this pass.
         for (const name of ours)
             if (!DB_SIDECAR.test(name))
                 move(name);
         for (const name of ours) {
-            if (DB_SIDECAR.test(name) && moved.includes(`${sub}/${name.replace(DB_SIDECAR, "")}`))
+            if (!DB_SIDECAR.test(name))
+                continue;
+            if (moved.includes(`${sub}/${name.replace(DB_SIDECAR, "")}`))
                 move(name);
+            else
+                skipped.push(`${sub}/${name}`); // its database stayed, or it has none
         }
     }
-    recordRekey(baseDir, projectDir, moved);
+    recordRekey(baseDir, projectDir, moved, unloggedSkips(baseDir, key, skipped));
     return moved;
 }
 /**
