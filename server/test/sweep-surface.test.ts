@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -463,6 +463,76 @@ describe("the spine's readers (#398)", () => {
     } finally {
       rmSync(s.dir, { recursive: true, force: true });
     }
+  });
+
+  // #429: the one-file layout, CLAUDE.md a symlink to AGENTS.md. Setup used
+  // to install the fragment into AGENTS.md, then open CLAUDE.md -- the same
+  // file -- find the fragment's own markers and replace the whole spine with
+  // the three-line import block; --check then read the self-import as green
+  // because it accepted any marker span. These pin both halves of the fix.
+  describe("CLAUDE.md as a symlink to AGENTS.md (#429)", () => {
+    const claudeRow = TABLE.find((r) => r.harness === "claude")!;
+    const linked = () => {
+      const s = scratch();
+      writeFileSync(join(s.proj, "AGENTS.md"), "# my project\n\nhouse rules\n");
+      symlinkSync("AGENTS.md", join(s.proj, "CLAUDE.md"));
+      return s;
+    };
+    const claudeLines = (out: string) => out.split("\n").filter((l) => l.includes("CLAUDE.md"));
+
+    it("setup refuses the import in one line, keeps the spine, and a second run says nothing new", () => {
+      const s = linked();
+      try {
+        const first = setup(s.home, "claude", "--project", s.proj);
+        expect(first.status).toBe(0);
+        const agents = readFileSync(join(s.proj, "AGENTS.md"), "utf8");
+        expect(agents.startsWith(IMPORT_BLOCK)).toBe(false);
+        expect(agents).toContain(FRAGMENT.trimEnd());
+        expect(agents).toContain("house rules");
+        expect(claudeLines(first.stdout).join("\n")).toContain("is AGENTS.md by another name");
+
+        const again = setup(s.home, "claude", "--project", s.proj);
+        expect(again.status).toBe(0);
+        expect(readFileSync(join(s.proj, "AGENTS.md"), "utf8")).toBe(agents);
+        expect(claudeLines(again.stdout)).toEqual(claudeLines(first.stdout));
+
+        const green = setup(s.home, "claude", "--project", s.proj, "--check");
+        expect(green.status).toBe(0);
+        expect(green.stdout).toContain("CLAUDE.md is AGENTS.md by another name, which carries the fragment");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("--check is red on the erased layout: a span holding only the import block does not reach", () => {
+      const s = linked();
+      try {
+        // what the pre-fix setup left behind: AGENTS.md importing itself, no rules
+        writeFileSync(join(s.proj, "AGENTS.md"), `${IMPORT_BLOCK}\n# my project\n\nhouse rules\n`);
+        const red = setup(s.home, "claude", "--project", s.proj, "--check");
+        expect(red.status).toBe(1);
+        expect(red.stdout).toContain("carries only the @AGENTS.md import block");
+        expect(reachFrom(s.proj, claudeRow, { fragment: FRAGMENT }).state).toBe("broken");
+        expect(reachFrom(s.proj, claudeRow).state).toBe("broken");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a CLAUDE.md that resolves outside the project is refused and left as written", () => {
+      const s = scratch();
+      try {
+        const outside = join(s.dir, "elsewhere.md");
+        writeFileSync(outside, "# dotfiles claude\n");
+        symlinkSync(outside, join(s.proj, "CLAUDE.md"));
+        const r = setup(s.home, "grok", "--project", s.proj);
+        expect(r.status).toBe(0);
+        expect(readFileSync(outside, "utf8")).toBe("# dotfiles claude\n");
+        expect(claudeLines(r.stdout).join("\n")).toContain("resolves outside the project");
+      } finally {
+        rmSync(s.dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("an import inside a code fence or HTML comment does not count", () => {

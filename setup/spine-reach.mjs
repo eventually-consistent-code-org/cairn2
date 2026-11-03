@@ -14,8 +14,8 @@
  * Author(s): John Reed
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 
 // Constants
 export const BEGIN = "<!-- cairn:begin";
@@ -155,6 +155,26 @@ export function spliceImport(body) {
   return { next: IMPORT_BLOCK + (tail.length ? `\n${tail}` : ""), note: "import installed at the top" };
 }
 
+/** The real path of a file (symlinks followed), or null when it does not resolve. */
+export function realOrNull(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** Are two paths one file by two names? Both must resolve (#429). */
+export function sameFile(a, b) {
+  const ra = realOrNull(a);
+  return ra !== null && ra === realOrNull(b);
+}
+
+/** Does a real path sit inside a real directory (or equal it)? */
+export function insideDir(real, dir) {
+  return dir !== null && real !== null && (real === dir || real.startsWith(dir + sep));
+}
+
 /** Read a project-relative file, or null when it does not exist. */
 function readOrNull(projectDir, rel) {
   const p = join(projectDir, rel);
@@ -174,6 +194,13 @@ function reachDirect(projectDir, rel, fragment) {
   const span = fragmentSpan(body);
   if (!span) return { state: "broken", detail: `${rel} carries no cairn section` };
   if (span.orphan) return { state: "broken", detail: `${rel} has a cairn:begin marker with no matching end` };
+  // The import block between the markers and nothing else: what a pre-#429
+  // setup left in an AGENTS.md that was also CLAUDE.md. It imports itself
+  // and carries no rules, so it is broken with or without a fragment to
+  // compare (asserted: sweep-surface.test.ts, #429).
+  if (body.slice(span.start, span.end) === IMPORT_BLOCK.trimEnd()) {
+    return { state: "broken", detail: `${rel} carries only the @AGENTS.md import block, not the spine` };
+  }
   if (fragment !== undefined && body.slice(span.start, span.end) !== fragment.trimEnd()) {
     return { state: "broken", detail: `${rel} cairn section is stale vs harness/AGENTS-cairn.md` };
   }
@@ -187,6 +214,14 @@ function reachDirect(projectDir, rel, fragment) {
  *  :returns {state: "absent" | "reaches" | "broken", detail} */
 export function reachFrom(projectDir, row, { fragment, top = false } = {}) {
   if (row.via !== "import") return reachDirect(projectDir, row.loadFile, fragment);
+
+  // One file by two names (CLAUDE.md -> AGENTS.md, #429): there is no import
+  // to find, the loader reads the spine straight off the same bytes.
+  if (sameFile(join(projectDir, row.loadFile), join(projectDir, "AGENTS.md"))) {
+    const r = reachDirect(projectDir, "AGENTS.md", fragment);
+    if (r.state === "reaches") return { state: "reaches", detail: `${row.loadFile} is AGENTS.md by another name, which carries the fragment` };
+    return { state: "broken", detail: `${row.loadFile} is AGENTS.md by another name, but ${r.detail}` };
+  }
 
   const body = readOrNull(projectDir, row.loadFile);
   if (body === null) {

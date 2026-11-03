@@ -34,8 +34,10 @@ export function parseHarnesses(setupSrc) {
 
 /** Mechanism leg: run each setup target in a scratch project and home.
  *  :param table readers rows; harnesses: what setup accepts; setupPath: the script
+ *  :param fragment the rendered spine; when given, what setup wrote must equal
+ *    it (#429: a span holding only the import block never counts as reaching)
  *  :returns {rows: [{harness, loadFile, path, ok, detail}], failures: [string]} */
-export function mechanismLeg({ table, harnesses, setupPath }) {
+export function mechanismLeg({ table, harnesses, setupPath, fragment }) {
   const rows = [];
   const failures = [];
   if (table.length === 0) failures.push("readers table is empty");
@@ -74,8 +76,8 @@ export function mechanismLeg({ table, harnesses, setupPath }) {
         continue;
       }
 
-      const own = reachFrom(proj, row, { top: true });
-      const claude = reachFrom(proj, CLAUDE_VIA_IMPORT, { top: true });
+      const own = reachFrom(proj, row, { fragment, top: true });
+      const claude = reachFrom(proj, CLAUDE_VIA_IMPORT, { fragment, top: true });
       if (own.state !== "reaches") {
         const detail = own.state === "absent"
           ? `setup ${h} never writes ${row.loadFile}`

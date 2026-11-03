@@ -31,13 +31,13 @@
 // Dependency-free node — builtins only.
 
 import {
-  copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
+  copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BEGIN, READERS, reachFrom, spliceFragment, spliceImport,
+  BEGIN, READERS, insideDir, reachFrom, realOrNull, sameFile, spliceFragment, spliceImport,
 } from "./spine-reach.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -147,13 +147,45 @@ function installFragment(path, fragment) {
  *  docs), so without this line a project that has both never shows Claude
  *  the spine.
  *  :param create write a CLAUDE.md holding only the import when none exists
- *    (the claude target); every other target touches an existing one only */
+ *    (the claude target); every other target touches an existing one only
+ *  :returns "installed" | "alias" | "refused" | "absent" -- the claude tail
+ *    line reads it */
 function installClaudeImport(path, { create }) {
   let body = null;
   try {
     body = readFileSync(path, "utf8");
   } catch { /* absent */ }
-  if (body === null && !create) return;
+  if (body === null && !create) return "absent";
+
+  // #429: resolve the real file before splicing. CLAUDE.md as a symlink to
+  // AGENTS.md is one file by two names -- splicing the import there would
+  // replace the spine just installed with a block that imports itself. A
+  // link that leaves the project (or points at nothing) is the owner's file
+  // somewhere else. Either way: one line, nothing written, same line on
+  // every re-run (asserted: sweep-surface.test.ts and setup.test.ts, #429).
+  let isLink = false;
+  try {
+    isLink = lstatSync(path).isSymbolicLink();
+  } catch { /* absent */ }
+  if (isLink) {
+    let real = null;
+    try {
+      real = realpathSync(path);
+    } catch { /* dangling */ }
+    if (real === null) {
+      console.log(`  ${path}: is a symlink to a file that does not exist — refusing to write through it; fix the link, then re-run cairn-setup.`);
+      return "refused";
+    }
+    if (sameFile(path, join(projectDir, "AGENTS.md"))) {
+      console.log(`  ${path}: is AGENTS.md by another name (symlink) — import skipped; Claude Code reads the spine straight from it.`);
+      return "alias";
+    }
+    if (!insideDir(real, realOrNull(projectDir))) {
+      console.log(`  ${path}: resolves outside the project (${real}) — refusing to write through it; point the link inside the project or add the @AGENTS.md import by hand.`);
+      return "refused";
+    }
+  }
+
   const { next, note, error } = spliceImport(body ?? "");
   if (error) {
     console.error(`  ${path}: ${error} — fix the markers, then re-run cairn-setup.`);
@@ -161,10 +193,11 @@ function installClaudeImport(path, { create }) {
   }
   if (next === body) {
     console.log(`  ${path}: ${note}...`);
-    return;
+    return "installed";
   }
   writeFileSync(path, next);
   console.log(`  ${path}: @AGENTS.md ${note} (Claude Code reads the spine through it).`);
+  return "installed";
 }
 
 /** Copy the verb subroutines + registry into the project for pluginless harnesses. */
@@ -301,10 +334,14 @@ if (checkMode) {
   // fragment? For claude a CLAUDE.md without the import is red outright --
   // that is the gap. For the rest, an absent file is "not installed", and a
   // CLAUDE.md beside an installed AGENTS.md must still carry the import.
+  // The rendered fragment goes along (#429) so a span that holds only the
+  // import block, or a stale copy, reads as not reaching -- without it any
+  // marker span counted.
+  const fragment = readFileSync(join(repoRoot, "harness", "AGENTS-cairn.md"), "utf8");
   const row = READERS.find((r) => r.harness === harness);
-  const agentsInstalled = reachFrom(projectDir, { loadFile: "AGENTS.md", via: "direct" }).state === "reaches";
+  const agentsInstalled = reachFrom(projectDir, { loadFile: "AGENTS.md", via: "direct" }, { fragment }).state === "reaches";
   if (harness === "claude") {
-    const r = reachFrom(projectDir, row);
+    const r = reachFrom(projectDir, row, { fragment });
     if (r.state === "reaches") {
       console.log(`  readers (${row.path}): ${r.detail}`);
     } else {
@@ -312,11 +349,11 @@ if (checkMode) {
       lagging++;
     }
   } else {
-    const r = reachFrom(projectDir, row);
+    const r = reachFrom(projectDir, row, { fragment });
     console.log(`  readers (${row.path}): ${r.state === "absent" ? "not installed" : r.detail}`);
     if (r.state === "broken" && r.detail.includes("cairn:begin")) lagging++;
     if (agentsInstalled && existsSync(join(projectDir, "CLAUDE.md"))) {
-      const c = reachFrom(projectDir, READERS.find((x) => x.harness === "claude"));
+      const c = reachFrom(projectDir, READERS.find((x) => x.harness === "claude"), { fragment });
       if (c.state !== "reaches") {
         console.log(`  readers (CLAUDE.md → @AGENTS.md → fragment): ${c.detail} — Claude Code sessions here never read the spine`);
         lagging++;
@@ -344,7 +381,7 @@ console.log(`wiring cairn into ${harness} for ${projectDir}...`);
 // Universal layer — every harness benefits from these three.
 mergeMcpJson(join(projectDir, ".mcp.json"));
 installFragment(join(projectDir, "AGENTS.md"), fragment);
-installClaudeImport(join(projectDir, "CLAUDE.md"), { create: harness === "claude" });
+const claudeImport = installClaudeImport(join(projectDir, "CLAUDE.md"), { create: harness === "claude" });
 installVerbs();
 
 if (harness === "copilot") {
@@ -484,7 +521,13 @@ if (harness === "grok") {
 }
 
 if (harness === "claude") {
-  console.log("  CLAUDE.md imports AGENTS.md, so Claude Code reads the spine here. install the plugin too — it adds the hooks, commands, and skills.");
+  if (claudeImport === "alias") {
+    console.log("  CLAUDE.md is AGENTS.md here, so Claude Code reads the spine from it directly. install the plugin too — it adds the hooks, commands, and skills.");
+  } else if (claudeImport === "refused") {
+    console.log("  CLAUDE.md was left as written, so Claude Code has no path to the spine here until the import is in — `--check` reports it.");
+  } else {
+    console.log("  CLAUDE.md imports AGENTS.md, so Claude Code reads the spine here. install the plugin too — it adds the hooks, commands, and skills.");
+  }
 }
 
 console.log("cairn-setup complete.");
