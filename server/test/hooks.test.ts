@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isFrozenByBreaker, projectKey, readRunManifest } from "../src/planning/run-manifest.js";
@@ -4562,5 +4562,82 @@ describe("pause recorder hook (#379)", () => {
         expect(readFileSync(join(dir, f), "utf8"), f).not.toMatch(invokes);
       }
     }
+  });
+});
+
+describe("plugin layer imports no server code (#391)", () => {
+  // docs/ARCHITECTURE.md ("Hook surface") says the hooks and root scripts
+  // are dependency-free and import no server code. Until this describe
+  // existed that was a sentence: a hook that imported from server/dist would
+  // have loaded the whole MCP server on every PreToolUse call and nothing
+  // went red. The server's own layering has architecture.test.ts; this is
+  // the plugin layer's one layering rule given the same treatment.
+  const repoRoot = resolve(scriptsDir, "..", "..");
+  // The three directories the doc's claim covers. Imports are followed from
+  // here, so a helper reached by a relative path (setup/spine-reach.mjs) is
+  // held to the same rule as the file that reached it.
+  const WALKED = ["hooks/scripts", "scripts", "scripts/lib"];
+  // A relative import may land anywhere under the plugin layer and nowhere
+  // else. server/ is refused by name as well, because that is the sentence
+  // the doc makes -- a path rule, not a package rule.
+  const PLUGIN_ROOTS = ["hooks", "scripts", "setup"];
+
+  function mjsIn(dir: string): string[] {
+    const files = readdirSync(join(repoRoot, dir)).filter((n) => n.endsWith(".mjs")).sort()
+      .map((n) => `${dir}/${n}`);
+    expect(files.length, `walk matched ZERO files (${dir}) -- the path is stale, ` +
+      "so this rule has been silently guarding nothing").toBeGreaterThan(0);
+    return files;
+  }
+
+  /** Every import specifier in one file: static, re-export and dynamic forms. */
+  function specifiersOf(rel: string): string[] {
+    const src = readFileSync(join(repoRoot, rel), "utf8");
+    const forms = [
+      /^\s*(?:import|export)\b[^;'"]*?\bfrom\s+["']([^"']+)["']/gm, // import { x } from "y"
+      /^\s*import\s+["']([^"']+)["']/gm,                              // import "y" (side effect)
+      /\bimport\(\s*["']([^"']+)["']\s*\)/g,                           // await import("y")
+    ];
+    return forms.flatMap((re) => [...src.matchAll(re)].map((m) => m[1]));
+  }
+
+  it("every import is a node: builtin or a relative path inside the plugin layer", () => {
+    const queue = WALKED.flatMap(mjsIn);
+    const seen = new Set<string>();
+    const violations: string[] = [];
+    let specifiers = 0;
+    let builtins = 0;
+    while (queue.length) {
+      const f = queue.shift()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      for (const spec of specifiersOf(f)) {
+        specifiers++;
+        if (spec.startsWith("node:")) { builtins++; continue; }
+        if (!spec.startsWith("./") && !spec.startsWith("../")) {
+          violations.push(`${f} -> ${spec}`); // a bare package name: not dependency-free
+          continue;
+        }
+        const abs = resolve(repoRoot, dirname(f), spec);
+        const rel = relative(repoRoot, abs).split(sep).join("/");
+        const root = rel.split("/")[0];
+        if (root === "server" || root === ".." || !PLUGIN_ROOTS.includes(root)) {
+          violations.push(`${f} -> ${spec}`);
+          continue;
+        }
+        if (existsSync(abs)) queue.push(rel); // follow it: the rule holds transitively
+      }
+    }
+    // Anti-vacuous, both ways: the walk found files (mjsIn asserts that per
+    // directory) AND the regexes found imports. A rule whose pattern matched
+    // nothing would pass forever and measure itself.
+    expect(specifiers, "the specifier regexes matched nothing -- the rule is measuring itself")
+      .toBeGreaterThan(0);
+    expect(builtins, "no node: import anywhere -- the regexes stopped reading real code")
+      .toBeGreaterThan(0);
+    expect(violations, "a hook or root script imported outside the plugin layer. " +
+      "A hook that loads server/dist pays for the whole MCP server on every tool call; " +
+      "recompute the path scheme in hooks/scripts/lib.mjs instead (ARCHITECTURE.md, Hook surface)")
+      .toEqual([]);
   });
 });
