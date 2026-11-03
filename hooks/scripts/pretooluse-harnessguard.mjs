@@ -123,7 +123,8 @@
  *   next checkout, commit or `worktree add`, outside any tool call,
  *   under the owner's identity. Asserted: server/test/hooks.test.ts
  *   "harness guard protects git hooks (#353)". With a hooksPath set,
- *   .git/hooks is ordinary -- git never looks there; with no git on
+ *   .git/hooks is ordinary -- git never looks there (a claim about git,
+ *   dated 2026-11-03 from git 2.56's core.hooksPath docs); with no git on
  *   PATH, only .git/hooks is known; a hooksPath holding the project or
  *   the home folder is skipped rather than made every write a hook.
  *
