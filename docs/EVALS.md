@@ -89,6 +89,14 @@ under the plugins directory is a separate clone pinned to the last
 release tag, so the plugin-name form grades the STALE copy. The path
 form loads the working tree.
 
+**git 2.31 or newer.** From Claude Code 2.1.283, `claude plugin eval`
+refuses to run on an older git: the run stops before any case with a
+message naming the version it wants, nothing is graded. Check `git
+--version` once before the first run on a new machine; a stock macOS or
+Ubuntu LTS git clears the floor, an older enterprise image may not.
+A claim about the harness, as of 2026-10-14 (the 2.1.299 upgrade
+checklist, #331, ran on git 2.56.0; #371).
+
 **Subscription only.** cairn never spawns API-key (Console-billed)
 sessions — every agent turn, local or CI, runs on the operator's Claude
 subscription. The harness inherits the shell: an exported
