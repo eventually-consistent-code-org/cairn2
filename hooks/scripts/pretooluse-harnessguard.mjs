@@ -21,8 +21,11 @@
  *   its root outside the project, ~/.claude/plugins), and the ship-gate
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
- *   pass a hook), and the refusal log the circuit breaker counts (#358,
- *   same homes). Letter case never counts (#295): a path is read in its
+ *   pass a hook), the refusal log the circuit breaker counts (#358, same
+ *   homes), and the folder git runs its hooks from (#353: core.hooksPath
+ *   when set, else .git/hooks -- a hook planted there runs at the next
+ *   checkout or commit, in every worktree, under the owner's identity).
+ *   Letter case never counts (#295): a path is read in its
  *   on-disk case and compared case-folded, and so is a command's name, so a
  *   Mac's volume can't hide either -- a real HOOKS/ on a case-sensitive
  *   volume is refused too. An agent that can rewrite its own hooks can
@@ -111,6 +114,20 @@
  *   tool, a writing tool under another name or field, keystrokes into a
  *   running process, settings a server keeps.
  *
+ *   Git hooks (#353): the folder git runs its hooks from is a protected
+ *   tree for every tool above -- core.hooksPath when set, the repo's own
+ *   config first and the global one after it, else .git/hooks (a linked
+ *   worktree's common dir) -- asked of git once per call (`git rev-parse
+ *   --git-path hooks`, which applies that precedence and expands ~), so
+ *   it is as fresh as the settings scripts (#312). A hook runs at the
+ *   next checkout, commit or `worktree add`, outside any tool call,
+ *   under the owner's identity. Asserted: server/test/hooks.test.ts
+ *   "harness guard protects git hooks (#353)". With a hooksPath set,
+ *   .git/hooks is ordinary -- git never looks there (a claim about git,
+ *   dated 2026-11-03 from git 2.56's core.hooksPath docs); with no git on
+ *   PATH, only .git/hooks is known; a hooksPath holding the project or
+ *   the home folder is skipped rather than made every write a hook.
+ *
  *   Not seen: a write in an interpreter (python -c, an MCP tool running
  *   python or javascript), a write that only exists in a substitution's
  *   output (`$(cat script)` run as a command -- the body of a $(...), a
@@ -129,6 +146,7 @@
  *   Dated claim about the harness, 2026-10-14, #371.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -197,6 +215,14 @@ const HOME_FILES = [
 const SCRIPT_WHAT = "a script your settings run as a hook or status line";
 const MCP_WHAT = "a script your MCP server config launches";
 const MCP_DIR_WHAT = "a folder your MCP server config runs its server from";
+
+// What a refusal calls a file in the folder git runs its hooks from (#353):
+// the refusal names the file on its next line and asks where the
+// instruction came from, like every other (ADR 0016).
+const GIT_HOOK_WHAT = "a git hook that runs at your next checkout or commit";
+
+// How long one `git rev-parse` may take before the guard goes on without it.
+const GIT_WAIT_MS = 1500;
 
 // Options whose value is the folder a runner works in (#316): uv's
 // --directory, npm's and pnpm's -C, bun's --cwd, as the next word or with
@@ -448,7 +474,9 @@ let HOMES = [];
 // Protected places outside the project (#263, #267), each { dir, what,
 // tree, carve }: `tree` protects everything under dir, else only the
 // *.json files directly in it (the way the run guard reads runs/); `carve`
-// lists project folders inside dir that stay ordinary work.
+// lists project folders inside dir that stay ordinary work. Main adds the
+// folders MCP configs run servers from (#316) and the one git runs its
+// hooks from (#353), which may lie inside the project.
 let ZONES = [];
 // The scripts the protected settings run (#312) and the protected MCP
 // configs launch (#314), each { path, what }, in every spelling.
@@ -887,6 +915,45 @@ function mcpScripts() {
     }
   }
   return { scripts: [...scripts], folders: [...folders] };
+}
+
+// The folder git runs its hooks from (#353)
+
+/**
+ * Every spelling of the folder git runs its hooks from (#353): what
+ * core.hooksPath names when set -- the repo's own config first, then the
+ * global one, ~ expanded, a relative path from where git is asked -- else
+ * .git/hooks, the common dir's in a linked worktree. Git answers all of
+ * that itself to `git rev-parse --git-path hooks`, asked once a run from
+ * the project, so a hooksPath set a moment ago counts now: the fresh-read
+ * discipline of #312. A hook planted there runs at the next checkout,
+ * commit or `worktree add`, in every worktree, under the owner's identity,
+ * where no guard sees what it does.
+ *
+ * No git to ask (not on PATH, hung past GIT_WAIT_MS, or no repo): the
+ * .git/hooks folder under the nearest .git, when that is a folder, else
+ * nothing -- the guard never crashes over it. A folder that holds the
+ * project or the home folder (`core.hooksPath = .`) is skipped: it would
+ * make every write a hook.
+ */
+function gitHookDirs() {
+  const project = ROOTS[0];
+  let dir = null;
+  try {
+    const r = spawnSync("git", ["rev-parse", "--git-path", "hooks"], {
+      cwd: project, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+    });
+    const out = r.status === 0 ? String(r.stdout).trim() : "";
+    if (out) dir = resolve(project, expandHome(out));
+  } catch { /* no git: the folder below is the best the guard knows */ }
+  if (dir === null) {
+    const dotGit = join(gitRoot(project), ".git");
+    try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { return []; }
+  }
+  if (dir === null) return [];
+  const anchors = [...ROOTS, ...HOMES];
+  return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)));
 }
 
 /**
@@ -2395,6 +2462,10 @@ try {
   const { scripts, folders } = protectedScripts();
   SCRIPTS = scripts;
   for (const dir of folders) ZONES.push({ dir, what: MCP_DIR_WHAT, tree: true, carve: [] });
+  // The folder git runs its hooks from (#353), asked of git fresh the same
+  // way: a tree zone too, wherever it lies -- a tracked scripts/hooks, the
+  // repo's .git/hooks, or a ~/.githooks the global config names.
+  for (const dir of gitHookDirs()) ZONES.push({ dir, what: GIT_HOOK_WHAT, tree: true, carve: [] });
 
   let hit = null;
 
