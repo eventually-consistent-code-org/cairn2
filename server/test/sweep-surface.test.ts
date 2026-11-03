@@ -775,6 +775,53 @@ describe("merge leads with file overlap (#223)", () => {
     }
   });
 
+  // #444: the command entry compared the percent-encoded, symlink-resolved
+  // module URL to the raw argv[1], so through a symlinked plugin folder or a
+  // path with a space the body never ran: empty line, exit 0, which reads as
+  // "no overlap". Spawn it as a command through both shapes.
+  it("run as a command through a symlink or a path with a space, it prints the lead (#444)", () => {
+    const { dir, git, put, commit } = scratch();
+    const plug = mkdtempSync(join(tmpdir(), "cairn-444-"));
+    try {
+      git("checkout", "-q", "-b", "a");
+      put("shared.ts", "a\n");
+      commit("a");
+      git("checkout", "-q", "main");
+      git("checkout", "-q", "-b", "b");
+      put("shared.ts", "b\n");
+      commit("b");
+
+      const real = join(ROOT, "hooks", "scripts", "merge-overlap.mjs");
+      symlinkSync(join(ROOT, "hooks"), join(plug, "hooks"));
+      mkdirSync(join(plug, "my plugin", "hooks", "scripts"), { recursive: true });
+      writeFileSync(join(plug, "my plugin", "hooks", "scripts", "merge-overlap.mjs"), readFileSync(real));
+      const shapes = {
+        direct: real,
+        symlink: join(plug, "hooks", "scripts", "merge-overlap.mjs"),
+        space: join(plug, "my plugin", "hooks", "scripts", "merge-overlap.mjs"),
+      };
+      for (const [name, path] of Object.entries(shapes)) {
+        const r = spawnSync(process.execPath, [path, "a", "b"], { cwd: dir, encoding: "utf8" });
+        expect(r.status, `${name}: exit`).toBe(0);
+        expect(r.stdout.trim(), `${name}: stdout`).toBe("overlap: 1 file — shared.ts");
+      }
+      // Nothing to say is never a silent success: no args and a bad ref both
+      // exit non-zero with one plain line, no stack trace.
+      const none = spawnSync(process.execPath, [shapes.symlink], { cwd: dir, encoding: "utf8" });
+      expect(none.status).not.toBe(0);
+      expect(none.stdout).toBe("");
+      expect(none.stderr).toContain("usage:");
+      const bad = spawnSync(process.execPath, [shapes.space, "a", "no-such-ref"], { cwd: dir, encoding: "utf8" });
+      expect(bad.status).not.toBe(0);
+      expect(bad.stdout).toBe("");
+      expect(bad.stderr).not.toContain("    at ");
+      expect(bad.stderr.trim().split("\n")).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(plug, { recursive: true, force: true });
+    }
+  });
+
   // #443: the helper used to be named by a project-relative path that only
   // resolved inside cairn's own checkout, from a folder the npm package did
   // not ship and setup did not copy. The path each verb names must go
