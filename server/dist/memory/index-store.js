@@ -9,6 +9,23 @@ export function indexDbPath(projectDir) {
 }
 export class MemoryIndex {
     db;
+    /**
+     * Loads the binding and nothing else -- no file, no schema. The readers
+     * (#375) call this when a project has no index yet, so a broken binding
+     * still surfaces as the same typed NATIVE_MODULE_BROKEN the constructor
+     * raises (asserted in mcp.test.ts, "broken native binding (#108)"),
+     * while a healthy one leaves the cairn home untouched.
+     */
+    static probe(load = loadSqlite) {
+        try {
+            load();
+        }
+        catch (e) {
+            if (isBindingsFailure(e))
+                throw bindingsError(classifyBindingFailure(e));
+            throw e;
+        }
+    }
     constructor(dbPath, load = loadSqlite) {
         // Lazy native load (#108): better-sqlite3 is required here, per
         // construction, instead of at module import -- a missing compiled

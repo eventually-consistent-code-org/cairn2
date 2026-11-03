@@ -1015,13 +1015,16 @@ export function buildServer(deps) {
         inputSchema: z.object({ number: z.number(), name: z.string() }),
     }, wrap(async (a) => ensurePhase(await getTracker(), a.number, a.name)));
     server.registerTool("plan_drift", {
-        annotations: { title: titleOf("plan_drift"), readOnlyHint: true },
-        description: "Flag plan-referenced issues that are missing or closed-unverified, a stale " +
-            "security audit (latest security record written dirty or before code commits since " +
-            "its stamp), and work that has gone quiet (an issue held in progress with no tracker " +
-            "update and no commit naming it, or a branch with no recent commit); also repairs " +
-            "roadmap.md Status cells that still say 'planned' for a phase with VERIFICATION.md, " +
-            "reporting each as a 'roadmap-row' item",
+        // A check-and-repair tool, not a read (#375): every run stamps the ship
+        // gate the run guard reads, and a verified phase's roadmap row still
+        // saying planned is rewritten. The label used to say read-only, so the
+        // permission layer was told not to look at a tool that writes.
+        annotations: { title: titleOf("plan_drift"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        description: "Check-and-repair. Flags plan-referenced issues missing or closed-unverified, a stale " +
+            "security audit (latest record written dirty or before later code commits), and quiet " +
+            "work (an in-progress issue with no tracker update and no commit naming it, or a branch " +
+            "with no recent commit); repairs roadmap.md Status cells still 'planned' for a phase with " +
+            "VERIFICATION.md ('roadmap-row' items); stamps the ship gate the push guard reads",
         inputSchema: z.object({}),
     }, wrap(async () => {
         const d = dir();
@@ -1065,6 +1068,20 @@ export function buildServer(deps) {
         }
         return idx;
     };
+    // The readers' opener (#375): opening the index CREATES it (file, schema,
+    // migration), which made a first mem_search on a project a write under the
+    // cairn home from a tool labelled read-only. A reader takes the index only
+    // when it already exists -- cached or on disk -- and otherwise sees an
+    // empty one, which is what the db would hold. The binding is still probed
+    // on that path, so a broken install fails typed instead of reading as
+    // "nothing indexed" (#108). Writers keep getMemIndex.
+    const peekMemIndex = (d = dir()) => {
+        const path = indexDbPath(d);
+        if (memIndexes.has(path) || existsSync(path))
+            return getMemIndex(d);
+        MemoryIndex.probe(deps.loadSqlite);
+        return undefined;
+    };
     server.registerTool("mem_index", {
         annotations: { title: titleOf("mem_index"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Index reference material into the searchable memory store (disposable, rebuildable)",
@@ -1104,7 +1121,7 @@ export function buildServer(deps) {
         }),
     }, wrap((a) => {
         assertValidPhase(a.phase);
-        return getMemIndex().search(a.query, { phase: a.phase, issueId: a.issueId, role: a.role }, a.limit ?? 10);
+        return peekMemIndex()?.search(a.query, { phase: a.phase, issueId: a.issueId, role: a.role }, a.limit ?? 10) ?? [];
     }));
     server.registerTool("mem_stats", {
         annotations: { title: titleOf("mem_stats"), readOnlyHint: true },
@@ -1125,7 +1142,11 @@ export function buildServer(deps) {
         const observations = observationBacklog(d);
         let index;
         try {
-            index = { ...getMemIndex(d).stats(), ...bannerStats(d) };
+            const idx = peekMemIndex(d);
+            index = {
+                ...(idx ? idx.stats() : { chunkCount: 0, approxBytes: 0, approxTokens: 0 }),
+                ...bannerStats(d),
+            };
         }
         catch (e) {
             index = { indexUnavailable: e.message ?? String(e) };
@@ -1282,7 +1303,7 @@ export function buildServer(deps) {
             anchorCardId = card.id;
         }
         catch {
-            const chunkCreatedAt = getMemIndex(d).sourceCreatedAt(a.anchor);
+            const chunkCreatedAt = peekMemIndex(d)?.sourceCreatedAt(a.anchor);
             if (chunkCreatedAt === undefined) {
                 throw new CairnError("NOT_FOUND", `no card or index chunk '${a.anchor}'`, "check the id with mem_card_list or the source with mem_search");
             }
@@ -1307,7 +1328,7 @@ export function buildServer(deps) {
         }));
         const cardsBefore = cardItems.filter((c) => isBeforeAnchor(c.created, c.id));
         const cardsAfter = cardItems.filter((c) => isAfterAnchor(c.created, c.id));
-        const chunkNeighbors = getMemIndex(d).timeline(anchorCreatedAt, before, after);
+        const chunkNeighbors = peekMemIndex(d)?.timeline(anchorCreatedAt, before, after) ?? [];
         const chunksBefore = chunkNeighbors
             .filter((c) => c.createdAt < anchorCreatedAt)
             .map((c) => ({ source: c.source, createdAt: c.createdAt }));
@@ -1450,7 +1471,9 @@ export function buildServer(deps) {
         return result;
     }));
     server.registerTool("budget_check", {
-        annotations: { title: titleOf("budget_check"), readOnlyHint: true },
+        // Writes the run ledger on every call (opening it persists the state),
+        // and a boundary appends a row -- not read-only, not idempotent (#375)
+        annotations: { title: titleOf("budget_check"), readOnlyHint: false, destructiveHint: false },
         description: "Spend ledger gate for headless batch runs — re-reads actual spend (latest metrics row per session; "
             + "sessions since the run opened count in full, pre-existing sessions count as the delta past their "
             + "run-open baseline) and answers proceed/stop against the run's ceilings. "
@@ -2245,7 +2268,8 @@ export function buildServer(deps) {
         return { emitted: true, ...(snapshot?.frozen ? { frozen: snapshot.frozen } : {}) };
     }));
     server.registerTool("outlook_get", {
-        annotations: { title: titleOf("outlook_get"), readOnlyHint: true },
+        // artifact: true writes the board under the cairn home (#375)
+        annotations: { title: titleOf("outlook_get"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Portfolio aggregate (#55): every registered cairn project on this machine as a " +
             "card — snapshot (phases/sessions/tracker block), staleness vs live git HEAD, per-project " +
             "{name, error} isolation. Reads ~/.cairn/registry.json + outlook mirrors only; never walks " +
@@ -2381,7 +2405,8 @@ export function buildServer(deps) {
         };
     }));
     server.registerTool("research_sections", {
-        annotations: { title: titleOf("research_sections"), readOnlyHint: true },
+        // flip rewrites a section marker in place (#375)
+        annotations: { title: titleOf("research_sections"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         description: "Parse a research artifact's ##+ section markers " +
             "(<!-- namespace: done|pending|failed [date] [model] [— note] -->) for one " +
             "namespace (scout, survey, ...). Unmarked sections report state 'unmarked'; a " +
