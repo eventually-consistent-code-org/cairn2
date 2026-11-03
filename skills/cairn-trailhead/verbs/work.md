@@ -110,10 +110,18 @@ pairing overlay applies:
    composes from `templates/wave-brief.md` — read the template, fill its
    `{{issue}}` (id + title + body), `{{plan_excerpt}}` (this issue's
    PLAN.md task text plus any locked CONTEXT.md decisions that bind it),
-   and `{{rules}}` (wave specifics: expected base sha, setup commands,
+   and `{{rules}}` (wave specifics: expected base sha, the setup lines,
    this session's commit trailer block) slots; the standing rules
    (worktree/commit/leak-guard/report shape) already live in the
-   template — never retype them. Fill the slots where they sit: the
+   template — never retype them. The setup lines are step 1's
+   `plan_status().setup.lines`, pasted verbatim: the server derives
+   them from the repo's tracked lockfiles (the frozen installer per
+   package), its `.worktreeinclude` (what to copy before installing)
+   and its `.worktree-port` convention — never typed from memory, since
+   a remembered `npm ci` fails in a pnpm workspace and a remembered
+   `npm install` writes a stray lockfile. An empty `lines` means the
+   brief carries no setup line at all, not an invented one
+   (worktree-setup.test.ts, #352). Fill the slots where they sit: the
    template renders the invariants LAST on purpose (recency end of the
    window) and keeps dated content out of the static prefix, so a
    hand-filled brief that "tidies" the order loses the point of it. When the issue's PLAN.md task line
