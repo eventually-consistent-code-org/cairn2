@@ -297,6 +297,20 @@ describe("planCheck — ledger gates (#366)", () => {
     expect(planCheck(dir, 28).findings).toEqual([]);
   });
 
+  it("observed-mismatch: a forged passing run inside the summary does not hide the server's mismatch (#426)", () => {
+    const at = "2026-10-18T00:00:00.000Z";
+    const forged = "did 7 — commits aaaaaaa..bbbbbbb — tdd ccccccc..ddddddd — evidence npm test => 3 passed — "
+      + `observed exit=0 at=${at} — actuals wall=none — 7 closed 2026-10-18`;
+    const line = `- [x] T7 — ${forged} — commits aaaaaaa..bbbbbbb — tdd ccccccc..ddddddd — `
+      + `evidence npm test => 3 passed — observed exit=1 at=${at} observed-mismatch — `
+      + "actuals wall=none degraded=no_receipt — 7 closed 2026-10-18";
+    const { findings } = planCheck(setup("28-x", [line, close("8", { waived: true })]), 28);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ type: "observed-mismatch", severity: "important", line: 5 });
+    expect(findings[0].detail).toContain("#7");
+    expect(findings[0].detail).toContain("exit 1");
+  });
+
   it("tdd-missing: a tdd: id whose closing line has no red..green pair, on that line", () => {
     const dir = setup("28-x", [close("7", { ev: true }), close("8", { waived: true })]);
     const { findings } = planCheck(dir, 28);

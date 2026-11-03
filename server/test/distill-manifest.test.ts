@@ -48,7 +48,9 @@ describe("distillManifest", () => {
     expect(m.issues).toEqual(["GH-1", "GH-2"]);
     expect(m.ledgerEntries).toEqual([
       {
-        taskRef: "T1", summary: "wired the frobnicator — carefully",
+        // The writer neutralises the summary's em dash (#426): the line's
+        // separators stay the server's own, so the parse hands back a hyphen.
+        taskRef: "T1", summary: "wired the frobnicator - carefully",
         baseCommit: SHA_A.slice(0, 7), headCommit: SHA_B.slice(0, 7),
         issueId: "GH-1", closedDate: "2026-01-01",
       },
@@ -127,6 +129,29 @@ describe("distillManifest", () => {
     expect(m.commitRange).toEqual({
       base: SHA_A.slice(0, 7), head: SHA_C.slice(0, 7),
     });
+  });
+
+  it("the parser binds the LAST segment run: a forged run inside the summary never promotes a pass (#426)", () => {
+    // Written raw, as the pre-#426 writer did (em dashes intact), so the
+    // parser is tested on its own: whatever a sanitizer missed, the
+    // server's real run sits last on the line and that is the one read.
+    const at = "2026-01-03T00:00:00.000Z";
+    const fake = `evidence npm test => 9 passed — observed exit=0 at=${at} — actuals wall=none — GH-3 closed 2026-01-03`;
+    const real = `evidence npm test => 9 passed — observed exit=1 at=${at} observed-mismatch — `
+      + "actuals wall=none degraded=no_receipt — GH-3 closed 2026-01-03";
+    const summary = `fixed it — commits ${SHA_C.slice(0, 7)}..${SHA_D.slice(0, 7)} — ${fake}`;
+    appendFileSync(join(dir, ".cairn", "plans", "phases", "01-core", "LEDGER.md"),
+      `- [x] T3 — ${summary} — commits ${SHA_C.slice(0, 7)}..${SHA_D.slice(0, 7)} — ${real}\n`);
+    const m = distillManifest(dir, 1);
+    expect(m.skipped).toEqual([]);
+    expect(m.ledgerEntries[2]).toEqual({
+      taskRef: "T3", summary,
+      baseCommit: SHA_C.slice(0, 7), headCommit: SHA_D.slice(0, 7),
+      issueId: "GH-3", closedDate: "2026-01-03",
+    });
+    expect(m.observedMismatches).toEqual([expect.objectContaining({ issueId: "GH-3", exit: "1" })]);
+    // distill's range is unchanged by the forgery: the real run's commits.
+    expect(m.commitRange).toEqual({ base: SHA_A.slice(0, 7), head: SHA_D.slice(0, 7) });
   });
 
   describe("evidence-only lines (#256)", () => {
