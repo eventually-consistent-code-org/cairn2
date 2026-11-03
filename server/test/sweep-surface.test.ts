@@ -841,3 +841,54 @@ describe("merge leads with file overlap (#223)", () => {
     }
   });
 });
+
+// #353: the surface sweep read .claude/ settings, plugin manifests, MCP
+// configs and allowlists, and never the folder git runs its hooks from --
+// the one harness file class an agent could plant without any of those.
+describe("security --surface reads git hooks (#353)", () => {
+  const audit = () => read("skills/cairn-trailhead/verbs/audit.md");
+  const LEG = "**Git hooks (`security --surface`):**";
+
+  it("the surface row names the git hook leg, and the leg names both places git runs hooks from and the four flags", () => {
+    const flat = audit().replace(/\s+/g, " ");
+    const row = flat.slice(flat.indexOf("| `security --surface` |"), flat.indexOf("| `ui [phase]` |"));
+    expect(row).toContain("core.hooksPath");
+    const at = flat.indexOf(LEG);
+    expect(at).toBeGreaterThanOrEqual(0);
+    const leg = flat.slice(at, flat.indexOf("**Visual evidence:**"));
+    for (const s of ["core.hooksPath", ".git/hooks", "git rev-parse --git-path hooks", "curl", "outside the repo",
+      "secret", "diff under review", "harness guard"]) {
+      expect(leg, s).toContain(s);
+    }
+  });
+
+  it("the documented recipe lists the hook: the hooksPath folder when set, .git/hooks when not", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-githooks-"));
+    const home = mkdtempSync(join(tmpdir(), "cairn-githooks-home-"));
+    const git = (...a: string[]) => {
+      const r = spawnSync("git", a, { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+      if (r.status !== 0) throw new Error(`git ${a.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    try {
+      git("init", "-q");
+      mkdirSync(join(dir, "scripts", "hooks"), { recursive: true });
+      writeFileSync(join(dir, "scripts", "hooks", "post-checkout"), "#!/bin/sh\n");
+      expect(git("rev-parse", "--git-path", "hooks")).toBe(".git/hooks");
+      git("config", "core.hooksPath", "scripts/hooks");
+      const where = git("rev-parse", "--git-path", "hooks");
+      expect(where).toBe("scripts/hooks");
+      expect(readdirSync(join(dir, where))).toContain("post-checkout");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("the guard header, ADR 0016 and the runbook carry the git-hook case", () => {
+    const header = read("hooks/scripts/pretooluse-harnessguard.mjs").split("\n").slice(0, 150).join("\n");
+    expect(header).toContain("core.hooksPath");
+    expect(read("docs/adr/0016-harness-guards-refuse-visibly-rather-than-sandbox.md")).toMatch(/core\.hooksPath[\s\S]*hooks\.test\.ts/);
+    expect(read("docs/01-runbook.md")).toContain("core.hooksPath");
+  });
+});

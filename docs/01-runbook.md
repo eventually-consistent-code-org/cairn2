@@ -2140,6 +2140,9 @@ configuration that decides what the agent may do at all: the `hooks/`
 directory, `.mcp.json`, the settings files under any `.claude/` folder,
 the plugin manifests under `.claude-plugin/`, and your machine-wide
 Claude settings (`~/.claude/settings.json` and `settings.local.json`).
+The folder git runs its hooks from is on that list too — `core.hooksPath`
+when set, else `.git/hooks` — because a hook planted there runs at your
+next checkout or commit, in every worktree, as you (#353).
 An agent that can rewrite its own hooks can switch off every other
 control in one edit, so the Edit, Write and NotebookEdit tools are
 refused on those paths, and so is any Bash line or known MCP tool shape

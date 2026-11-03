@@ -56,6 +56,15 @@ Cost: an operator who genuinely wants a harness edit pays one flag. That
 is the intended friction, and the refusal text is written to make the
 question — did you actually ask for this? — the thing they read first.
 
+A git hook is harness configuration too (#353, 2026-11-03). The folder
+git runs its hooks from — `core.hooksPath` when set, else `.git/hooks`
+— joins the harness guard's protected set under the same escape and the
+same refusal shape: one line naming the file, saying it is a git hook
+that runs at the next checkout or commit, then the question of where
+the instruction came from. Asserted in `server/test/hooks.test.ts`
+("harness guard protects git hooks (#353)"); `audit security --surface`
+reads the same folder.
+
 Fail-open is half cairn's and half the platform's, and the two halves
 now point different ways. A guard's own error exits 0 — a broken guard
 never blocks work (asserted: `server/test/runguard-effects.test.ts`
