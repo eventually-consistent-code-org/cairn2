@@ -129,6 +129,19 @@ export type ProbeVerdict =
 
 export interface ProbeResult { verdict: ProbeVerdict; detail?: string }
 
+/** What the service enforces on the default branch (#485) -- the four rules
+ *  the push gate rests on, as the tracker reports them: `pull_request`,
+ *  `required_reviews:<n>`, `non_fast_forward` (no force push), `deletion`.
+ *  `rules` is only a measurement when `source` names the endpoint that
+ *  answered; a read that failed says `unreadable: <reason>` and is never
+ *  passed off as an empty list (claims rule 2, #462). Asserted by
+ *  github.unit.test.ts "GitHubTracker branchProtection (#485)". */
+export interface BranchProtection {
+  default: string;
+  rules: string[];
+  source: "rulesets" | "legacy" | `unreadable: ${string}`;
+}
+
 export interface Tracker {
   readonly capabilities: Capability;
   createIssue(input: IssueCreate): Promise<Issue>;
@@ -151,6 +164,10 @@ export interface Tracker {
   /** Cheap credential preflight -- one authenticated call, mapped to a
    *  specific verdict. A probe failure IS the result: this never throws. */
   probe?(): Promise<ProbeResult>;
+  /** The default branch's protection as the service reports it (#485).
+   *  Present only on adapters whose backend holds the repository (github
+   *  today). Never throws: a failed read is `source: "unreadable: …"`. */
+  branchProtection?(): Promise<BranchProtection>;
   /** The category a state NAME would resolve to here, with no write and
    *  no network (#427) -- present on adapters with a custom-state
    *  vocabulary: local and the fake from their config, jira, linear,

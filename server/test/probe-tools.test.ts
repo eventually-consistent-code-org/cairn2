@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
+import { GitHubTracker } from "../src/tracker/adapters/github.js";
+import type { Tracker } from "../src/tracker/types.js";
 
 describe("probe_start owns its started comment (#396)", () => {
   let client: Client;
@@ -65,5 +67,90 @@ describe("probe_start owns its started comment (#396)", () => {
     const thread = await call("thread_start", { description: "auth rework" });
     expect(comments(draft.json.issue)).toEqual([]);
     expect(comments(thread.json.issue)).toEqual([]);
+  });
+});
+
+// #485: config_probe carries branchProtection for a tracker that can read it,
+// so ship can say when the push gate is the guard alone. The read never fails
+// the probe; a tracker without the read leaves the field absent.
+describe("config_probe reports branchProtection (#485)", () => {
+  async function probeWith(tracker: Tracker) {
+    const projectDir = mkdtempSync(join(tmpdir(), "cairn-probe-bp-"));
+    writeFileSync(
+      join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+    const server = buildServer({
+      projectDir,
+      tracker,
+      fetchLatestVersion: async () => "9.9.9",
+    });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "test", version: "0.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    const res = await c.callTool({ name: "config_probe", arguments: {} });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { ...res, json: JSON.parse(text) };
+  }
+  const github = (routes: Record<string, { status: number; body: unknown }>) =>
+    new GitHubTracker({ repo: "o/r" }, async (url) => {
+      const u = String(url);
+      const hit = Object.keys(routes).find((suffix) => u.endsWith(suffix));
+      if (!hit) throw new Error(`unexpected url in test: ${u}`);
+      return new Response(JSON.stringify(routes[hit].body), { status: routes[hit].status });
+    }, () => "tok");
+  const repo = { status: 200, body: { full_name: "o/r", default_branch: "main" } };
+
+  it("rules present ride along with the tracker verdict", async () => {
+    const res = await probeWith(github({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": {
+        status: 200,
+        body: [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }],
+      },
+    }));
+    expect(res.isError).toBeFalsy();
+    expect(res.json.tracker).toEqual({ verdict: "ok" });
+    expect(res.json.branchProtection).toEqual({
+      default: "main", rules: ["pull_request", "required_reviews:1"], source: "rulesets",
+    });
+  });
+
+  it("rules empty: the guard-alone case is reported as a measured empty list", async () => {
+    const res = await probeWith(github({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+      "/repos/o/r/branches/main/protection": {
+        status: 404, body: { message: "Branch not protected" },
+      },
+    }));
+    expect(res.json.branchProtection).toEqual({ default: "main", rules: [], source: "legacy" });
+  });
+
+  it("unreadable: a 403 on the protection read is carried, never an empty verdict", async () => {
+    const res = await probeWith(github({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+      "/repos/o/r/branches/main/protection": { status: 403, body: { message: "Forbidden" } },
+    }));
+    expect(res.isError).toBeFalsy();
+    expect(res.json.branchProtection.rules).toEqual([]);
+    expect(res.json.branchProtection.source).toMatch(/^unreadable: /);
+  });
+
+  it("a tracker verdict that is not ok skips the read and says so", async () => {
+    const res = await probeWith(github({
+      "/repos/o/r": { status: 401, body: { message: "Bad credentials" } },
+    }));
+    expect(res.json.tracker.verdict).toBe("bad_token");
+    expect(res.json.branchProtection).toEqual({
+      default: "unknown", rules: [], source: "unreadable: tracker probe verdict bad_token",
+    });
+  });
+
+  it("a tracker without the read leaves the field absent (the fake)", async () => {
+    const res = await probeWith(new FakeTracker());
+    expect(res.json.tracker).toEqual({ verdict: "ok" });
+    expect(res.json.branchProtection).toBeUndefined();
   });
 });
