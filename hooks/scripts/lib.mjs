@@ -88,6 +88,12 @@ export function gitCommonDir(projectDir) {
  * planning-folder path two folders up fell outside what the leak and
  * harness guards considered the project. Asserted: hooks.test.ts, the
  * #383 twin table's nested rows run once more with the variable stripped.
+ * The answer keeps the cwd's own spelling, as the variable would: git
+ * reports the top level with links resolved (/private/var for a Mac's
+ * /var), and the harness guard compares a path's written spelling as well
+ * as its real one, so the root is handed back as the cwd minus what lies
+ * below the top level, and as git spelled it only when the cwd's own
+ * spelling does not end that way (a link inside the path).
  * Never throws: a guard that cannot find its root fails open on the cwd.
  */
 export function projectRoot(payload) {
@@ -99,7 +105,12 @@ export function projectRoot(payload) {
     const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1500,
     }).trim();
-    if (top) return top;
+    if (top) {
+      const real = realpathSync(cwd);
+      const below = real === top ? "" : real.startsWith(top + "/") ? real.slice(top.length) : null;
+      if (below !== null && cwd.endsWith(below)) return cwd.slice(0, cwd.length - below.length) || cwd;
+      return top;
+    }
   } catch {
     // not a repository, no git on PATH, or git hung: the folder walk below
   }
