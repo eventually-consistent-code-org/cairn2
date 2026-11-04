@@ -99,7 +99,13 @@
  *   relative path is judged from every folder a cd, env -C or git -C on the
  *   line can reach (#258); after a cd it can't follow, refused. A git -C or
  *   tar -C value is read like a cd target (#318): ~, $HOME and $PWD spelled
- *   out, a variable it can't read refused the same way. A write target a
+ *   out, a variable it can't read refused the same way. A variable the
+ *   line assigns earlier -- a bare NAME=value, an export, declare or
+ *   local, a for header's words (each in turn), a prefix on the line a
+ *   shell or eval nests -- is spelled out before a write path is judged
+ *   (#291; asserted: hooks.test.ts "(#291)"); one assigned from a
+ *   substitution, leading the path, is refused like a cd the guard can't
+ *   follow. A write target a
  *   substitution computes the folder of is judged there when the guard
  *   knows the folder -- `$(pwd)/x` is the shell's, from every folder a cd
  *   before it can reach, `$(git rev-parse --show-toplevel)/x` the repo
@@ -214,6 +220,12 @@
  *   A hooksPath or include that reaches a git config file in content the
  *   line doesn't spell (`cp evil.cfg .git/config`, an unreadable patch),
  *   and the editor `git config --edit` opens (#465).
+ *   A protected path in a variable the line never assigns (#291, by
+ *   decision, phase 31: the session's environment, a `read`, a value a
+ *   caller computed) -- `$HK/hooks.json` is judged as typed, measured by
+ *   hooks.test.ts "(#291)"; one the line assigns is spelled out before
+ *   judgment, and one it assigns from a substitution is refused as a
+ *   write the guard can't place.
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
  *   2.1.299 the platform fails closed when it cannot reach the guard or
@@ -713,6 +725,92 @@ function expandVars(raw) {
     .replace(/^(?:\$CLAUDE_CONFIG_DIR|\$\{CLAUDE_CONFIG_DIR\})(?=\/|$)/, () => configDir() ?? "")
     .replace(/^(?:\$XDG_CONFIG_HOME|\$\{XDG_CONFIG_HOME\})(?=\/|$)/, () => expandHome(process.env.XDG_CONFIG_HOME ?? ""))
     .replace(/^(?:\$GIT_CONFIG_GLOBAL|\$\{GIT_CONFIG_GLOBAL\})(?=\/|$)/, () => expandHome(process.env.GIT_CONFIG_GLOBAL ?? ""));
+}
+
+// A `$NAME` or `${NAME}` inside a word (#291).
+const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
+
+/**
+ * `raw` with every variable the line assigned earlier spelled out (#291):
+ * each $NAME / ${NAME} whose NAME is in `vars`, in every value a loop gave
+ * it, so `D=hooks; echo x > $D/hooks.json` is judged at hooks/. One the
+ * line assigned from a substitution (null in `vars`), at the front of the
+ * path with a folder after it, leads the write where the guard can't
+ * follow -- `lost`, as a cd it can't read (#258) and a substitution leading
+ * a path (#319) do; elsewhere in the path it stays as typed, judged under
+ * the folder before it, as `/tmp/$(date).bak` is. A variable the line
+ * never assigned stays as typed (the header's Not seen block). Past
+ * MAX_PLACES values the rest is lost too.
+ */
+function expandAssigned(raw, vars) {
+  if (!vars?.size) return { raws: [raw], lost: false };
+  let raws = [""];
+  let lost = false;
+  let at = 0;
+  for (const m of raw.matchAll(VAR_REF)) {
+    const text = raw.slice(at, m.index);
+    at = m.index + m[0].length;
+    const vals = vars.get(m[1] ?? m[2]);
+    if (vals === undefined) { raws = raws.map((r) => r + text + m[0]); continue; } // never assigned on the line
+    if (vals === null) { // assigned from something the guard can't read
+      if (/^(?:\.\/)*$/.test(raw.slice(0, m.index)) && raw.slice(at).includes("/")) lost = true;
+      raws = raws.map((r) => r + text + m[0]);
+      continue;
+    }
+    raws = raws.flatMap((r) => vals.map((v) => r + text + v));
+    if (raws.length > MAX_PLACES) { lost = true; raws = raws.slice(0, MAX_PLACES); }
+  }
+  return { raws: raws.map((r) => r + raw.slice(at)), lost };
+}
+
+/**
+ * The values one assignment's right-hand side can take (#291), spelled out
+ * through the variables assigned before it and the ones the guard knows
+ * (~, $HOME, $CAIRN_HOME ...), one per value a loop variable in it holds.
+ * Null when a $(...) or backtick computes it, or a variable it names was
+ * itself unresolvable.
+ */
+function valueOf(v, vars) {
+  if (/\$\(|`/.test(v)) return null;
+  if ([...v.matchAll(VAR_REF)].some((m) => vars.get(m[1] ?? m[2]) === null)) return null;
+  const { raws, lost } = expandAssigned(v, vars);
+  return lost ? null : raws.map(expandVars);
+}
+
+/** `vars` with each NAME=value of `assigns` set, in order, each read through the ones before it (#291). */
+function assignVars(assigns, vars) {
+  const out = new Map(vars);
+  for (const a of assigns) {
+    const eq = a.indexOf("=");
+    if (eq > 0) out.set(a.slice(0, eq), valueOf(a.slice(eq + 1), out));
+  }
+  return out;
+}
+
+/**
+ * The variables one segment leaves set for the commands after it (#291):
+ * a bare NAME=value (one or several), an export, declare, typeset,
+ * readonly or local one, and a `for NAME in WORDS` (or select) header,
+ * which gives NAME each word in turn -- every word, since the body runs
+ * for each. A prefix assignment on a real command (`D=x cmd`) is that
+ * command's alone, as the shell gives it: writeTargets hands it to the
+ * line the command nests, and nothing after it sees it.
+ */
+function lineVars(seg, vars) {
+  const { words: w, assigns } = unwrap(seg.words, READ);
+  let out = vars;
+  if (!w.length) out = assignVars(assigns, out);
+  else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
+    out = assignVars(w.slice(1).filter((a) => ASSIGNMENT.test(a)), out);
+  }
+  const r = seg.reserved ?? [];
+  const at = r.findIndex((x, i) => (x === "for" || x === "select") && r[i + 2] === "in");
+  if (at >= 0) {
+    const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out));
+    out = new Map(out);
+    out.set(r[at + 1], vals.includes(null) ? null : vals.flat());
+  }
+  return out;
 }
 
 /**
@@ -2300,20 +2398,26 @@ function writeTargets(seg, ctx) {
   const add = (raw, mode = "write", dir = ctx.dir, pipe = false) => {
     // a nested shell's "$1" / "$@" is whatever path its caller handed it
     const mapped = ctx.positional && raw.search(POSITIONAL) >= 0;
-    // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
-    // sees them (#258, #263), and a folder it computes in front of the path
-    // when the guard knows which: $(pwd) and the repo root (#321)
-    const r = expandVars(computedDir((mapped ? raw.replace(POSITIONAL, ctx.positional) : raw)
-      .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
-    const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
-    // a path with nothing in front of any other substitution to anchor it
-    // (`$(somecmd)/notes.txt`, `\`dirname x\`/y`) lands where the guard can't
-    // follow, like a cd it can't (#319): there is no tail it could clear
-    // from there, since the folder may be a protected one itself; a
-    // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
-    // judged there, as a $NAME is
-    const abs = /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
-    out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
+    // #291 -- a variable the line assigned earlier is spelled out first, in
+    // every value a loop gave it; one assigned from a substitution, leading
+    // the path, puts the write where the guard can't follow
+    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars);
+    for (const one of raws) {
+      // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
+      // sees them (#258, #263), and a folder it computes in front of the path
+      // when the guard knows which: $(pwd) and the repo root (#321)
+      const r = expandVars(computedDir(one
+        .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
+      const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
+      // a path with nothing in front of any other substitution to anchor it
+      // (`$(somecmd)/notes.txt`, `\`dirname x\`/y`) lands where the guard can't
+      // follow, like a cd it can't (#319): there is no tail it could clear
+      // from there, since the folder may be a protected one itself; a
+      // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
+      // judged there, as a $NAME the line never assigned is
+      const abs = lost || /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
+      out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
+    }
   };
   if (ctx.chdir) {
     for (const x of writes) add(x);
@@ -2359,6 +2463,7 @@ function writeTargets(seg, ctx) {
         positional: marker,
         argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
         walk: ctx.walk,
+        vars: assignVars(assigns, ctx.vars), // the line's variables, and this command's own prefix (#291)
       }));
     };
     const str = cmd === "eval" ? evalCommandString(args)
@@ -2623,14 +2728,18 @@ function lineTargets(command, dir, depth, extra = {}) {
   if (tooDeep(segs)) return depth > 0 || !exempt(segs[0]?.words ?? []) ? [{ deep: true }] : [];
   const places = linePlaces(segs, dir);
   const out = [];
+  // the variables assigned so far on the line, each command judged under
+  // the ones before it (#291); a nested line starts with its caller's
+  let vars = extra.vars ?? new Map();
   for (let k = 0; k < segs.length; k++) {
     // the commands piping into this one, nearest last
     const up = [];
     for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) up.unshift(segs[j]);
     // the prefix counts on a command the human typed, not inside a quoted string
     if (depth > 0 || !exempt(segs[k].words)) {
-      for (const d of places) out.push(...writeTargets(segs[k], { ...extra, dir: d, depth, up }));
+      for (const d of places) out.push(...writeTargets(segs[k], { ...extra, dir: d, depth, up, vars }));
     }
+    vars = lineVars(segs[k], vars);
   }
   return out;
 }
@@ -2828,11 +2937,12 @@ try {
     console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
   } else if (hit.lost) {
     // #258: a directory change it couldn't follow -- fail closed, and say so
-    // (a git -C too, #318; a folder a substitution computes, #319)
+    // (a git -C too, #318; a folder a substitution computes, #319; a
+    // variable the line set from one, #291)
     console.error(
-      "cairn harness guard: a directory change in this line (cd, pushd, env -C, git -C), or a " +
-      "folder a $(...) computes, goes somewhere the guard couldn't tell, so this write may land " +
-      "in the hook directory or a settings file.",
+      "cairn harness guard: a directory change in this line (cd, pushd, env -C, git -C), a " +
+      "folder a $(...) computes, or a variable set from one, goes somewhere the guard couldn't tell, " +
+      "so this write may land in the hook directory or a settings file.",
     );
     console.error(`  file: ${String(hit.path).replace(/[\u0001-\u0003]/g, "*")}`);
     console.error("  name the folder plainly, or write to an absolute path, and the guard can judge it.");

@@ -5808,9 +5808,10 @@ describe("the harness guard's Not seen block is dated, pinned and measured (#289
       "starts by name off PATH",
       "runs arbitrary code",
       "the editor",
+      "a variable the line never assigns",
     ]) expect(block, phrase).toContain(phrase);
     // the line count is the pin: a shape added or removed moves it, on purpose, in the same change
-    expect(block.split("\n").length, block).toBe(25);
+    expect(block.split("\n").length, block).toBe(31);
   });
 
   it("the Coverage says find -exec, xargs and a heredoc fed to a shell are read, and cites this block", () => {
@@ -6502,5 +6503,115 @@ describe("the reader switches left off: # comments in the harness guard, eval in
     const runGuard = readFileSync(RUNGUARD, "utf8");
     expect(runGuard).toContain("evalCommandString");
     expect(runGuard.slice(0, runGuard.indexOf("\nimport "))).toContain("`eval`");
+  });
+});
+
+// #291 -- a protected path held in a shell variable was written past the
+// guard: a variable as a cd target was refused (a folder the guard can't
+// read is LOST, #258), but one in the write path itself was judged as
+// typed, so `D=hooks; echo x > $D/hooks.json` landed in the hook directory
+// unseen -- and so did the ship-gate stamp, a run manifest or the home
+// settings held the same way (#263, #267). An assignment earlier on the
+// line is spelled out before judgment now: a bare NAME=value, an export /
+// declare / local, a for header's words (each in turn), and a prefix on
+// the line a shell or eval nests. One assigned from a substitution leads
+// the write where the guard can't follow, refused like a cd it can't. A
+// variable the line never assigns -- the session's environment -- is left
+// as typed, by decision (phase 31): the header's Not seen block says so,
+// dated, and the last test here measures it.
+describe("a protected path held in a same-line variable is seen (#291)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib; a home; a cairn home holding a ship-gate stamp. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-291-proj-");
+    const home = freshDir("cairn-hooks-291-home-");
+    const cairnHome = freshDir("cairn-hooks-291-cairnhome-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    mkdirSync(join(cairnHome, "ship-gate"), { recursive: true });
+    writeFileSync(join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+    return { p, home, cairnHome };
+  }
+
+  function run(f: ReturnType<typeof fixture>, command: string,
+    opts: { cwd?: string; bare?: boolean; env?: Record<string, string> } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome, ...opts.env,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in (opts.env ?? {}))) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** Each refused shape beside its twin: the same variable, holding a harmless path. `rel` climbs from the shell's folder to the root. */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    [`D=${rel}hooks; echo x > $D/hooks.json`, `D=${rel}src; echo x > $D/x.json`],
+    [`D=${rel}hooks\necho x > $D/hooks.json`, `D=${rel}src\necho x > $D/x.json`],
+    [`export D=${rel}hooks; echo x > \${D}/hooks.json`, `export D=${rel}src; echo x > \${D}/x.json`],
+    [`declare D=${rel}hooks; rm $D/hooks.json`, `declare D=${rel}src; rm $D/x.json`],
+    [`F=${rel}hooks/hooks.json; cp /tmp/x $F`, `F=${rel}src/x.json; cp /tmp/x $F`],
+    // the line a shell or eval nests inherits the variable, and a prefix on it is that line's
+    [`D=${rel}hooks bash -c 'echo x > $D/hooks.json'`, `D=${rel}src bash -c 'echo x > $D/x.json'`],
+    [`D=${rel}hooks; eval 'echo x > $D/hooks.json'`, `D=${rel}src; eval 'echo x > $D/x.json'`],
+    // a for header gives its variable each word in turn, so the body is judged for every one
+    [`for f in ${rel}hooks/hooks.json; do rm $f; done`, `for f in ${rel}src/x.json; do rm $f; done`],
+    [`for f in ${rel}src/x.json ${rel}hooks/hooks.json; do echo x > $f; done`,
+      `for f in ${rel}src/x.json ${rel}src/y.json; do echo x > $f; done`],
+    // a variable built from an earlier one, and from the ones the guard already knows
+    [`R=${rel}.; D=$R/hooks; echo x > $D/hooks.json`, `R=${rel}.; D=$R/src; echo x > $D/x.json`],
+    [`C=$HOME/.claude; echo x > $C/settings.json`, `C=$HOME/notes; echo x > $C/settings.json`],
+    [`S=$CAIRN_HOME/ship-gate; echo '{}' > $S/proj-0123456789abcdef.json`, `S=$CAIRN_HOME/notes; echo '{}' > $S/proj.json`],
+  ];
+
+  it("harness guard: a variable assigned earlier on the line is spelled out before the write is judged; the same variable naming a harmless path passes", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("file:");
+      expect(r.stderr, JSON.stringify(refused)).not.toContain("couldn't tell");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+  });
+
+  it("a variable the line assigns from a substitution leads the write where the guard can't follow: refused, saying it couldn't tell; one that doesn't lead the path is judged under the folder before it", () => {
+    const f = fixture();
+    for (const c of ["D=$(cat x); echo y > $D/hooks.json", "D=`cat x`; echo y > $D/hooks.json",
+      "D=$(pwd)/..; echo y > $D/hooks.json", "R=$(cat x); D=$R/hooks; rm $D/hooks.json"]) {
+      const r = run(f, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("couldn't tell");
+    }
+    for (const c of ["F=$(mktemp); echo x > $F", "N=$(date +%s); echo x > /tmp/$N.log", "D=$(mktemp -d); echo x > $D",
+      "N=$(date +%s); echo x > src/$N.json"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the measured gap, as the Not seen block says: a variable the line never assigns -- the session's environment -- is judged as typed", () => {
+    const f = fixture();
+    for (const c of ["echo x > $D/hooks.json", "rm $F", "echo x > ${D}/hooks.json"]) {
+      expect(run(f, c, { env: { D: "hooks", F: join(f.p, "hooks", "hooks.json") } }).status, c).toBe(0);
+    }
+    const header = readFileSync(HARNESSGUARD, "utf8");
+    expect(header.slice(0, header.indexOf("*/"))).toContain("a variable the line never assigns");
   });
 });
