@@ -22,6 +22,7 @@ import { outlookMirrorPath } from "../src/core/outlook.js";
 import { listSessions } from "../src/sessions/store.js";
 import { PROVIDERS } from "../src/peers/run.js";
 import { scaffoldPhase, scaffoldProject } from "../src/planning/artifacts.js";
+import { setFocus } from "../src/workspace/context.js";
 
 // Controllable failure injection for the continuity resilience test below.
 // Mocks ONLY writeHandoff (everything else passes through to the real module)
@@ -2171,6 +2172,8 @@ describe("workspace: focus redirect + board (two-member fixture)", () => {
     expect(focused.json).toEqual({
       focus: "b",
       projectDir: join(wsRoot, "member-b"),
+      // launched at the workspace root: the focus applies here (#487)
+      focusApplied: true,
     });
 
     await call("context_set", { phase: 7 });
@@ -2870,4 +2873,98 @@ describe("readOnlyHint: true tools leave the planning dir and the cairn home unt
     }
     expect(offenders, "a tool labelled read-only wrote a file").toEqual([]);
   }, 60_000);
+});
+
+// #487 -- the observed cross-write: a server launched INSIDE member b, a
+// sibling session (another handle, here a direct setFocus from the root) sets
+// the focus to a, and b's next write must still land in b. The root-launched
+// server in the "focus redirect" block above is the twin: there the focus wins.
+describe("workspace: a member launch is never redirected by another session's focus (#487)", () => {
+  let wsRoot: string;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { ...res, json: JSON.parse(text) };
+  };
+
+  beforeAll(async () => {
+    wsRoot = mkdtempSync(join(tmpdir(), "cairn-ws-member-"));
+    mkdirSync(join(wsRoot, "member-a"));
+    mkdirSync(join(wsRoot, "member-b"));
+    writeFileSync(join(wsRoot, "member-a", "cairn.json"), CAIRN_JSON);
+    writeFileSync(join(wsRoot, "member-b", "cairn.json"), CAIRN_JSON);
+    writeFileSync(
+      join(wsRoot, "cairn-workspace.json"),
+      JSON.stringify({
+        workspace: "ws-member",
+        members: [
+          { name: "a", path: "member-a" },
+          { name: "b", path: "member-b" },
+        ],
+      }),
+    );
+    // this server is member b's session
+    const server = buildServer({
+      projectDir: join(wsRoot, "member-b"),
+      tracker: new FakeTracker(),
+    });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-ws-member", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+  });
+
+  afterAll(() => {
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  it("focus set to a from another handle: b's context_set lands in member b, and workspace_status says focusApplied: false", async () => {
+    // the other handle -- a sibling session launched at the root
+    setFocus(wsRoot, "a");
+
+    await call("context_set", { phase: 3 });
+    const ctxFile = join(".cairn", "state", "active-context.json");
+    expect(existsSync(join(wsRoot, "member-b", ctxFile))).toBe(true);
+    expect(existsSync(join(wsRoot, "member-a", ctxFile))).toBe(false);
+    expect(existsSync(join(wsRoot, ctxFile))).toBe(false);
+
+    const status = await call("workspace_status", {});
+    expect(status.isError).toBeFalsy();
+    expect(status.json).toMatchObject({
+      workspace: "ws-member",
+      focus: "a",
+      launchDir: join(wsRoot, "member-b"),
+      resolvedProject: join(wsRoot, "member-b"),
+      focusApplied: false,
+    });
+  });
+
+  it("this session's own workspace_focus writes the file but reports focusApplied: false", async () => {
+    const out = await call("workspace_focus", { project: "a" });
+    expect(out.json).toEqual({
+      focus: "a",
+      projectDir: join(wsRoot, "member-b"),
+      focusApplied: false,
+    });
+    const list = await call("workspace_list", {});
+    expect(list.json.focus).toBe("a");
+    // and the next read still answers from b
+    const got = await call("context_get", {});
+    expect(got.json).toEqual({ phase: 3 });
+  });
+
+  it("a stale focus is a field on workspace_status for a member launch, never a thrown call", async () => {
+    rmSync(join(wsRoot, "member-a", "cairn.json"));
+    const status = await call("workspace_status", {});
+    expect(status.isError).toBeFalsy();
+    expect(status.json).toMatchObject({
+      resolvedProject: join(wsRoot, "member-b"),
+      focusApplied: false,
+    });
+    expect(status.json.focusError).toBeUndefined();
+    // b's own reads still work with a's cairn.json gone
+    const got = await call("context_get", {});
+    expect(got.json).toEqual({ phase: 3 });
+  });
 });

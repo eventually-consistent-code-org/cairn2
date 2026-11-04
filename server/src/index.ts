@@ -168,6 +168,7 @@ import {
 } from "./map/store.js";
 import {
   findWorkspace,
+  resolveProject,
   resolveProjectDir,
   setFocus,
 } from "./workspace/context.js";
@@ -313,8 +314,10 @@ export function buildServer(deps: {
 
   // Workspace resolution: the injected projectDir is the LAUNCH dir, fixed for the
   // server's lifetime. Every tool call resolves its effective project dir
-  // through dir() -- workspace focus redirects it, no workspace (or no focus)
-  // falls through to the launch dir byte-identically (single-project compat).
+  // through dir() -- the workspace focus redirects it only when the launch dir
+  // is the workspace root or a folder no member owns; a launch inside a member
+  // is that member's session and is never moved (#487). No workspace (or no
+  // focus) falls through to the launch dir byte-identically (single-project compat).
   const launchDir = deps.projectDir;
   const dir = (): string => resolveProjectDir(launchDir);
 
@@ -3004,8 +3007,8 @@ export function buildServer(deps: {
     {
       annotations: { title: titleOf("workspace_focus"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Set (or clear, with project: null) the workspace focus — every tool then " +
-        "operates on the focused member's project dir. Validates the member exists and is configured",
+        "Set (or clear, with project: null) the workspace focus — a session launched at the " +
+        "workspace root then operates on that member; a member launch keeps its own dir",
       inputSchema: z.object({ project: z.string().nullable() }),
     },
     wrap((a: { project: string | null }) => setFocus(launchDir, a.project)),
@@ -3017,13 +3020,25 @@ export function buildServer(deps: {
       annotations: { title: titleOf("workspace_status"), readOnlyHint: true },
       description:
         "Curated cross-project read: per configured member { name, phase, openIssues, " +
-        "openSessions } from that member's own stores/tracker. Read-only, never switches focus; " +
-        "a member whose tracker errors reports { name, error } instead of failing the call",
+        "openSessions } from its own stores/tracker, plus launchDir, resolvedProject, focusApplied; " +
+        "a member whose tracker errors reports { name, error }, never fails the call",
       inputSchema: z.object({}),
     },
     wrap(async () => {
+      // Where THIS session's calls land, and whether the focus moved them (#487):
+      // a redirect is a field here, never a surprise. A stale focus is reported
+      // the same way, not thrown -- this is the tool you reach for to find out.
+      let where: { launchDir: string; resolvedProject: string; focusApplied: boolean; focusError?: string };
+      try {
+        where = resolveProject(launchDir);
+      } catch (e) {
+        where = {
+          launchDir, resolvedProject: launchDir, focusApplied: false,
+          focusError: e instanceof CairnError ? e.message : String(e),
+        };
+      }
       const info = findWorkspace(launchDir);
-      if (!info) return { workspace: null, members: [] };
+      if (!info) return { workspace: null, members: [], ...where };
       const members: Array<Record<string, unknown>> = [];
       for (const m of info.members.filter((member) => member.configured)) {
         try {
@@ -3050,7 +3065,7 @@ export function buildServer(deps: {
           });
         }
       }
-      return { workspace: info.workspace, focus: info.focus, members };
+      return { workspace: info.workspace, focus: info.focus, ...where, members };
     }),
   );
 

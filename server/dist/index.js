@@ -58,7 +58,7 @@ import { approvePlan } from "./planning/plan-approval.js";
 import { SWEEP_SCOPE_RE, writeAuditRecord } from "./audit/record.js";
 import { dedupIntake, fileSurvivors, filedCost } from "./audit/closing.js";
 import { mapGet, mapQuery, mapSet, } from "./map/store.js";
-import { findWorkspace, resolveProjectDir, setFocus, } from "./workspace/context.js";
+import { findWorkspace, resolveProject, resolveProjectDir, setFocus, } from "./workspace/context.js";
 import { boardGet, boardUpdate } from "./workspace/board.js";
 import { PROVIDERS, peerList, peerRun } from "./peers/run.js";
 import { redactLeaks, scanForLeaks } from "./peers/leak-scan.js";
@@ -142,8 +142,10 @@ export function buildServer(deps) {
     const now = deps.now ?? (() => new Date());
     // Workspace resolution: the injected projectDir is the LAUNCH dir, fixed for the
     // server's lifetime. Every tool call resolves its effective project dir
-    // through dir() -- workspace focus redirects it, no workspace (or no focus)
-    // falls through to the launch dir byte-identically (single-project compat).
+    // through dir() -- the workspace focus redirects it only when the launch dir
+    // is the workspace root or a folder no member owns; a launch inside a member
+    // is that member's session and is never moved (#487). No workspace (or no
+    // focus) falls through to the launch dir byte-identically (single-project compat).
     const launchDir = deps.projectDir;
     const dir = () => resolveProjectDir(launchDir);
     // Per-dir memos -- focus can move between members mid-session, so trackers,
@@ -2186,20 +2188,33 @@ export function buildServer(deps) {
     }, wrap(() => findWorkspace(launchDir) ?? { workspace: null }));
     server.registerTool("workspace_focus", {
         annotations: { title: titleOf("workspace_focus"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-        description: "Set (or clear, with project: null) the workspace focus — every tool then " +
-            "operates on the focused member's project dir. Validates the member exists and is configured",
+        description: "Set (or clear, with project: null) the workspace focus — a session launched at the " +
+            "workspace root then operates on that member; a member launch keeps its own dir",
         inputSchema: z.object({ project: z.string().nullable() }),
     }, wrap((a) => setFocus(launchDir, a.project)));
     server.registerTool("workspace_status", {
         annotations: { title: titleOf("workspace_status"), readOnlyHint: true },
         description: "Curated cross-project read: per configured member { name, phase, openIssues, " +
-            "openSessions } from that member's own stores/tracker. Read-only, never switches focus; " +
-            "a member whose tracker errors reports { name, error } instead of failing the call",
+            "openSessions } from its own stores/tracker, plus launchDir, resolvedProject, focusApplied; " +
+            "a member whose tracker errors reports { name, error }, never fails the call",
         inputSchema: z.object({}),
     }, wrap(async () => {
+        // Where THIS session's calls land, and whether the focus moved them (#487):
+        // a redirect is a field here, never a surprise. A stale focus is reported
+        // the same way, not thrown -- this is the tool you reach for to find out.
+        let where;
+        try {
+            where = resolveProject(launchDir);
+        }
+        catch (e) {
+            where = {
+                launchDir, resolvedProject: launchDir, focusApplied: false,
+                focusError: e instanceof CairnError ? e.message : String(e),
+            };
+        }
         const info = findWorkspace(launchDir);
         if (!info)
-            return { workspace: null, members: [] };
+            return { workspace: null, members: [], ...where };
         const members = [];
         for (const m of info.members.filter((member) => member.configured)) {
             try {
@@ -2222,7 +2237,7 @@ export function buildServer(deps) {
                 });
             }
         }
-        return { workspace: info.workspace, focus: info.focus, members };
+        return { workspace: info.workspace, focus: info.focus, ...where, members };
     }));
     const WorkstreamPatchSchema = z.object({
         title: z.string().optional(),

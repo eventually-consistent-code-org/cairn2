@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CairnError } from "../src/errors.js";
-import { findWorkspace, resolveProjectDir, setFocus } from "../src/workspace/context.js";
+import { findWorkspace, resolveProject, resolveProjectDir, setFocus } from "../src/workspace/context.js";
 
 const fresh = () => mkdtempSync(join(tmpdir(), "cairn-workspace-"));
 
@@ -85,7 +85,7 @@ describe("setFocus + resolveProjectDir", () => {
     writeWorkspace(root, "acme", [{ name: "api", path: "api" }]);
     configureMember(root, "api");
     const result = setFocus(root, "api");
-    expect(result).toEqual({ focus: "api", projectDir: join(root, "api") });
+    expect(result).toEqual({ focus: "api", projectDir: join(root, "api"), focusApplied: true });
     expect(resolveProjectDir(root)).toBe(join(root, "api"));
   });
 
@@ -125,7 +125,7 @@ describe("setFocus + resolveProjectDir", () => {
     configureMember(root, "api");
     setFocus(root, "api");
     const cleared = setFocus(root, null);
-    expect(cleared).toEqual({ focus: null, projectDir: root });
+    expect(cleared).toEqual({ focus: null, projectDir: root, focusApplied: false });
     expect(resolveProjectDir(root)).toBe(root);
   });
 
@@ -185,5 +185,98 @@ describe("setFocus + resolveProjectDir", () => {
     setFocus(root, "api");
     const info = findWorkspace(root);
     expect(info?.focus).toBe("api");
+  });
+});
+
+// #487 -- a session launched inside a member project is never redirected by
+// the workspace focus. The focus file is one file under the workspace root,
+// shared by every session beneath it; before this block a sibling session's
+// `basecamp focus` silently repointed every other session's writes.
+describe("resolveProjectDir: a member launch is never redirected (#487)", () => {
+  function twoMembers(): string {
+    const root = fresh();
+    writeWorkspace(root, "acme", [{ name: "a", path: "a" }, { name: "b", path: "b" }]);
+    configureMember(root, "a");
+    configureMember(root, "b");
+    return root;
+  }
+
+  it("launched in member b, focus set to a from another handle: b still resolves to b", () => {
+    const root = twoMembers();
+    // the "other handle" is a second session that set the focus from the root
+    setFocus(root, "a");
+    expect(resolveProjectDir(join(root, "b"))).toBe(join(root, "b"));
+  });
+
+  it("launched at the workspace root, the focus wins", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    expect(resolveProjectDir(root)).toBe(join(root, "a"));
+  });
+
+  it("nested cwd: launched deep inside member b, still b's tree, never a", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    const nested = join(root, "b", "src", "deep");
+    mkdirSync(nested, { recursive: true });
+    expect(resolveProjectDir(nested)).toBe(nested);
+  });
+
+  it("launched in a non-member folder under the root, the focus applies", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    const scratch = join(root, "scratch");
+    mkdirSync(scratch, { recursive: true });
+    expect(resolveProjectDir(scratch)).toBe(join(root, "a"));
+  });
+
+  it("hostile twin: a sibling whose name merely starts with a member's path is not that member", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    // `b-other` shares the prefix `b` -- a startsWith check would call it member b
+    const lookalike = join(root, "b-other");
+    mkdirSync(lookalike, { recursive: true });
+    expect(resolveProjectDir(lookalike)).toBe(join(root, "a"));
+  });
+
+  it("hostile twin: a `..` climb spelled to look like a member launch is resolved first", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    const scratch = join(root, "scratch");
+    mkdirSync(scratch, { recursive: true });
+    // spelled as if inside b, but the path walks straight back out of it
+    expect(resolveProjectDir(`${join(root, "b")}/../scratch`)).toBe(join(root, "a"));
+  });
+
+  it("a stale focus never blocks a member launch -- the focus is not its business", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    rmSync(join(root, "a", "cairn.json"));
+    expect(resolveProjectDir(join(root, "b"))).toBe(join(root, "b"));
+    // launched at the root the stale focus still refuses, as before
+    expect(() => resolveProjectDir(root)).toThrow(CairnError);
+  });
+
+  it("resolveProject says whether the focus moved the session: launchDir, resolvedProject, focusApplied", () => {
+    const root = twoMembers();
+    setFocus(root, "a");
+    expect(resolveProject(join(root, "b"))).toEqual({
+      launchDir: join(root, "b"), resolvedProject: join(root, "b"), focusApplied: false,
+    });
+    expect(resolveProject(root)).toEqual({
+      launchDir: root, resolvedProject: join(root, "a"), focusApplied: true,
+    });
+    // no focus at all: the same three fields, nothing applied
+    setFocus(root, null);
+    expect(resolveProject(root)).toEqual({ launchDir: root, resolvedProject: root, focusApplied: false });
+  });
+
+  it("setFocus from a member launch writes the focus but reports it did not move this session", () => {
+    const root = twoMembers();
+    const result = setFocus(join(root, "b"), "a");
+    expect(result).toEqual({ focus: "a", projectDir: join(root, "b"), focusApplied: false });
+    // the file was written for the workspace -- a root launch sees it
+    expect(findWorkspace(root)?.focus).toBe("a");
+    expect(resolveProjectDir(root)).toBe(join(root, "a"));
   });
 });
