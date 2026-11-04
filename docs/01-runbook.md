@@ -1256,6 +1256,14 @@ checkout, not only the one harness that runs the run guard (section 10,
 "The git layer"). Opt-in, because it writes `core.hooksPath` into the
 repository's config.
 
+Whichever harness drives it, cairn acts as you — the tracker token, the
+push credential, the browser session and any connected account are
+yours, `config_probe` says so as `identity: "owner"`, and so the runtime
+half is yours to set up rather than cairn's to check: the shell and the
+browser a cairn session uses should hold no signed-in session the task
+does not need (ADR 0037; a sentence, dated 2026-11-04, with no mechanism
+behind it — cairn cannot see what a browser profile holds).
+
 Three things happen everywhere: a `cairn` entry merges into the project's
 `.mcp.json` (never clobbering yours), the generated verb-registry fragment
 installs into `AGENTS.md` between `cairn:begin`/`cairn:end` markers, and

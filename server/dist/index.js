@@ -1753,6 +1753,14 @@ export function buildServer(deps) {
                 tracker = await getTracker(d);
                 return tracker.probe ? tracker.probe() : { verdict: "ok" };
             }),
+            // Whose identity that verdict was reached with (#486, ADR 0037):
+            // cairn holds none of its own, so every route -- this token, a
+            // push, a browser, a connected account -- is the owner's, and a
+            // bad token is still the owner's bad token. A constant until a
+            // run can be given a scoped identity the services distinguish
+            // (the ADR's removeWhen); the literal type makes that a typed
+            // change, not a drift.
+            identity: "owner",
         };
         // Default-branch protection (#485): the push gate is the guard alone
         // unless the service enforces a rule, so ship reads this first. Only

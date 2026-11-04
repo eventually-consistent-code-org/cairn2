@@ -708,3 +708,16 @@ coverage is best-effort matching over command text rather than a shell
 parser, and an override reachable by the agent is reachable by anything
 that can steer the agent. That ordering — judgment first, deterministic
 backstop second — is deliberate and documented rather than implied.
+Under all of it sits the prior fact: cairn acts as the owner on every
+route. The tracker token, the push credential, the browser session and
+any connected account are the owner's, cairn holds no identity of its
+own, so no service can tell the agent's push from the owner's and no
+service-side rule can name the agent; the guards therefore refuse by
+effect, never by principal, and `config_probe` prints the fact as
+`identity: "owner"` beside the tracker verdict (asserted:
+`server/test/probe-tools.test.ts`, "config_probe reports identity:
+owner (#486)"). ADR 0037 — removeWhen: a run can be given a scoped
+identity the services distinguish — a per-run fine-grained token read
+from the run manifest, a browser profile with no saved sessions — at
+which point the ruleset can name the agent and the push gate moves to
+the service.
