@@ -25,6 +25,7 @@ import {
 } from "../src/planning/run-manifest.js";
 import { bannerPath, handoffPath, metricsPath } from "../src/core/continuity.js";
 import { indexDbPath } from "../src/memory/index-store.js";
+import { loadSqlite, type SqliteCtor } from "../src/memory/native.js";
 import { observationBacklog, observationsPath } from "../src/memory/observations.js";
 
 // Constants
@@ -197,11 +198,16 @@ describe("the one-shot move off the folder key (#362)", () => {
     // Second run, either runtime: nothing left to move, nothing logged again.
     expect(migrateRepositoryState(main, base)).toEqual([]);
     expect(lib.migrateRepositoryState(main, base)).toEqual([]);
-    // An old name that turns up again beside its twin is left alone.
+    // An old name that turns up again beside its twin is left alone...
     writeFileSync(join(base, "index", `${old}.db`), "stale");
     expect(migrateRepositoryState(main, base)).toEqual([]);
     expect(readFileSync(join(base, "index", `${key}.db`), "utf8")).toBe("sqlite");
-    expect(rekeys()).toHaveLength(1);
+    // ...and the skip goes on the record, once, by either runtime (#440)
+    expect(rekeys()).toHaveLength(2);
+    expect(rekeys()[1]).toMatchObject({ from: old, to: key, moved: [], skipped: [`index/${old}.db`] });
+    expect(lib.migrateRepositoryState(main, base)).toEqual([]);
+    expect(migrateRepositoryState(main, base)).toEqual([]);
+    expect(rekeys()).toHaveLength(2);
   });
 
   it("the hook side moves the same files the same way", () => {
@@ -244,6 +250,108 @@ describe("the one-shot move off the folder key (#362)", () => {
     expect(readdirSync(join(base, "runs"))).toEqual([`${projectKey(main)}-r9.json`]);
     // ...and from then on the main checkout sees the same run
     expect(listRunManifests(main, base).map((m) => m.runId)).toEqual(["r9"]);
+  });
+});
+
+describe("a database sidecar moves only with its database (#442)", () => {
+  // The index is sqlite; a hot rollback journal beside the shared file would
+  // be replayed into it on the next open. Skipped where the binding is absent.
+  let Sqlite: SqliteCtor | null = null;
+  beforeAll(() => {
+    try {
+      Sqlite = loadSqlite();
+    } catch {
+      Sqlite = null;
+    }
+  });
+  const ROWS = 2000; // the shared index; the old one is smaller, so a replay truncates
+  const OLD_ROWS = 300;
+
+  /** A built index at `path`: one table, `rows` rows all starting `prefix-`. */
+  function buildDb(path: string, prefix: string, rows: number): void {
+    const db = new Sqlite!(path);
+    db.exec("CREATE TABLE chunks (content TEXT)");
+    const ins = db.prepare("INSERT INTO chunks VALUES (?)");
+    for (let i = 0; i < rows; i++) ins.run(`${prefix}-${i}`);
+    db.close();
+  }
+
+  /** The rollback journal a server killed mid-commit leaves beside `path`:
+   *  captured while a transaction has every page journaled, with sync off
+   *  so the header's record count reads "everything in the file". */
+  function hotJournal(path: string): Buffer {
+    const db = new Sqlite!(path);
+    db.pragma("journal_mode = DELETE");
+    db.pragma("synchronous = OFF");
+    db.exec("BEGIN");
+    db.exec("UPDATE chunks SET content = content || '!'");
+    const journal = readFileSync(`${path}-journal`);
+    db.exec("ROLLBACK");
+    db.close();
+    return journal;
+  }
+
+  /** Rows in `path` whose content starts `prefix-`, after an integrity check --
+   *  a replayed foreign journal fails the check, the count or the prefix. */
+  function rowCount(path: string, prefix: string): number {
+    const db = new Sqlite!(path);
+    try {
+      expect(db.pragma("integrity_check", { simple: true })).toBe("ok");
+      return db.prepare("SELECT count(*) FROM chunks WHERE content LIKE ?").pluck().get(`${prefix}-%`) as number;
+    } finally {
+      db.close();
+    }
+  }
+
+  it("a hot journal whose database stayed stays too, and the shared index keeps every row", () => {
+    if (!Sqlite) return;
+    const { main } = repoWithWorktree();
+    const base = freshDir("cairn-key-home-");
+    const dir = join(base, "index");
+    mkdirSync(dir, { recursive: true });
+    const shared = join(dir, `${projectKey(main)}.db`); // another checkout built it already
+    buildDb(shared, "shared", ROWS);
+    const oldDb = join(dir, `${pathKey(main)}.db`); // this checkout's, killed mid-commit
+    buildDb(oldDb, "old", OLD_ROWS);
+    writeFileSync(`${oldDb}-journal`, hotJournal(oldDb));
+
+    for (const migrate of [migrateRepositoryState, lib.migrateRepositoryState]) {
+      expect(migrate(main, base)).toEqual([]);
+      expect(existsSync(`${oldDb}-journal`)).toBe(true);
+      expect(existsSync(`${shared}-journal`)).toBe(false);
+    }
+    expect(rowCount(shared, "shared")).toBe(ROWS);
+    expect(rowCount(oldDb, "old")).toBe(OLD_ROWS); // its own journal rolls its own pages back
+    // both leftovers are on the record as skipped, once (#440)
+    const rekeys = jsonl(join(base, "metrics", `${projectKey(main)}.jsonl`)).filter((r) => r.event === "rekey");
+    expect(rekeys).toHaveLength(1);
+    expect(rekeys[0]).toMatchObject({ moved: [], skipped: [`index/${pathKey(main)}.db`, `index/${pathKey(main)}.db-journal`] });
+  });
+
+  it("a sidecar moves in the same pass as its database", () => {
+    if (!Sqlite) return;
+    const { main } = repoWithWorktree();
+    const base = freshDir("cairn-key-home-");
+    const dir = join(base, "index");
+    mkdirSync(dir, { recursive: true });
+    const old = pathKey(main);
+    const oldDb = join(dir, `${old}.db`);
+    buildDb(oldDb, "old", OLD_ROWS);
+    writeFileSync(`${oldDb}-journal`, hotJournal(oldDb));
+    writeFileSync(join(dir, `${old}.db-wal`), "");
+    writeFileSync(join(dir, `${old}.db-shm`), "");
+    // an orphan: a journal with no database to belong to
+    writeFileSync(join(dir, `${old}.other.db-journal`), "");
+
+    expect(migrateRepositoryState(main, base).sort()).toEqual([
+      `index/${old}.db`, `index/${old}.db-journal`, `index/${old}.db-shm`, `index/${old}.db-wal`,
+    ]);
+    const key = projectKey(main);
+    expect(readdirSync(dir).sort()).toEqual([
+      `${key}.db`, `${key}.db-journal`, `${key}.db-shm`, `${key}.db-wal`, `${old}.other.db-journal`,
+    ].sort());
+    expect(rowCount(join(dir, `${key}.db`), "old")).toBe(OLD_ROWS);
+    expect(lib.migrateRepositoryState(main, base)).toEqual([]);
   });
 });
 
@@ -295,5 +403,41 @@ describe("the shared observation log (#362)", () => {
     expect(observe(main, "again").status).toBe(0);
     expect(observationBacklog(main).count).toBe(4);
     expect(rekeys()).toHaveLength(1);
+  });
+
+  it("migrates the metrics folder before its rekey row, so the old cost history is still read (#440)", () => {
+    const { main } = repoWithWorktree();
+    const old = pathKey(main);
+    // the in-checkout observation log the observe hook moves on the first tool call...
+    const oldDir = join(main, ".cairn", "observations");
+    mkdirSync(oldDir, { recursive: true });
+    writeFileSync(join(oldDir, "observations.jsonl"),
+      `${JSON.stringify({ ts: "2026-10-01T00:00:00.000Z", tool: "Edit", target: "t" })}\n`);
+    // ...and the whole cost history, still under the folder key
+    const metricsDir = join(home, ".cairn", "metrics");
+    mkdirSync(metricsDir, { recursive: true });
+    const oldMetrics = join(metricsDir, `${old}.jsonl`);
+    writeFileSync(oldMetrics, `${JSON.stringify({ session_id: "s1", est_cost_usd: 1 })}\n`);
+
+    // the hook order the plugin ships: observe first, the cost tracker's metricsPath at session end
+    expect(observe(main, "first-call").status).toBe(0);
+    const live = metricsPath(main);
+    expect(live).toBe(join(metricsDir, `${projectKey(main)}.jsonl`));
+    expect(lib.metricsPath(main)).toBe(live);
+    expect(existsSync(oldMetrics)).toBe(false);
+    const rows = jsonl(live);
+    expect(rows[0]).toMatchObject({ session_id: "s1" }); // the history leads, the rekey rows follow it
+    const rekeys = () => jsonl(live).filter((r) => r.event === "rekey");
+    expect(rekeys().map((r) => r.moved)).toEqual([[`metrics/${old}.jsonl`], ["observations/observations.jsonl"]]);
+    expect(rekeys().every((r) => Array.isArray(r.skipped) && r.skipped.length === 0)).toBe(true);
+
+    // Forced: an old name beside its twin stays, and the skip is logged once, by either runtime.
+    writeFileSync(oldMetrics, `${JSON.stringify({ session_id: "s0" })}\n`);
+    expect(migrateRepositoryState(main)).toEqual([]);
+    expect(lib.migrateRepositoryState(main)).toEqual([]);
+    const skips = rekeys().filter((r) => (r.skipped as string[]).length > 0);
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toMatchObject({ moved: [], skipped: [`metrics/${old}.jsonl`] });
+    expect(jsonl(oldMetrics)).toEqual([{ session_id: "s0" }]); // untouched, recoverable by hand
   });
 });

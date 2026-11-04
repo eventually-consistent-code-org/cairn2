@@ -76,10 +76,13 @@ export declare function projectKey(projectDir: string): string;
 export declare function moveNoClobber(from: string, to: string): boolean;
 /**
  * The one-shot rekey's record: one row on the project's metrics log naming
- * what moved. It carries no session_id, so every latest-row-per-session
- * reader skips it. One append of one line, so it never tears another row.
+ * what moved and what stayed behind a twin (#440). It carries no
+ * session_id, so every latest-row-per-session reader skips it. One append
+ * of one line, so it never tears another row. Every writer of this row
+ * runs migrateRepositoryState first, so the row never creates the
+ * metrics file whose existence would block the old cost history's move.
  */
-export declare function recordRekey(baseDir: string, projectDir: string, moved: string[]): void;
+export declare function recordRekey(baseDir: string, projectDir: string, moved: string[], skipped?: string[]): void;
 /**
  * Moves every repository-state file this folder kept under its worktree
  * key to the project key (#362): a name is `<key><rest>` where rest starts
@@ -88,6 +91,20 @@ export declare function recordRekey(baseDir: string, projectDir: string, moved: 
  * worktree that ran before the upgrade keeps its own leftovers, and the
  * shared file is never replaced. Nothing to move, nothing logged, so the
  * move is one-shot by construction: the old name is gone once it lands.
+ * A name a twin blocks is logged as skipped (#440), once, so the leftover
+ * is visible to every reader of the log rather than silently unread.
+ * Asserted: project-key.test.ts, "migrates the metrics folder before its
+ * rekey row".
+ *
+ * A database sidecar (`-journal`, `-wal`, `-shm`) moves only in the pass
+ * that moves its database (#442). Set beside the shared index, a hot
+ * rollback journal from another checkout's killed commit is replayed into
+ * it on the next open as if it were its own -- the file is never replaced
+ * by name and destroyed by content. So databases go first, and a sidecar
+ * whose database stayed, or has none, stays too. Asserted:
+ * project-key.test.ts, "a database sidecar moves only with its database".
+ * The moment between a database landing and its journal following is the
+ * same window the readdir order always left; accepted, not locked.
  *
  * :param projectDir: the checkout
  * :param baseDir: the cairn home

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../config.js";
 import { metricsSegments } from "../core/metrics.js";
-import { moveNoClobber, projectKey, recordRekey } from "../planning/run-manifest.js";
+import { migrateRepositoryState, moveNoClobber, projectKey, recordRekey } from "../planning/run-manifest.js";
 
 /**
  * The observation buffer's own state (#173). The PostToolUse hook appends a
@@ -70,6 +70,11 @@ export function migrateLegacyObservations(
     return []; // nothing in the checkout -- the usual case
   }
   if (names.length === 0) return [];
+  // The state folders first (#440): the rekey row below lands on the metrics
+  // file, and were it created here, the cost history under the old key would
+  // have a twin and never move. Asserted: project-key.test.ts, "migrates the
+  // metrics folder before its rekey row".
+  migrateRepositoryState(projectDir, baseDir);
   const key = projectKey(projectDir);
   const newDir = join(baseDir, "observations");
   mkdirSync(newDir, { recursive: true });
