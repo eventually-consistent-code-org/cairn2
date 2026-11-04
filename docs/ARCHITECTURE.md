@@ -224,7 +224,10 @@ reason.
   at staging, which session the run is — the id the staging shell
   carried — and the breaker limit the project configuration held at that
   moment, so the hooks judge the run by what was staged and never by a
-  file the run can edit (ADR 0033, in the hook section). ADR 0026 —
+  file the run can edit (ADR 0033, in the hook section); and while any
+  manifest of the project reads running, creating another is refused
+  with `RUN_LIVE`, so a running batch gets no second manifest to move
+  the breaker's count onto (ADR 0033, amendment). ADR 0026 —
   removeWhen: every harness runs a skill-declared tool sequence
   atomically, so a chain with one right order can live in the verb file.
 
@@ -573,9 +576,12 @@ distinction matters more than the count.
   headless batch run is frozen by the circuit breaker after the limit
   that was staged into its manifest, counting only refusals from the
   session that staged the run — another session's refusal is logged and
-  never counted, and a manifest with no session yet counts nothing — so
-  a running batch can neither be frozen by a bystander nor switch its
-  own breaker off by editing the project configuration mid-run; the
+  never counted, and a manifest with no session yet counts nothing — and
+  judging every running manifest that session owns, never the newest
+  alone, so a running batch can neither be frozen by a bystander, nor
+  switch its own breaker off by editing the project configuration
+  mid-run, nor move the count onto a second run it stages beside the
+  first (ADR 0033, amendment); the
   freeze is written into the manifest itself, and the server refuses the
   frozen run's claims and closes and posts the comment the hooks can't
   (ADR 0016, amendment). ADR 0033 — removeWhen: the harness gives a

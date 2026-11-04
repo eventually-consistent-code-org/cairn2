@@ -67,3 +67,40 @@ and move the count — the closing audit reproduced this and it is filed
 accept custom state names, so on those backends the freeze still keys on
 the literal name (#471). The staged session id is taken on trust from
 the staging caller.
+
+## Amendment — 2026-11-04: every run the session owns, and one running run per project (#466)
+
+The closing audit's reproduction stood: snapshotting the limit closed
+one route and left the frozen party able to replace the authority
+wholesale. The breaker judged the newest running manifest, and the tool
+that creates a manifest is agent-callable with no owner gate, so a
+running batch refused twice could stage a second run — its own
+session's at a limit of zero, or any session's — and the third refusal
+was counted against the decoy while the real run kept pushing.
+
+Two changes, both bound in the phase 31 context. The breaker judges
+every running manifest whose session is the refusing session, never
+the newest alone: the count is the session's rows that name any run it
+has live, each owned run is judged against its own staged limit, and a
+decoy with a limit of its own freezes with the first. The row names the
+run the session staged first, so a run that follows a finished one
+still starts at zero. Order never decides: a decoy forged older than
+the run, or a newer one staged by another session, moves nothing.
+Asserted by the hook test "a running batch cannot move the breaker's
+count by staging a second run", red against the previous code on its
+first assertion (the third refusal left the real run running).
+
+And `run_manifest create` refuses with a typed `RUN_LIVE` while any
+manifest of the project reads `running`, writing nothing; the refusal
+names the live run and the way to end it (`set_status`). A staged,
+complete, stopped or frozen run blocks nothing, and another project's
+run in the same cairn home is not this project's. Asserted by
+"one running manifest per project" (module) and "a running batch cannot
+stage a second run" (through the tool), both red against the previous
+code. No new tool, no new parameter; the tool description is unchanged,
+so the resident footprint did not move.
+
+What stays open: a manifest that fails to parse blocks nothing and
+counts nothing — the runs folder is a protected zone, so only the owner
+or a guard failure puts one there — and the staged session id is still
+taken on trust from the staging caller.
