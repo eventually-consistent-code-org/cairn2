@@ -24,15 +24,22 @@ const pauseRow = (kind: string, min: number) =>
 
 describe("the receipt and the close comment carry pausedMinutes beside measured (#380)", () => {
   // The pauses log lives under the cairn home, so HOME is a temp folder for
-  // this block -- a fixture log, and no real one touched.
+  // this block -- a fixture log, and no real one touched. The server is
+  // "session s1" here, the session the rows above name: the close believes
+  // only the claiming session's rows (#470, measured-duration.test.ts).
   let savedHome: string | undefined;
+  let savedSession: string | undefined;
   beforeAll(() => {
     savedHome = process.env.HOME;
+    savedSession = process.env.CLAUDE_CODE_SESSION_ID;
     process.env.HOME = mkdtempSync(join(tmpdir(), "cairn-receipt-home-"));
+    process.env.CLAUDE_CODE_SESSION_ID = "s1";
   });
   afterAll(() => {
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
+    if (savedSession === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = savedSession;
   });
 
   // A claimed issue on a tracker that lists comments, with the clock in hand.

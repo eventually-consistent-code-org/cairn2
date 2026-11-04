@@ -62,20 +62,36 @@ function isReceipt(v, issueId) {
         && typeof r.worklog === "string";
 }
 /**
+ * The session this server runs for (#470): Claude Code starts its MCP
+ * servers with CLAUDE_CODE_SESSION_ID in their environment, the same id
+ * every hook payload carries -- a claim about the harness, dated
+ * 2026-11-04, measured on a live server's environment. Undefined under a
+ * harness that sets none; a stamp then carries no session and the
+ * measurement subtracts no pause (asserted: measured-duration.test.ts,
+ * "a claim stamped with no session believes no row").
+ */
+export function sessionOfServer() {
+    const s = process.env.CLAUDE_CODE_SESSION_ID?.trim();
+    return s ? s : undefined;
+}
+/**
  * Rung two's evidence: the moment this server moved the issue to in
- * progress, with the base commit beside it when the claim named one. The
- * FIRST claim wins -- a re-claim after a parked stretch is still the same
- * piece of work, and cycle time (and the commit range) run from its start.
+ * progress, with the base commit beside it when the claim named one, and
+ * the claiming session when the server knows its own (#470). The FIRST
+ * claim wins -- a re-claim after a parked stretch is still the same piece
+ * of work, and cycle time (and the commit range) run from its start.
  * Never throws; a claim must not fail because instrumentation could not
  * write.
  */
-export function recordClaim(projectDir, issueId, at, baseCommit) {
+export function recordClaim(projectDir, issueId, at, baseCommit, sessionId) {
     try {
         ensureDir(projectDir);
         const path = receiptPath(projectDir, issueId, "claim");
         if (existsSync(path))
             return true;
-        const record = { issueId, at, ...(baseCommit ? { baseCommit } : {}) };
+        const record = {
+            issueId, at, ...(baseCommit ? { baseCommit } : {}), ...(sessionId ? { sessionId } : {}),
+        };
         writeFileSync(path, JSON.stringify(record) + "\n");
         return true;
     }
@@ -84,8 +100,8 @@ export function recordClaim(projectDir, issueId, at, baseCommit) {
     }
 }
 /** The whole claim stamp, without consuming it; null when absent or
- *  unreadable. Tolerant of the older two-field shape: a stamp with no
- *  baseCommit still parses, it just carries none. */
+ *  unreadable. Tolerant of the older shapes: a stamp with no baseCommit or
+ *  no sessionId still parses, it just carries none. */
 export function readClaimRecord(projectDir, issueId) {
     try {
         const raw = readFileSync(receiptPath(projectDir, issueId, "claim"), "utf8");
@@ -94,10 +110,12 @@ export function readClaimRecord(projectDir, issueId) {
         if (typeof at !== "string" || Number.isNaN(Date.parse(at)))
             return null;
         const baseCommit = typeof r.baseCommit === "string" && r.baseCommit ? r.baseCommit : undefined;
+        const sessionId = typeof r.sessionId === "string" && r.sessionId ? r.sessionId : undefined;
         return {
             issueId: typeof r.issueId === "string" ? r.issueId : issueId,
             at,
             ...(baseCommit ? { baseCommit } : {}),
+            ...(sessionId ? { sessionId } : {}),
         };
     }
     catch {

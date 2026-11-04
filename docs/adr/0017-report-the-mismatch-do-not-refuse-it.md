@@ -150,4 +150,42 @@ act" is a sentence until a mechanism the agent cannot drive lands (the
 harness guard refusing the flag without the owner's escape is the cheapest;
 filed as #460, phase 31). Until then the stamp attributes an approval to
 a checkout, not to a person, and `verify.rerun` off by default is the
-real gate.
+real gate. (Closed by the 2026-11-04 amendment below.)
+
+## Amendment 2026-11-04 — the stamp is a human act by mechanism (#460)
+
+The dated gap above is closed, by the cheapest mechanism it named. The
+harness guard already reads every MCP tool's input (#310); it now treats
+`plan_meta_set` carrying `approve` — `true`, and the spellings a coerced
+schema would read the same way, `"true"` and `1` — as a harness write
+under whatever server name the plugin is installed as: refused with the
+standard line and the same question of where the instruction came from,
+unless the session was started with `CAIRN_HARNESS_EDIT=1` in its
+environment. The inline Bash prefix is not that escape; a tool parameter
+has no `!` route, so the session escape is the one way in, and the
+refusal says so. The server's tool is unchanged — no parameter, no
+description, nothing resident moved — because the server cannot tell who
+called it; the guard can tell how the session was started, and that is
+the fact a human act rests on.
+
+The plan verb's approve step now tells rather than asks: it reads the
+escape from the shell, calls the tool only when the owner started the
+session with it, and otherwise reports the plan unapproved with the one
+line that says how to approve. A yes typed into a prompt was never
+provenance — the agent still made the call — and the guard would refuse
+it anyway. The cost is the escape's breadth: it is session-wide, so the
+approving session is one the owner starts for that purpose and ends
+after; that is the same price as any other harness edit (ADR 0016), paid
+once per plan.
+
+What the stamp still does not say: `by` records the git identity of the
+checkout, which is a record of whose checkout approved, not an
+authentication of the person at the keyboard. The sentence to carry is
+"a human started the approving session"; the guard asserts that much and
+no more. Asserted in `server/test/hooks.test.ts` ("the approval stamp
+needs the owner's escape: plan_meta_set approve (#460)" — refused without
+the escape, allowed with it, the hostile spellings, every other plan tool
+passing, the nested working directory with and without
+`CLAUDE_PROJECT_DIR`, and the refusal row the breaker counts) and in the
+#383 matrix row "plan_meta_set with approve" beside the same tool's
+ordinary wave edit.

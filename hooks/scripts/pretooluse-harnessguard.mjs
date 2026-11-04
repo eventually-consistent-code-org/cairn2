@@ -22,9 +22,16 @@
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
  *   pass a hook), the refusal log the circuit breaker counts (#358, same
- *   homes), and the folder git runs its hooks from (#353: core.hooksPath
+ *   homes), the pauses log the duration measurement subtracts (#470, same
+ *   homes; asserted: hooks.test.ts "a forged pause row is refused"), the
+ *   folder git runs its hooks from (#353: core.hooksPath
  *   when set, else .git/hooks -- a hook planted there runs at the next
- *   checkout or commit, in every worktree, under the owner's identity).
+ *   checkout or commit, in every worktree, under the owner's identity),
+ *   and the pointer that names that folder (#465: core.hooksPath set by
+ *   `git config` in any scope, or a hooksPath or include line written
+ *   into a git config file -- a pointer that moves the protected zone is
+ *   that zone's configuration, or the zone protects only folders that
+ *   were hooks folders before the agent acted).
  *   Letter case never counts (#295): a path is read in its
  *   on-disk case and compared case-folded, and so is a command's name, so a
  *   Mac's volume can't hide either -- a real HOOKS/ on a case-sensitive
@@ -121,7 +128,15 @@
  *   the folder cwd / workdir / working_directory / workingDirectory names.
  *   Anything else passes: a read
  *   tool, a writing tool under another name or field, keystrokes into a
- *   running process, settings a server keeps.
+ *   running process, settings a server keeps -- all but one input that is
+ *   a write by itself (#460): cairn's plan_meta_set, under any server
+ *   name, carrying `approve` (true, "true" or 1) mints the owner's
+ *   approval stamp on a plan, the act the close-time verify re-run
+ *   trusts (ADR 0017); refused unless the session carries
+ *   CAIRN_HARNESS_EDIT=1, so the stamp is a human act by mechanism and
+ *   not by the plan verb's manners. Asserted: hooks.test.ts
+ *   "plan_meta_set approve (#460)" and the #383 row "plan_meta_set with
+ *   approve".
  *
  *   Git hooks (#353): the folder git runs its hooks from is a protected
  *   tree for every tool above -- core.hooksPath when set, the repo's own
@@ -136,6 +151,29 @@
  *   dated 2026-11-03 from git 2.56's core.hooksPath docs); with no git on
  *   PATH, only .git/hooks is known; a hooksPath holding the project or
  *   the home folder is skipped rather than made every write a hook.
+ *
+ *   The pointer (#465): `git config` setting core.hooksPath is a write to
+ *   that configuration -- in any scope (--local, --global, --system,
+ *   --worktree, --file), by the legacy `<key> <value>`, --add,
+ *   --replace-all, --unset and --unset-all, the 2.46+ `set` and `unset`
+ *   subcommands, or removing or renaming the core section -- and so is
+ *   include.path or includeIf.<cond>.path, a file git reads config from,
+ *   which can carry the key. The key is compared case-folded, as git
+ *   reads it; a key from a stream (xargs) counts unless the line only
+ *   reads. A write that puts a hooksPath or an include INTO a git config
+ *   file counts the same: the repo's config (`git rev-parse --git-path
+ *   config`, the common one in a linked worktree) and config.worktree,
+ *   GIT_CONFIG_GLOBAL when set, ~/.gitconfig, $XDG_CONFIG_HOME/git/config
+ *   (~/.config/git/config by default) and the system file (`git var
+ *   GIT_CONFIG_SYSTEM`, asked only when the call spells a pointer, and
+ *   /etc/gitconfig either way) -- judged only when the call's input spells
+ *   hooksPath or include, so a user.name line appended to .git/config is
+ *   ordinary. Reading the key passes (a bare `git config core.hooksPath`,
+ *   --get, get, --list), and so does `git -c core.hooksPath=DIR <cmd>`,
+ *   which names hooks for that one command in the agent's own process:
+ *   nothing the owner's next commit reads. Asserted: hooks.test.ts
+ *   "core.hooksPath (#465)", and the #383 rows "git config core.hooksPath"
+ *   and "a hooksPath line appended to the repo's git config".
  *
  *   CLAUDE_CONFIG_DIR (#304): when set, Claude Code keeps its settings,
  *   .claude.json and its plugins, skills, agents, commands and hooks
@@ -169,6 +207,9 @@
  *   The program a hook or an MCP server starts by name off PATH. An MCP
  *   server that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
+ *   A hooksPath or include that reaches a git config file in content the
+ *   line doesn't spell (`cp evil.cfg .git/config`, an unreadable patch),
+ *   and the editor `git config --edit` opens (#465).
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
  *   2.1.299 the platform fails closed when it cannot reach the guard or
@@ -256,6 +297,29 @@ const GIT_HOOK_WHAT = "a git hook that runs at your next checkout or commit";
 
 // How long one `git rev-parse` may take before the guard goes on without it.
 const GIT_WAIT_MS = 1500;
+
+// The git config key that moves the folder #353 protects (#465), as git
+// reads it: section and key names without case. What a refusal calls it,
+// by command or by a line written into a config file.
+const HOOKS_PATH_KEY = "core.hookspath";
+const HOOKS_PATH_WHAT = "where git looks for its hooks (core.hooksPath)";
+// The other pointer: include.path and includeIf.<condition>.path name a
+// file git reads config from, which can carry the key (folded keys), and
+// the sections those keys live in.
+const POINTER_KEY = /^include(?:if\..*)?\.path$/;
+const POINTER_SECTION = /^include(?:if\..*)?$/;
+// `git config`'s value-taking options, so a key is never read out of one.
+const GIT_CONFIG = { short: "f", long: ["--file", "--blob", "--type", "--default", "--get-color", "--comment",
+  "--value", "--url"] };
+// The flags and 2.46+ subcommands that write a key, that take a whole
+// section, and that only read -- `--edit` opens an editor (Not seen).
+const GIT_CONFIG_WRITES = new Set(["--add", "--replace-all", "--unset", "--unset-all", "set", "unset"]);
+const GIT_CONFIG_SECTIONS = new Set(["--remove-section", "--rename-section", "remove-section", "rename-section"]);
+const GIT_CONFIG_READS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
+  "--get-colorbool", "-l", "--list", "-e", "--edit", "get", "list", "edit"]);
+// The words a call must spell before a write to a git config file is
+// judged (#465): the key, or an include that can carry it.
+const POINTER_WORDS = /hookspath|include/;
 
 // Options whose value is the folder a runner works in (#316): uv's
 // --directory, npm's and pnpm's -C, bun's --cwd, as the next word or with
@@ -483,6 +547,14 @@ const CLAUDE_PKG = /@anthropic-ai\/claude-code(?![\w-])/i;
 // The harness's own tools; every other tool name is an MCP tool (#310).
 const CORE_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash"]);
 
+// The one MCP input that is a harness write by itself (#460): cairn's
+// plan_meta_set, under whatever server name the plugin is installed as,
+// carrying `approve` -- it mints the owner's approval stamp on a plan,
+// the act the close-time verify re-run trusts (ADR 0017). What a refusal
+// calls it.
+const APPROVAL_TOOL = /(?:^|__)plan_meta_set$/;
+const APPROVAL_WHAT = "the owner's approval stamp on a plan";
+
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
 const TOOL_REMOVES = new Set(["delete", "remove", "rm", "rmdir", "unlink", "trash", "erase"]);
@@ -524,6 +596,11 @@ let SCRIPTS = [];
 // zones too big to list in full.
 let ENTRIES = null;
 let UNLISTED = [];
+// What git answered once this run (#353, #465), and the git config files a
+// pointer line could land in, in every spelling -- listed only when the
+// call spells one (POINTER_WORDS), empty otherwise.
+let GIT_ANSWERS = null;
+let GIT_CONFIGS = [];
 
 // Paths
 
@@ -618,11 +695,17 @@ function expandHome(raw) {
   return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
 }
 
-/** expandHome, and $CAIRN_HOME (the run guard's own cairn home, #263, #299) and $CLAUDE_CONFIG_DIR (#304) too. */
+/**
+ * expandHome, and $CAIRN_HOME (the run guard's own cairn home, #263, #299),
+ * $CLAUDE_CONFIG_DIR (#304), and the two git reads a config file from,
+ * $XDG_CONFIG_HOME and $GIT_CONFIG_GLOBAL (#465), too.
+ */
 function expandVars(raw) {
   return expandHome(raw)
     .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "")
-    .replace(/^(?:\$CLAUDE_CONFIG_DIR|\$\{CLAUDE_CONFIG_DIR\})(?=\/|$)/, () => configDir() ?? "");
+    .replace(/^(?:\$CLAUDE_CONFIG_DIR|\$\{CLAUDE_CONFIG_DIR\})(?=\/|$)/, () => configDir() ?? "")
+    .replace(/^(?:\$XDG_CONFIG_HOME|\$\{XDG_CONFIG_HOME\})(?=\/|$)/, () => expandHome(process.env.XDG_CONFIG_HOME ?? ""))
+    .replace(/^(?:\$GIT_CONFIG_GLOBAL|\$\{GIT_CONFIG_GLOBAL\})(?=\/|$)/, () => expandHome(process.env.GIT_CONFIG_GLOBAL ?? ""));
 }
 
 /**
@@ -655,8 +738,9 @@ function configDirs() {
 
 /**
  * The protected places outside the project (#263): the ship-gate stamp
- * and the run manifests the run guard trusts, and the refusal log the
- * circuit breaker counts (#358), in every cairn home they can live in --
+ * and the run manifests the run guard trusts, the refusal log the
+ * circuit breaker counts (#358), and the pauses log the duration
+ * measurement subtracts (#470), in every cairn home they can live in --
  * CAIRN_HOME (the run guard reads it) and ~/.cairn (the server writes
  * it). The run report beside the manifests stays writable.
  *
@@ -696,6 +780,9 @@ function outsideZones() {
     add(join(base, "runs"), "the run manifests", false);
     // #358 -- the breaker counts these rows; a log the agent can empty is a breaker it can reset
     add(join(base, "refusals"), "the guard refusal log", true);
+    // #470 -- the duration measurement subtracts these rows; a log the
+    // measured party can append to is a report, not a measurement (ADR 0020)
+    add(join(base, "pauses"), "the usage-limit pauses log the duration measurement reads", true);
   }
   for (const home of HOMES) {
     add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);
@@ -1027,23 +1114,80 @@ function mcpScripts() {
  * make every write a hook.
  */
 function gitHookDirs() {
-  const project = ROOTS[0];
-  let dir = null;
-  try {
-    const r = spawnSync("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd: project, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
-    });
-    const out = r.status === 0 ? String(r.stdout).trim() : "";
-    if (out) dir = resolve(project, expandHome(out));
-  } catch { /* no git: the folder below is the best the guard knows */ }
+  let dir = gitAnswers().hooks;
   if (dir === null) {
-    const dotGit = join(gitRoot(project), ".git");
+    const dotGit = join(gitRoot(ROOTS[0]), ".git");
     try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { return []; }
   }
   if (dir === null) return [];
   const anchors = [...ROOTS, ...HOMES];
   return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)));
+}
+
+/** One git command from the project, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
+function askGit(args) {
+  try {
+    const r = spawnSync("git", args, {
+      cwd: ROOTS[0], encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+    });
+    return r.status === 0 ? String(r.stdout).trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What git answers, once a run, for the places this guard asks about (#353,
+ * #465): `git rev-parse --git-path hooks --git-path config --git-path
+ * config.worktree`, one line each as git resolves them -- core.hooksPath
+ * applied for hooks, the common dir's config in a linked worktree, ~
+ * expanded, a relative path from the project. Each null when there is no
+ * git to ask.
+ */
+function gitAnswers() {
+  if (GIT_ANSWERS) return GIT_ANSWERS;
+  GIT_ANSWERS = { hooks: null, config: null, worktree: null };
+  const lines = askGit(["rev-parse", "--git-path", "hooks", "--git-path", "config", "--git-path", "config.worktree"])
+    .split("\n").map((l) => l.trim());
+  if (lines.length >= 3 && lines[0] && lines[1]) {
+    GIT_ANSWERS = {
+      hooks: resolve(ROOTS[0], expandHome(lines[0])),
+      config: resolve(ROOTS[0], expandHome(lines[1])),
+      worktree: lines[2] ? resolve(ROOTS[0], expandHome(lines[2])) : null,
+    };
+  }
+  return GIT_ANSWERS;
+}
+
+/**
+ * Every git config file a hooksPath or include line could land in (#465),
+ * in each spelling: the repo's own and its worktree's (asked of git, else
+ * .git/config under the nearest .git), the global ones -- GIT_CONFIG_GLOBAL
+ * when set, ~/.gitconfig, and $XDG_CONFIG_HOME/git/config, which is
+ * ~/.config/git/config by default -- and the system file: /etc/gitconfig,
+ * and what `git var GIT_CONFIG_SYSTEM` names (git 2.37+, a claim about git
+ * dated 2026-11-04; asked only now, since the call spells a pointer).
+ */
+function gitConfigFiles() {
+  const files = [];
+  const { config, worktree } = gitAnswers();
+  if (config) files.push(config);
+  else {
+    const dotGit = join(gitRoot(ROOTS[0]), ".git");
+    try { if (statSync(dotGit).isDirectory()) files.push(join(dotGit, "config")); } catch { /* no repo */ }
+  }
+  if (worktree) files.push(worktree);
+  const home = resolve(homedir());
+  const named = (v) => (v && isAbsolute(expandHome(v)) ? resolve(expandHome(v)) : null);
+  const global = named(process.env.GIT_CONFIG_GLOBAL);
+  if (global) files.push(global);
+  files.push(join(home, ".gitconfig"));
+  files.push(join(named(process.env.XDG_CONFIG_HOME) ?? join(home, ".config"), "git", "config"));
+  files.push("/etc/gitconfig");
+  const system = named(askGit(["var", "GIT_CONFIG_SYSTEM"]).split("\n")[0]);
+  if (system) files.push(system);
+  return [...new Set(files.flatMap((f) => spellings(f)))];
 }
 
 /**
@@ -1072,6 +1216,9 @@ function fileRule(abs) {
   for (const home of HOMES) {
     for (const [dir, names, what] of HOME_FILES) if (names.some((n) => same(abs, join(home, dir, n)))) return what;
   }
+  // a git config file, while the call spells a pointer git reads from it
+  // (#465): the hooksPath that moves the folder #353 protects, or an include
+  if (GIT_CONFIGS.some((f) => same(abs, f))) return HOOKS_PATH_WHAT;
   const zone = zoneOf(abs);
   if (zone) return zone;
   const rel = projectRelative(abs);
@@ -1922,14 +2069,52 @@ function degitTargets(words, add) {
 }
 
 /**
+ * git config (#465): setting core.hooksPath -- by the legacy `<key>
+ * <value>`, --add, --replace-all, --unset, --unset-all, the 2.46+ `set`
+ * and `unset`, or removing or renaming its section -- moves the folder
+ * #353 protects, in whatever scope or --file the line names; include.path
+ * and includeIf.<cond>.path name a file git reads config from, which can
+ * carry the key. No path to judge: the hit carries its own `what`, and the
+ * key is what the refusal names. The key is compared case-folded, as git
+ * reads it; a key from a stream (xargs, find -exec, a nested shell's $1)
+ * counts unless the line only reads (#303's rule for claude). A bare key,
+ * --get and kin, get, list and --list read and pass; -e opens an editor
+ * the guard can't see (Not seen).
+ */
+function gitConfigTargets(rest, ctx, out) {
+  const words = ctx.positional ? rest.map((a) => a.replace(POSITIONAL, ctx.positional)) : rest;
+  const { opts, operands } = parseOpts(words, GIT_CONFIG);
+  const names = opts.map((o) => o.name);
+  const sub = fold(operands[0] ?? "");
+  const flagged = (set) => names.some((n) => set.has(n));
+  if (flagged(GIT_CONFIG_READS) || GIT_CONFIG_READS.has(sub)) return;
+  const section = flagged(GIT_CONFIG_SECTIONS) || GIT_CONFIG_SECTIONS.has(sub);
+  const writes = section || flagged(GIT_CONFIG_WRITES) || GIT_CONFIG_WRITES.has(sub);
+  const keyed = GIT_CONFIG_WRITES.has(sub) || GIT_CONFIG_SECTIONS.has(sub) ? operands.slice(1) : operands;
+  const streamed = words.find((a) => STANDINS.some((m) => a.includes(m)));
+  if (streamed !== undefined) {
+    out.push({ raw: `${streamed} (a git config key)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  // the legacy form writes only with a value after the key; alone, the key is read
+  if (!writes && keyed.length < 2) return;
+  const key = keyed[0];
+  if (key === undefined) return;
+  const pointer = could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ||
+    (section && (could(key, "core") || POINTER_SECTION.test(fold(key))));
+  if (pointer) out.push({ raw: `${key} (a git config key)`, what: HOOKS_PATH_WHAT });
+}
+
+/**
  * git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree
- * clone and kin plant (#317) -- from its -C folder (#258), read the way a
+ * clone and kin plant (#317), the config key that moves the hooks folder
+ * (#465) -- from its -C folder (#258), read the way a
  * cd target is (#318): `~/proj`, `$HOME/proj` and `"$PWD"` spelled out,
  * and a folder the guard can't read (`-C "$X"`) LOST, so a relative
  * operand from it is refused rather than judged under a folder literally
  * named `~`.
  */
-function gitTargets(args, seg, ctx, add) {
+function gitTargets(args, seg, ctx, add, out) {
   let k = 0;
   let dir = ctx.dir;
   while (k < args.length && args[k].startsWith("-")) {
@@ -1949,6 +2134,7 @@ function gitTargets(args, seg, ctx, add) {
     }
   } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
   else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, args.slice(k + 1), dir, add);
+  else if (sub === "config") gitConfigTargets(args.slice(k + 1), ctx, out);
 }
 
 /**
@@ -2211,7 +2397,7 @@ function writeTargets(seg, ctx) {
   else if (cmd === "tar" || cmd === "bsdtar" || cmd === "gtar") tarTargets(args, ctx, add);
   else if (cmd === "unzip") unzipTargets(args, ctx, add);
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
-  else if (cmd === "git") gitTargets(args, seg, ctx, add);
+  else if (cmd === "git") gitTargets(args, seg, ctx, add, out);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
   else if (RUNNERS.has(cmd)) runnerTargets(cmd, args, ctx, add, out);
   // #317 -- an initializer run by name, or through `pnpm dlx` / `npm exec`
@@ -2448,6 +2634,7 @@ function lineTargets(command, dir, depth, extra = {}) {
  */
 function judgeTarget(t) {
   if (t.deep) return { deep: true };
+  if (t.what) return { path: t.raw, what: t.what }; // a git config key, judged where it was read (#465)
   const lead = t.raw.replace(/^(\.\/)+/, "")[0];
   const lost = { path: t.raw, lost: true };
   if (lead === STDIN) {
@@ -2468,10 +2655,28 @@ function judgeTarget(t) {
 
 // MCP tools (#310)
 
+/**
+ * True when an `approve` value says yes (#460): the boolean the schema
+ * takes, and the spellings a coerced schema would read the same way
+ * ("true" in any case, 1) -- the hostile twin of a flag is its string.
+ * false, null, 0, "" and absence say no.
+ */
+function approveFlag(v) {
+  return v === true || v === 1 || (typeof v === "string" && /^true$/i.test(v.trim()));
+}
+
 /** The words of an MCP tool's own name, past its `mcp__server__` prefix, lowercased. */
 function toolWords(tool) {
   const name = tool.startsWith("mcp__") ? tool.split("__").pop() : tool;
   return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/** A tool's input with its path and folder fields dropped: what it writes or runs, not where (#465). */
+function withoutPaths(input) {
+  const out = { ...(input && typeof input === "object" ? input : {}) };
+  for (const f of [...PATH_FIELDS, ...DEST_FIELDS, ...SOURCE_FIELDS, "notebook_path", "cwd", "workdir",
+    "working_directory", "workingDirectory"]) delete out[f];
+  return out;
 }
 
 /** Every path a set of input fields holds: a string, or the strings in a list. */
@@ -2533,7 +2738,10 @@ try {
   const { lines: mcpCommandLines, dir: mcpDir } = core
     ? { lines: [], dir: null } : toolCommandLines(toolInput);
   const mcpLines = mcpCommandLines.map((line) => ({ line, cwd: mcpDir }));
-  if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
+  // #460 -- the approval flag is a write with no path: judged here, under
+  // the same session escape as every file below, never the inline one
+  const approves = !core && APPROVAL_TOOL.test(tool) && approveFlag(toolInput?.approve);
+  if (!core && !mcpPaths.length && !mcpLines.length && !approves) process.exit(0);
 
   // #459 -- the root the harness names, else the one git or a .claude folder
   // marks above the shell's cwd; never the subfolder the shell stands in
@@ -2559,8 +2767,18 @@ try {
   // way: a tree zone too, wherever it lies -- a tracked scripts/hooks, the
   // repo's .git/hooks, or a ~/.githooks the global config names.
   for (const dir of gitHookDirs()) ZONES.push({ dir, what: GIT_HOOK_WHAT, tree: true, carve: [] });
+  // The files that pointer can be written into (#465), listed only when the
+  // call spells one in what it writes or runs -- never in a path it names,
+  // so a folder called hookspath makes no edit of .git/config a pointer: a
+  // user.name line into .git/config stays ordinary work.
+  if (POINTER_WORDS.test(fold(JSON.stringify(withoutPaths(toolInput))))) GIT_CONFIGS = gitConfigFiles();
 
-  let hit = null;
+  // The approval stamp (#460): the flag itself is the write, so the hit is
+  // made here -- the tool's input names no path for the loops below to judge.
+  const phaseDir = String(toolInput?.phaseDir ?? "").replace(/\s+/g, " ").slice(0, 80);
+  let hit = approves
+    ? { path: `the approval stamp for plan ${phaseDir} (plan_meta_set with approve)`, what: APPROVAL_WHAT, approval: true }
+    : null;
 
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
@@ -2618,8 +2836,14 @@ try {
   }
   // #286, like the run guard's #262: name the owner's ways to approve, never
   // a paste-ready prefix -- the inline override is still honoured, just not taught
-  console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
-  console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  if (hit.approval) {
+    // #460 -- a tool parameter has no `!` route: the session escape is the one way in
+    console.error("  this needs the owner's go-ahead. Owner: approve from a session started with CAIRN_HARNESS_EDIT set to 1");
+    console.error("  in its environment -- the plan verb's approve step says how. The agent never answers this for you.");
+  } else {
+    console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
+    console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  }
   console.error("  If you did not ask for this, something the agent read did — check where the");
   console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
   // #358 -- the audit row and the breaker's count; fixed text only, never the path.

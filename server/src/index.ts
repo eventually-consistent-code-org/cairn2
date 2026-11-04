@@ -81,7 +81,7 @@ import { docsDriftReport } from "./planning/docs-drift.js";
 import { distillManifest } from "./planning/distill-manifest.js";
 import { estimatePhaseTokens, issueEstimate, metricsSegments } from "./planning/token-estimate.js";
 import {
-  clearClaim, readClaimRecord, recordClaim, writeReceipt, type WorklogOutcome,
+  clearClaim, readClaimRecord, recordClaim, sessionOfServer, writeReceipt, type WorklogOutcome,
 } from "./planning/close-receipt.js";
 import {
   closeEvidenceText, composeClaimComment, composeCloseComment, headCommit, measureAtClose,
@@ -644,7 +644,9 @@ export function buildServer(deps: {
   ): Promise<{ claimCommented?: boolean; claimCommentError?: string; claimCommentRedacted?: string[] }> => {
     // First claim wins; recordClaim never throws. A bare in_progress
     // transition (no claim block) still stamps the time, just no commit.
-    if (issue.category === "in_progress") recordClaim(d, issue.id, claimAt, claim?.baseCommit);
+    // The session is the server's own (#470): the key the pause recorder's
+    // rows carry, so the close believes only this session's pauses.
+    if (issue.category === "in_progress") recordClaim(d, issue.id, claimAt, claim?.baseCommit, sessionOfServer());
     if (!claim) return {};
     try {
       const screened = screenComment(d, composeClaimComment(claim));
@@ -1189,9 +1191,11 @@ export function buildServer(deps: {
       }
       // A usage-limit wait inside the span comes off the number (#380); the
       // pauses log under the cairn home is read best-effort, like every
-      // other measurement here.
+      // other measurement here, and only the claiming session's rows are
+      // believed (#470) -- none when the stamp names no session.
       const { claimedAt, ...measured } = measureAtClose({
-        comments, observedClaimAt: claimRecord?.at ?? null, closedAt, pauses: { projectDir: d },
+        comments, observedClaimAt: claimRecord?.at ?? null, closedAt,
+        pauses: { projectDir: d, session: claimRecord?.sessionId ?? null },
       });
       // Typed close evidence (phase 23): one standard line, same shape on
       // every backend, posted before the state change so the close reads
