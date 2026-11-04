@@ -91,6 +91,18 @@ const READS = {
   rm: { alias: { f: "--force", n: "--dry-run" },
     longs: ["--force", "--cached", "--dry-run", "--pathspec-from-file"], valued: ["--pathspec-from-file"] },
   worktree: { alias: { f: "--force" }, longs: ["--force"] },
+  // #468 -- the owner-checkout rows that turn on a flag or are spared by one
+  apply: { short: "pC", alias: { R: "--reverse" },
+    longs: ["--check", "--stat", "--numstat", "--summary", "--cached", "--index", "--reverse", "--directory",
+      "--exclude", "--include", "--whitespace", "--build-fake-ancestor"],
+    valued: ["--directory", "--exclude", "--include", "--whitespace", "--build-fake-ancestor"] },
+  "checkout-index": { alias: { f: "--force", a: "--all", u: "--index", n: "--no-create" },
+    longs: ["--force", "--all", "--index", "--no-create", "--prefix", "--stage", "--temp", "--stdin"],
+    valued: ["--prefix", "--stage"] },
+  // read-tree's -u has no long spelling (builtin/read-tree.c); the row names `-u` itself
+  "read-tree": { alias: { n: "--dry-run" },
+    longs: ["--dry-run", "--prefix", "--index-output", "--exclude-per-directory"],
+    valued: ["--prefix", "--index-output", "--exclude-per-directory"] },
   push: PUSH_READ,
 };
 
@@ -115,12 +127,14 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
  *              glob, the colon magic of #464, the repository root as an
  *              absolute path through the `repoRoot` probe, #288), or
- *              --pathspec-from-file hides it; `sparesTree` names the flags
- *              that keep the write off the work tree (`restore --staged`,
- *              `rm --cached`, a dry run), and `needs` the flag the row also
- *              wants and names (a forced rm, #434: unforced, git refuses a
- *              modified file itself)
- *   unlessOn   always, unless `name` is on at the end (a dry run)
+ *              --pathspec-from-file hides it; `needs` names the flag the
+ *              row also wants and names (a forced rm, #434: unforced, git
+ *              refuses a modified file itself)
+ *   unlessOn   always, unless `name` -- one, or any of a list -- is on at
+ *              the end (a dry run; `apply --check`)
+ * and on any row, `sparesTree` names the flags that keep the write off the
+ * work tree (`restore --staged`, `rm --cached`, `apply --cached`, a dry
+ * run, `checkout-index --temp`): on, the row doesn't match (#434, #468).
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
  *   plusRef    a refspec with a leading `+`
@@ -129,11 +143,12 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
  * repository root when `word` is its absolute path (#288).
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
- * one a refusal names. The everyday neighbours stay off the table because
- * they are routine or recoverable: a single-path checkout/restore, a forced
- * single-path `rm` (#434), `branch -D` (its reflog keeps the commits),
- * `restore --staged .` and `rm --cached .` (the index only, like a plain
- * `git reset`), deleting a feature branch, and `clean -n`.
+ * one a refusal names. The everyday neighbours have no discards-work row
+ * because they are routine or recoverable: a single-path checkout/restore
+ * and a forced single-path `rm` (#434) -- which touch the checkout they
+ * run in and nothing more, #468 -- `branch -D` (its reflog keeps the
+ * commits), `restore --staged .` and `rm --cached .` (the index only, like
+ * a plain `git reset`), deleting a feature branch, and `clean -n`.
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
  * apply or drop can take another worktree's work -- those rows, and the
@@ -146,16 +161,23 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * list|show` stay reads. Asserted by runguard-effects.test.ts and
  * runguard-guards.test.ts (#363, #438).
  *
- * Owner checkout (#216, #435): a command touches the checkout it runs in
- * when it rewrites the working files, or replaces the checked-out commit
- * with another -- checkout, switch, merge, pull, rebase, cherry-pick,
- * revert, am, mv, the stash actions that write the tree (push, save, a
- * bare stash, pop, apply, branch), and reset in its hard, merge and keep
- * forms. A commit adds to the branch and leaves the files as the human
- * left them; add, rm --cached and a soft or mixed reset touch the index
- * only; the reads touch nothing -- none has a row. The run guard refuses
- * the effect only mid-run, aimed at the owner's checkout. Asserted by
- * runguard-effects.test.ts and runguard-guards.test.ts (#435).
+ * Owner checkout (#216, #435, #468): a command touches the checkout it
+ * runs in when it rewrites the working files, or replaces the checked-out
+ * commit with another -- checkout, switch, merge, pull, rebase,
+ * cherry-pick, revert, am, mv, the stash actions that write the tree
+ * (push, save, a bare stash, pop, apply, branch), reset in its hard, merge
+ * and keep forms, and (#468) apply, bisect in the actions that move HEAD
+ * (start, bad, good, new, old, skip, reset, replay, run), restore,
+ * checkout-index --force, sparse-checkout set / add / reapply / disable /
+ * init, read-tree -u, submodule update and deinit, rm, and clean. A
+ * commit adds to the branch and leaves the files as the human left them;
+ * add, rm --cached, restore --staged, apply --cached and a soft or mixed
+ * reset touch the index only; a dry run, apply --check / --stat,
+ * checkout-index --temp, bisect log / visualize / terms, sparse-checkout
+ * list, submodule status / init and the reads touch nothing -- none has a
+ * row. The run guard refuses the effect only mid-run, aimed at the owner's
+ * checkout. Asserted by runguard-effects.test.ts (the subcommand list is
+ * pinned) and runguard-guards.test.ts (#435, #468).
  *
  * Aliases (#430): a row's `sub` is the subcommand git runs, so an alias is
  * resolved to it before the table is read (resolveAlias) and needs no row
@@ -237,6 +259,30 @@ export const EFFECT_TABLE = Object.freeze([
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "pop", when: "always", what: "`git stash pop`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "apply", when: "always", what: "`git stash apply`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "branch", when: "always", what: "`git stash branch`", why: REWRITES },
+  // #468 -- the rest of the commands the definition names: each rewrites
+  // the working files or moves HEAD; its twin is the same command kept off
+  // the work tree (a check, a stat, --cached, --staged, a dry run, --temp)
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "apply", when: "unlessOn", name: ["--check", "--stat", "--numstat", "--summary"],
+    sparesTree: ["--cached"], what: "`git apply`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "bisect", when: "always",
+    action: ["start", "bad", "good", "new", "old", "skip", "reset", "replay", "run"], what: "`git bisect`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "restore", when: "always", sparesTree: ["--staged"],
+    what: "`git restore`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout-index", when: "flag", names: ["--force"], sparesTree: ["--temp"],
+    what: "`git checkout-index --force`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "sparse-checkout", when: "always",
+    action: ["set", "add", "reapply", "disable", "init"], what: "`git sparse-checkout`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "read-tree", when: "flag", names: ["-u"], sparesTree: ["--dry-run"],
+    what: "`git read-tree -u`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "submodule", action: "update", when: "always",
+    what: "`git submodule update`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "submodule", action: "deinit", when: "always",
+    what: "`git submodule deinit`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "rm", when: "always", sparesTree: ["--cached", "--dry-run"],
+    what: "`git rm`", why: REWRITES },
+  // the #288 fold: with discards-work overridden for the session, a clean
+  // of the owner's checkout mid-run is still refused, as a hard reset is
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "clean", when: "unlessOn", name: "--dry-run", what: "`git clean`", why: REWRITES },
 ]);
 
 // The subcommands the table knows (#430). In git a builtin wins over an
@@ -470,8 +516,17 @@ function rowCause(row, inv, probe) {
   const first = inv.args[0] === undefined || inv.args[0].startsWith("-") ? "" : inv.args[0];
   if (row.action !== undefined && ![].concat(row.action).includes(first)) return null;
   const args = row.action !== undefined && first !== "" ? inv.args.slice(1) : inv.args;
-  // past a bare `--` a push's words are still refspecs, not paths
-  const parsed = () => (inv.sub === "push" ? pushArgs(inv) : readArgs(args, READS[inv.sub]));
+  // past a bare `--` a push's words are still refspecs, not paths; read once per row
+  let read;
+  const parsed = () => (read ??= inv.sub === "push" ? pushArgs(inv) : readArgs(args, READS[inv.sub]));
+  // the write stays off the work tree, whatever the row's `when` (#434,
+  // #468): `restore --staged` (unless --worktree is on too), `rm --cached`,
+  // `apply --cached`, a dry run, `checkout-index --temp`; a --no- takes any
+  // of them back
+  if (row.sparesTree) {
+    const { flags, on } = parsed();
+    if (row.sparesTree.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+  }
   switch (row.when) {
     case "always":
       // the action word it matched, or the subcommand for a row without one or a bare stash
@@ -481,14 +536,13 @@ function rowCause(row, inv, probe) {
       const hit = row.names.find((n) => flags.has(n));
       return hit === undefined ? null : typed.get(hit) ?? hit;
     }
-    case "unlessOn":
-      return parsed().on.get(row.name) === true ? null : inv.sub;
+    case "unlessOn": {
+      // one name or a list (#468): `apply --check`, `--stat`, `--numstat`, `--summary` apply nothing
+      const { on } = parsed();
+      return [].concat(row.name).some((n) => on.get(n) === true) ? null : inv.sub;
+    }
     case "wholeTree": {
-      const { flags, on, typed, words } = parsed();
-      // the write stays off the work tree: `restore --staged` (unless
-      // --worktree is on too), `rm --cached`, a dry run (#434); a --no-
-      // takes any of them back
-      if (row.sparesTree?.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+      const { flags, typed, words } = parsed();
       // a row that also needs a flag names it: `-rf`, not `.` (#434)
       const need = row.needs?.find((n) => flags.has(n));
       if (row.needs && need === undefined) return null;

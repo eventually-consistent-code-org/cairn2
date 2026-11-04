@@ -884,7 +884,8 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
     expect(effectsOf("npm test && git push origin HEAD")).toEqual(["moves-shared-ref push origin HEAD"]);
     expect(effectsOf("git reset --har && npm test")).toContain("discards-work --har");
     expect(effectsOf("sh -c 'git push -f origin main'")).toContain("discards-work -f");
-    expect(effectsOf("sudo -u me git clean -fd")).toEqual(["discards-work clean"]);
+    // a clean also touches the checkout it runs in since #468; the refused effect is what the skip names
+    expect(effectsOf("sudo -u me git clean -fd")).toContain("discards-work clean");
     expect(effectsOf("op run -- git push --mirror")).toContain("discards-work --mirror");
     expect(effectsOf("echo $(git push +main)")).toContain("discards-work +main");
     expect(effectsOf("/usr/bin/GIT -C sub push --force-with-lease")).toContain("discards-work --force-with-lease");

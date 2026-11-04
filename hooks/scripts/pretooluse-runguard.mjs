@@ -88,12 +88,21 @@
  *   replaces the checked-out commit, of the checkout it runs in --
  *   checkout, switch, merge, pull, rebase, cherry-pick, revert, am, mv,
  *   the stash actions that write the tree (push, save, a bare stash, pop,
- *   apply, branch) and reset in its hard, merge and keep forms (#435; the
- *   hard reset even with discards-work overridden) -- aimed at the owner's
- *   own checkout (see ownerCheckout) is refused: it changes the human's
- *   files underneath them, mid-edit. A commit adds to their branch and
- *   leaves the files as they left them, add and a soft or mixed reset
- *   touch the index only, and the reads touch nothing: those pass.
+ *   apply, branch), reset in its hard, merge and keep forms (#435), and
+ *   (#468) apply, bisect start / bad / good / new / old / skip / reset /
+ *   replay / run, restore, checkout-index --force, sparse-checkout set /
+ *   add / reapply / disable / init, read-tree -u, submodule update and
+ *   deinit, rm, and clean -- aimed at the owner's own checkout (see
+ *   ownerCheckout) is refused: it changes the human's files underneath
+ *   them, mid-edit. A whole-tree restore, a clean, a forced whole-tree rm
+ *   and a hard reset are refused there even with discards-work overridden
+ *   (#288). A commit adds to their branch and leaves the files as they
+ *   left them; add, rm --cached, restore --staged, apply --cached and a
+ *   soft or mixed reset touch the index only; a dry run, apply --check or
+ *   --stat, checkout-index --temp, bisect log, sparse-checkout list,
+ *   submodule status and the reads touch nothing: those pass. The table
+ *   (git-effects.mjs EFFECT_TABLE) and this sentence agree row for row;
+ *   runguard-effects.test.ts pins the subcommand list (#468).
  *   CAIRN_RUN_OK=1 as the leading assignment overrides that once. A hard
  *   reset there carries both effects; the refusal names both.
  *
@@ -1666,4 +1675,13 @@ try {
  *         rows inherit it; a colon-prefixed real path stays a path. The
  *         repository root as an absolute path is the whole tree too (the
  *         #288 spelling), through the repoRoot probe, links resolved.
+ *   #468  the owner-checkout table meets its own definition: rows for
+ *         apply, bisect (the actions that move HEAD), restore,
+ *         checkout-index --force, sparse-checkout set and kin, read-tree
+ *         -u, submodule update / deinit and rm, each with its index-only,
+ *         dry-run or read twin; `sparesTree` applies to every row kind,
+ *         `unlessOn` takes a list. clean joins them as the #288 fold: with
+ *         discards-work overridden, a whole-tree restore, a clean or a
+ *         forced whole-tree rm of the owner's checkout is still refused
+ *         mid-run.
  */

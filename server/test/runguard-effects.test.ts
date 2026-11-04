@@ -189,16 +189,18 @@ describe("git effects: a forced whole-tree rm discards work (#434)", () => {
       expect(rest, c).toEqual([]);
       expect(hit?.flag, c).toBe(flag);
       expect(hit?.what, c).toBe("a forced whole-tree `git rm`");
-      expect(effects(c), c).toEqual([DISCARDS_WORK]);
+      // ...and, since #468, deletes the files of the checkout it runs in
+      expect(effects(c), c).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
     }
   });
 
-  it("the unforced, cached, dry-run and single-path forms stay read-only", () => {
+  it("the unforced, cached, dry-run and single-path forms discard nothing; the ones that still delete files touch the checkout (#468)", () => {
     for (const c of ["git rm -r .", "git rm .", "git rm --cached -r .", "git rm -rf --cached .",
       "git rm -r -f --cached :/", "git rm -rfn .", "git rm -rf --dry-run .", "git rm -rf src/a.ts",
       "git rm -rf src", "git rm -f seed.txt", "git rm --cached seed.txt", "git rm -rf *.log"]) {
       expect(causes(c, DISCARDS_WORK), c).toEqual([]);
-      expect(effects(c), c).toEqual([READ_ONLY]);
+      const indexOnly = /--cached|-rfn|--dry-run/.test(c);
+      expect(effects(c), c).toEqual(indexOnly ? [READ_ONLY] : [TOUCHES_OWNER_CHECKOUT]);
     }
   });
 });
@@ -532,5 +534,98 @@ describe("git effects: a lone colon, the magic forms and the repository root are
     }
     // no probe (the server's line classifier, a test): an absolute path is a path
     expect(causes("git checkout -- /work/repo", DISCARDS_WORK)).toEqual([]);
+  });
+});
+
+describe("git effects: the owner-checkout table meets its own definition (#468)", () => {
+  // The definition: a command touches the checkout it runs in when it
+  // rewrites the working files, or replaces the checked-out commit. Before
+  // #468 every command here read read-only and ran in the owner's checkout
+  // mid-run. Each row: [the command, the word the cause names, the row's name].
+  const rows: Array<[command: string, flag: string, what: string]> = [
+    ["git apply fix.patch", "apply", "`git apply`"],
+    ["git apply --index fix.patch", "apply", "`git apply`"],
+    ["git apply -R -p2 fix.patch", "apply", "`git apply`"],
+    ["git apply --directory=src fix.patch", "apply", "`git apply`"],
+    ["git bisect start", "start", "`git bisect`"],
+    ["git bisect start HEAD HEAD~5", "start", "`git bisect`"],
+    ["git bisect bad", "bad", "`git bisect`"],
+    ["git bisect good abc123", "good", "`git bisect`"],
+    ["git bisect new", "new", "`git bisect`"],
+    ["git bisect old", "old", "`git bisect`"],
+    ["git bisect skip", "skip", "`git bisect`"],
+    ["git bisect reset", "reset", "`git bisect`"],
+    ["git bisect replay bisect.log", "replay", "`git bisect`"],
+    ["git bisect run npm test", "run", "`git bisect`"],
+    ["git restore seed.txt", "restore", "`git restore`"],
+    ["git restore --source=HEAD~1 src/a.ts", "restore", "`git restore`"],
+    ["git restore --staged --worktree seed.txt", "restore", "`git restore`"],
+    ["git restore -SW seed.txt", "restore", "`git restore`"],
+    ["git checkout-index -f -a", "-f", "`git checkout-index --force`"],
+    ["git checkout-index --force -- seed.txt", "--force", "`git checkout-index --force`"],
+    ["git checkout-index -fu -a", "-fu", "`git checkout-index --force`"],
+    ["git checkout-index --forc -a", "--forc", "`git checkout-index --force`"],
+    ["git sparse-checkout set src", "set", "`git sparse-checkout`"],
+    ["git sparse-checkout add docs", "add", "`git sparse-checkout`"],
+    ["git sparse-checkout reapply", "reapply", "`git sparse-checkout`"],
+    ["git sparse-checkout disable", "disable", "`git sparse-checkout`"],
+    ["git sparse-checkout init --cone", "init", "`git sparse-checkout`"],
+    ["git read-tree -u HEAD", "-u", "`git read-tree -u`"],
+    ["git read-tree -mu HEAD topic", "-mu", "`git read-tree -u`"],
+    ["git read-tree --reset -u HEAD", "-u", "`git read-tree -u`"],
+    ["git submodule update --init --recursive", "update", "`git submodule update`"],
+    ["git submodule deinit -f lib", "deinit", "`git submodule deinit`"],
+    ["git rm -f seed.txt", "rm", "`git rm`"],
+    ["git rm seed.txt", "rm", "`git rm`"],
+    ["git rm -r src", "rm", "`git rm`"],
+    ["git clean -f", "clean", "`git clean`"],
+    ["git clean -fd", "clean", "`git clean`"],
+    ["git -c clean.requireForce=false clean -d", "clean", "`git clean`"],
+  ];
+
+  it("each touches the checkout it runs in, naming the word that caused it and the row's name", () => {
+    for (const [c, flag, what] of rows) {
+      const hits = causes(c, TOUCHES_OWNER_CHECKOUT);
+      expect(hits.map((h) => h.flag), c).toEqual([flag]);
+      expect(hits[0].what, c).toBe(what);
+      expect(hits[0].why, c).toMatch(/rewrites the files or HEAD/);
+      expect(effects(c), c).toContain(TOUCHES_OWNER_CHECKOUT);
+    }
+  });
+
+  it("the twins carry no row: the reads, the index-only forms, the dry runs, a write to temp files", () => {
+    for (const c of ["git apply --check fix.patch", "git apply --stat fix.patch", "git apply --numstat fix.patch",
+      "git apply --summary fix.patch", "git apply --cached fix.patch", "git apply --check --index fix.patch",
+      "git apply --cached -R fix.patch",
+      "git bisect log", "git bisect visualize", "git bisect view", "git bisect terms", "git bisect",
+      "git restore --staged seed.txt", "git restore -S .", "git restore --staged -- .",
+      "git checkout-index -a", "git checkout-index seed.txt", "git checkout-index -f --temp seed.txt",
+      "git checkout-index -a --prefix=/tmp/export/",
+      "git sparse-checkout list", "git sparse-checkout check-rules", "git sparse-checkout",
+      "git read-tree HEAD", "git read-tree -m HEAD topic", "git read-tree -u -n HEAD", "git read-tree -un HEAD",
+      "git read-tree --reset HEAD", "git read-tree --prefix=sub/ HEAD",
+      "git submodule status", "git submodule init", "git submodule summary", "git submodule",
+      "git rm --cached seed.txt", "git rm -n seed.txt", "git rm --dry-run -r .", "git rm -r --cached .",
+      "git clean -n", "git clean -nd", "git clean --dry-run -fdx", "git clean -fd --dry-run"]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT), c).toEqual([]);
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the #288 fold: a whole-tree restore, a clean and a forced whole-tree rm carry both effects, in table order", () => {
+    for (const c of ["git restore .", "git restore :", "git clean -fd", "git rm -rf .", "git checkout -- ."]) {
+      expect(effects(c), c).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
+    }
+    for (const c of ["git restore --staged .", "git clean -n", "git rm --cached -r ."]) {
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the table's owner-checkout rows name exactly the subcommands the definition lists, one effect per row", () => {
+    const subs = new Set(EFFECT_TABLE.filter((r: { effect: string }) => r.effect === TOUCHES_OWNER_CHECKOUT)
+      .map((r: { sub: string }) => r.sub));
+    expect([...subs].sort()).toEqual(["am", "apply", "bisect", "checkout", "checkout-index", "cherry-pick", "clean",
+      "merge", "mv", "pull", "read-tree", "rebase", "reset", "restore", "revert", "rm", "sparse-checkout", "stash",
+      "submodule", "switch"]);
   });
 });

@@ -2749,3 +2749,139 @@ describe("run guard: a lone colon is the whole tree (#464)", () => {
     expect(guard(proj, home, `git rm -rf ${other}`).status).toBe(0);
   });
 });
+
+describe("run guard: the owner-checkout table meets its own definition (#468)", () => {
+  const LIVE = { status: "running", phases: [], pushAuth: { granted: false } };
+  // the discards-work rows some of these also match aren't the rule under
+  // test, so the owner's escape lifts them for the whole leg
+  const lifted = { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" };
+
+  /** The fixture with a live run, a nested folder to run from, and one linked worktree -- the run's own place. */
+  function live(): { proj: string; home: string; sub: string; linked: string } {
+    const { proj, home } = fixture(LIVE);
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    const linked = join(freshDir("cairn-runguard-linked-"), "wt");
+    git(proj, "worktree", "add", "-q", "-b", "side", linked);
+    return { proj, home, sub, linked };
+  }
+
+  // Each row: [the command, the word the effect line names, the row's name
+  // for it, its harmless twin -- the same command kept off the work tree].
+  // Before #468 every command here passed in the owner's checkout mid-run
+  // with exit 0 while a checkout of a branch beside it was refused.
+  const rows: Array<[command: string, flag: string, name: string, twin: string]> = [
+    ["git apply fix.patch", "apply", "git apply", "git apply --check fix.patch"],
+    ["git apply --index fix.patch", "apply", "git apply", "git apply --cached fix.patch"],
+    ["git apply -R fix.patch", "apply", "git apply", "git apply --stat fix.patch"],
+    ["git bisect start", "start", "git bisect", "git bisect log"],
+    ["git bisect start HEAD HEAD~1", "start", "git bisect", "git bisect terms"],
+    ["git bisect bad", "bad", "git bisect", "git bisect visualize"],
+    ["git bisect good HEAD~1", "good", "git bisect", "git bisect log"],
+    ["git bisect skip", "skip", "git bisect", "git bisect view"],
+    ["git bisect reset", "reset", "git bisect", "git bisect log"],
+    ["git restore seed.txt", "restore", "git restore", "git restore --staged seed.txt"],
+    ["git restore --source=HEAD~1 -- seed.txt", "restore", "git restore", "git restore -S -- seed.txt"],
+    ["git restore -SW seed.txt", "restore", "git restore", "git restore -S seed.txt"],
+    ["git checkout-index -f -a", "-f", "git checkout-index --force", "git checkout-index -a"],
+    ["git checkout-index --force seed.txt", "--force", "git checkout-index --force", "git checkout-index seed.txt"],
+    ["git checkout-index -fu -a", "-fu", "git checkout-index --force", "git checkout-index -f --temp seed.txt"],
+    ["git sparse-checkout set src", "set", "git sparse-checkout", "git sparse-checkout list"],
+    ["git sparse-checkout add docs", "add", "git sparse-checkout", "git sparse-checkout check-rules"],
+    ["git sparse-checkout disable", "disable", "git sparse-checkout", "git sparse-checkout list"],
+    ["git read-tree -u HEAD", "-u", "git read-tree -u", "git read-tree HEAD"],
+    ["git read-tree -mu HEAD side", "-mu", "git read-tree -u", "git read-tree -m HEAD side"],
+    ["git read-tree --reset -u HEAD", "-u", "git read-tree -u", "git read-tree -u -n HEAD"],
+    ["git submodule update --init --recursive", "update", "git submodule update", "git submodule status"],
+    ["git submodule deinit -f lib", "deinit", "git submodule deinit", "git submodule init"],
+    ["git rm -f seed.txt", "rm", "git rm", "git rm --cached seed.txt"],
+    ["git rm seed.txt", "rm", "git rm", "git rm -n seed.txt"],
+    ["git rm -r sub", "rm", "git rm", "git rm -r --cached sub"],
+  ];
+
+  // The #288 fold: with discards-work overridden for the session, the
+  // whole-tree restore, the clean and the forced whole-tree rm of the
+  // owner's checkout are still refused mid-run -- the mid-run rule used
+  // to cover checkout, switch and hard reset only.
+  const folded: Array<[command: string, flag: string, name: string, twin: string]> = [
+    ["git restore .", "restore", "git restore", "git restore --staged ."],
+    ["git restore :", "restore", "git restore", "git restore -S :"],
+    ["git clean -fd", "clean", "git clean", "git clean -nd"],
+    ["git clean -f", "clean", "git clean", "git clean -n"],
+    ["git rm -rf .", "rm", "git rm", "git rm --cached -r ."],
+  ];
+
+  it("each is refused in the owner's checkout mid-run, from the root and from a nested folder, naming the run and the effect; its twin passes there", () => {
+    const { proj, home, sub } = live();
+    for (const [c, flag, name, twin] of rows) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("run-x");
+        expect(r.stderr, c).toContain(`this \`${name}\` targets the checkout you work in`);
+        expect(r.stderr, c).toContain(`effect: touches-owner-checkout, from \`${flag}\`.`);
+        expectOwnerTail(r.stderr, c);
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the #288 fold: with the destructive-git override set, the whole-tree restore, clean and forced rm are still refused mid-run, naming both effects", () => {
+    const { proj, home, sub } = live();
+    for (const [c, flag, name, twin] of folded) {
+      for (const cwd of [proj, sub]) {
+        for (const r of [guard(proj, home, c, lifted, cwd), guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`, {}, cwd)]) {
+          expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain(`this \`${name}\` targets the checkout you work in`);
+          expect(r.stderr, c).toContain(`effect: touches-owner-checkout, from \`${flag}\`; also discards-work.`);
+        }
+        expect(guard(proj, home, twin, lifted, cwd).status, twin).toBe(0);
+      }
+    }
+  });
+
+  it("each passes in the run's own worktree -- by cwd and by -C -- and in the owner's checkout once no run is live", () => {
+    const { proj, home, linked } = live();
+    for (const [c] of [...rows, ...folded]) {
+      const r = guard(proj, home, c, lifted, linked);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      const byC = guard(proj, home, `git -C ${linked} ${c.replace(/^git (-c \S+ )?/, "")}`, lifted);
+      expect(byC.status, `-C: ${c}\n${byC.stderr}`).toBe(0);
+    }
+    const idle = fixture();
+    for (const [c] of rows) {
+      const r = guard(idle.proj, idle.home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("CAIRN_RUN_OK=1 as the leading assignment lifts each one once", () => {
+    const { proj, home } = live();
+    for (const [c] of [...rows, ...folded]) {
+      expect(guard(proj, home, `CAIRN_RUN_OK=1 ${c}`, lifted).status, c).toBe(0);
+    }
+  });
+
+  it("the reads of the new subcommands, and a mention, still pass in the owner's checkout mid-run", () => {
+    const { proj, home } = live();
+    for (const c of [
+      "git apply --check fix.patch",
+      "git apply --numstat fix.patch",
+      "git bisect log",
+      "git sparse-checkout list",
+      "git read-tree HEAD",
+      "git read-tree --prefix=sub/ HEAD",
+      "git submodule status",
+      "git rm --cached seed.txt",
+      "git clean -n",
+      "git checkout-index -a --prefix=/tmp/export/",
+      "echo git apply fix.patch",
+      'git commit -m "git bisect start"',
+      "git log -- seed.txt",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+});
