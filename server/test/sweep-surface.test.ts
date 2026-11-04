@@ -1058,3 +1058,53 @@ describe("the git layer of the ship gate (#456)", () => {
     expect(read("skills/cairn-trailhead/verbs/ship.md")).toContain("guardReach");
   });
 });
+
+// #292: a hard link is a second name for a protected file, outside the
+// protected set, and a write through it is a write the harness guard never
+// saw. The guard refuses making one now (hooks.test.ts "hard link ... (#292)");
+// the surface sweep lists the second names already there, by link count.
+describe("security --surface lists hard-linked protected files (#292)", () => {
+  const audit = () => read("skills/cairn-trailhead/verbs/audit.md");
+  const LEG = "**Hard links (`security --surface`):**";
+
+  it("the surface row names the hard-link leg, and the leg names the link-count find, the other name's lookup, the severity and the guard", () => {
+    const flat = audit().replace(/\s+/g, " ");
+    const row = flat.slice(flat.indexOf("| `security --surface` |"), flat.indexOf("| `ui [phase]` |"));
+    expect(row).toContain("hard link");
+    const at = flat.indexOf(LEG);
+    expect(at).toBeGreaterThanOrEqual(0);
+    const leg = flat.slice(at, flat.indexOf("**Visual evidence:**"));
+    for (const s of ["-links +1", "-samefile", "harness guard", "#292", "`ln`", "cp -l", "`important`", "ship-gate", "~/.claude"]) {
+      expect(leg, s).toContain(s);
+    }
+  });
+
+  it("the documented recipe finds the second name: a hard link raises the count above one; a symlink and a copy do not", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-292-"));
+    const find = (...args: string[]) => {
+      const r = spawnSync("find", args, { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`find ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.split("\n").filter(Boolean);
+    };
+    try {
+      mkdirSync(join(dir, "hooks"));
+      mkdirSync(join(dir, "elsewhere"));
+      writeFileSync(join(dir, "hooks", "hooks.json"), "{}\n");
+      expect(find("hooks", "-type", "f", "-links", "+1")).toEqual([]);
+      symlinkSync(join(dir, "hooks", "hooks.json"), join(dir, "elsewhere", "sym.json"));
+      writeFileSync(join(dir, "elsewhere", "copy.json"), "{}\n");
+      expect(find("hooks", "-type", "f", "-links", "+1")).toEqual([]);
+      linkSync(join(dir, "hooks", "hooks.json"), join(dir, "elsewhere", "hard.json"));
+      expect(find("hooks", "-type", "f", "-links", "+1")).toEqual(["hooks/hooks.json"]);
+      // and the other name, the way the leg says to find it
+      expect(find(".", "-samefile", "hooks/hooks.json")).toContain("./elsewhere/hard.json");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the guard header carries the hard-link case beside the copy family it belongs to", () => {
+    const src = read("hooks/scripts/pretooluse-harnessguard.mjs");
+    expect(src.slice(0, src.indexOf("*/"))).toMatch(/hard link[\s\S]*#292/);
+  });
+});
