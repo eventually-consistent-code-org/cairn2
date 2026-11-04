@@ -249,12 +249,7 @@ export function checkLedgerEntry(projectDir: string, phaseDir: string,
  * writes the bytes.
  */
 export function appendLedger(projectDir: string, phaseDir: string,
-  entry: LedgerEntryInput, opts: {
-    /** The claim's base commit as the server stamped it, when the caller
-     *  already consumed the claim record (the folded close, #365). Never
-     *  the entry's own baseCommit -- that one is the caller's word (#357). */
-    claimBase?: string;
-  } = {}): {
+  entry: LedgerEntryInput): {
     path: string; line: string;
     /** Why this line carries no receipt facts, when it doesn't (#233). */
     degraded?: string[];
@@ -290,10 +285,12 @@ export function appendLedger(projectDir: string, phaseDir: string,
     // The re-run (#357) happens here, inside the one write path, so the
     // folded close (#365) and a standalone ledger_append both observe. It
     // never throws and is null when rerun is off -- the line then carries
-    // no observed segment at all, byte-identical to before.
+    // no observed segment at all, byte-identical to before. Its provenance
+    // is the owner's approval stamp (#423), read by the server itself;
+    // nothing on the entry is consulted for it.
     observation = observeDeclaredVerify({
       projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
-      declared: declaredVerify, claimBase: opts.claimBase,
+      declared: declaredVerify,
     });
     const taken = takeReceipt(projectDir, sanitize(entry.issueId));
     // Duration ladder (#232): the close measured rungs one and two when it

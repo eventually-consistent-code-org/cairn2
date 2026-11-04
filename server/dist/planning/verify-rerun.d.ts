@@ -34,15 +34,14 @@ export declare function runDeclared(projectDir: string, command: string, timeout
  * Every way of NOT running is a named skip, checked in this order:
  * evidence waived, no declared verify, the evidence command differs from
  * the declaration (character for character), the declaration is not a
- * plain shell line, PLAN.md is untracked, the server holds no claim stamp
- * with a base for this issue, the declared line changed since that base.
- * Only then does the declared line run.
+ * plain shell line, PLAN.md is untracked, no owner approval is stamped on
+ * it, the approved blob is unreadable, the declared line differs from the
+ * approved one, the line cannot be classified, a git invocation on it
+ * carries a refused effect. Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
- * :param o.claimBase: the base the server stamped at claim time, when the
- *   caller already read (and consumed) the claim record -- the folded close
- *   does; a standalone append leaves it unset and the record is read here.
- *   The ledger entry's own baseCommit is never consulted: it is the caller's.
+ * :param o.hooksDir: where the hook modules are, for a test standing in for
+ *   the published package; left unset, they are resolved beside this module
  * :returns the observation, or null when rerun is off
  */
 export declare function observeDeclaredVerify(o: {
@@ -53,7 +52,7 @@ export declare function observeDeclaredVerify(o: {
         command: string;
     };
     declared: string | null;
-    claimBase?: string;
     settings?: RerunSettings;
     now?: () => Date;
+    hooksDir?: string | null;
 }): Observation | null;

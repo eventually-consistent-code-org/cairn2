@@ -246,7 +246,10 @@ pairing overlay applies:
    shorthand mismatch. With `verify.rerun` on, pass the declared line
    verbatim as `evidence.command`: the server re-runs it and reports
    `ledger.observed`, and an `observedMismatch` is quoted as a finding,
-   never closed over. Never compute a time spent: self-reports measured
+   never closed over. A named skip (`plan-unapproved` until the owner
+   stamped the plan in `plan`, `effect-refused` for a line that would
+   push or discard work) is quoted too, never worked around: you do not
+   approve the plan. Never compute a time spent: self-reports measured
    6x-14x high. On stopping early: leave in_progress and post a parked
    comment — why it stopped, what remains.
 7. Nothing to run (docs or plan text only): `issue_close(id)` with no

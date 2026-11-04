@@ -1623,19 +1623,30 @@ pass, and a failed verify mandatorily becomes a trace.
 default 600). When it's on, a close doesn't just record the evidence the
 worker narrated — the server re-runs the task's declared `verify:` line
 itself, but only when the evidence command equals that line exactly, the
-PLAN.md holding it is tracked by git, and the line is unchanged since the
-base commit the server stamped at claim time (a base named on the append
-call is never used). It runs under a minimal environment, so no tracker
-token reaches it. Know what you're switching on: whoever can commit
-PLAN.md gets a shell line that runs outside the PreToolUse hooks, so keep
-it off unless plans are owner-reviewed before they're claimed (ADR 0017). What it saw lands beside the claim: `observed exit=<n>`
-on the ledger line, the last 20 lines of output in the tool result. A
-failing or timed-out re-run marks the line `observed-mismatch`, which
-`plan_check` reports as `important` and verify fails the phase on — the
-close itself is never refused (ADR 0017). Every reason it ran nothing is
-named in the result (`plan-untracked`, `declared-changed`,
+PLAN.md holding it is tracked by git, and the line is the one in the plan
+YOU approved: `plan_meta_set(phaseDir, approve: true)` stamps the plan as
+it reads right then (`{ blob, at, by }`, kept in local state, never in
+git), and the plan verb asks for that stamp as its last step in engineer
+mode. No stamp, no run (`plan-unapproved`); a line edited since, committed
+or not, is `declared-changed`. Before anything runs, every git invocation
+on the line goes through the run guard's effect classifier — the same
+reader and table your hooks use — and a line that would push, force-push,
+hard-reset or clean is skipped as `effect-refused` with the effect named;
+a line the server can't read (a script file, a shell fed from stdin) is
+`unclassifiable`, and a server installed without the hook scripts beside
+it reports `classifier-unavailable`. This is the one place cairn fails
+closed: nobody is at the keyboard to answer a refusal. It runs under a
+minimal environment, so no tracker token reaches it. Still, know what
+you're switching on: the line runs outside the PreToolUse hooks, so
+approve plans you have read (ADR 0017). What it saw lands beside the
+claim: `observed exit=<n>` on the ledger line, the last 20 lines of output
+in the tool result. A failing or timed-out re-run marks the line
+`observed-mismatch`, which `plan_check` reports as `important` and verify
+fails the phase on — the close itself is never refused (ADR 0017). Every
+reason it ran nothing is named in the result (`plan-untracked`,
+`plan-unapproved`, `declared-changed`, `effect-refused`,
 `command-differs`, …), never silent. The run happens server-side, outside
-your hooks, which is why it only ever runs the owner's tracked plan line.
+your hooks, which is why it only ever runs the owner's approved plan line.
 
 ### Drift
 

@@ -176,7 +176,7 @@ export function checkLedgerEntry(projectDir, phaseDir, entry) {
  * mid-task. Ledger rides into git with the closing commit; the server just
  * writes the bytes.
  */
-export function appendLedger(projectDir, phaseDir, entry, opts = {}) {
+export function appendLedger(projectDir, phaseDir, entry) {
     const phase = checkLedgerEntry(projectDir, phaseDir, entry);
     const declaredVerify = declaredVerifyFor(projectDir, phaseDir, entry.issueId);
     const path = join(plansRoot(projectDir), "phases", phaseDir, "LEDGER.md");
@@ -198,10 +198,12 @@ export function appendLedger(projectDir, phaseDir, entry, opts = {}) {
         // The re-run (#357) happens here, inside the one write path, so the
         // folded close (#365) and a standalone ledger_append both observe. It
         // never throws and is null when rerun is off -- the line then carries
-        // no observed segment at all, byte-identical to before.
+        // no observed segment at all, byte-identical to before. Its provenance
+        // is the owner's approval stamp (#423), read by the server itself;
+        // nothing on the entry is consulted for it.
         observation = observeDeclaredVerify({
             projectDir, phaseDir, issueId: sanitize(entry.issueId), evidence: entry.evidence,
-            declared: declaredVerify, claimBase: opts.claimBase,
+            declared: declaredVerify,
         });
         const taken = takeReceipt(projectDir, sanitize(entry.issueId));
         // Duration ladder (#232): the close measured rungs one and two when it

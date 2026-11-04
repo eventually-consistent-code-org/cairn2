@@ -14,6 +14,7 @@ import {
 import { metricsPath } from "../src/core/continuity.js";
 import { issueCostUsd } from "../src/core/metrics.js";
 import { readClaim, readClaimRecord, receiptsDir } from "../src/planning/close-receipt.js";
+import { readPlanApproval } from "../src/planning/plan-approval.js";
 
 // The work verb's real claim comment opens this way -- every issue in this
 // repo since phase 21 was claimed with it, so it is the shape rung one must
@@ -546,6 +547,14 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       const made = await h.call("issue_create", { title: "fold", claim: { wave: "3", task: "fold" } });
       expect(made.json.id).toBe("FAKE-1");
       await h.call("context_set", { phase: 1, issueId: made.json.id });
+      // The owner's approval (#423) is the human act the re-run keys on;
+      // the same plan_meta_set call that writes waves and tdd stamps it.
+      const approved = await h.call("plan_meta_set", { phaseDir: "01-core", approve: true });
+      expect(approved.isError).toBeFalsy();
+      expect(approved.json.approval).toMatchObject({
+        phaseDir: "01-core", by: "t <t@t>", blob: expect.stringMatching(/^[0-9a-f]{40,64}$/),
+      });
+      expect(readPlanApproval(h.projectDir, "01-core")?.blob).toBe(approved.json.approval.blob);
       const closed = await h.call("issue_close", {
         id: made.json.id, summary: "Rerun observed", evidence: { command: declared, result: "all passed" },
       });

@@ -137,4 +137,13 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
    (#142, #271). A backend that can't re-parent says so
    via `phaseSkipped` in the result; relay that instead of assuming the
    move happened. Ask before adopting.
-8. Report the plan summary and next step `/cairn:work <N>`.
+8. Approve (engineer mode, `verify.rerun` on): the owner's stamp is what
+   lets the close-time re-run execute this plan's `verify:` lines (#423,
+   ADR 0017). Ask once, with the final PLAN.md in front of the user —
+   "approve this plan as written?" — and on a yes call
+   `plan_meta_set(phaseDir, approve: true)`; the result's `approval`
+   carries the blob, time and identity. A no, vibe mode, or rerun off:
+   skip the call — nothing runs server-side until the stamp exists, and
+   that is the design, not a gap. Never pass `approve` on the user's
+   behalf.
+9. Report the plan summary and next step `/cairn:work <N>`.
