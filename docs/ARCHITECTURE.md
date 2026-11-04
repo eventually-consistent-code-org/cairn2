@@ -317,7 +317,21 @@ reason.
   judgment gates — with `strongest` as the value for a gate, pinned equal
   to the skill's table by a test that parses the skill file (see the
   Seats subsystem section below).
-- `workspace/` — multi-project workspaces and the dispatch board.
+- `workspace/` — multi-project workspaces and the dispatch board. Every
+  tool call resolves its project dir through one function, which walks
+  up from the launch dir to the nearest `cairn-workspace.json` and reads
+  the focus file under that root. The focus moves only a session launched
+  at the workspace root or in a folder no member owns; a session launched
+  inside a configured member (or anywhere in its tree) resolves to its
+  launch dir whatever the focus says, because the focus file is shared by
+  every session beneath the root and honoring it there let one session's
+  focus switch redirect a sibling session's writes into its planning
+  folder and tracker (#487, observed during the v2.9.3 release).
+  `workspace_status` and `workspace_focus` report `launchDir`,
+  `resolvedProject` and `focusApplied` so a redirect is a field, not a
+  surprise. Asserted by `server/test/workspace-context.test.ts` ("a
+  member launch is never redirected", with the prefix-lookalike and
+  `..`-climb twins) and the member-launch block in `server/test/mcp.test.ts`.
 - `core/` — continuity, active context, project registry, outlook
   emission; the wave checkpoint composes its notes and resume verb,
   writes the handoff and emits the outlook in one call. Which of these

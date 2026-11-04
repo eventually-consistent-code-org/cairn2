@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { CairnError } from "../errors.js";
 const WORKSPACE_FILE = "cairn-workspace.json";
 const focusPath = (root) => join(root, ".cairn", "basecamp", "focus.json");
@@ -97,7 +97,7 @@ export function setFocus(launchDir, project) {
     }
     if (project === null) {
         writeFocus(info.root, null);
-        return { focus: null, projectDir: launchDir };
+        return { focus: null, projectDir: launchDir, focusApplied: false };
     }
     const member = info.members.find((m) => m.name === project);
     if (!member) {
@@ -107,23 +107,59 @@ export function setFocus(launchDir, project) {
         throw new CairnError("CONFIG_INVALID", `member '${project}' has no cairn.json and cannot be focused`, `add a cairn.json to ${member.path}`);
     }
     writeFocus(info.root, project);
-    return { focus: project, projectDir: member.absPath };
+    // The focus is written for the workspace; whether it moves THIS session is
+    // the launch dir's call (#487) -- a member launch reports focusApplied: false
+    // and keeps its own project dir, so the caller learns it on the spot.
+    const resolved = resolveProject(launchDir);
+    return { focus: project, projectDir: resolved.resolvedProject, focusApplied: resolved.focusApplied };
 }
 /**
- * The one function every tool call resolves its project dir through. No
- * workspace, or a workspace with no focus set, both resolve to `launchDir`
- * itself — the compatibility path that keeps single-project behavior
- * byte-identical. A focus naming a member that has since vanished or lost its
- * cairn.json is a stale-focus error, never a silent fallback to launchDir.
+ * True when `dir` is a configured member's directory or lies anywhere inside
+ * one. Compared segment-wise (never a string prefix): `b-other` is not inside
+ * member `b`, and a `..` spelled into the launch dir was resolved before it
+ * got here — workspace-context.test.ts, the #487 hostile twins.
  */
-export function resolveProjectDir(launchDir) {
+function insideConfiguredMember(info, dir) {
+    return info.members.some((m) => {
+        if (!m.configured)
+            return false;
+        const rel = relative(m.absPath, dir);
+        return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+    });
+}
+/**
+ * The one function every tool call resolves its project dir through, with
+ * the reasoning beside the answer. No workspace, or a workspace with no focus
+ * set, both resolve to `launchDir` itself — the compatibility path that keeps
+ * single-project behavior byte-identical.
+ *
+ * A launch dir that is itself a configured member (or sits inside one) is
+ * that member's session and resolves to itself whatever the focus says
+ * (#487): the focus file is one file under the workspace root, shared by
+ * every session beneath it, and honoring it here let one session's
+ * `basecamp focus` silently repoint a sibling session's writes into its own
+ * planning folder and tracker. The focus applies only to a session launched
+ * at the workspace root or in a folder no member owns — the sessions that
+ * have no project of their own. A focus naming a member that has since
+ * vanished or lost its cairn.json is a stale-focus error for THOSE sessions,
+ * never a silent fallback to launchDir; a member launch is not the stale
+ * focus's business and is never blocked by it.
+ */
+export function resolveProject(launchDir) {
+    const self = { launchDir, resolvedProject: launchDir, focusApplied: false };
     const info = findWorkspace(launchDir);
     if (!info || info.focus === null)
-        return launchDir;
+        return self;
+    if (insideConfiguredMember(info, resolve(launchDir)))
+        return self;
     const member = info.members.find((m) => m.name === info.focus);
     if (!member || !member.configured) {
         throw new CairnError("CONFIG_INVALID", `focus names '${info.focus}' but it is ${member ? "no longer configured (missing cairn.json)"
             : "no longer a member"} of workspace '${info.workspace}'`, `clear focus (workspace_focus with project: null) or restore '${info.focus}' as a configured member`);
     }
-    return member.absPath;
+    return { launchDir, resolvedProject: member.absPath, focusApplied: true };
+}
+/** The project dir alone — what every tool call keys its stores and tracker on. */
+export function resolveProjectDir(launchDir) {
+    return resolveProject(launchDir).resolvedProject;
 }
