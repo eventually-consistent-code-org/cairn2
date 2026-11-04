@@ -554,7 +554,8 @@ distinction matters more than the count.
   umbrella issue, and a paused or stopped mark on the handoff; the
   measured duration subtracts those windows (ADR 0020, amendment).
 - **Refusers** block a tool call and say why. The leak guard stops a
-  commit whose staged diff would carry internal references into source.
+  commit whose staged diff would carry internal references, or a
+  key-shaped secret, into source (#280).
   The run guard keeps an unattended run out of the working directory a
   human is using. The harness guard protects the configuration that
   decides what the agent may do at all — the hook directory, the tool

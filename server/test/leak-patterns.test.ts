@@ -213,3 +213,129 @@ describe("peer child env drop covers every adapter credential default (#340)", (
     expect(PEER_ENV_DROP).toContain("GH_TOKEN");
   });
 });
+
+
+// #280: key-shaped secrets join the shared pattern set -- a well-known
+// token prefix, a private-key header, or a key|secret|token assignment
+// whose value is long, opaque and carries both letters and digits. Every
+// fixture below is spelled in pieces so this file's own diff never trips
+// the live commit guard; every refused shape sits beside its harmless
+// twin (the same characters that must pass), and the hostile spellings
+// the issue never named (a token in a URL's userinfo, a JSON-quoted key,
+// a Go walrus) are judged here too.
+describe("secret shapes in the shared pattern set (#280)", () => {
+  const AWS = "AKIA" + "IOSFODNN7EXAMPLE";
+  const GH = "ghp_" + "0123456789abcdefghijABCDEFGHIJklmnopqr";
+  const GH_PAT = "github_pat_" + "11ABCDEFG0abcdefghijklmnop";
+  const SLACK = "xoxb-" + "1234567890-abcdefghij";
+  const PEM = "-----BEGIN " + "RSA PRIVATE KEY-----";
+  const OPAQUE = "a1b2c3d4e5f6a7b8c9d0e1f2";
+
+  const refused: Array<[string, string]> = [
+    ["secret-aws-key", `const id = "${AWS}";`],
+    ["secret-github-token", `GITHUB_TOKEN=${GH}`],
+    ["secret-github-token", `const pat = "${GH_PAT}";`],
+    ["secret-slack-token", `slack: "${SLACK}",`],
+    ["secret-private-key", PEM],
+    ["secret-private-key", "-----BEGIN " + "PGP PRIVATE KEY BLOCK-----"],
+    ["secret-private-key", "-----BEGIN " + "PRIVATE KEY-----"],
+    ["secret-assignment", `const token = "${OPAQUE}";`],
+    ["secret-assignment", `client_secret: ${OPAQUE}`],
+    ["secret-assignment", `API_KEY=${OPAQUE}`],
+    ["secret-assignment", `password = '${OPAQUE}'`],
+    // the spellings the issue never named
+    ["secret-github-token", `url: https://${GH}@github.com/o/r.git`],
+    ["secret-assignment", `{"api_key": "${OPAQUE}"}`],
+    ["secret-assignment", `token := "${OPAQUE}"`],
+    ["secret-aws-key", `  id: ${AWS}\r`],
+  ];
+
+  // the harmless twins: the same characters, short of a secret
+  const twins: string[] = [
+    'const note = "AKIA is the Amazon key prefix";',
+    'const low = "akia' + 'iosfodnn7example";',
+    'const fake = "ghp_' + 'short123";',
+    'const name = "ghp_token_placeholder";',
+    'const ch = "xoxb-' + 'example";',
+    "-----BEGIN PUBLIC KEY-----",
+    "-----BEGIN CERTIFICATE-----",
+    "const token = process.env.GITHUB_TOKEN;",
+    "const tokenCount = 20000;",
+    "secret: true",
+    'password: "hunter2"',
+    'const secret_key = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";',
+    'tokenEnv: z.string().default("GITHUB_TOKEN"),',
+    "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    'expect(out).toContain("COPILOT_GITHUB_TOKEN=secret-copilot_github_token");',
+    "const sha = a3f5c9e1b2d4f6a8c0e2b4d6f8a0c2e4;",
+  ];
+
+  it("every secret shape is refused by the hook's set, under its own kind", () => {
+    const pats = buildPatterns(ghCfg);
+    for (const [kind, line] of refused) {
+      // a line can be two shapes at once (GITHUB_TOKEN=ghp_... is a GitHub
+      // token AND a token assignment); every hit is a secret kind, and the
+      // named one is among them
+      const names = scanLines([line], pats).map((h: { name: string }) => h.name);
+      expect(names, line).toContain(kind);
+      expect(names.every((n: string) => n.startsWith("secret-")), line).toBe(true);
+    }
+  });
+
+  it("every harmless twin passes the hook's set", () => {
+    const pats = buildPatterns(ghCfg);
+    for (const line of twins) expect(scanLines([line], pats), line).toEqual([]);
+  });
+
+  it("a secret hit withholds the value: the match names the kind, never the text", () => {
+    const pats = buildPatterns(ghCfg);
+    let seen = 0;
+    for (const [, line] of refused) {
+      for (const h of scanLines([line], pats)) {
+        seen++;
+        expect(h.match, line).toBe("(value withheld)");
+        for (const value of [AWS, GH, GH_PAT, SLACK, OPAQUE, "PRIVATE KEY"]) expect(JSON.stringify(h), line).not.toContain(value);
+      }
+    }
+    // zero hits would pass the loop above by saying nothing -- an empty
+    // match is a failure here, never a pass
+    expect(seen).toBeGreaterThanOrEqual(refused.length);
+    // the planning-path kinds still carry their match, as the guard's
+    // listing and the CLI mode always did
+    const [hit] = scanLines(['label: "cairn' + ':seed",'], pats);
+    expect(hit.match).toBe("cairn" + ":seed");
+  });
+
+  it("server source is exempt from cairn-path only -- a secret there is still refused", () => {
+    const pats = buildPatterns(ghCfg);
+    for (const p of ["server/src/config.ts", "server/dist/config.js"]) {
+      expect(scanLines([`const id = "${AWS}";`], patternsForFile(p, pats)).map((h: { name: string }) => h.name))
+        .toEqual(["secret-aws-key"]);
+    }
+  });
+
+  it("the server port refuses and passes the same lines, hit for hit", () => {
+    const corpus = [...refused.map(([, l]) => l), ...twins].join("\n");
+    const hook = scanLines(corpus.split("\n"), buildPatterns(ghCfg))
+      .map(({ line, name }: { line: number; name: string }) => ({ line, name }));
+    // at least one hit per refused line, none on a twin line -- an empty
+    // match would be a failure here, never a pass
+    expect(hook.length).toBeGreaterThanOrEqual(refused.length);
+    expect(hook.every((h) => h.line <= refused.length)).toBe(true);
+    expect(scanForLeaks(corpus, ghCfg)).toEqual(hook);
+  });
+
+  it("the server's redacting form swaps the secret's token for a kind-named placeholder", () => {
+    const out = redactLeaks(`evidence: GITHUB_TOKEN=${GH} npm test`, ghCfg);
+    expect(out.text).toBe("evidence: [redacted secret-github-token] npm test");
+    expect(out.redacted).toEqual(["secret-github-token"]);
+    expect(out.text).not.toContain(GH);
+    expect(scanForLeaks(out.text, ghCfg)).toEqual([]);
+  });
+
+  it("leakGuard.enabled === false switches the secret scan off with the rest, in both places", () => {
+    const off = { leakGuard: { enabled: false } };
+    expect(scanForLeaks(PEM, off)).toEqual([]);
+    expect(redactLeaks(PEM, off)).toEqual({ text: PEM, redacted: [] });
+  });
+});

@@ -16,9 +16,13 @@
  *   input is text, not a file in this repo, so no exemption applies here --
  *   every pattern runs at full strength.
  *
- *   Scope note: these patterns catch planning paths, phase refs, cairn
- *   labels and Jira-style tracker ids, plus whatever the user adds in
- *   leakGuard.extraPatterns. They are not a secret scanner.
+ *   Scope: these patterns catch planning paths, phase refs, cairn labels,
+ *   Jira-style tracker ids, and the key-shaped secrets of #280 -- a cloud
+ *   access key, a GitHub or Slack token, a private-key header, and a
+ *   key|secret|token assignment with a long opaque value -- plus whatever
+ *   the user adds in leakGuard.extraPatterns. A hit never carries the
+ *   text, so a secret's line is reported and its value is not; what the
+ *   secret shapes do not read is the hook's Not seen block.
  * Author(s): John Reed
  */
 export interface LeakScanConfig {
@@ -47,9 +51,11 @@ export interface Redaction {
 }
 /**
  * Builds the pattern list, mirroring buildPatterns in the hook module:
- * three built-ins, a tracker-id pattern for a Jira project key, then the
- * user's extraPatterns. An invalid user regex is skipped silently -- the
- * guard must never crash the flow it guards.
+ * three built-ins, the five secret shapes (#280, same regex source as the
+ * hook's -- change one side and the parity test goes red), a tracker-id
+ * pattern for a Jira project key, then the user's extraPatterns. An
+ * invalid user regex is skipped silently -- the guard must never crash
+ * the flow it guards.
  *
  * :param config: cairn.json (parsed or raw); null/undefined = built-ins only
  * :returns the patterns, in the hook's order

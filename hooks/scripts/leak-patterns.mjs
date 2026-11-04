@@ -17,6 +17,18 @@
  *   because allow is all-or-nothing per path: allowlisting server/src/**
  *   would silently drop tracker-id and label scanning there too.
  *
+ *   Secrets (#280): five key-shaped patterns -- a cloud access key, a
+ *   GitHub or Slack token, a private-key header, and a key|secret|token
+ *   assignment whose value is long, opaque and carries both a letter and
+ *   a digit -- ride beside the planning patterns, so the commit guard and
+ *   the server's outbound screen (leak-scan.ts, held equal by the parity
+ *   test) carry them together. A secret hit withholds its match: the
+ *   listing names the file and line, never the value (asserted:
+ *   leak-patterns.test.ts "a secret hit withholds the value"). Precision
+ *   over recall on purpose -- an unknown vendor prefix is a
+ *   leakGuard.extraPatterns line, and a repository's history is a job for
+ *   a real secret scanner; the hook's header lists what is not seen.
+ *
  * removeWhen: never for the scan itself; the hook that calls it can
  *   retire if the platform offers a pre-commit content policy cairn can
  *   register patterns with.
@@ -29,11 +41,33 @@ import { basename, join } from "node:path";
 // Constants
 const CAIRN_PATH_EXEMPT_PREFIXES = ["server/src/", "server/dist/"];
 
+// Secret shapes (#280). `withhold` tells scanLines to report the kind and
+// the line but never the matched text -- the listing travels back through
+// the agent and can land in a tracker comment. No exemptPrefixes: the
+// server-source exemption is cairn-path only (#140). Change one here and
+// the server's copy in leak-scan.ts in the same commit -- the parity test
+// compares them source for source.
+const SECRET_PATTERNS = [
+  // an AWS access key id, long-lived (AKIA) or temporary (ASIA)
+  { name: "secret-aws-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/, withhold: true },
+  // a GitHub classic token (ghp/gho/ghu/ghs/ghr) or a fine-grained PAT
+  { name: "secret-github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/, withhold: true },
+  // a Slack bot, user, app, refresh or session token
+  { name: "secret-slack-token", re: /\bxox[abeprs]-[A-Za-z0-9-]{10,}\b/, withhold: true },
+  // any PEM private-key header: RSA, EC, OPENSSH, DSA, encrypted, PGP block
+  { name: "secret-private-key", re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/, withhold: true },
+  // key|secret|token|password = <twenty-plus opaque chars with a letter and a digit>;
+  // `process.env.X`, `$(...)` and `${...}` start outside the value class, so
+  // a reference to a secret never reads as one
+  { name: "secret-assignment", re: /\b(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|secret[_-]?key|secret|token|password|passwd)["']?\s*[:=]{1,3}\s*["']?(?=[^\s"'`]*[A-Za-z])(?=[^\s"'`]*\d)[A-Za-z0-9_\-/+=]{20,}/i, withhold: true },
+];
+
 export function buildPatterns(config) {
   const patterns = [
     { name: "cairn-path", re: /\.cairn\//, exemptPrefixes: CAIRN_PATH_EXEMPT_PREFIXES },
     { name: "phase-ref", re: /\b(?:phases\/\d{2}(?:\.\d+)?-[a-z0-9-]+|milestones\/v\d+)\b/ },
     { name: "cairn-label", re: /cairn:(?:seed|backlog)/ },
+    ...SECRET_PATTERNS,
   ];
   const projectKey = config?.tracker?.type === "jira"
     ? config?.tracker?.config?.projectKey : undefined;
@@ -63,9 +97,11 @@ export function patternsForFile(path, patterns) {
 export function scanLines(lines, patterns) {
   const hits = [];
   lines.forEach((text, i) => {
-    for (const { name, re } of patterns) {
+    for (const { name, re, withhold } of patterns) {
       const m = re.exec(text);
-      if (m) hits.push({ line: i + 1, name, match: m[0] });
+      // a secret's finding is its kind and line; the value stays out of
+      // every listing (#280)
+      if (m) hits.push({ line: i + 1, name, match: withhold ? "(value withheld)" : m[0] });
     }
   });
   return hits;

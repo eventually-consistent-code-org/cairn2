@@ -534,10 +534,21 @@ describe("peerRun — server-enforced rules (#268)", () => {
     });
 
     it("honours leakGuard.extraPatterns, and an invalid one never crashes the scan", async () => {
+      // a GitLab token prefix: a vendor the shipped secret set (#280) does
+      // not know, so the only kind that can fire here is the user's own
       const mark = markingStub("opencode");
-      const d = projectDir({ leakGuard: { extraPatterns: ["([", "AKIA[0-9A-Z]{16}"] } });
-      const err = await refusal(peerRun(d, "opencode", "const key = 'AKIA" + "IOSFODNN7EXAMPLE'"));
+      const d = projectDir({ leakGuard: { extraPatterns: ["([", "glpat-[A-Za-z0-9_-]{20}"] } });
+      const err = await refusal(peerRun(d, "opencode", "const key = 'glpat-" + "aBcDeFgHiJkLmNoPqRsT'"));
       expect(err.message).toContain("(extra)");
+      expect(err.message).not.toContain("aBcDeFgHiJkLmNoPqRsT");
+      expect(existsSync(mark)).toBe(false);
+    });
+
+    it("a cloud access key is refused with no extra pattern at all -- the shipped secret set (#280), value withheld", async () => {
+      const mark = markingStub("opencode");
+      const d = projectDir();
+      const err = await refusal(peerRun(d, "opencode", "const key = 'AKIA" + "IOSFODNN7EXAMPLE'"));
+      expect(err.message).toContain("(secret-aws-key)");
       expect(err.message).not.toContain("IOSFODNN7EXAMPLE");
       expect(existsSync(mark)).toBe(false);
     });
