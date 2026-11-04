@@ -36,15 +36,16 @@
  *   The run's session and the staged limit (#431, #433): `sessionId` names
  *   the staging session, the only one counted toward the freeze and the only
  *   one frozen; `breakerLimit` is `auto.breaker` at staging, read from here.
+ *
+ * removeWhen: never — push authority is an owner-decided policy gate, not
+ *   a workaround for a model limit; a stronger agent does not change who
+ *   decides what leaves the machine (ADR 0007).
+ *
  *   One running manifest per project (#466): while any manifest of the
  *   project reads `running`, create refuses RUN_LIVE -- the breaker judges
  *   every running manifest the refusing session owns, and a running batch
  *   gets no second manifest to move the count onto. Asserted:
  *   run-manifest.test.ts, "one running manifest per project".
- *
- * removeWhen: never — push authority is an owner-decided policy gate, not
- *   a workaround for a model limit; a stronger agent does not change who
- *   decides what leaves the machine (ADR 0007).
  * Author(s): John Reed
  */
 import { z } from "zod";
