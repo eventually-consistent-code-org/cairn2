@@ -5,7 +5,11 @@
  *   files that define the agent's own harness: the hook directory, the MCP
  *   server configs (.mcp.json, ~/.claude.json, Cursor's project and home
  *   mcp.json, #298), the settings cascade, the plugin manifest, .claude/hooks
- *   and agents (and Cursor's hooks, #269), the skill, agent and command
+ *   and agents (and Cursor's hooks: the project's .cursor/hooks.json and
+ *   .cursor/hooks/, #269, and the home folder's ~/.cursor/hooks.json with
+ *   its ~/.cursor/hooks/ scripts, #293 -- read in every Cursor session on
+ *   the machine, a dated claim from Cursor's hooks docs, 2026-11-04;
+ *   asserted: hooks.test.ts "(#293)"), the skill, agent and command
  *   folders in .claude and ~/.claude (#309), ~/.claude/hooks and every
  *   script those settings run as a hook or the status line, wherever it
  *   lives (#312: read fresh from the settings and hooks.json files each
@@ -304,6 +308,9 @@ const HOME_FILES = [
   [".claude", SETTINGS_NAMES, "your machine-wide Claude settings"],
   ["", [".claude.json"], "your machine-wide MCP server config"],
   [".cursor", CURSOR_MCP, "your machine-wide Cursor MCP server config"],
+  // #293 -- the user-level hooks file Cursor reads in every session on the
+  // machine; its scripts folder, ~/.cursor/hooks, is a tree in outsideZones
+  [".cursor", CURSOR_NAMES, "your machine-wide Cursor hooks"],
 ];
 
 // What a refusal calls a script the settings run (#312), one a protected
@@ -903,6 +910,9 @@ function outsideZones() {
     add(join(home, ".claude", "agents"), "your machine-wide agent definitions", true);
     add(join(home, ".claude", "commands"), "your machine-wide slash commands", true);
     add(join(home, ".claude", "hooks"), "your machine-wide Claude hooks", true);
+    // #293 -- where ~/.cursor/hooks.json keeps the scripts it runs, the way
+    // ~/.claude/hooks does for the settings (#312)
+    add(join(home, ".cursor", "hooks"), "your machine-wide Cursor hooks", true);
   }
   for (const cfg of configDirs()) {
     add(cfg, "your machine-wide Claude settings", false);

@@ -6834,3 +6834,95 @@ describe("the leak guard refuses key-shaped secrets, names the line and withhold
     expect(block.split("\n").length, block).toBe(17);
   });
 });
+
+// #293 -- Cursor reads a second hooks file: ~/.cursor/hooks.json, its
+// scripts under ~/.cursor/hooks/ (Cursor's hooks docs, read 2026-11-04 --
+// a dated claim about the harness; the project-level pair was #269's). A
+// hook planted there runs in every Cursor session on the machine, outside
+// any tool call, so both are the harness: refused like the project's and
+// named, in any letter case, by the file tools and the shell; the rest of
+// ~/.cursor (rules, skills, a .bak) and every read stay ordinary. Each
+// refused shape runs beside its harmless twin, from the project root and
+// from pkg/lib, the nested row once more with CLAUDE_PROJECT_DIR stripped
+// (#383, #459). Cursor's own Write and Delete reach this through the
+// adapter: cursor-adapter.test.ts "(#293)".
+describe("the harness guard protects Cursor's user-level hooks: ~/.cursor/hooks.json and ~/.cursor/hooks/ (#293)", () => {
+  const WHAT = "your machine-wide Cursor hooks";
+
+  /** A project with a nested pkg/lib, and a home holding the user-level hooks file, a hook script and a rules folder. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-293-proj-");
+    const home = freshDir("cairn-hooks-293-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    mkdirSync(join(home, ".cursor", "hooks"), { recursive: true });
+    mkdirSync(join(home, ".cursor", "rules"), { recursive: true });
+    writeFileSync(join(home, ".cursor", "hooks.json"), JSON.stringify({ version: 1, hooks: {} }));
+    writeFileSync(join(home, ".cursor", "hooks", "format.sh"), "#!/bin/sh\n");
+    return { p, home };
+  }
+
+  function run(f: ReturnType<typeof fixture>, payload: Record<string, unknown>, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ ...payload, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const file = (tool: string, file_path: string) => ({ tool_name: tool, tool_input: { file_path } });
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
+
+  /** Each refused shape beside its twin -- the same tool on the harmless neighbour, or the read of the same file. */
+  const pairs = (home: string): Array<[refused: Record<string, unknown>, twin: Record<string, unknown>]> => [
+    [file("Write", join(home, ".cursor", "hooks.json")), file("Write", join(home, ".cursor", "hooks.json.bak"))],
+    [file("Edit", join(home, ".cursor", "hooks.json")), file("Edit", join(home, ".cursor", "rules", "style.mdc"))],
+    // the hostile spellings: letter case, ~ and $HOME, the scripts folder and a cairn install inside it
+    [file("Write", join(home, ".CURSOR", "Hooks.json")), file("Write", join(home, ".CURSOR", "Rules", "a.mdc"))],
+    [file("Write", "~/.cursor/hooks.json"), file("Write", "~/.cursor/mcp.json.bak")],
+    [file("Write", join(home, ".cursor", "hooks", "format.sh")), file("Write", join(home, ".cursor", "skills", "x", "SKILL.md"))],
+    [file("Write", join(home, ".cursor", "hooks", "cairn", "pretooluse-harnessguard.mjs")), file("Write", join(home, ".cursor", "notes.md"))],
+    [bash("echo '{}' > ~/.cursor/hooks.json"), bash("cat ~/.cursor/hooks.json")],
+    [bash("echo x > $HOME/.cursor/hooks/format.sh"), bash("cat $HOME/.cursor/hooks/format.sh")],
+    [bash("cd ~/.cursor && echo '{}' > hooks.json"), bash("cd ~/.cursor && cat hooks.json")],
+    [bash("rm -rf ~/.cursor/hooks"), bash("ls ~/.cursor/hooks")],
+    [bash("rm ~/.cursor/hooks.json"), bash("ls -la ~/.cursor/hooks.json")],
+    [bash("cp /tmp/evil.json ~/.cursor/hooks.json"), bash("cp ~/.cursor/hooks.json /tmp/hooks-backup.json")],
+    [bash("sed -i '' 's/a/b/' ~/.cursor/hooks.json"), bash("grep -n version ~/.cursor/hooks.json")],
+    [bash("mkdir -p ~/.cursor/hooks/cairn"), bash("mkdir -p ~/.cursor/rules/new")],
+    [bash("chmod +x ~/.cursor/hooks/format.sh"), bash("chmod +x ~/.cursor/rules/run.sh")],
+    [bash("echo x > ~/.cursor/hooks/*.sh"), bash("echo x > ~/.cursor/rules/*.mdc")],
+    [bash("tee ~/.cursor/hooks.json < /tmp/evil.json"), bash("tee /tmp/copy.json < ~/.cursor/hooks.json")],
+  ];
+
+  it("refuses Write, Edit and the shell writes on the user-level hooks file and its scripts folder, naming them, in any letter case; the rest of ~/.cursor and every read pass", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs(f.home)) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused.tool_input)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused.tool_input)).toContain(WHAT);
+      expect(run(f, twin).status, JSON.stringify(twin.tool_input)).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs(f.home)) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused.tool_input)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin.tool_input)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the guard header names the user-level file beside the project one, and cites this block", () => {
+    const source = readFileSync(HARNESSGUARD, "utf8");
+    const header = source.slice(0, source.indexOf("*/"));
+    expect(header).toMatch(/~\/\.cursor\/hooks\.json[\s\S]*#293/);
+    expect(header).toContain('hooks.test.ts "(#293)"');
+  });
+});

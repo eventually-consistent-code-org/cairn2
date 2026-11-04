@@ -18,16 +18,24 @@
  *   it the same way. That entry is set failClosed, and anything short of a
  *   clean answer from a guard (a crash, a timeout, a missing script) denies
  *   here too -- a guard that didn't run never reads as allow.
- *   Confirmed in Cursor's hooks docs: preToolUse fires for every tool;
- *   tool_name is Shell, Read, Write, Grep, Delete, Task or MCP:<name>;
- *   Shell's tool_input carries command and working_directory; the answer
- *   is {permission: allow|deny, user_message, agent_message}; failClosed
- *   blocks on a hook crash or timeout.
- *   Assumed (the docs show no Write or Delete payload): the file path's
- *   field name -- PATH_KEYS, tried in order -- and the tool names Edit,
- *   StrReplace and MultiEdit, mapped in case edits arrive under them. A
- *   file-tool call with none of those fields is denied, so a wrong guess
- *   fails loud, not open. Delete is judged as an `rm -rf` of its path.
+ *   Confirmed in Cursor's hooks docs (read 2026-11-04): preToolUse fires
+ *   for every tool; tool_name is Shell, Read, Write, Grep, Delete, Task or
+ *   MCP:<name>; Shell's tool_input carries command and working_directory;
+ *   the answer is {permission: allow|deny, user_message, agent_message};
+ *   failClosed blocks on a hook crash or timeout; and the user-level hooks
+ *   file is ~/.cursor/hooks.json with its scripts under ~/.cursor/hooks/
+ *   (#293: the harness guard protects both beside the project's pair).
+ *   Partial, unconfirmed as of 2026-11-04 (#293): the file tools' payload.
+ *   The docs show no Write, Edit or Delete input, and the probe that would
+ *   have captured one could not run -- the Cursor CLI on the development
+ *   machine was not signed in, and signing in is the owner's act -- so the
+ *   path field's name (PATH_KEYS, tried in order) and the tool names Edit,
+ *   StrReplace and MultiEdit stay #269's guesses, kept rather than
+ *   dropped: a guessed name that is removed turns a call under it into an
+ *   allow. A file-tool call with none of those fields is denied, so a
+ *   wrong guess fails loud, not open; the fixtures in cursor-adapter.test.ts
+ *   are synthetic until a captured payload replaces them, and that test
+ *   pins this paragraph. Delete is judged as an `rm -rf` of its path.
  * Author(s): John Reed
  */
 

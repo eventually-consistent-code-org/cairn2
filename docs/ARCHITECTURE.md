@@ -562,7 +562,17 @@ distinction matters more than the count.
   server config, the settings cascade, the plugin manifests, and the
   folder git runs its hooks from (`core.hooksPath` when set, else the
   repository's own hooks folder; a planted hook runs under the owner's
-  identity at their next commit) — from the agent it configures. The
+  identity at their next commit) — from the agent it configures. Cursor
+  runs the run guard and the harness guard through an adapter installed
+  under its project hooks folder: its shell payload and the two places
+  it reads a hooks file from are what Cursor's docs confirm (read
+  2026-11-04), and its file-tool payload is partial, unconfirmed as of
+  that date — the path field names are guesses, and a call the adapter
+  cannot read is denied rather than let through — dated in the adapter
+  header and pinned by `server/test/cursor-adapter.test.ts` (#293). The
+  user-level hooks file Cursor reads in every session on the machine, and
+  the scripts folder beside it, are protected beside the project pair
+  (asserted: `server/test/hooks.test.ts`, "(#293)"). The
   write guard, the fourth since 2026-11-04 (#454), keeps a subagent
   inside the write authority its type was given: it reads the hook
   payload's `agent_type` (present inside subagents per the Claude Code
