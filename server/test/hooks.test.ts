@@ -4926,6 +4926,13 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
       refused: sh((c) => `cd ${c.rel}.claude/skills && git clone https://x/y`), twin: sh((c) => `cd ${c.rel}pkg && git clone https://x/y`) },
     { guard: "harness", shape: "a write handed to another shell", cwds: BOTH,
       refused: sh((c) => `bash -c "echo > ${c.rel}hooks/hooks.json"`), twin: sh((c) => `bash -c "cat ${c.rel}hooks/hooks.json | head"`) },
+    // #289: the computed-path shapes the Coverage says are read -- find -exec, xargs, a heredoc fed to a shell
+    { guard: "harness", shape: "find -exec onto a hook file", cwds: BOTH,
+      refused: sh((c) => `find ${c.rel}hooks -name '*.json' -exec rm {} \\;`), twin: sh((c) => `find ${c.rel}hooks -name '*.json' -exec cat {} \\;`) },
+    { guard: "harness", shape: "a hook path piped into xargs rm", cwds: BOTH,
+      refused: sh((c) => `echo ${c.rel}hooks/hooks.json | xargs rm`), twin: sh((c) => `echo ${c.rel}hooks/hooks.json | xargs cat`) },
+    { guard: "harness", shape: "a heredoc fed to a shell", cwds: BOTH,
+      refused: sh((c) => `bash <<'EOF'\nrm ${c.rel}hooks/hooks.json\nEOF`), twin: sh((c) => `bash <<'EOF'\ncat ${c.rel}hooks/hooks.json\nEOF`) },
     { guard: "harness", shape: "chmod of a protected folder", cwds: BOTH,
       refused: sh((c) => `chmod -R 777 ${c.rel}hooks`), twin: sh((c) => `chmod -R 777 ${c.rel}pkg`) },
     { guard: "harness", shape: "git checkout -- of a hook file", cwds: BOTH,
@@ -5750,5 +5757,102 @@ describe("harness guard follows CLAUDE_CONFIG_DIR (#304)", () => {
     // ~/.claude named as the config dir is the default spelled out: nothing doubles, nothing is lost
     expect(run(f, ...bash(`echo x > ${f.home}/.claude/settings.json`), f.p, join(f.home, ".claude")).status).toBe(2);
     expect(run(f, ...bash(`echo x > ${f.home}/.claude/notes.md`), f.p, join(f.home, ".claude")).status).toBe(0);
+  });
+});
+
+// #289 -- paths a command finds for itself. Closed by decision (phase 31,
+// 2026-11-04): the guard reads what a line spells, and the shapes it cannot
+// read -- an archive's or an unreadable patch's members, a listing that
+// names nothing protected -- are written into the header's Not-seen block,
+// dated, rather than half-guarded (ADR 0016). Three things make that a
+// mechanism instead of a sentence: the block is pinned here phrase by
+// phrase and line by line, so a deleted line is red; what the Coverage says
+// is read (find -exec, xargs, a heredoc fed to a shell) is run, from the
+// root and from a subfolder, beside its twin; and what the block says is
+// not seen is measured passing, so the header and the guard move together.
+describe("the harness guard's Not seen block is dated, pinned and measured (#289)", () => {
+  const source = readFileSync(HARNESSGUARD, "utf8");
+  const header = source.slice(0, source.indexOf("*/"));
+  const MARK = " *   Not seen, dated 2026-11-04 (#289";
+
+  /** The block: from its dated opening line to the blank comment line that ends it. */
+  function notSeenBlock(): string {
+    const start = header.indexOf(MARK);
+    expect(start, "the Not-seen block opens with its date and issue").toBeGreaterThan(-1);
+    return header.slice(start).split("\n *\n")[0];
+  }
+
+  it("the block is dated, closes by decision, and names each unseen shape -- a deleted line is red here", () => {
+    const block = notSeenBlock();
+    for (const phrase of [
+      "by decision", "ADR 0016",
+      "a write in an interpreter",
+      "a substitution's output",
+      "archive or patch the guard can't read",
+      "discovers for itself",
+      "cp -p, rsync -a or tar copy",
+      "starts by name off PATH",
+      "runs arbitrary code",
+    ]) expect(block, phrase).toContain(phrase);
+    // the line count is the pin: a shape added or removed moves it, on purpose, in the same change
+    expect(block.split("\n").length, block).toBe(22);
+  });
+
+  it("the Coverage says find -exec, xargs and a heredoc fed to a shell are read, and cites this block", () => {
+    expect(header).toMatch(/find -exec, xargs and a heredoc\s+\*\s+fed to a shell/);
+    expect(header).toContain('asserted: hooks.test.ts "Not seen block (#289)"');
+  });
+
+  /** A project with a hook file, a source file, a readable patch onto the hook and a nested pkg/lib. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-notseen-proj-");
+    const home = freshDir("cairn-hooks-notseen-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks", "scripts"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    writeFileSync(join(p, "a.tgz"), "not an archive the guard reads");
+    writeFileSync(join(p, "fix.diff"), "--- a/hooks/hooks.json\n+++ b/hooks/hooks.json\n@@ -1 +1 @@\n-{}\n+{\"x\":1}\n");
+    return { p, home };
+  }
+
+  function run(f: { p: string; home: string }, command: string, cwd = f.p) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("what the Coverage says is read, is: a listing word, a find walk, an xargs stream and a heredoc shell line, from the root and pkg/lib", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const [cwd, rel] of [[f.p, ""], [nested, "../../"]] as const) {
+      const pairs: Array<[refused: string, twin: string]> = [
+        [`git ls-files ${rel}hooks | xargs rm`, `git ls-files ${rel}src | xargs rm`],
+        [`find ${rel}hooks -name '*.json' -exec rm {} \\;`, `find ${rel}src -name '*.json' -exec rm {} \\;`],
+        [`echo ${rel}hooks/hooks.json | xargs rm`, `echo ${rel}src/x.json | xargs rm`],
+        [`bash <<'EOF'\nrm ${rel}hooks/hooks.json\nEOF`, `bash <<'EOF'\nrm ${rel}src/x.json\nEOF`],
+        // the patch names hooks/hooks.json from the project root, so -d says where that is
+        [`patch -d ${rel || "."} -p1 < ${rel}fix.diff`, `patch -d ${rel || "."} -p1 --dry-run < ${rel}fix.diff`],
+        [`tar xzf ${rel}a.tgz -C ${rel}hooks`, `tar xzf ${rel}a.tgz -C ${rel}src`],
+        [`unzip ${rel}a.zip -d ${rel}hooks`, `unzip ${rel}a.zip -d ${rel}src`],
+      ];
+      for (const [refused, twin] of pairs) {
+        expect(run(f, refused, cwd).status, `${JSON.stringify(refused)} from ${rel || "root"}`).toBe(2);
+        expect(run(f, twin, cwd).status, `${JSON.stringify(twin)} from ${rel || "root"}`).toBe(0);
+      }
+    }
+  });
+
+  it("what the block says is not seen, is not: an unreadable patch or archive at the root, and a listing naming nothing protected, pass -- the measured gap", () => {
+    const f = fixture();
+    for (const c of ["git ls-files | xargs rm", "curl -s https://x/p.diff | patch -p1", "curl -s https://x/p.diff | git apply",
+      "curl -s https://x/a.tgz | tar xz", "tar xzf a.tgz", "unzip a.zip"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
   });
 });

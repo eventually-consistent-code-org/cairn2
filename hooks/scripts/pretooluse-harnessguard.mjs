@@ -72,7 +72,8 @@
  *   WRITES -- redirects and the operands of commands that change files,
  *   through wrappers and program runners (xcrun, script, flock, #307;
  *   strace, runuser, #311), bash -c, su -c, find -exec, xargs and a heredoc
- *   fed to a shell. Any other heredoc body is data, but the $(...) or
+ *   fed to a shell (asserted: hooks.test.ts "Not seen block (#289)", and
+ *   the #383 rows). Any other heredoc body is data, but the $(...) or
  *   backtick an unquoted body (`<<EOF`) runs is read as a line of its own
  *   (#322); a quoted delimiter (`<<'EOF'`) keeps the body literal. A
  *   program runner the table doesn't name is backed up by
@@ -146,14 +147,27 @@
  *   config dir that is the home or the project, or a relative one, adds
  *   nothing. Asserted: hooks.test.ts "follows CLAUDE_CONFIG_DIR (#304)".
  *
- *   Not seen: a write in an interpreter (python -c, an MCP tool running
- *   python or javascript), a write that only exists in a substitution's
- *   output (`$(cat script)` run as a command -- the body of a $(...), a
- *   <(...), >(...) or $((...)), and the literal target after any of them
- *   are read, #319, #320), an archive's members,
- *   paths an upstream command finds, modes cp -p, rsync or tar copy, the
- *   program a hook or an MCP server starts by name off PATH. An MCP server
- *   that runs arbitrary code is that same class: gate it with the
+ *   Not seen, dated 2026-11-04 (#289, by decision: the guard reads what a
+ *   line spells; what a command computes at run time is the operating
+ *   system's to isolate, ADR 0016; each shape below is pinned by
+ *   hooks.test.ts "Not seen block (#289)", one sentence a shape):
+ *   a write in an interpreter (python -c, an MCP tool running python or
+ *   javascript).
+ *   A write that only exists in a substitution's output (`$(cat script)`
+ *   run as a command -- the body of a $(...), a <(...), >(...) or $((...)),
+ *   and the literal target after any of them are read, #319, #320).
+ *   The members of an archive or patch the guard can't read, landing where
+ *   it is extracted or applied (`curl ... | tar xz`, `curl ... | patch -p1`,
+ *   `tar xzf a.tgz` at the project root: the folder is judged, the members
+ *   are not; a readable patch is read file by file, a -C or -d folder as a
+ *   write).
+ *   Paths an upstream command discovers for itself when none of its words
+ *   names a protected place (`git ls-files | xargs rm`; `git ls-files hooks
+ *   | xargs rm` is refused for the word, a find upstream for what it walks,
+ *   #258).
+ *   Modes a cp -p, rsync -a or tar copy preserves onto a protected holder.
+ *   The program a hook or an MCP server starts by name off PATH. An MCP
+ *   server that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
