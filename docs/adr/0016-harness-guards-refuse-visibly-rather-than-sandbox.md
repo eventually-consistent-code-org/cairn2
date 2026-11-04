@@ -190,3 +190,47 @@ enabled: false` switches it off here as everywhere. Asserted in
 `server/test/measured-duration.test.ts` ("server-composed comments pass
 the leak screen before posting") and `server/test/leak-patterns.test.ts`
 ("redactLeaks"). The two live comments stay the owner's call to edit.
+
+## Amendment 2026-11-04 — the pointer to the hooks folder is the folder's configuration (#465)
+
+The decision stands; this closes an ordering gap the #353 clause above
+left open. That clause protected the folder git runs its hooks from, read
+fresh from git on every call. The key that names the folder was not
+protected, so an agent could write a hook script into an ordinary folder
+(allowed: not a hooks folder yet), then run `git config core.hooksPath`
+to point git at it (allowed: a command, not a file write), and the
+owner's next commit, in any worktree, ran the planted script under the
+owner's identity. The phase 30 security audit reproduced it twice; the
+folder fix held once the pointer was set, which is exactly the problem —
+it protected only folders that were already hooks folders before the
+agent acted.
+
+Setting the pointer is now a harness write, under the same escape and
+the same refusal shape, by every route the audit named and one it did
+not. The harness guard's command leg owns it (the run guard's files stay
+disjoint, as the phase decided): `git config` setting `core.hooksPath` in
+any scope — local, global, system, worktree, `--file` — by the legacy
+`<key> <value>`, `--add`, `--replace-all`, `--unset`, `--unset-all`, the
+2.46+ `set` and `unset` subcommands, or removing or renaming the core
+section; and, the spelling the issue never mentioned, `include.path` and
+`includeIf.<condition>.path`, which name a file git reads config from and
+can carry the key. The key is compared case-folded, as git reads it. A
+write that puts a `hooksPath` or an `include` line into a git config file
+counts the same — the repo's config (the common one in a linked
+worktree) and `config.worktree`, `~/.gitconfig`, the XDG file, and the
+system file — judged only when the call spells one of those words in
+what it writes or runs, so a `user.name` line appended to `.git/config`
+is ordinary work. Reading the key passes, and so does `git -c
+core.hooksPath=DIR <cmd>`, which names hooks for that one command in the
+agent's own process and nothing the owner's next commit reads.
+
+Not seen, and written into the guard's dated block rather than
+half-guarded: a pointer that reaches a config file in content the line
+does not spell (`cp evil.cfg .git/config`, an unreadable patch), and the
+editor `git config --edit` opens. Asserted in `server/test/hooks.test.ts`
+("pointing git at a hooks folder is a harness write: core.hooksPath
+(#465)" — the audit's plant-then-point reproduction, every scope and
+form, the file routes, the nested working directory with and without
+`CLAUDE_PROJECT_DIR`, the linked worktree, and the measured gap) and in
+the #383 matrix rows "git config core.hooksPath" and "a hooksPath line
+appended to the repo's git config", each beside its harmless twin.
