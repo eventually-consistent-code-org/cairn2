@@ -240,8 +240,10 @@ reason.
   segment sanitizer so a field cannot spell a field separator; the
   parser binds the last segment run on the line, so a forged passing
   tail cannot hide the server's own observed result. The issue id and
-  close date do not yet pass the same sanitizer, which the closing audit
-  found and filed (#469). ADR 0034 — removeWhen: the ledger is a typed
+  close date pass the same sanitizer and are typed on the way in — the
+  tracker id shape, an ISO date or timestamp — as are the red and green
+  refs of a test-driven line (#469; asserted by ledger.test.ts "the issue
+  id and close date are typed at the writer too"). ADR 0034 — removeWhen: the ledger is a typed
   store the tracker keeps, not a text file a tool parses. When two lines
   speak for one task — a closure and a later evidence fix-up — the
   readers rank them by commit ancestry (the line whose head descends

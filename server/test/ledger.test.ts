@@ -1001,3 +1001,103 @@ describe("a commit reference is a hash, nothing else (#428)", () => {
     expect(res.line).toContain("commits A1B2C3D..d4e5f6a —");
   });
 });
+
+describe("the issue id and close date are typed at the writer too (#469)", () => {
+  // The closing audit of phase 30 forged a passing observation through the
+  // two fields the segment sanitizer never touched. An honest summary, honest
+  // FAILING evidence, and an id (or date) that spells the separator run
+  // followed by a fake passing tail and a different issue number: every
+  // reader anchored on the last run that parsed, so the forgery won.
+  const TAIL = " — commits aaaaaaa..bbbbbbb — evidence npm test => passed — "
+    + "observed exit=0 at=2026-07-14T10:00:00.000Z — actuals wall=none degraded=no_receipt — ";
+  const forgedId = `PROJ-105 closed 2026-07-14${TAIL}PROJ-999`;
+  const forgedDate = `2026-07-14${TAIL}PROJ-999 closed 2026-07-14`;
+  const failing = { command: "npm test", result: "exit 1, 3 failed" };
+  const receipt = (issueId: string): CloseReceipt => ({
+    version: 1, issueId, closedAt: "2026-10-01T12:00:00.000Z", claimedAt: null, claimedMinutes: 10,
+    estimate: { points: null, pointsSource: "none", minutes: null, minutesSource: "none" },
+    worklog: "unsupported",
+  });
+  const phase = () => {
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 5, "Typed Phase");
+    return { d, phaseDir };
+  };
+  const refusal = (fn: () => unknown): { code: string; message: string } | "accepted" => {
+    try { fn(); } catch (e) { return { code: (e as CairnError).code, message: (e as CairnError).message }; }
+    return "accepted";
+  };
+
+  it("the audit's crafted id is refused with a typed error before anything is written or consumed", () => {
+    const { d, phaseDir } = phase();
+    writeReceipt(d, receipt("PROJ-105"));
+    const r = refusal(() => appendLedger(d, phaseDir, { ...entry, issueId: forgedId, evidence: failing }));
+    expect(r).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("issueId") });
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+    expect(existsSync(join(receiptsDir(d), "PROJ-105.close.json"))).toBe(true);
+    // The honest line, written next, is the only thing any reader sees.
+    const honest = appendLedger(d, phaseDir, { ...entry, evidence: failing });
+    expect(honest.line.endsWith("— PROJ-105 closed 2026-07-14")).toBe(true);
+    const parsed = parseLedger(join(d, ".cairn", "plans", "phases", phaseDir));
+    expect(parsed.entries.map((e) => [e.issueId, e.closedDate, e.observedExit]))
+      .toEqual([["PROJ-105", "2026-07-14", undefined]]);
+    expect(parsed.entries[0].summary).toBe("wire adapter retries");
+  });
+
+  it("the same forgery through the close date is refused the same way; the date is an ISO date or timestamp", () => {
+    const { d, phaseDir } = phase();
+    for (const bad of [forgedDate, "yesterday", "14/07/2026", "2026-07-14 10:00", "2026-7-4", ""]) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, closedDate: bad }));
+      expect(r, JSON.stringify(bad))
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("closedDate") });
+    }
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+  });
+
+  it("the hostile spellings the audit did not name: a path climb, an option, whitespace, a bare hash sign", () => {
+    const { d, phaseDir } = phase();
+    // A receipt is keyed by the id (close-receipt.ts), so a climbing id would
+    // otherwise name a file outside the receipts folder.
+    for (const bad of ["../../etc/passwd", "--force", "PROJ 105", "#", "-1", ".hidden", "", "PROJ-105—closed"]) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, issueId: bad }));
+      expect(r, JSON.stringify(bad))
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("issueId") });
+    }
+  });
+
+  it("the harmless twins pass and render exactly as before: the id shapes every tracker mints, a date, a timestamp", () => {
+    const { d, phaseDir } = phase();
+    const ids = ["#469", "469", "PROJ-105", "ENG-12.3", "abc_def-1", "66f1a2b3c4d5e6f7a8b9c0d1", " GH-7 "];
+    for (const id of ids) {
+      const r = appendLedger(d, phaseDir, { ...entry, issueId: id });
+      expect(r.line.endsWith(`${EV}${id.trim()} closed 2026-07-14`), id).toBe(true);
+    }
+    const stamped = appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14T10:00:00.000Z" });
+    expect(stamped.line.endsWith(`${EV}PROJ-105 closed 2026-07-14T10:00:00.000Z`)).toBe(true);
+    const offset = appendLedger(d, phaseDir, {
+      ...entry, taskRef: "task-9", kind: "evidence", closedDate: "2026-07-14T12:00:00+02:00",
+    });
+    expect(offset.line.endsWith("evidence for PROJ-105 2026-07-14T12:00:00+02:00")).toBe(true);
+    const parsed = parseLedger(join(d, ".cairn", "plans", "phases", phaseDir));
+    expect(parsed.skipped).toEqual([]);
+    expect(parsed.entries.map((e) => e.issueId)).toEqual([...ids.map((i) => i.trim()), "PROJ-105"]);
+    expect(parsed.entries[ids.length].closedDate).toBe("2026-07-14T10:00:00.000Z");
+    expect(parsed.evidence.map((e) => e.loggedDate)).toEqual(["2026-07-14T12:00:00+02:00"]);
+  });
+
+  it("the tdd red and green refs are hashes too: a symbolic or option-shaped ref is refused naming the field", () => {
+    const { d, phaseDir } = phase();
+    const cases = [
+      ["redCommit", "HEAD"], ["greenCommit", "--output=x"], ["redCommit", "abc12"], ["greenCommit", "main"],
+    ] as const;
+    for (const [field, value] of cases) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, {
+        ...entry, redCommit: "c".repeat(40), greenCommit: "d".repeat(40), [field]: value,
+      }));
+      expect(r, `${field}=${value}`)
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(field) });
+    }
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+  });
+});
