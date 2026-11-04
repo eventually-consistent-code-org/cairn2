@@ -15,7 +15,11 @@
 // Server-side execution bypasses every PreToolUse hook, so the tracked
 // plan file and the owner's stamp are the whole of the trust; an untracked
 // plan has no provenance, an unapproved one no owner behind it, and both
-// are reported, not run. The line runs with a minimal environment: the
+// are reported, not run. The run guard's judgment the hooks would have
+// given is applied here instead (#423, line-effects.ts): every git
+// invocation on the line is classified first, a discards-work or
+// moves-shared-ref effect is a named skip, and a line the server cannot
+// classify fails closed. The line runs with a minimal environment: the
 // server's own env carries tracker tokens, and a verify line has no
 // business reading them.
 //
@@ -32,6 +36,7 @@ import { join, relative, sep } from "node:path";
 import { loadConfig } from "../config.js";
 import { plansRoot } from "./artifacts.js";
 import { declaredVerifyIn, isPlainShellLine } from "./check.js";
+import { REFUSED_EFFECTS, classifyLine } from "./line-effects.js";
 import { readPlanApproval } from "./plan-approval.js";
 // Constants
 /** Lines of combined output kept as the observed tail. */
@@ -168,6 +173,29 @@ export function runDeclared(projectDir, command, timeoutSeconds, now = () => new
     }
 }
 /**
+ * What the declared line would do to git, judged before it runs (#423):
+ * every git invocation on it goes through the run guard's effect
+ * classifier, and the first `discards-work` or `moves-shared-ref` effect
+ * is the skip the line gets, with the effect and the invocation named.
+ * Fail closed, unlike the hooks: a line the classifier cannot read, or no
+ * classifier beside this server, is reported and never run.
+ *
+ * :returns null when the line may run, or the named skip reason
+ */
+function effects(declared, hooksDir) {
+    const c = classifyLine(declared, { hooksDir });
+    if (!c.ok)
+        return { skipped: c.reason, detail: c.detail };
+    const hit = c.effects.find((e) => REFUSED_EFFECTS.has(e.effect));
+    if (!hit)
+        return null;
+    return {
+        skipped: "effect-refused", effect: hit.effect,
+        detail: `${hit.what} (\`${hit.flag}\`) in \`${hit.command}\` ${hit.effect === "discards-work"
+            ? "discards work with no undo" : "moves a ref other clones fetch"}; the server never runs it`,
+    };
+}
+/**
  * The close-time observation for one close-kind ledger append, or null
  * when rerun is off (nothing recorded, the line byte-identical to before).
  * Every way of NOT running is a named skip, checked in this order:
@@ -175,9 +203,12 @@ export function runDeclared(projectDir, command, timeoutSeconds, now = () => new
  * the declaration (character for character), the declaration is not a
  * plain shell line, PLAN.md is untracked, no owner approval is stamped on
  * it, the approved blob is unreadable, the declared line differs from the
- * approved one. Only then does the declared line run.
+ * approved one, the line cannot be classified, a git invocation on it
+ * carries a refused effect. Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
+ * :param o.hooksDir: where the hook modules are, for a test standing in for
+ *   the published package; left unset, they are resolved beside this module
  * :returns the observation, or null when rerun is off
  */
 export function observeDeclaredVerify(o) {
@@ -195,7 +226,8 @@ export function observeDeclaredVerify(o) {
     if (!isPlainShellLine(o.declared))
         return { skipped: "not-plain-shell" };
     const planPath = join(plansRoot(o.projectDir), "phases", o.phaseDir, "PLAN.md");
-    const refused = provenance(o.projectDir, o.phaseDir, planPath, o.issueId, o.declared);
+    const refused = provenance(o.projectDir, o.phaseDir, planPath, o.issueId, o.declared)
+        ?? effects(o.declared, o.hooksDir);
     if (refused)
         return refused;
     return runDeclared(o.projectDir, o.declared, settings.timeoutSeconds, o.now);

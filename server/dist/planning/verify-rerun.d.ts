@@ -36,9 +36,12 @@ export declare function runDeclared(projectDir: string, command: string, timeout
  * the declaration (character for character), the declaration is not a
  * plain shell line, PLAN.md is untracked, no owner approval is stamped on
  * it, the approved blob is unreadable, the declared line differs from the
- * approved one. Only then does the declared line run.
+ * approved one, the line cannot be classified, a git invocation on it
+ * carries a refused effect. Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
+ * :param o.hooksDir: where the hook modules are, for a test standing in for
+ *   the published package; left unset, they are resolved beside this module
  * :returns the observation, or null when rerun is off
  */
 export declare function observeDeclaredVerify(o: {
@@ -51,4 +54,5 @@ export declare function observeDeclaredVerify(o: {
     declared: string | null;
     settings?: RerunSettings;
     now?: () => Date;
+    hooksDir?: string | null;
 }): Observation | null;
