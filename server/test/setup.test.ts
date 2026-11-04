@@ -5,10 +5,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SETUP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "setup", "cairn-setup.mjs");
@@ -405,5 +405,82 @@ describe("cairn-setup", () => {
     expect(out).toContain("left untouched");
     const mcp = JSON.parse(readFileSync(join(proj, ".mcp.json"), "utf8"));
     expect(mcp.mcpServers.cairn.command).toBe("custom");
+  });
+});
+
+// #473: #429 gated the import refusal on CLAUDE.md itself being the symlink.
+// With the link the other way (AGENTS.md -> CLAUDE.md), or the two names one
+// hard-linked inode, setup wrote the spine through the AGENTS.md name, then
+// opened a regular-looking CLAUDE.md, found the spine's own markers and
+// replaced 180-odd lines of installed rules with the three-line import block
+// -- and printed the success line. Every layout below reads the same one
+// line, writes no import, keeps the spine, and is byte-identical on re-run.
+describe("one file by two names, every way round (#473)", () => {
+  const FRAGMENT = readFileSync(join(dirname(SETUP), "..", "harness", "AGENTS-cairn.md"), "utf8");
+  const OWNER = "# My project\n\nHouse rules here.\n";
+  const claudeLines = (out: string) => out.split("\n").filter((l) => l.includes("CLAUDE.md"));
+
+  // Each layout writes the owner's text under one name and links the other
+  // name to it. The ../ climb is the hostile spelling: a relative link that
+  // leaves the project and comes straight back, which a prefix check on the
+  // link text would misread as outside.
+  const layouts: Record<string, (proj: string) => void> = {
+    "AGENTS.md is a symlink to CLAUDE.md": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      symlinkSync("CLAUDE.md", join(proj, "AGENTS.md"));
+    },
+    "AGENTS.md reaches CLAUDE.md through a ../ climb": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      symlinkSync(join("..", basename(proj), "CLAUDE.md"), join(proj, "AGENTS.md"));
+    },
+    "the two names are one hard link": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      linkSync(join(proj, "CLAUDE.md"), join(proj, "AGENTS.md"));
+    },
+    "CLAUDE.md is a symlink to AGENTS.md (the #429 control)": (proj) => {
+      writeFileSync(join(proj, "AGENTS.md"), OWNER);
+      symlinkSync("AGENTS.md", join(proj, "CLAUDE.md"));
+    },
+  };
+
+  for (const [name, lay] of Object.entries(layouts)) {
+    it(`${name}: setup for claude keeps the spine, writes no import, re-runs byte-identical`, () => {
+      const proj = fresh("cairn-setup-");
+      const home = fresh("cairn-home-");
+      lay(proj);
+
+      const first = run("claude", proj, home);
+      const claude = readFileSync(join(proj, "CLAUDE.md"), "utf8");
+      expect(claude).toContain("House rules here.");
+      expect(claude).toContain(FRAGMENT.trimEnd());
+      expect(claude).not.toContain("@AGENTS.md");
+      expect(claude).toBe(readFileSync(join(proj, "AGENTS.md"), "utf8"));
+      expect(claudeLines(first).join("\n")).toContain("is AGENTS.md by another name");
+      expect(first).toContain("CLAUDE.md is AGENTS.md here");
+      expect(first).not.toContain("CLAUDE.md imports AGENTS.md");
+
+      const again = run("claude", proj, home);
+      expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe(claude);
+      expect(again).toContain("cairn section already current");
+      expect(claudeLines(again)).toEqual(claudeLines(first));
+
+      const check = run("claude", proj, home, "--check");
+      expect(check).toContain("CLAUDE.md is AGENTS.md by another name, which carries the fragment");
+    });
+  }
+
+  it("the harmless twin: two separate files with the same bytes are two files, so CLAUDE.md gets the import", () => {
+    const proj = fresh("cairn-setup-");
+    const home = fresh("cairn-home-");
+    writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+    writeFileSync(join(proj, "AGENTS.md"), OWNER);
+
+    const out = run("claude", proj, home);
+    expect(out).toContain("CLAUDE.md imports AGENTS.md");
+    const claude = readFileSync(join(proj, "CLAUDE.md"), "utf8");
+    expect(claude.split("\n").slice(0, 3)).toContain("@AGENTS.md");
+    expect(claude).toContain("House rules here.");
+    expect(claude).not.toContain(FRAGMENT.trimEnd());
+    expect(readFileSync(join(proj, "AGENTS.md"), "utf8")).toContain(FRAGMENT.trimEnd());
   });
 });

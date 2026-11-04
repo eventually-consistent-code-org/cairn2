@@ -141,6 +141,22 @@ function installFragment(path, fragment) {
   console.log(`  ${path}: cairn section installed.`);
 }
 
+/** Which way two names meet on one file, for the one-line alias note (#473).
+ *  :returns "symlink" (CLAUDE.md is the link, the #429 shape),
+ *    "AGENTS.md is the symlink", or "hard link" */
+function linkShape(claude, agents) {
+  const isLink = (p) => {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  if (isLink(claude)) return "symlink";
+  if (isLink(agents)) return "AGENTS.md is the symlink";
+  return "hard link";
+}
+
 /** Put the `@AGENTS.md` import at the top of CLAUDE.md (#398), inside the
  *  cairn markers, idempotent. Claude Code reads AGENTS.md only when no
  *  CLAUDE.md is in scope (a claim, as of 2026-10, per the Claude Code memory
@@ -157,12 +173,25 @@ function installClaudeImport(path, { create }) {
   } catch { /* absent */ }
   if (body === null && !create) return "absent";
 
-  // #429: resolve the real file before splicing. CLAUDE.md as a symlink to
-  // AGENTS.md is one file by two names -- splicing the import there would
-  // replace the spine just installed with a block that imports itself. A
-  // link that leaves the project (or points at nothing) is the owner's file
-  // somewhere else. Either way: one line, nothing written, same line on
-  // every re-run (asserted: sweep-surface.test.ts and setup.test.ts, #429).
+  // #429/#473: one file by two names, checked BEFORE any splice and whichever
+  // name is the link. CLAUDE.md as a symlink to AGENTS.md, AGENTS.md as a
+  // symlink to CLAUDE.md, or the two names one hard-linked inode: the spine
+  // was just installed through the AGENTS.md name into these same bytes, and
+  // splicing the import here would replace it with a block that imports
+  // itself. #429 gated this on CLAUDE.md being the symlink, so the other two
+  // layouts erased the spine and printed the success line; sameFile now
+  // compares real path, then device and inode. One line, nothing written,
+  // same line on every re-run (asserted: setup.test.ts and
+  // sweep-surface.test.ts, #429, #473).
+  const agentsPath = join(projectDir, "AGENTS.md");
+  if (sameFile(path, agentsPath)) {
+    console.log(`  ${path}: is AGENTS.md by another name (${linkShape(path, agentsPath)}) — import skipped; Claude Code reads the spine straight from it.`);
+    return "alias";
+  }
+
+  // A CLAUDE.md that is itself a symlink to something else: a link that
+  // leaves the project (or points at nothing) is the owner's file somewhere
+  // else -- refused in one line, nothing written (#429).
   let isLink = false;
   try {
     isLink = lstatSync(path).isSymbolicLink();
@@ -175,10 +204,6 @@ function installClaudeImport(path, { create }) {
     if (real === null) {
       console.log(`  ${path}: is a symlink to a file that does not exist — refusing to write through it; fix the link, then re-run cairn-setup.`);
       return "refused";
-    }
-    if (sameFile(path, join(projectDir, "AGENTS.md"))) {
-      console.log(`  ${path}: is AGENTS.md by another name (symlink) — import skipped; Claude Code reads the spine straight from it.`);
-      return "alias";
     }
     if (!insideDir(real, realOrNull(projectDir))) {
       console.log(`  ${path}: resolves outside the project (${real}) — refusing to write through it; point the link inside the project or add the @AGENTS.md import by hand.`);

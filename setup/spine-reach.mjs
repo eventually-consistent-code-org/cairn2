@@ -14,7 +14,7 @@
  * Author(s): John Reed
  */
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
 // Constants
@@ -164,10 +164,24 @@ export function realOrNull(path) {
   }
 }
 
-/** Are two paths one file by two names? Both must resolve (#429). */
+/** Are two paths one file by two names? Both must resolve (#429). Real
+ *  paths first, which catches a symlink whichever name is the link; then
+ *  device + inode, which catches a hard link, where the two real paths are
+ *  different names for one inode (#473, asserted: setup.test.ts and
+ *  sweep-surface.test.ts). Two separate files with the same bytes are two
+ *  files. */
 export function sameFile(a, b) {
   const ra = realOrNull(a);
-  return ra !== null && ra === realOrNull(b);
+  const rb = realOrNull(b);
+  if (ra === null || rb === null) return false;
+  if (ra === rb) return true;
+  try {
+    const sa = statSync(ra);
+    const sb = statSync(rb);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
 }
 
 /** Does a real path sit inside a real directory (or equal it)? */

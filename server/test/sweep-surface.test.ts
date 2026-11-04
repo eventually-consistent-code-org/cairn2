@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { ConfigSchema } from "../src/config.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
-import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
+import { IMPORT_BLOCK, READERS, reachFrom, sameFile, scanImport } from "../../setup/spine-reach.mjs";
 import { overlapFiles, overlapLead } from "../../hooks/scripts/merge-overlap.mjs";
 import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
@@ -890,5 +890,48 @@ describe("security --surface reads git hooks (#353)", () => {
     expect(header).toContain("core.hooksPath");
     expect(read("docs/adr/0016-harness-guards-refuse-visibly-rather-than-sandbox.md")).toMatch(/core\.hooksPath[\s\S]*hooks\.test\.ts/);
     expect(read("docs/01-runbook.md")).toContain("core.hooksPath");
+  });
+});
+
+// #473: sameFile compared real paths only, so a hard link (two real paths,
+// one inode) read as two files and the import step erased the spine through
+// the CLAUDE.md name. Real path first, then device + inode; two separate
+// files with the same bytes stay two files, and a name that does not resolve
+// is never "the same" as anything.
+describe("one file by two names: sameFile (#473)", () => {
+  it("is true for a symlink either way round and for a hard link; false for a byte-identical twin or a missing name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-473-"));
+    try {
+      writeFileSync(join(dir, "a.md"), "same bytes\n");
+      symlinkSync("a.md", join(dir, "to-a.md"));
+      linkSync(join(dir, "a.md"), join(dir, "hard-a.md"));
+      writeFileSync(join(dir, "twin.md"), "same bytes\n");
+      symlinkSync(join("..", basename(dir), "a.md"), join(dir, "climb-a.md"));
+      expect(sameFile(join(dir, "a.md"), join(dir, "to-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "to-a.md"), join(dir, "a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "hard-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "hard-a.md"), join(dir, "to-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "climb-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "twin.md"))).toBe(false);
+      expect(sameFile(join(dir, "a.md"), join(dir, "missing.md"))).toBe(false);
+      expect(sameFile(join(dir, "missing.md"), join(dir, "missing.md"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--check reads the hard-linked layout as the spine by another name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-473-"));
+    try {
+      const fragment = read("harness/AGENTS-cairn.md");
+      writeFileSync(join(dir, "AGENTS.md"), `${fragment}\n# my project\n`);
+      linkSync(join(dir, "AGENTS.md"), join(dir, "CLAUDE.md"));
+      const row = (READERS as { harness: string }[]).find((r) => r.harness === "claude")!;
+      const r = reachFrom(dir, row, { fragment });
+      expect(r.state).toBe("reaches");
+      expect(r.detail).toContain("CLAUDE.md is AGENTS.md by another name");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
