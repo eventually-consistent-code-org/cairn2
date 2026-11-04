@@ -11,7 +11,7 @@ import { describe, it, expect } from "vitest";
 import {
   WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
   shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
-  toolCommandLines, tooDeep,
+  toolCommandLines, tooDeep, evalCommandString,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -792,5 +792,18 @@ describe("suCommandString (#258)", () => {
     expect(suCommandString(["-s", "/bin/sh", "-c", "x", "root"])).toBe("x");
     expect(suCommandString(["-s", "-c"])).toBeNull(); // -s took "-c" as the shell
     expect(suCommandString(["-", "root"])).toBeNull();
+  });
+});
+
+// #283: both guards read eval through this one function, so neither can
+// drift to reading its words one at a time again.
+describe("evalCommandString (#283)", () => {
+  it("joins eval's words with one space, as the shell does before reading the result as a line; null with none", () => {
+    expect(evalCommandString(["git reset", "--hard"])).toBe("git reset --hard");
+    expect(evalCommandString(["echo", "git", "reset", "--hard"])).toBe("echo git reset --hard");
+    expect(evalCommandString(["rm 'a b'"])).toBe("rm 'a b'"); // inner quoting survives for the re-read
+    expect(evalCommandString([])).toBeNull();
+    expect(evalCommandString([""])).toBeNull();
+    expect(evalCommandString(["  "])).toBeNull();
   });
 });

@@ -6415,3 +6415,92 @@ describe("the pauses log is the harness guard's: a forged pause row is refused (
     }
   });
 });
+
+// #283 -- two reader switches were still off after both guards took the
+// shared reader (#270). The harness guard read `#` comments as word text,
+// so `echo x # > hooks/hooks.json` was refused for a write the shell never
+// makes; and the run guard read `eval` only through the runner backstop
+// (#311), one word at a time, so `eval 'git reset' '--hard'` -- the reset,
+// once eval joins its words -- passed while `eval echo git reset --hard`,
+// an echo, was refused (runguard-guards.test.ts carries that side). Both
+// guards read eval through one shared function now (shell-words.mjs
+// evalCommandString: the words joined by one space, the result read as a
+// line), and the harness guard drops comments through the reader's own
+// switch. The heredoc and substitution gaps the issue also named closed
+// earlier (#322, #319-#321).
+describe("the reader switches left off: # comments in the harness guard, eval in both guards (#283)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-283-proj-");
+    const home = freshDir("cairn-hooks-283-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    return { p, home };
+  }
+
+  function run(f: { p: string; home: string }, command: string, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /**
+   * Each refused shape beside its harmless twin: the same characters, with
+   * the write moved behind a comment, onto a source file, or out of the
+   * line eval joins. `rel` climbs from the shell's folder to the root.
+   */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    // a comment ends the line: the write before it is the write, the one after it is text
+    [`echo x > ${rel}hooks/hooks.json # note`, `echo x # > ${rel}hooks/hooks.json`],
+    [`rm ${rel}hooks/hooks.json # cleanup`, `rm ${rel}src/x.json # cleanup`],
+    [`echo x > ${rel}hooks/hooks.json\n# done`, `echo x > ${rel}src/x.json\n# > ${rel}hooks/hooks.json`],
+    [`# a comment\necho x > ${rel}hooks/hooks.json`, `# echo x > ${rel}hooks/hooks.json\necho x`],
+    // the hostile spellings: a quoted # is a word, a # inside a word is text, and a comment in a nested line ends at its newline
+    [`echo '#' > ${rel}hooks/hooks.json`, `echo '#' > ${rel}src/x.json`],
+    [`echo x#y > ${rel}hooks/hooks.json`, `echo x#y > ${rel}src/x.json`],
+    [`bash -c 'echo x > ${rel}hooks/hooks.json # c'`, `bash -c 'echo x # > ${rel}hooks/hooks.json'`],
+    // eval joins its words with one space, then the result is read as a line -- comments and all
+    [`eval 'rm' '${rel}hooks/hooks.json'`, `eval 'echo' 'rm' '${rel}hooks/hooks.json'`],
+    [`eval "echo x >" ${rel}hooks/hooks.json`, `eval "echo x > ${rel}src/x.json"`],
+    [`eval "echo x > ${rel}hooks/hooks.json # c"`, `eval "echo x # > ${rel}hooks/hooks.json"`],
+  ];
+
+  it("harness guard: a write before a # comment is the write and one behind it is text; eval's words are joined before the line is read", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("the hook directory");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the harness guard's reader has the comments switch on and the run guard reads eval, each said in its header", () => {
+    const harness = readFileSync(HARNESSGUARD, "utf8");
+    expect(harness).toMatch(/const READ = \{[^}]*comments: true/);
+    expect(harness).toContain("evalCommandString");
+    const runGuard = readFileSync(RUNGUARD, "utf8");
+    expect(runGuard).toContain("evalCommandString");
+    expect(runGuard.slice(0, runGuard.indexOf("\nimport "))).toContain("`eval`");
+  });
+});

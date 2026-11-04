@@ -150,6 +150,14 @@
  *   prefix, which the alias probe reads from the session's files, not the
  *   line's (the push gate counts those too).
  *
+ *   A line handed to another shell is read as that shell reads it (#270):
+ *   `sh -c`, `bash -lc`, a heredoc fed to a shell reading stdin (#322),
+ *   and `eval`, whose words are joined by one space and the result read as
+ *   a line (#283, through shell-words.mjs evalCommandString, the function
+ *   the harness guard reads it with) -- so `eval 'git reset' '--hard'` is
+ *   the hard reset and `eval echo git reset --hard` is an echo. Asserted by
+ *   runguard-guards.test.ts (#283).
+ *
  *   The push action by another route (#483): moves-shared-ref is reachable
  *   with no git on the line -- `gh pr merge`; a `gh api` write (-X PUT,
  *   PATCH, POST or DELETE, or -f / -F fields or --input with no method)
@@ -286,8 +294,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
-  shellReadsStdin, shellSegments, toolCommandLines, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, evalCommandString, pagerCommands, runnerCommands,
+  shellCommandString, shellReadsStdin, shellSegments, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
@@ -470,6 +478,16 @@ function readLine(line) {
         if (script) walk(script, depth + 1, env);
         else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
         else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
+        continue;
+      }
+      // #283 -- eval joins its words with one space and runs the result as
+      // a line: read that line, the way the harness guard reads it (the
+      // shared evalCommandString), never its words one at a time. Past the
+      // depth a shell string is read at, it is a step that can do anything.
+      if (cmd === "eval") {
+        const script = evalCommandString(words.slice(1));
+        if (script && depth < 2) walk(script, depth + 1, env);
+        else if (script) out.steps.push(true);
         continue;
       }
       if (cmd !== "git") {
@@ -1938,4 +1956,12 @@ try {
  *         read are the Not seen block in the rules above, each with its
  *         service-side control; runguard-sidedoors.test.ts (#484) pins the
  *         block line by line.
+ *   #283  eval is read as the shell runs it: its words joined by one space,
+ *         the result read as a line, through the shell-words.mjs function
+ *         the harness guard shares (evalCommandString) -- the runner
+ *         backstop (#311) read each word alone, so a reset split across
+ *         eval's words passed and an echo through eval was refused. The
+ *         harness guard's reader turns its `#` comment switch on in the
+ *         same change; the heredoc and substitution gaps the issue named
+ *         closed earlier (#322, #319-#321).
  */

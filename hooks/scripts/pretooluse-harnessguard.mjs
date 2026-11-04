@@ -80,7 +80,11 @@
  *   through wrappers and program runners (xcrun, script, flock, #307;
  *   strace, runuser, #311), bash -c, su -c, find -exec, xargs and a heredoc
  *   fed to a shell (asserted: hooks.test.ts "Not seen block (#289)", and
- *   the #383 rows). Any other heredoc body is data, but the $(...) or
+ *   the #383 rows). An `eval` runs its words joined by one space, read as
+ *   a line through the function the run guard reads it with (#283,
+ *   shell-words.mjs evalCommandString), and an unquoted `#` at a word
+ *   start comments out the rest of its line, so a write spelled behind one
+ *   is text (asserted: hooks.test.ts "(#283)"). Any other heredoc body is data, but the $(...) or
  *   backtick an unquoted body (`<<EOF`) runs is read as a line of its own
  *   (#322); a quoted delimiter (`<<'EOF'`) keeps the body literal. A
  *   program runner the table doesn't name is backed up by
@@ -225,8 +229,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString,
-  shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, braceExpand, evalCommandString, pagerCommands, quoteWord, runnerCommands,
+  shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 import { projectRoot } from "./lib.mjs";
 
@@ -390,10 +394,13 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * x)` is a cd and an rm (#258). A $(...) or backtick is one word, quoted
  * or not, so the literal target after one is still seen (#319), and its
  * body is read as a command line of its own -- inside an unquoted
- * heredoc body too, whose text is otherwise data (#322). # comments are
- * word text.
+ * heredoc body too, whose text is otherwise data (#322). An unquoted `#`
+ * at a word start comments out the rest of its line (#283), as the shell
+ * reads it, so `echo x # > hooks/hooks.json` writes nothing and `echo x >
+ * hooks/hooks.json # note` is the write; a quoted `#`, or one inside a
+ * word, is text.
  */
-const READ = { redirects: true, subshells: true, substitutions: true };
+const READ = { redirects: true, subshells: true, substitutions: true, comments: true };
 
 // find: name tests, the primaries that take a value, and the ones that act.
 const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
@@ -2342,6 +2349,8 @@ function writeTargets(seg, ctx) {
   // A command handed to another shell as a string is still a command: read
   // it the same way, one level down -- `bash -c`, `eval`, `su -c`, and a
   // heredoc or here-string fed to a shell (or to su) reading stdin (#258).
+  // eval's line is its words joined by one space (#283), through the
+  // function the run guard reads it with, so the two guards agree on it.
   if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
     if (ctx.depth >= 3) return out;
     const nest = (text, rest = []) => {
@@ -2352,7 +2361,7 @@ function writeTargets(seg, ctx) {
         walk: ctx.walk,
       }));
     };
-    const str = cmd === "eval" ? args.join(" ")
+    const str = cmd === "eval" ? evalCommandString(args)
       : cmd === "su" ? suCommandString(args) : shellCommandString(args);
     if (str) {
       nest(str, cmd === "eval" ? [] : args.slice(args.indexOf(str) + 1));
