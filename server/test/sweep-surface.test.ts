@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { ConfigSchema } from "../src/config.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
 import { FakeTracker } from "../src/tracker/fake.js";
-import { IMPORT_BLOCK, READERS, reachFrom, scanImport } from "../../setup/spine-reach.mjs";
+import { IMPORT_BLOCK, READERS, reachFrom, sameFile, scanImport } from "../../setup/spine-reach.mjs";
 import { overlapFiles, overlapLead } from "../../hooks/scripts/merge-overlap.mjs";
 import { formatReaders, mechanismLeg, parseHarnesses, projectLeg } from "../../scripts/lib/readers-leg.mjs";
 
@@ -824,20 +824,35 @@ describe("merge leads with file overlap (#223)", () => {
 
   // #443: the helper used to be named by a project-relative path that only
   // resolved inside cairn's own checkout, from a folder the npm package did
-  // not ship and setup did not copy. The path each verb names must go
-  // through the plugin root (as status.md does) into a directory that both
-  // package.json ships and cairn-setup copies to pluginless harnesses.
-  it("the command both verbs name resolves inside a directory the package ships and setup copies (#443)", () => {
+  // not ship. The path each verb names must go through the plugin root (as
+  // status.md does) into a directory package.json ships. #443's close said
+  // setup copied that folder everywhere; it copied it for Cursor alone, so
+  // the last leg here runs setup into a scratch project and looks for the
+  // named file beside the copied verbs (the per-harness matrix and the
+  // command actually running live in setup.test.ts, #474).
+  it("the command both verbs name resolves inside a directory the package ships, and setup copies that file (#443, #474)", () => {
     const shipped: string[] = JSON.parse(read("package.json")).files;
     expect(shipped).toContain("hooks");
-    for (const verb of ["work", "ship"]) {
-      const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
-      const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
-      expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
-      const rel = m![1];
-      expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
-      expect(rel.startsWith("hooks/scripts/"), `${rel} sits in the folder cairn-setup copies`).toBe(true);
-      expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), "cairn-443-"));
+    try {
+      mkdirSync(join(dir, "p"));
+      mkdirSync(join(dir, "h"));
+      const r = spawnSync(process.execPath, [join(ROOT, "setup", "cairn-setup.mjs"), "grok", "--project", join(dir, "p")], {
+        encoding: "utf8", env: { ...process.env, HOME: join(dir, "h"), USERPROFILE: join(dir, "h"), CAIRN_SETUP_OFFLINE: "1" },
+      });
+      expect(r.status).toBe(0);
+      for (const verb of ["work", "ship"]) {
+        const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
+        const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
+        expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
+        const rel = m![1];
+        expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
+        expect(rel.startsWith("hooks/scripts/"), `${rel} sits where cairn-setup picks the helpers it copies`).toBe(true);
+        expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
+        expect(existsSync(join(dir, "p", ".cairn", "harness", "scripts", basename(rel))), `setup copied ${basename(rel)} beside the verbs`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -890,5 +905,48 @@ describe("security --surface reads git hooks (#353)", () => {
     expect(header).toContain("core.hooksPath");
     expect(read("docs/adr/0016-harness-guards-refuse-visibly-rather-than-sandbox.md")).toMatch(/core\.hooksPath[\s\S]*hooks\.test\.ts/);
     expect(read("docs/01-runbook.md")).toContain("core.hooksPath");
+  });
+});
+
+// #473: sameFile compared real paths only, so a hard link (two real paths,
+// one inode) read as two files and the import step erased the spine through
+// the CLAUDE.md name. Real path first, then device + inode; two separate
+// files with the same bytes stay two files, and a name that does not resolve
+// is never "the same" as anything.
+describe("one file by two names: sameFile (#473)", () => {
+  it("is true for a symlink either way round and for a hard link; false for a byte-identical twin or a missing name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-473-"));
+    try {
+      writeFileSync(join(dir, "a.md"), "same bytes\n");
+      symlinkSync("a.md", join(dir, "to-a.md"));
+      linkSync(join(dir, "a.md"), join(dir, "hard-a.md"));
+      writeFileSync(join(dir, "twin.md"), "same bytes\n");
+      symlinkSync(join("..", basename(dir), "a.md"), join(dir, "climb-a.md"));
+      expect(sameFile(join(dir, "a.md"), join(dir, "to-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "to-a.md"), join(dir, "a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "hard-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "hard-a.md"), join(dir, "to-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "climb-a.md"))).toBe(true);
+      expect(sameFile(join(dir, "a.md"), join(dir, "twin.md"))).toBe(false);
+      expect(sameFile(join(dir, "a.md"), join(dir, "missing.md"))).toBe(false);
+      expect(sameFile(join(dir, "missing.md"), join(dir, "missing.md"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--check reads the hard-linked layout as the spine by another name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-473-"));
+    try {
+      const fragment = read("harness/AGENTS-cairn.md");
+      writeFileSync(join(dir, "AGENTS.md"), `${fragment}\n# my project\n`);
+      linkSync(join(dir, "AGENTS.md"), join(dir, "CLAUDE.md"));
+      const row = (READERS as { harness: string }[]).find((r) => r.harness === "claude")!;
+      const r = reachFrom(dir, row, { fragment });
+      expect(r.state).toBe("reaches");
+      expect(r.detail).toContain("CLAUDE.md is AGENTS.md by another name");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

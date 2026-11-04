@@ -3,12 +3,12 @@
 // with a fake HOME so no real harness config is touched.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SETUP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "setup", "cairn-setup.mjs");
@@ -405,5 +405,168 @@ describe("cairn-setup", () => {
     expect(out).toContain("left untouched");
     const mcp = JSON.parse(readFileSync(join(proj, ".mcp.json"), "utf8"));
     expect(mcp.mcpServers.cairn.command).toBe("custom");
+  });
+});
+
+// #473: #429 gated the import refusal on CLAUDE.md itself being the symlink.
+// With the link the other way (AGENTS.md -> CLAUDE.md), or the two names one
+// hard-linked inode, setup wrote the spine through the AGENTS.md name, then
+// opened a regular-looking CLAUDE.md, found the spine's own markers and
+// replaced 180-odd lines of installed rules with the three-line import block
+// -- and printed the success line. Every layout below reads the same one
+// line, writes no import, keeps the spine, and is byte-identical on re-run.
+describe("one file by two names, every way round (#473)", () => {
+  const FRAGMENT = readFileSync(join(dirname(SETUP), "..", "harness", "AGENTS-cairn.md"), "utf8");
+  const OWNER = "# My project\n\nHouse rules here.\n";
+  const claudeLines = (out: string) => out.split("\n").filter((l) => l.includes("CLAUDE.md"));
+
+  // Each layout writes the owner's text under one name and links the other
+  // name to it. The ../ climb is the hostile spelling: a relative link that
+  // leaves the project and comes straight back, which a prefix check on the
+  // link text would misread as outside.
+  const layouts: Record<string, (proj: string) => void> = {
+    "AGENTS.md is a symlink to CLAUDE.md": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      symlinkSync("CLAUDE.md", join(proj, "AGENTS.md"));
+    },
+    "AGENTS.md reaches CLAUDE.md through a ../ climb": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      symlinkSync(join("..", basename(proj), "CLAUDE.md"), join(proj, "AGENTS.md"));
+    },
+    "the two names are one hard link": (proj) => {
+      writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+      linkSync(join(proj, "CLAUDE.md"), join(proj, "AGENTS.md"));
+    },
+    "CLAUDE.md is a symlink to AGENTS.md (the #429 control)": (proj) => {
+      writeFileSync(join(proj, "AGENTS.md"), OWNER);
+      symlinkSync("AGENTS.md", join(proj, "CLAUDE.md"));
+    },
+  };
+
+  for (const [name, lay] of Object.entries(layouts)) {
+    it(`${name}: setup for claude keeps the spine, writes no import, re-runs byte-identical`, () => {
+      const proj = fresh("cairn-setup-");
+      const home = fresh("cairn-home-");
+      lay(proj);
+
+      const first = run("claude", proj, home);
+      const claude = readFileSync(join(proj, "CLAUDE.md"), "utf8");
+      expect(claude).toContain("House rules here.");
+      expect(claude).toContain(FRAGMENT.trimEnd());
+      expect(claude).not.toContain("@AGENTS.md");
+      expect(claude).toBe(readFileSync(join(proj, "AGENTS.md"), "utf8"));
+      expect(claudeLines(first).join("\n")).toContain("is AGENTS.md by another name");
+      expect(first).toContain("CLAUDE.md is AGENTS.md here");
+      expect(first).not.toContain("CLAUDE.md imports AGENTS.md");
+
+      const again = run("claude", proj, home);
+      expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe(claude);
+      expect(again).toContain("cairn section already current");
+      expect(claudeLines(again)).toEqual(claudeLines(first));
+
+      const check = run("claude", proj, home, "--check");
+      expect(check).toContain("CLAUDE.md is AGENTS.md by another name, which carries the fragment");
+    });
+  }
+
+  it("the harmless twin: two separate files with the same bytes are two files, so CLAUDE.md gets the import", () => {
+    const proj = fresh("cairn-setup-");
+    const home = fresh("cairn-home-");
+    writeFileSync(join(proj, "CLAUDE.md"), OWNER);
+    writeFileSync(join(proj, "AGENTS.md"), OWNER);
+
+    const out = run("claude", proj, home);
+    expect(out).toContain("CLAUDE.md imports AGENTS.md");
+    const claude = readFileSync(join(proj, "CLAUDE.md"), "utf8");
+    expect(claude.split("\n").slice(0, 3)).toContain("@AGENTS.md");
+    expect(claude).toContain("House rules here.");
+    expect(claude).not.toContain(FRAGMENT.trimEnd());
+    expect(readFileSync(join(proj, "AGENTS.md"), "utf8")).toContain(FRAGMENT.trimEnd());
+  });
+});
+
+// #474: the work, ship and status verbs tell the agent to run a helper
+// through $CLAUDE_PLUGIN_ROOT, a variable only Claude Code sets, and setup
+// copied the hook scripts folder for Cursor alone. On the other six
+// harnesses the copied verb's command resolved to a path at the filesystem
+// root, module not found, and the file was not on the machine either. Setup
+// now copies the helpers the verbs name (with their relative imports) into a
+// scripts folder beside the copied verbs, for every harness, and rewrites
+// the plugin-root path in the copied verbs to it; Claude Code keeps the
+// plugin root, which it does set.
+describe("the helpers the verbs name reach every harness (#474)", () => {
+  const PLUGINLESS = ["grok", "copilot", "codex", "gemini", "cursor", "opencode", "zed"];
+  const SCRIPTS = join(".cairn", "harness", "scripts");
+  const VERBS = join(".cairn", "harness", "verbs");
+  /** Every `node "<path>"` a verb body tells the agent to run. */
+  const commands = (body: string) => [...body.matchAll(/node "([^"]+\.mjs)"/g)].map((m) => m[1]);
+  const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe" });
+
+  it("codex: the copied work verb's merge-overlap command runs from the project root and prints the lead; re-run is byte-identical", () => {
+    const proj = fresh("cairn-setup-");
+    const home = fresh("cairn-home-");
+    // a scratch repo with two branches that both touch one file
+    git(proj, "init", "-q", "-b", "main");
+    git(proj, "config", "user.email", "t@example.com");
+    git(proj, "config", "user.name", "t");
+    writeFileSync(join(proj, "shared.ts"), "base\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-qm", "base");
+    for (const b of ["a", "b"]) {
+      git(proj, "checkout", "-q", "-b", b, "main");
+      writeFileSync(join(proj, "shared.ts"), `${b}\n`);
+      git(proj, "commit", "-qam", b);
+    }
+
+    run("codex", proj, home);
+    const work = readFileSync(join(proj, VERBS, "work.md"), "utf8");
+    expect(work).not.toContain("$CLAUDE_PLUGIN_ROOT");
+    const cmd = commands(work).find((c) => c.endsWith("merge-overlap.mjs"));
+    expect(cmd, "work.md names the merge-overlap helper").toBeDefined();
+    const r = spawnSync(process.execPath, [cmd!, "a", "b"], { cwd: proj, encoding: "utf8" });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("overlap: 1 file — shared.ts");
+
+    const helper = readFileSync(join(proj, cmd!), "utf8");
+    run("codex", proj, home);
+    expect(readFileSync(join(proj, VERBS, "work.md"), "utf8")).toBe(work);
+    expect(readFileSync(join(proj, cmd!), "utf8")).toBe(helper);
+  });
+
+  for (const h of PLUGINLESS) {
+    it(`${h}: every command the copied verbs name sits in the install, none goes through the plugin root, and the copies import each other`, () => {
+      const proj = fresh("cairn-setup-");
+      const home = fresh("cairn-home-");
+      run(h, proj, home);
+      let named = 0;
+      for (const f of readdirSync(join(proj, VERBS))) {
+        const body = readFileSync(join(proj, VERBS, f), "utf8");
+        expect(body, `${f} still names the plugin root`).not.toContain("$CLAUDE_PLUGIN_ROOT");
+        for (const c of commands(body)) {
+          named++;
+          expect(c.startsWith(`${SCRIPTS}/`), `${f} names ${c} outside the copied scripts folder`).toBe(true);
+          expect(existsSync(join(proj, c)), `${f} names ${c}, which setup did not copy`).toBe(true);
+        }
+      }
+      expect(named, "no copied verb names a helper at all -- an empty match is a failure").toBeGreaterThan(0);
+      // cost-report imports ./lib.mjs beside it: the copy must carry the import, not just the entry file.
+      const cost = spawnSync(process.execPath, [join(SCRIPTS, "cost-report.mjs")], {
+        cwd: proj, encoding: "utf8", env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: proj },
+      });
+      expect(cost.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
+      expect(cost.status).toBe(0);
+    });
+  }
+
+  it("claude keeps the plugin root in the copied verbs, and the helpers still land beside them", () => {
+    const proj = fresh("cairn-setup-");
+    const home = fresh("cairn-home-");
+    run("claude", proj, home);
+    const work = readFileSync(join(proj, VERBS, "work.md"), "utf8");
+    expect(work).toContain('"$CLAUDE_PLUGIN_ROOT/hooks/scripts/merge-overlap.mjs"');
+    expect(existsSync(join(proj, SCRIPTS, "merge-overlap.mjs"))).toBe(true);
+    expect(existsSync(join(proj, SCRIPTS, "cost-report.mjs"))).toBe(true);
+    expect(existsSync(join(proj, SCRIPTS, "lib.mjs"))).toBe(true);
   });
 });

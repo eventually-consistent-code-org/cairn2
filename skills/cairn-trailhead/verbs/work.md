@@ -49,7 +49,10 @@ pairing overlay applies:
    tracker note with its line: `overlap: 3 files — a, b, c` or
    `overlap: none`. No overlap merges silently; overlap names the files
    first, so a conflict or a quiet semantic collision is read where it
-   lives (asserted by sweep-surface.test.ts, #223). A failed issue:
+   lives (asserted by sweep-surface.test.ts, #223). On a pluginless
+   harness the copied verb names the helper in the scripts folder
+   cairn-setup installs beside it, not the plugin root (asserted by
+   setup.test.ts, #474). A failed issue:
    let the wave's others finish, then STOP before the next wave and
    report — never build on possibly-broken foundations.
 

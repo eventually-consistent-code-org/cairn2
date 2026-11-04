@@ -7,10 +7,13 @@
  *   `overlap: 3 files — a, b, c` or `overlap: none` -- so the human reads
  *   the collision first, not the conflict markers. Pure git, read-only.
  *
- *   Lives under hooks/scripts (#443) because that is the folder the npm
- *   package ships and cairn-setup copies to pluginless harnesses; the verbs
- *   call it through $CLAUDE_PLUGIN_ROOT, the way status.md calls
- *   cost-report.mjs (asserted: sweep-surface.test.ts, #443). Not a hook.
+ *   Lives under hooks/scripts (#443) because that is a folder the npm
+ *   package ships; the plugin's verbs call it through $CLAUDE_PLUGIN_ROOT,
+ *   the way status.md calls cost-report.mjs (asserted: sweep-surface.test.ts,
+ *   #443). Only Claude Code sets that variable, so cairn-setup copies this
+ *   file and cost-report.mjs, with their imports, from here into every
+ *   harness install and re-points the copied verbs at the copy (asserted:
+ *   setup.test.ts, #474). Not a hook.
  * derives: convention — a merge lead is judgment for the human; no axiom
  *   governs it, it only has to be reachable from every install.
  * Author(s): John Reed
