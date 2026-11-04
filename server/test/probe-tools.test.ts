@@ -154,3 +154,49 @@ describe("config_probe reports branchProtection (#485)", () => {
     expect(res.json.branchProtection).toBeUndefined();
   });
 });
+
+// #486: cairn holds no identity of its own -- every route (tracker call,
+// push, browser, connected account) carries the owner's -- so config_probe
+// prints the fact as a field beside the tracker verdict, not a paragraph
+// (ADR 0037). The value is a constant today; the test pins its place and
+// its independence from the verdict, so a future scoped identity moves
+// this test on purpose rather than drifting past it.
+describe('config_probe reports identity: "owner" (#486)', () => {
+  async function probeWith(tracker: Tracker) {
+    const projectDir = mkdtempSync(join(tmpdir(), "cairn-probe-id-"));
+    writeFileSync(
+      join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+    const server = buildServer({
+      projectDir,
+      tracker,
+      fetchLatestVersion: async () => "9.9.9",
+    });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "test", version: "0.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    const res = await c.callTool({ name: "config_probe", arguments: {} });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { ...res, json: JSON.parse(text) };
+  }
+
+  it("prints identity: owner directly beside the tracker verdict", async () => {
+    const res = await probeWith(new FakeTracker());
+    expect(res.isError).toBeFalsy();
+    expect(res.json.tracker).toEqual({ verdict: "ok" });
+    expect(res.json.identity).toBe("owner");
+    // Beside, not buried: the first two keys of the probe are the verdict
+    // and whose identity that verdict was reached with.
+    expect(Object.keys(res.json).slice(0, 2)).toEqual(["tracker", "identity"]);
+  });
+
+  it("a tracker verdict that is not ok leaves identity unchanged: a bad token is still the owner's", async () => {
+    const github = new GitHubTracker({ repo: "o/r" }, async () =>
+      new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }), () => "tok");
+    const res = await probeWith(github);
+    expect(res.isError).toBeFalsy();
+    expect(res.json.tracker.verdict).toBe("bad_token");
+    expect(res.json.identity).toBe("owner");
+  });
+});
