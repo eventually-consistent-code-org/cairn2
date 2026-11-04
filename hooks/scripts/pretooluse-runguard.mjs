@@ -88,6 +88,19 @@
  *   CAIRN_RUN_OK=1 as the leading assignment overrides that once. A hard
  *   reset there carries both effects; the refusal names both.
  *
+ *   An alias is what it runs (#430). A `-c alias.<name>=<value>` on the
+ *   line is expanded before the table is read -- `git -c 'alias.hr=reset
+ *   --hard' hr` is the hard reset, nested and quoted as git reads them --
+ *   and a name git has no builtin for is asked of git once (`git config
+ *   --get alias.<name>`, where the command first runs), so the user's own
+ *   aliases take the same path. A `!` shell alias is refused in every
+ *   session: what follows the `!` goes to the shell as it stands, and the
+ *   table can't read it. A builtin wins over an alias of its own name, as
+ *   in git. A probe that fails or finds nothing leaves the words as typed:
+ *   the guard fails open on its own error, never on git's answer. The
+ *   refusal names the alias beside the flag it expanded to. Asserted by
+ *   runguard-effects.test.ts and runguard-guards.test.ts (#430).
+ *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
  *   on the line that could make a commit or move a ref refuses it: a git
@@ -179,8 +192,8 @@ import {
   shellReadsStdin, shellSegments, toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 import {
-  DISCARDS_WORK, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine, longNames,
-  parseInvocation, pushArgs, readArgs, truthy,
+  DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
+  longNames, parseInvocation, pushArgs, readArgs, resolveAlias, truthy,
 } from "./git-effects.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -1180,6 +1193,44 @@ const repoProbe = (at) => ({
   linkedWorktrees: () => linkedWorktrees(at),
 });
 
+// The subcommands the effect table knows: builtins, never aliases (#430).
+const TABLED = new Set(EFFECT_TABLE.map((row) => row.sub));
+
+// git's own list of its builtins (#430), read once per guard run and only
+// when a subcommand off the table and off GIT_READS turns up. null until
+// then; an empty set when git can't say, and the probe below runs anyway
+// -- a `git config --get` that finds nothing changes nothing.
+let BUILTINS = null;
+
+/**
+ * True when `sub` is a command git itself runs (#430), so no alias can
+ * stand in for it: a table row, a GIT_READS or GIT_READ_ACTIONS entry, or
+ * a name on `git --list-cmds=builtins` (a dated claim about git, 2.18 and
+ * later, 2026-11). A probe is spent on nothing else.
+ */
+function gitBuiltin(sub) {
+  if (TABLED.has(sub) || GIT_READS.has(sub) || GIT_READ_ACTIONS.has(sub)) return true;
+  BUILTINS ??= new Set((gitOut({ dir: process.cwd() }, ["--list-cmds=builtins"]) ?? "").split("\n"));
+  return BUILTINS.has(sub);
+}
+
+/**
+ * Resolves a subcommand git knows no builtin for through the aliases
+ * configured at the target `at` (#430): `git config --get alias.<name>` --
+ * the repository's config, the user's and the system's, never this
+ * command's own -c values, which were expanded as the line was read. Asked
+ * once per name, at the first place the command may run; a probe that
+ * fails or finds nothing leaves the words as typed, so an unknown
+ * subcommand stays what it was (fail open on the guard's own error, ADR
+ * 0016). An alias this guard can't see -- one a `-c include.path` or a
+ * --config-env pulls in -- takes that same path. Asserted by
+ * runguard-guards.test.ts (#430).
+ */
+function configAlias(inv, at) {
+  resolveAlias(inv, (name) => (gitBuiltin(name) ? undefined
+    : gitOut(at, ["config", "--get", `alias.${name}`]) || undefined));
+}
+
 /**
  * True for the stash's parking half (#363): a bare `git stash`, `stash
  * push`, `stash save`, or options with no action (`git stash -u`). It has
@@ -1307,6 +1358,11 @@ function judgeLine(line, start, ctx) {
     const targets = invTargets(inv, places, lineEnv);
     const known = targets.filter((t) => t !== LOST);
     const lost = known.length < targets.length;
+    // #430 -- an alias is what it runs: the -c ones on the line were
+    // expanded as it was read (parseInvocation); a name git has no builtin
+    // for may be an alias from the repository's or the user's config, asked
+    // of git once, where the command first runs
+    if (inv.sub && !gitBuiltin(inv.sub)) configAlias(inv, known[0] ?? { dir: ctx.cwd });
     // #359 -- what it does, read off the effect table; the rows only the
     // repository can answer wait for a target, below
     const [shared] = classify(inv, {}, { only: MOVES_SHARED_REF, first: true });
@@ -1548,4 +1604,9 @@ try {
  *         push / save / pop / apply / branch actions and reset --merge /
  *         --keep join checkout, switch and reset --hard. The definition line
  *         is in the rules above and on the table.
+ *   #430  a git alias is judged by what it runs: an inline -c alias is
+ *         expanded as the line is read (git-effects.mjs, resolveAlias), a
+ *         configured one is asked of git once through gitOut, and a `!`
+ *         shell alias is a discards-work row of its own. The gap predates
+ *         #359; the rewrite's claim brought it in scope.
  */

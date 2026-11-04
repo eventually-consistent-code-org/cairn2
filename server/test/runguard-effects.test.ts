@@ -377,3 +377,88 @@ describe("run guard: each refusal names its effect and the flag that caused it (
     expect(r.status).toBe(0);
   });
 });
+
+describe("git effects: an alias is classified by what it runs (#430)", () => {
+  /** A git command given as words, so an alias value may hold spaces and quotes. */
+  const words = (...w: string[]) => parseInvocation(["git", ...w]);
+  /** The flag the first cause of `only` names. */
+  const flagOf = (i: ReturnType<typeof words>, only: string): string => classify(i, {}, { only })[0]?.flag;
+
+  it("an inline -c alias resolves to the real subcommand before the table is read, one spelling each", () => {
+    const hard = words("-c", "alias.hr=reset --hard", "hr", "HEAD~1");
+    expect(effectsOf(hard)).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
+    expect(flagOf(hard, DISCARDS_WORK)).toBe("--hard");
+    expect([hard.sub, hard.args, hard.alias]).toEqual(["reset", ["--hard", "HEAD~1"], "hr"]);
+    const force = words("-c", "alias.fp=push --force", "fp", "origin", "topic");
+    expect(effectsOf(force)).toEqual([DISCARDS_WORK, MOVES_SHARED_REF]);
+    expect(flagOf(force, DISCARDS_WORK)).toBe("--force");
+    // a whole-tree checkout, the `--` in the value or typed after the name
+    for (const tree of [words("-c", "alias.co=checkout -- .", "co"), words("-c", "alias.co=checkout", "co", "--", ".")]) {
+      expect(effectsOf(tree)).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
+      expect(flagOf(tree, DISCARDS_WORK)).toBe(".");
+    }
+    const main = words("-c", "alias.pm=push origin main", "pm");
+    expect(effectsOf(main)).toEqual([MOVES_SHARED_REF]);
+    expect(flagOf(main, MOVES_SHARED_REF)).toBe("push origin main");
+  });
+
+  it("a shell alias is refused outright: discards-work, from `!`, whatever follows it", () => {
+    for (const value of ["!rm -rf .", "!git reset --hard", "!echo hi"]) {
+      const sh = words("-c", `alias.tidy=${value}`, "tidy");
+      expect(effectsOf(sh), value).toEqual([DISCARDS_WORK]);
+      expect(flagOf(sh, DISCARDS_WORK), value).toBe("!");
+      expect(sh.alias, value).toBe("tidy");
+    }
+  });
+
+  it("reads the value as git does: the last -c wins, the key in any case, quoting, nesting, its own -c, a loop", () => {
+    expect(words("-c", "alias.x=status", "-c", "alias.x=reset --hard", "x").sub).toBe("reset");
+    expect(words("-c", "alias.x=reset --hard", "-c", "alias.x=status", "x").sub).toBe("status");
+    expect(words("-c", "Alias.X=reset --hard", "x").sub).toBe("reset");
+    const q = words("-c", `alias.x=commit -m 'two words' --author="A B" -m c\\ d`, "x");
+    expect([q.sub, q.args]).toEqual(["commit", ["-m", "two words", "--author=A B", "-m", "c d"]]);
+    expect(words("-c", "alias.a=b", "-c", "alias.b=reset --hard", "a").sub).toBe("reset");
+    const own = words("-c", "alias.x=-c core.bare=false reset --hard", "x");
+    expect([own.sub, own.configs]).toEqual(["reset", ["alias.x=-c core.bare=false reset --hard", "core.bare=false"]]);
+    // git refuses an alias loop; the words stay as typed and carry no effect
+    expect(effectsOf(words("-c", "alias.a=b", "-c", "alias.b=a", "a"))).toEqual([READ_ONLY]);
+  });
+
+  it("a builtin on the table wins over an alias of its own name, as in git -- an alias can't disguise one", () => {
+    const reset = words("-c", "alias.reset=status", "reset", "--hard");
+    expect(effectsOf(reset)).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
+    expect(reset.alias).toBeUndefined();
+    // an empty value, a bare -c alias.x (git refuses both) or no alias: the words stay as typed
+    for (const w of [["-c", "alias.x=", "x"], ["-c", "alias.x", "x"], ["-c", "alias.y=reset --hard", "x"], ["x"]]) {
+      const i = words(...w);
+      expect([i.sub, i.alias], w.join(" ")).toEqual(["x", undefined]);
+    }
+    // an everyday alias is the everyday command
+    expect(effectsOf(words("-c", "alias.st=status", "st"))).toEqual([READ_ONLY]);
+    expect(effectsOf(words("-c", "alias.lg=log --oneline", "lg", "-3"))).toEqual([READ_ONLY]);
+  });
+
+  it("the hook: a refusal through an alias names the alias beside the flag", () => {
+    const { proj, home } = fixture();
+    const hard = guard(proj, home, "git -c 'alias.hr=reset --hard' hr HEAD~1");
+    expect(hard.status).toBe(2);
+    expect(hard.stderr).toContain("effect: discards-work, from `--hard`, via alias `hr`; also touches-owner-checkout.");
+    const sh = guard(proj, home, "git -c 'alias.tidy=!rm -rf .' tidy");
+    expect(sh.status).toBe(2);
+    expect(sh.stderr).toContain("a `!` shell alias is refused in every session");
+    expect(sh.stderr).toContain("effect: discards-work, from `!`, via alias `tidy`.");
+  });
+
+  it("the hook: an alias from the repository's configuration is asked of git once; nothing found leaves the words as typed", () => {
+    const { proj, home } = fixture();
+    git(proj, "config", "alias.hr", "reset --hard");
+    const r = guard(proj, home, "git hr HEAD~1");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("effect: discards-work, from `--hard`, via alias `hr`; also touches-owner-checkout.");
+    // no such alias: an unknown subcommand stays read-only (the guard fails open on what it can't see, ADR 0016)
+    expect(guard(proj, home, "git frobnicate --hard").status).toBe(0);
+    // a probe git can't answer -- a folder that is no repository -- leaves today's classification
+    const r2 = guard(proj, home, `git -C ${join(proj, "nowhere")} hr HEAD~1`);
+    expect(r2.status, r2.stderr).toBe(0);
+  });
+});

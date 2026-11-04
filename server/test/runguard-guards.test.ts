@@ -2570,3 +2570,89 @@ describe("run guard: the owner-checkout effect covers every command its definiti
     }
   });
 });
+
+describe("run guard: a git alias is judged by what it runs (#430)", () => {
+  const LIVE = { status: "running", phases: [], pushAuth: { granted: false } };
+
+  // Each row: [the command, the alias name, the flag the effect line names, the refusal's lead].
+  // Before #430 every one of them read read-only: the alias name had no table row.
+  const rows: Array<[command: string, name: string, flag: string, lead: string]> = [
+    ["git -c 'alias.hr=reset --hard' hr HEAD~1", "hr", "--hard", "`git reset --hard` is refused in every session"],
+    ["git -c alias.fp='push --force' fp origin topic", "fp", "--force", "`git push --force` is refused in every session"],
+    ["git -c 'alias.co=checkout -- .' co", "co", ".", "a whole-tree `git checkout` is refused in every session"],
+    ["git -c alias.wipe=clean wipe -fd", "wipe", "clean", "`git clean` is refused in every session"],
+    ["git -c 'alias.tidy=!rm -rf .' tidy", "tidy", "!", "a `!` shell alias is refused in every session"],
+    // nested: the name typed is the one the refusal names
+    ["git -c alias.a=b -c 'alias.b=reset --hard' a", "a", "--hard", "`git reset --hard` is refused in every session"],
+  ];
+
+  it("inline: each discards-work spelling is refused in every session, naming the alias beside the flag", () => {
+    const { proj, home } = fixture();
+    for (const [c, name, flag, lead] of rows) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain(lead);
+      expect(r.stderr, c).toContain(`effect: discards-work, from \`${flag}\`, via alias \`${name}\``);
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+  });
+
+  it("inline: a push onto main through an alias meets the ship gate, and passes it with a clean stamp", () => {
+    const unstamped = fixture(undefined, false);
+    const r = guard(unstamped.proj, unstamped.home, "git -c 'alias.pm=push origin main' pm");
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("/cairn:ship");
+    expect(r.stderr).toContain("effect: moves-shared-ref, from `push origin main`, via alias `pm`.");
+    expectOwnerTail(r.stderr, "pm", "CAIRN_ALLOW_UNSHIPPED_PUSH");
+    const stamped = fixture();
+    expect(guard(stamped.proj, stamped.home, "git -c 'alias.pm=push origin main' pm").status).toBe(0);
+  });
+
+  it("configured: an alias from the repository's or the user's configuration takes the same path", () => {
+    const { proj, home } = fixture();
+    git(proj, "config", "alias.hr", "reset --hard");
+    git(proj, "config", "alias.tidy", "!rm -rf .");
+    for (const [c, flag] of [["git hr HEAD~1", "--hard"], ["git tidy", "!"]]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain(`effect: discards-work, from \`${flag}\`, via alias \``);
+    }
+    // the user's own config, through GIT_CONFIG_GLOBAL so the host's is never read
+    const userConfig = join(freshDir("cairn-runguard-gitconfig-"), "gitconfig");
+    writeFileSync(userConfig, "[alias]\n\tfp = push --force\n");
+    const r = guard(proj, home, "git fp origin topic", { GIT_CONFIG_GLOBAL: userConfig });
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("effect: discards-work, from `--force`, via alias `fp`; also moves-shared-ref.");
+  });
+
+  it("fails open on its own: no alias found, a folder git can't read, or a builtin's name leaves the words as typed", () => {
+    const { proj, home } = fixture();
+    git(proj, "config", "alias.hr", "reset --hard");
+    // git ignores an alias named like a builtin, so the guard never resolves one: a commit stays a commit
+    git(proj, "config", "alias.commit", "!rm -rf .");
+    for (const c of ["git frobnicate --hard", `git -C ${join(proj, "nowhere")} hr HEAD~1`, "git commit --allow-empty -m wip"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("the owner's escape lifts it, and an everyday alias passes silently", () => {
+    const { proj, home } = fixture();
+    for (const [c] of rows) {
+      expect(guard(proj, home, c, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, c).toBe(0);
+    }
+    for (const c of ["git -c alias.st=status st", "git -c 'alias.lg=log --oneline' lg -3", "git -c alias.ci=commit ci --allow-empty -m wip"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      expect(r.stderr, c).toBe("");
+    }
+  });
+
+  it("mid-run: an alias that touches the owner's checkout is refused like the command it runs", () => {
+    const { proj, home } = fixture(LIVE);
+    const r = guard(proj, home, "git -c alias.sw=switch sw -c topic");
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("this `git switch` targets the checkout you work in");
+    expect(r.stderr).toContain("effect: touches-owner-checkout, from `switch`, via alias `sw`.");
+  });
+});

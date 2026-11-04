@@ -11,9 +11,12 @@
  *
  *   Pure functions, no imports and no I/O. What only the repository can
  *   answer -- a remote configured to mirror, a push that deletes the
- *   remote's HEAD branch, a second worktree sharing the stash (#363) --
- *   comes in through `probe`, which the guard fills in per target and a
- *   test can stub.
+ *   remote's HEAD branch, a second worktree sharing the stash (#363), an
+ *   alias from the user's configuration (#430) -- comes in through `probe`
+ *   and resolveAlias's `lookup`, which the guard fills in per target and a
+ *   test can stub. An alias is what it runs (#430): the inline `-c
+ *   alias.<name>=<value>` ones are expanded as the words are parsed, so
+ *   every reader of parseInvocation classifies the real subcommand.
  *
  * removeWhen: the run guard meets its own removeWhen -- it is this
  *   module's only reader.
@@ -36,6 +39,14 @@ export const READ_ONLY = "read-only";
 
 /** The effects, in the order the guard's rules ask about them. */
 export const EFFECTS = Object.freeze([DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT]);
+
+/**
+ * The subcommand a `!` shell alias resolves to (#430): git hands the rest
+ * of the value to the shell as it stands, so there is no subcommand to
+ * classify -- the table refuses this one word instead. No git command is
+ * ever spelled `!`.
+ */
+export const SHELL_ALIAS = "!";
 
 /**
  * git's top-level options that eat the following word as their value, from
@@ -139,6 +150,16 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * only; the reads touch nothing -- none has a row. The run guard refuses
  * the effect only mid-run, aimed at the owner's checkout. Asserted by
  * runguard-effects.test.ts and runguard-guards.test.ts (#435).
+ *
+ * Aliases (#430): a row's `sub` is the subcommand git runs, so an alias is
+ * resolved to it before the table is read (resolveAlias) and needs no row
+ * of its own -- `git -c 'alias.hr=reset --hard' hr` matches the hard-reset
+ * rows. The one row an alias adds is the shell alias, SHELL_ALIAS: a `!`
+ * value goes to the shell as it stands, a file delete as easily as a
+ * reset, and nothing on this table can read it, so it is refused as if it
+ * discarded work, in every session, under the same owner's escape as the
+ * other discards-work rows. Asserted by runguard-effects.test.ts and
+ * runguard-guards.test.ts (#430).
  */
 export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: "reset", when: "flag", names: ["--hard"],
@@ -183,6 +204,10 @@ export const EFFECT_TABLE = Object.freeze([
     what: "`git push --prune`", why: "it deletes every remote branch this clone doesn't have." },
   { effect: DISCARDS_WORK, sub: "push", when: "probe", name: "deletesDefaultBranch", cause: "a deleted default branch",
     what: "a push deleting the default branch", why: "everyone's shared history hangs off it." },
+  // #430 -- a `!` alias: git runs the rest in the shell, unread by this table
+  { effect: DISCARDS_WORK, sub: SHELL_ALIAS, when: "always", what: "a `!` shell alias",
+    why: "git hands what follows the `!` to the shell as it stands, so whether it discards work can't be " +
+      "read off the effect table; it is refused as if it did." },
   { effect: MOVES_SHARED_REF, sub: "push", when: "pushTo",
     what: "`git push`", why: "it changes refs other clones fetch." },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout", when: "always", what: "`git checkout`", why: REWRITES },
@@ -207,6 +232,96 @@ export const EFFECT_TABLE = Object.freeze([
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "apply", when: "always", what: "`git stash apply`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "branch", when: "always", what: "`git stash branch`", why: REWRITES },
 ]);
+
+// The subcommands the table knows (#430). In git a builtin wins over an
+// alias of its own name, so none of these is ever resolved as one -- an
+// alias can't disguise a hard reset as something else.
+const TABLED = new Set(EFFECT_TABLE.map((row) => row.sub));
+
+/**
+ * An alias value split into words the way git does it (#430, split_cmdline):
+ * whitespace separates, a single or double quote groups, and a backslash
+ * takes the next character literally except inside single quotes. An
+ * unclosed quote, which git refuses, runs to the end of the value here.
+ */
+export function aliasWords(value) {
+  const words = [];
+  let cur = null;
+  let quote = "";
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (!quote && /\s/.test(c)) {
+      if (cur !== null) words.push(cur);
+      cur = null;
+    } else if (!quote && (c === "'" || c === '"')) {
+      quote = c;
+      cur ??= "";
+    } else if (c === quote) {
+      quote = "";
+    } else if (c === "\\" && quote !== "'" && i + 1 < value.length) {
+      cur = (cur ?? "") + value[++i];
+    } else {
+      cur = (cur ?? "") + c;
+    }
+  }
+  if (cur !== null) words.push(cur);
+  return words;
+}
+
+/**
+ * The value an inline `-c alias.<name>=<value>` of `inv` gives `name`
+ * (#430), as git reads it: the last one wins, the key in any letter case.
+ * Undefined when none does, or for a bare `-c alias.<name>` (git refuses
+ * it as a missing value).
+ */
+export function inlineAlias(inv, name) {
+  const want = `alias.${name.toLowerCase()}`;
+  let found;
+  for (const c of inv.configs) {
+    const eq = c.indexOf("=");
+    if (eq > 0 && c.slice(0, eq).toLowerCase() === want) found = c.slice(eq + 1);
+  }
+  return found;
+}
+
+/**
+ * Resolves the subcommand of `inv` through its aliases, in place, the way
+ * git runs them (#430): a subcommand on the table is a builtin and wins
+ * over an alias of its own name; otherwise the inline `-c` value, or what
+ * `lookup(name)` gives back (the guard asks git for the configured one),
+ * is the alias. Its words go ahead of the typed args as a new git command
+ * line -- so a value may carry top-level options and a `--` of its own --
+ * and the result is resolved again until the name is no alias, or repeats
+ * (git refuses the loop; the words stay as last expanded). A `!` value
+ * ends the walk with `sub` SHELL_ALIAS. An empty value, which git fails,
+ * leaves the words as typed. `alias` on the result is the name first
+ * typed, for the refusal to name; the dirs, configs and opts gathered so
+ * far are kept, the expansion's own coming after them.
+ */
+export function resolveAlias(inv, lookup = () => undefined) {
+  const seen = new Set();
+  while (inv.sub && !TABLED.has(inv.sub) && !seen.has(inv.sub)) {
+    seen.add(inv.sub);
+    const value = inlineAlias(inv, inv.sub) ?? lookup(inv.sub);
+    if (typeof value !== "string" || value === "") return inv;
+    inv.alias ??= inv.sub;
+    if (value.startsWith("!")) {
+      inv.sub = SHELL_ALIAS;
+      inv.shell = value.slice(1);
+      return inv;
+    }
+    const tail = inv.paths.length ? ["--", ...inv.paths] : [];
+    const next = parseInvocation(["git", ...aliasWords(value), ...inv.args, ...tail], { aliases: false });
+    Object.assign(inv, {
+      dirs: [...inv.dirs, ...next.dirs],
+      configs: [...inv.configs, ...next.configs],
+      configEnvs: [...inv.configEnvs, ...next.configEnvs],
+      opts: { ...inv.opts, ...next.opts },
+      sub: next.sub, args: next.args, paths: next.paths,
+    });
+  }
+  return inv;
+}
 
 /**
  * The long options in `names` that a typed `--name` stands for, the way
@@ -290,9 +405,12 @@ export const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.pat
  * invocation: the -C directories in order, the -c and --config-env values,
  * --git-dir / --work-tree / --bare as `opts`, the subcommand, its args (cut
  * at a bare `--`), and the paths past that `--`, which are paths, not flags
- * -- `git checkout -- .` (#264).
+ * -- `git checkout -- .` (#264). An inline `-c alias.<name>=<value>` naming
+ * the subcommand is expanded in place (#430, resolveAlias), so `sub` is
+ * what git runs and `alias` the name typed; `aliases: false` leaves it,
+ * for the expansion's own re-parse.
  */
-export function parseInvocation(words) {
+export function parseInvocation(words, { aliases = true } = {}) {
   let i = 1;
   const dirs = [];
   const configs = [];
@@ -312,12 +430,13 @@ export function parseInvocation(words) {
   }
   const rest = words.slice(i + 1);
   const dashes = rest.indexOf("--");
-  return {
+  const inv = {
     dirs, configs, configEnvs, opts,
     sub: words[i] ?? "",
     args: dashes < 0 ? rest : rest.slice(0, dashes),
     paths: dashes < 0 ? [] : rest.slice(dashes + 1),
   };
+  return aliases ? resolveAlias(inv) : inv;
 }
 
 /**
@@ -404,8 +523,11 @@ export function effectsOf(inv, probe = {}) {
  * The line a refusal adds naming the effect it refuses and the flag that
  * caused it, plus any other effect the same invocation carries (#359): a
  * hard reset of the owner's checkout both discards work and touches it.
+ * A command that got there through an alias names the alias too (#430):
+ * the flag is a word the reader never typed.
  */
 export function effectLine(inv, cause) {
   const others = effectsOf(inv).filter((e) => e !== cause.effect && e !== READ_ONLY);
-  return `  effect: ${cause.effect}, from \`${cause.flag}\`` + (others.length ? `; also ${others.join(", ")}.` : ".");
+  const via = inv.alias === undefined ? "" : `, via alias \`${inv.alias}\``;
+  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via}` + (others.length ? `; also ${others.join(", ")}.` : ".");
 }
