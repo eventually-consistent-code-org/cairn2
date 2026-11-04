@@ -105,23 +105,29 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
   "branch instead, and squash it before the close.";
 
 /**
- * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438).
+ * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438,
+ * #464, #288).
  * Each row: the effect, the subcommand, the first word it needs (`action`,
  * read off before the flags are -- one word or a list, where "" is git's
  * default action: no word, or an option first, as in a bare `git stash`),
  * and `when` -- one of:
  *   flag       any of `names` is set (spelled out, shortened, or a short alias)
- *   wholeTree  a pathspec names the whole tree, or --pathspec-from-file
- *              hides it; `sparesTree` names the flags that keep the write
- *              off the work tree (`restore --staged`, `rm --cached`, a dry
- *              run), and `needs` the flag the row also wants and names (a
- *              forced rm, #434: unforced, git refuses a modified file itself)
+ *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
+ *              glob, the colon magic of #464, the repository root as an
+ *              absolute path through the `repoRoot` probe, #288), or
+ *              --pathspec-from-file hides it; `sparesTree` names the flags
+ *              that keep the write off the work tree (`restore --staged`,
+ *              `rm --cached`, a dry run), and `needs` the flag the row also
+ *              wants and names (a forced rm, #434: unforced, git refuses a
+ *              modified file itself)
  *   unlessOn   always, unless `name` is on at the end (a dry run)
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
  *   plusRef    a refspec with a leading `+`
  *   config     a `-c` setting matching `key` that reads as true
  *   probe      the repository says so: probe[name](inv) is true
+ * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
+ * repository root when `word` is its absolute path (#288).
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours stay off the table because
  * they are routine or recoverable: a single-path checkout/restore, a forced
@@ -386,13 +392,27 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
 
 /**
  * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, and a bare glob (`*`,
- * `**`, `./*` -- a pathspec `*` crosses `/`). A single path -- `src/a.ts`,
- * `.gitignore`, `:/src`, `*.ts` -- is not.
+ * `.`, `./`, `..`, `../..`, a bare glob (`*`, `**`, `./*` -- a pathspec
+ * `*` crosses `/`), and the magic spellings git reads as everything (#464):
+ * a lone `:`, `::`, `:/`, `:/:`, `:/.`, `:(top)`, and any long-form magic
+ * with no path after it (`:(glob,top)`, `:(icase)` -- measured against git
+ * 2.56, 2026-11-04: `git rm -rfn -- :` lists every tracked file). With
+ * `root`, the repository's own absolute path, that path too -- `/repo`,
+ * `/repo/`, `/repo/.`, `/repo/*` (#288); only the repository knows its
+ * root, so the guard's repoRoot probe supplies it per word. A single path
+ * -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` --
+ * is not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by
+ * decision (phase 31, 2026-11-04). Asserted by runguard-effects.test.ts
+ * and runguard-guards.test.ts (#464).
  */
-export function wholeTree(p) {
-  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p);
+export function wholeTree(p, root) {
+  if (p === "") return false;
+  if (/^(?::(?:\/*:?|\((?!(?:\w+,)*exclude\b)\w+(?:,\w+)*\)))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p)) return true;
+  return root !== undefined && root !== null && bareRoot(p) === bareRoot(root);
 }
+
+/** A folder path with its trailing `/`, `/.` and `/*` spellings dropped -- what names the folder itself (#288). */
+const bareRoot = (p) => p.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
 
 /** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
 export const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
@@ -472,8 +492,11 @@ function rowCause(row, inv, probe) {
       // a row that also needs a flag names it: `-rf`, not `.` (#434)
       const need = row.needs?.find((n) => flags.has(n));
       if (row.needs && need === undefined) return null;
+      // the repository root as an absolute path is the whole tree too (#288):
+      // the repoRoot probe answers per word, or no word is the root
+      const root = typeof probe?.repoRoot === "function" ? probe.repoRoot : () => undefined;
       const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
-        : [...words, ...inv.paths].find(wholeTree) ?? null;
+        : [...words, ...inv.paths].find((w) => wholeTree(w, root(w))) ?? null;
       return tree === null || need === undefined ? tree : typed.get(need) ?? need;
     }
     case "pushTo": {

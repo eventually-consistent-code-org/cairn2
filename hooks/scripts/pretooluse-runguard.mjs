@@ -55,7 +55,14 @@
  *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
  *   worktree remove; a stash pop, apply, drop or branch while more than
  *   one worktree shares the stash, #363, #438),
- *   options shortened as git allows (--har is --hard). Their everyday
+ *   options shortened as git allows (--har is --hard). A whole-tree
+ *   pathspec is `.`, `..`, a bare glob, `:/`, `:(top)`, a lone `:` or any
+ *   magic with nothing after it (#464: git reads `:` as everything), or the
+ *   repository root as an absolute path (#288, the repoRoot probe); a
+ *   colon-prefixed real path (`:/src`) is that path. Not seen, by decision
+ *   (phase 31, 2026-11-04): an exclude-only pathspec (`:!src`,
+ *   `:(exclude)src`) stays a path here, though git reads it as everything
+ *   but the excluded (measured, git 2.56). Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
  *   stdout). Escape:
@@ -1186,15 +1193,39 @@ function linkedWorktrees(at) {
 }
 
 /**
+ * The repository root at `at`, when `word` is its absolute path (#288, the
+ * whole-tree rows' repoRoot probe): `git rev-parse --show-toplevel`, links
+ * resolved, read once per target. The answer is the word's own spelling with
+ * its trailing `/`, `/.` or `/*` dropped -- `/tmp/repo` for a root git
+ * reports as `/private/tmp/repo` -- so the classifier's string compare
+ * meets it. A relative word, a path under the root, another repository's
+ * root (git refuses a path outside the work tree itself), or a target git
+ * can't read is undefined: a path, like the other probes' no. Asserted by
+ * runguard-guards.test.ts (#464, the #288 rows).
+ */
+function repoRoot(at, word) {
+  if (!isAbsolute(word)) return undefined;
+  if (at.top === undefined) {
+    const top = gitOut(at, ["rev-parse", "--show-toplevel"]);
+    at.top = top ? realPath(top) : null;
+  }
+  if (at.top === null) return undefined;
+  const bare = word.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+  return realPath(bare) === at.top ? bare : undefined;
+}
+
+/**
  * The repository's answers the classifier asks for at the target `at`
  * (#359): a remote that mirrors, a push that deletes the default branch --
- * defaultBranchSources reads which branches that is -- and a second
- * worktree sharing the stash (#363).
+ * defaultBranchSources reads which branches that is -- a second worktree
+ * sharing the stash (#363), and whether an absolute path is this
+ * repository's root (#288).
  */
 const repoProbe = (at) => ({
   mirrorConfigured: (inv) => mirrorConfigured(inv, at),
   deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
   linkedWorktrees: () => linkedWorktrees(at),
+  repoRoot: (word) => repoRoot(at, word),
 });
 
 // The subcommands the effect table knows: builtins, never aliases (#430).
@@ -1629,4 +1660,10 @@ try {
  *         configured one is asked of git once through gitOut, and a `!`
  *         shell alias is a discards-work row of its own. The gap predates
  *         #359; the rewrite's claim brought it in scope.
+ *   #464  a lone colon is the whole tree: git reads `:`, `::`, `:/:` and
+ *         any magic with no path after it as everything, so wholeTree
+ *         (git-effects.mjs) matches them and the rm, checkout and restore
+ *         rows inherit it; a colon-prefixed real path stays a path. The
+ *         repository root as an absolute path is the whole tree too (the
+ *         #288 spelling), through the repoRoot probe, links resolved.
  */

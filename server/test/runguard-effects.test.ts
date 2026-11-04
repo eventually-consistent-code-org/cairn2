@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT, READ_ONLY, EFFECTS, EFFECT_TABLE,
-  classify, effectsOf, parseInvocation,
+  classify, effectsOf, parseInvocation, wholeTree,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/git-effects.mjs";
 
@@ -460,5 +460,77 @@ describe("git effects: an alias is classified by what it runs (#430)", () => {
     // a probe git can't answer -- a folder that is no repository -- leaves today's classification
     const r2 = guard(proj, home, `git -C ${join(proj, "nowhere")} hr HEAD~1`);
     expect(r2.status, r2.stderr).toBe(0);
+  });
+});
+
+describe("git effects: a lone colon, the magic forms and the repository root are the whole tree (#464, #288)", () => {
+  // git reads a pathspec of a colon and nothing after it as "everything"
+  // (gitglossary; measured against git 2.56 on 2026-11-04: `git rm -rfn --
+  // :` lists every tracked file), and so `::`, `:/:` and any long-form
+  // magic with no path after it. Before #464 the matcher knew `:/` and
+  // `:(top)` only, so `git rm -rf :` passed the guard and emptied the tree.
+  it("the colon spellings name the whole tree; a colon-prefixed real path and the exclude forms stay paths", () => {
+    for (const p of [":", "::", ":/", ":/:", ":/.", ":/*", ":(top)", ":(top,glob)", ":(glob,top)", ":(icase)", ":*"]) {
+      expect(wholeTree(p), p).toBe(true);
+    }
+    // the exclude forms stay paths by decision (phase 31 CONTEXT, 2026-11-04)
+    for (const p of [":/sub", ":/src/a.ts", ":(top)sub", "::sub", ":/:sub", ":!sub", ":!", ":(exclude)sub",
+      ":(top,exclude)", ":(exclude,top)", "seed.txt", "src", "*.ts", ""]) {
+      expect(wholeTree(p), p).toBe(false);
+    }
+  });
+
+  it("the repository root as an absolute path is the whole tree when the root is known; a folder under it is not (#288)", () => {
+    const root = "/work/repo";
+    for (const p of ["/work/repo", "/work/repo/", "/work/repo/.", "/work/repo/*", "/work/repo/./", "/work/repo/**"]) {
+      expect(wholeTree(p, root), p).toBe(true);
+      expect(wholeTree(p, `${root}/`), p).toBe(true);
+    }
+    for (const p of ["/work/repo/src", "/work/repo/seed.txt", "/work/repo2", "/work", "repo", "/work/repo/*.ts"]) {
+      expect(wholeTree(p, root), p).toBe(false);
+    }
+    // no root known: an absolute path is a path -- only the repository can say which one is its root
+    expect(wholeTree("/work/repo")).toBe(false);
+    expect(wholeTree("/work/repo", undefined)).toBe(false);
+  });
+
+  it("the rm, checkout and restore rows inherit every spelling and name it as the cause", () => {
+    const rows: Array<[string, string, string]> = [
+      ["git rm -rf :", "-rf", "a forced whole-tree `git rm`"],
+      ["git rm -r --force -- ::", "--force", "a forced whole-tree `git rm`"],
+      ["git checkout -- :", ":", "a whole-tree `git checkout`"],
+      ["git checkout :", ":", "a whole-tree `git checkout`"],
+      ["git checkout HEAD -- :/:", ":/:", "a whole-tree `git checkout`"],
+      ["git restore :", ":", "a whole-tree `git restore`"],
+      ["git restore -- ::", "::", "a whole-tree `git restore`"],
+      ["git restore -s HEAD~1 :(glob,top)", ":(glob,top)", "a whole-tree `git restore`"],
+      ["git restore --staged --worktree :", ":", "a whole-tree `git restore`"],
+    ];
+    for (const [c, flag, what] of rows) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.flag, c).toBe(flag);
+      expect(hit?.what, c).toBe(what);
+    }
+    // the twins: a colon-prefixed real path, the exclude forms, and the index-only or dry-run colon
+    for (const c of ["git rm -rf :/sub", "git rm -rf ::seed.txt", "git checkout -- :/sub", "git checkout -- :!sub",
+      "git restore :/sub", "git restore :(exclude)sub", "git restore --staged :", "git rm --cached -r :",
+      "git rm -rfn :", "git rm -r :"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+    }
+  });
+
+  it("the repository root comes in through the repoRoot probe, per word, in the word's own spelling (#288)", () => {
+    // the guard's probe: the word, trailing slash, dot or glob dropped, when it resolves to the root
+    const probe = { repoRoot: (w: string) => (/^\/work\/repo(?:\/\.|\/\*+|\/)*$/.test(w) ? "/work/repo" : undefined) };
+    for (const [c, flag] of [["git checkout -- /work/repo", "/work/repo"], ["git checkout HEAD /work/repo/", "/work/repo/"],
+      ["git restore /work/repo/.", "/work/repo/."], ["git rm -rf /work/repo/*", "-rf"]]) {
+      expect(causes(c, DISCARDS_WORK, probe).map((h) => h.flag), c).toEqual([flag]);
+    }
+    for (const c of ["git checkout -- /work/repo/src", "git restore /work/repo/seed.txt", "git rm -rf /work/other"]) {
+      expect(causes(c, DISCARDS_WORK, probe), c).toEqual([]);
+    }
+    // no probe (the server's line classifier, a test): an absolute path is a path
+    expect(causes("git checkout -- /work/repo", DISCARDS_WORK)).toEqual([]);
   });
 });

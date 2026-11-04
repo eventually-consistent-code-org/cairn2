@@ -2650,3 +2650,102 @@ describe("run guard: a git alias is judged by what it runs (#430)", () => {
     expect(r.stderr).toContain("effect: touches-owner-checkout, from `switch`, via alias `sw`.");
   });
 });
+
+describe("run guard: a lone colon is the whole tree (#464)", () => {
+  // Each row: [refused, its harmless twin]. git reads a pathspec of a
+  // colon and nothing after it as everything (measured against git 2.56,
+  // 2026-11-04: `git rm -rfn -- :` lists every tracked file; a checkout or
+  // restore of `:` rewrites every file from the index). A colon-prefixed
+  // real path (`:/sub`) is that path. Before #464 every refused form here
+  // passed the guard with exit 0.
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["git rm -rf :", "git rm -rf :/sub"],
+    ["git rm -r --force -- :", "git rm -r --force -- :/sub/b.txt"],
+    ["git rm -rf ::", "git rm -rf ::seed.txt"],
+    ["git checkout -- :", "git checkout -- :/sub"],
+    ["git checkout :", "git checkout :/seed.txt"],
+    ["git checkout HEAD -- ::", "git checkout HEAD -- ::seed.txt"],
+    ["git restore :", "git restore :/sub"],
+    ["git restore -- ':(top)'", "git restore -- ':(top)sub'"],
+    ["git restore -s HEAD~1 ':(glob,top)'", "git restore -s HEAD~1 ':(glob)*.ts'"],
+    ["git restore ':/:'", "git restore ':/:seed.txt'"],
+    ["timeout 5 git rm -rf :", "timeout 5 git rm -rf :/sub"],
+  ];
+
+  /** The fixture plus a nested folder to run from -- the #383 matrix. */
+  function nested(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  it("each is refused from the repository root and from a nested folder, naming the escape; its twin passes in both", () => {
+    const { proj, home, sub } = nested();
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("refused in every session");
+        expect(r.stderr, refused).toContain("effect: discards-work, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the exclude forms (by decision), the index-only, dry-run and unforced colon pass; the owner's escape lifts the rest", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      "git checkout -- ':!sub'",
+      "git restore ':(exclude)sub'",
+      "git restore --staged :",
+      "git rm --cached -r :",
+      "git rm -rfn :",
+      "git rm -r :",
+      "echo git rm -rf :",
+      'git commit -m "git checkout -- :"',
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const [refused] of pairs) {
+      expect(guard(proj, home, refused, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, refused).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${refused}`).status, refused).toBe(0);
+    }
+  });
+
+  it("the repository root spelled as an absolute path is the whole tree, a folder under it a path (#288)", () => {
+    const { proj, home, sub } = nested();
+    // the folder as given and with its links resolved (/var vs /private/var on a Mac): git takes both
+    const roots = [...new Set([proj, realpathSync(proj)])];
+    for (const root of roots) {
+      const rows: Array<[refused: string, twin: string]> = [
+        [`git checkout -- ${root}`, `git checkout -- ${root}/seed.txt`],
+        [`git checkout HEAD ${root}/`, `git checkout HEAD ${root}/sub`],
+        [`git restore ${root}/.`, `git restore ${root}/sub/`],
+        [`git rm -rf ${root}`, `git rm -rf ${root}/sub`],
+        [`git rm -rf '${root}/*'`, `git rm -rf '${root}/*.log'`],
+      ];
+      for (const [refused, twin] of rows) {
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, refused, {}, cwd);
+          expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, refused).toContain("refused in every session");
+          const t = guard(proj, home, twin, {}, cwd);
+          expect(t.status, `${twin}\n${t.stderr}`).toBe(0);
+        }
+      }
+    }
+    // -C into the repository from outside it: judged where git runs
+    const outside = freshDir("cairn-runguard-outside-");
+    expect(guard(proj, home, `git -C ${proj} checkout -- ${proj}`, {}, outside).status).toBe(2);
+    // another repository's root is no whole tree here: git refuses a path outside the work tree itself
+    const other = fixture().proj;
+    expect(guard(proj, home, `git checkout -- ${other}`).status).toBe(0);
+    expect(guard(proj, home, `git rm -rf ${other}`).status).toBe(0);
+  });
+});
