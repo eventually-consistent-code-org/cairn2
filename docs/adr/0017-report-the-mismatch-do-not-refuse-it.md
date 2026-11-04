@@ -141,3 +141,13 @@ The decision itself stands unchanged: the close is never refused over
 what the re-run saw, and `verify.rerun` stays off by default. Enabling it
 now grants whoever can commit PLAN.md nothing until the owner stamps the
 plan, and never a line that moves a shared ref or discards work.
+
+One gap stays open and is stated as a dated claim (2026-11-03): the
+stamp is minted by a parameter on an agent-callable tool, and the only
+thing that makes it a human act is the plan verb asking first. Nothing in
+code refuses an agent that passes `approve` without asking, so "a human
+act" is a sentence until a mechanism the agent cannot drive lands (the
+harness guard refusing the flag without the owner's escape is the cheapest;
+filed as #460, phase 31). Until then the stamp attributes an approval to
+a checkout, not to a person, and `verify.rerun` off by default is the
+real gate.
