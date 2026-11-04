@@ -3,7 +3,8 @@
 // the run refuses its claims and closes with RUN_FROZEN, posts the one
 // plain-language comment the freeze owes, and carries `frozen` on the
 // outlook emit. A second server -- another session, the owner's -- that
-// never named the run is never frozen.
+// never named the run is never frozen. The run is staged with its session's
+// id (#431), the one whose refusals the breaker counts.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -75,7 +76,7 @@ describe("a frozen run's claims and closes refuse RUN_FROZEN (#358)", () => {
   it("stages, runs, freezes, then refuses claim and close, commenting once", async () => {
     // the run's server stages and starts the run -- naming it binds them
     expect((await call(run, "run_manifest", {
-      action: "create", runId: RUN, phases: [{ number: 1, name: "one", estimate }],
+      action: "create", runId: RUN, phases: [{ number: 1, name: "one", estimate }], sessionId: "sess-run",
     })).isError).toBe(false);
     await call(run, "run_manifest", { action: "set_status", runId: RUN, status: "running" });
     await call(run, "run_manifest", { action: "set_phase", runId: RUN, phase: 1 });
@@ -132,6 +133,8 @@ describe("a frozen run's claims and closes refuse RUN_FROZEN (#358)", () => {
     expect(stop.json.status).toBe("stopped");
     const read = await call(run, "run_manifest", { action: "read", runId: RUN });
     expect(read.json.stop.refusals).toHaveLength(3); // what the run report lists
+    expect(read.json.sessionId).toBe("sess-run"); // the session staging named (#431), as the tool carried it
+    expect(read.json.breakerLimit).toBe(3); // cairn.json's auto.breaker (its default) staged into the manifest (#433)
 
     const emit = await call(run, "outlook_emit");
     expect(emit.json).toMatchObject({ emitted: true, frozen: { runId: RUN, refusals: 3 } });
@@ -180,7 +183,7 @@ describe("a frozen run cannot close an issue through issue_update (#427)", () =>
     client = new Client({ name: "test-breaker-close", version: "0.0.0" });
     await Promise.all([server.connect(st), client.connect(ct)]);
     expect((await call("run_manifest", {
-      action: "create", runId: RUN2, phases: [{ number: 1, name: "one", estimate }],
+      action: "create", runId: RUN2, phases: [{ number: 1, name: "one", estimate }], sessionId: "sess-run-close",
     })).isError).toBe(false);
     await call("run_manifest", { action: "set_status", runId: RUN2, status: "running" });
     await call("run_manifest", { action: "set_phase", runId: RUN2, phase: 1 });

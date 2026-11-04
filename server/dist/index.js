@@ -1529,13 +1529,13 @@ export function buildServer(deps) {
     }));
     server.registerTool("run_manifest", {
         annotations: { title: titleOf("run_manifest"), readOnlyHint: false, destructiveHint: false },
-        description: "The run manifest for headless batch runs (#132) — the executor's SOLE source of "
-            + "authority, under ~/.cairn/runs/ (never the repo). action 'create' writes one per "
-            + "run (pushAuth ALWAYS starts false); 'read' returns it plus its file path (the run "
-            + "report writes beside it); 'grant_push' records the staging gate's push "
-            + "pre-authorization (REC-5, the manifest's phases only; staged runs only); "
-            + "'set_status' moves staged → running → complete|stopped; 'set_phase' marks the "
-            + "phase in flight (running, forward-only) — no push without one",
+        description: "The run manifest for batch runs (#132) — the executor's sole authority, under "
+            + "~/.cairn/runs/. 'create' writes one per run (pushAuth starts false; sessionId = "
+            + "the staging shell's $CLAUDE_CODE_SESSION_ID, the one session the breaker counts); "
+            + "'read' returns it plus its path; 'grant_push' records the staging gate's push "
+            + "pre-authorization (staged runs only); 'set_status' moves staged → running → "
+            + "complete|stopped; 'set_phase' marks the phase in flight (forward-only) — no push "
+            + "without one",
         inputSchema: z.object({
             action: z.enum(["create", "read", "grant_push", "set_status", "set_phase"]),
             runId: z.string(),
@@ -1563,6 +1563,7 @@ export function buildServer(deps) {
             status: z.enum(["staged", "running", "complete", "stopped"]).optional(),
             phase: z.number().optional(),
             effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+            sessionId: z.string().optional(),
         }),
     }, wrap((a) => {
         const d = dir();
@@ -1584,6 +1585,10 @@ export function buildServer(deps) {
                     ceiling,
                     answers: a.answers,
                     effort: a.effort,
+                    sessionId: a.sessionId, // #431 -- the one session whose refusals count
+                    // #433 -- the breaker's limit is staged here, where the runs folder
+                    // is protected; a mid-run edit to cairn.json governs the next run only
+                    breakerLimit: loadConfig(d).auto.breaker,
                 });
             }
             case "read":

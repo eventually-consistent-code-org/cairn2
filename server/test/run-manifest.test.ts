@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   composeFreezeComment,
   createRunManifest,
@@ -488,5 +488,76 @@ describe("the circuit breaker's freeze (#358)", () => {
     expect(text).toContain("re-stage the remaining phases with /cairn:auto --batch");
     expect(text).not.toContain(projectDir);
     expect(text).not.toContain(baseDir);
+  });
+});
+
+// #431 -- the manifest names the run's session, so the breaker counts only
+// that session's refusals and the run guard freezes only it. The verb passes
+// the staging shell's id; a blank or absent one is null for the run guard to
+// stamp from the first call of a session working in `checkout`.
+describe("the run's session (#431)", () => {
+  it("records the staging session's id and the checkout it was staged from; blank or absent reads null", () => {
+    const { projectDir, baseDir } = setup();
+    const named = createRunManifest(projectDir, {
+      runId: "run-named", phases: PHASES, sessionId: "sess-1", createdAt: CREATED, baseDir,
+    });
+    expect(named.sessionId).toBe("sess-1");
+    expect(named.checkout).toBe(resolve(projectDir));
+    expect(readRunManifest(projectDir, "run-named", baseDir)).toMatchObject({ sessionId: "sess-1", checkout: resolve(projectDir) });
+
+    const bare = createRunManifest(projectDir, { runId: "run-bare", phases: PHASES, createdAt: CREATED, baseDir });
+    expect(bare.sessionId).toBeNull();
+    expect(readRunManifest(projectDir, "run-bare", baseDir).sessionId).toBeNull();
+    const blank = createRunManifest(projectDir, { runId: "run-blank", phases: PHASES, sessionId: "  ", createdAt: CREATED, baseDir });
+    expect(blank.sessionId).toBeNull();
+  });
+
+  it("the stamp the run guard writes survives the schema, and a manifest from before the field still reads", () => {
+    const { projectDir, baseDir } = setup();
+    createRunManifest(projectDir, { runId: "run-stamp", phases: PHASES, createdAt: CREATED, baseDir });
+    const path = runManifestPath(projectDir, "run-stamp", baseDir);
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    onDisk.sessionId = "sess-first"; // as breaker.mjs stampRunSession writes it
+    writeFileSync(path, JSON.stringify(onDisk));
+    expect(readRunManifest(projectDir, "run-stamp", baseDir).sessionId).toBe("sess-first");
+
+    delete onDisk.sessionId;
+    delete onDisk.checkout;
+    onDisk.runId = "run-old";
+    writeFileSync(runManifestPath(projectDir, "run-old", baseDir), JSON.stringify(onDisk));
+    const old = readRunManifest(projectDir, "run-old", baseDir);
+    expect(old.sessionId).toBeUndefined();
+    expect(old.checkout).toBeUndefined();
+  });
+});
+
+// #433 -- the breaker's limit is staged into the manifest, where the runs
+// folder is protected, and read from there; cairn.json is the owner's default
+// for the next run, never the live one.
+describe("the staged breaker limit (#433)", () => {
+  it("records auto.breaker as it read at staging, and leaves the field out when none was given", () => {
+    const { projectDir, baseDir } = setup();
+    const staged = createRunManifest(projectDir, {
+      runId: "run-limit", phases: PHASES, breakerLimit: 5, createdAt: CREATED, baseDir,
+    });
+    expect(staged.breakerLimit).toBe(5);
+    expect(readRunManifest(projectDir, "run-limit", baseDir).breakerLimit).toBe(5);
+    const off = createRunManifest(projectDir, { runId: "run-off", phases: PHASES, breakerLimit: 0, createdAt: CREATED, baseDir });
+    expect(readRunManifest(projectDir, "run-off", baseDir).breakerLimit).toBe(0);
+    const none = createRunManifest(projectDir, { runId: "run-none", phases: PHASES, createdAt: CREATED, baseDir });
+    expect("breakerLimit" in none).toBe(false);
+    expect(readRunManifest(projectDir, "run-none", baseDir).breakerLimit).toBeUndefined();
+  });
+
+  it("a hand-edited limit that is negative or fractional fails the schema instead of passing as a limit", () => {
+    const { projectDir, baseDir } = setup();
+    createRunManifest(projectDir, { runId: "run-bad", phases: PHASES, breakerLimit: 3, createdAt: CREATED, baseDir });
+    const path = runManifestPath(projectDir, "run-bad", baseDir);
+    for (const bad of [-1, 2.5]) {
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      onDisk.breakerLimit = bad;
+      writeFileSync(path, JSON.stringify(onDisk));
+      expect(() => readRunManifest(projectDir, "run-bad", baseDir)).toThrow(/breakerLimit/);
+    }
   });
 });

@@ -609,11 +609,11 @@ describe("run guard hook", () => {
       // -- so the fixture must hash that same literal value.
       const { base, hash } = hashAndBaseForEnvDir(proj);
       mkdirSync(join(home, "runs"), { recursive: true });
+      // these tests judge one rule per command; the breaker (#358) counts
+      // only the session the manifest names (#431), and this one names
+      // none, so nothing here ever freezes -- its own tests are below
       writeFileSync(join(home, "runs", `${base}-${hash}-${runId}.json`),
         JSON.stringify({ version: 1, runId, status }));
-      // these tests judge one rule per command; the breaker (#358) would
-      // freeze a live run three refusals in -- its own tests are below
-      writeFileSync(join(proj, "cairn.json"), JSON.stringify({ auto: { breaker: 0 } }));
     }
     return { proj, home, runId };
   }
@@ -3902,18 +3902,17 @@ for (let i = 0; i < 300; i++) atomicWriteJson(${JSON.stringify(target)}, { write
 describe("circuit breaker (#358)", () => {
   const RUN = "run-brk";
 
-  /** A committed project with a cairn.json, an isolated cairn home, and optionally one run manifest. */
+  /** A committed project with a cairn.json, an isolated cairn home, and optionally one run
+   *  manifest. `breaker` is the limit staged INTO the manifest (#433) -- the breaker never
+   *  reads cairn.json for it, so the fixture seeds nothing there. */
   function breakerFixture(opts: { status?: string; breaker?: number } = {}) {
     const proj = tmpProj();
     gitInit(proj);
     stageFile(proj, "seed.txt", "seed\n");
     execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
-    writeFileSync(join(proj, "cairn.json"), JSON.stringify({
-      tracker: { type: "github", config: { repo: "o/r" } },
-      ...(opts.breaker !== undefined ? { auto: { breaker: opts.breaker } } : {}),
-    }));
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     const home = freshDir("cairn-hooks-breaker-home-");
-    if (opts.status) writeManifest(home, proj, RUN, opts.status);
+    if (opts.status) writeManifest(home, proj, RUN, opts.status, undefined, opts.breaker);
     return { proj, home };
   }
 
@@ -3922,15 +3921,19 @@ describe("circuit breaker (#358)", () => {
   const manifestPath = (home: string, proj: string, runId: string) =>
     join(home, "runs", `${projectKey(proj)}-${runId}.json`);
 
-  /** A full manifest, as the server writes one: push authority granted, phase 1 in flight. */
-  function writeManifest(home: string, proj: string, runId: string, status: string, created = "2026-10-22T00:00:00.000Z") {
+  /** A full manifest, as the server writes one: push authority granted, phase 1 in flight,
+   *  staged by session "sess-run" (#431 -- only that session's refusals count), at the
+   *  default limit unless `breakerLimit` says otherwise (#433). */
+  function writeManifest(
+    home: string, proj: string, runId: string, status: string, created = "2026-10-22T00:00:00.000Z", breakerLimit = 3,
+  ) {
     mkdirSync(join(home, "runs"), { recursive: true });
     writeFileSync(manifestPath(home, proj, runId), JSON.stringify({
       version: 1, runId, project: basename(proj), created,
       phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
       ceiling: null,
       pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
-      status, currentPhase: 1,
+      status, currentPhase: 1, sessionId: "sess-run", checkout: proj, breakerLimit,
     }, null, 2));
   }
 
@@ -4029,7 +4032,7 @@ describe("circuit breaker (#358)", () => {
     expect(rows(bare.home, bare.proj)).toHaveLength(3);
   });
 
-  it("auto.breaker: 0 turns the freeze off, and the rows are still written", () => {
+  it("a staged limit of 0 (auto.breaker: 0 at staging) turns the freeze off, and the rows are still written", () => {
     const { proj, home } = breakerFixture({ status: "running", breaker: 0 });
     for (let i = 0; i < 4; i++) {
       const r = resetHard(proj, home);
@@ -4796,7 +4799,7 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
   };
   const jiraAnd = (name: string, content: string) => (c: Ctx) => {
     writeFileSync(join(c.root, "cairn.json"),
-      JSON.stringify({ tracker: { type: "jira", config: { projectKey: "DRILL" } }, auto: { breaker: 0 } }));
+      JSON.stringify({ tracker: { type: "jira", config: { projectKey: "DRILL" } } }));
     stage(name, content)(c);
   };
   const committedThenDirty = (c: Ctx) => {
@@ -5028,9 +5031,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
     stageFile(root, "seed.txt", "seed\n");
     execFileSync("git", ["commit", "-q", "-m", "init", "--no-gpg-sign"], { cwd: root });
     mkdirSync(join(root, "pkg", "lib"), { recursive: true });
-    // the breaker (#358) would freeze a live run three refusals in; these rows judge one rule each
+    // these rows judge one rule each; the breaker (#358) counts only the session a manifest
+    // names (#431) and the manifests here name none, so nothing in this block ever freezes
     writeFileSync(join(root, "cairn.json"),
-      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } }, auto: { breaker: 0 } }));
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
     mkdirSync(join(plugin, "hooks", "scripts"), { recursive: true });
     writeFileSync(join(plugin, "hooks", "hooks.json"), "{}");
     return { root, home, cairnHome, plugin };
@@ -5320,5 +5324,189 @@ syncBuiltinESMExports();
     // and the live file is back, empty, ready for the next append
     expect(existsSync(live)).toBe(true);
     expect(readFileSync(live, "utf8")).toBe("");
+  });
+});
+
+// #431: the breaker attributed every refusal on the project to the newest
+// live run, whoever refused it. An interactive session in the main checkout
+// that tried to switch branches while a run was live was refused BECAUSE a
+// run was live, and three of those froze the run and then refused that
+// session's own pushes as "the run's". The manifest now records the staging
+// session's id; the breaker counts only that session's refusals; the run
+// guard's frozen-session rule compares against the recorded id; a manifest
+// with no id yet counts nothing. Where the staging shell had no session id,
+// the run guard stamps it from the first hook event of a session whose
+// working directory is the run's checkout.
+describe("the breaker counts only the run's own session (#431)", () => {
+  const RUN = "run-own";
+
+  /** A committed project, an isolated cairn home, and one running manifest staged by `sessionId`. */
+  function fixture(sessionId: string | null, checkout?: string) {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    const home = freshDir("cairn-hooks-own-session-home-");
+    mkdirSync(join(home, "runs"), { recursive: true });
+    const created = "2026-11-03T00:00:00.000Z";
+    writeFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), JSON.stringify({
+      version: 1, runId: RUN, project: basename(proj), created,
+      phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
+      ceiling: null,
+      pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
+      status: "running", currentPhase: 1, sessionId, checkout: checkout ?? proj,
+    }, null, 2));
+    return { proj, home };
+  }
+
+  const manifest = (home: string, proj: string) =>
+    JSON.parse(readFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), "utf8"));
+
+  const rows = (home: string, proj: string): Array<Record<string, unknown>> => {
+    const path = join(home, "refusals", `${projectKey(proj)}.jsonl`);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
+
+  /** One run-guard call from `session`, standing in `cwd`. */
+  const guard = (proj: string, home: string, command: string, session: string, cwd = proj) =>
+    runHookRaw(RUNGUARD, proj, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd, session_id: session }),
+      { CAIRN_HOME: home });
+
+  it("another session's refusals leave the run running and that session pushing; the run's own three freeze it", () => {
+    const { proj, home } = fixture("sess-run");
+    // the owner's session, in the chair: refused each time, counted never
+    for (let i = 0; i < 3; i++) {
+      const r = guard(proj, home, "git reset --hard", "sess-owner");
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(home, proj).status).toBe("running");
+    expect(rows(home, proj)).toHaveLength(3);
+    expect(rows(home, proj).every((r) => !("run_id" in r))).toBe(true);
+    // and it still pushes its feature branch
+    expect(guard(proj, home, "git push origin feature", "sess-owner").status).toBe(0);
+
+    // the run's own session: three refusals freeze it, and only its rows carry the run id
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain("refusal 2 of 3");
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain(`batch run ${RUN} is frozen`);
+    const m = manifest(home, proj);
+    expect(m.status).toBe("stopped");
+    expect(m.stop).toMatchObject({ reason: "breaker", count: 3, sessions: ["sess-run"] });
+    expect(rows(home, proj).filter((r) => r.run_id === RUN).map((r) => r.session_id)).toEqual(["sess-run", "sess-run", "sess-run"]);
+
+    // frozen: the run's session pushes nothing; the other session is untouched
+    const own = guard(proj, home, "git push origin feature", "sess-run");
+    expect(own.status).toBe(2);
+    expect(own.stderr).toContain("this session is the run's");
+    expect(guard(proj, home, "git push origin feature", "sess-owner").status).toBe(0);
+  });
+
+  it("a manifest with no session id yet counts nothing, from any session", () => {
+    const { proj, home } = fixture(null, join(tmpdir(), "somewhere-else"));
+    for (const session of ["sess-a", "sess-b", "sess-a", "sess-a"]) {
+      const r = guard(proj, home, "git reset --hard", session);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(home, proj).status).toBe("running");
+    expect(manifest(home, proj).sessionId).toBeNull();
+    expect(rows(home, proj).every((r) => !("run_id" in r))).toBe(true);
+  });
+
+  it("with no id staged, the run guard stamps the first session whose working directory is the run's checkout", () => {
+    const { proj, home } = fixture(null);
+    // a session elsewhere -- another checkout -- is not the run's, allowed or refused
+    const elsewhere = freshDir("cairn-hooks-own-session-elsewhere-");
+    expect(guard(proj, home, "git status", "sess-elsewhere", elsewhere).status).toBe(0);
+    expect(manifest(home, proj).sessionId).toBeNull();
+    // the first event from the checkout itself stamps the run -- an allowed call, no refusal needed
+    expect(guard(proj, home, "git status", "sess-first").status).toBe(0);
+    expect(manifest(home, proj)).toMatchObject({ status: "running", sessionId: "sess-first", currentPhase: 1 });
+    // stamped once: a later session from the same folder does not take it over
+    expect(guard(proj, home, "git status", "sess-later").status).toBe(0);
+    expect(manifest(home, proj).sessionId).toBe("sess-first");
+    // from here the stamped session's refusals count and no other's do
+    expect(guard(proj, home, "git reset --hard", "sess-later").stderr).not.toContain("circuit breaker");
+    expect(guard(proj, home, "git reset --hard", "sess-first").stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+  });
+});
+
+// #433: the breaker read its limit from cairn.json on every refusal -- the
+// agent's own configuration surface, written by the tune verb, which the
+// harness guard does not protect -- so a headless run that kept being refused
+// could write auto.breaker to 0 and never freeze. A freeze authority the
+// frozen party can disable is not one. run_manifest create now snapshots
+// auto.breaker into the manifest as breakerLimit, where the runs folder is
+// already a protected zone, and the breaker reads it there; the cairn.json
+// value is the owner's default for the next run, never the live one.
+describe("a running batch cannot switch its own breaker off (#433)", () => {
+  const RUN = "run-limit";
+  const tracker = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  /** A committed project with a cairn.json, an isolated cairn home, and one running manifest the run's session staged. */
+  function fixture(manifestExtra: Record<string, unknown>, auto?: Record<string, unknown>) {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ ...tracker, ...(auto ? { auto } : {}) }));
+    const home = freshDir("cairn-hooks-staged-limit-home-");
+    mkdirSync(join(home, "runs"), { recursive: true });
+    const created = "2026-11-03T00:00:00.000Z";
+    writeFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), JSON.stringify({
+      version: 1, runId: RUN, project: basename(proj), created,
+      phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
+      ceiling: null,
+      pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
+      status: "running", currentPhase: 1, sessionId: "sess-run", checkout: proj, ...manifestExtra,
+    }, null, 2));
+    return { proj, home };
+  }
+
+  const manifest = (home: string, proj: string) =>
+    JSON.parse(readFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), "utf8"));
+
+  /** One run-guard refusal from the run's own session. */
+  const refuse = (proj: string, home: string) =>
+    runHookRaw(RUNGUARD, proj, JSON.stringify({
+      tool_name: "Bash", tool_input: { command: "git reset --hard" }, cwd: proj, session_id: "sess-run",
+    }), { CAIRN_HOME: home });
+
+  it("a mid-run change to the configured limit leaves the staged limit in force", () => {
+    const { proj, home } = fixture({ breakerLimit: 3 });
+    expect(refuse(proj, home).stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+    expect(refuse(proj, home).stderr).toContain("refusal 2 of 3");
+    // the run, refused twice, edits its own project config to switch the breaker off
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ ...tracker, auto: { breaker: 0 } }));
+    const third = refuse(proj, home);
+    expect(third.status).toBe(2);
+    expect(third.stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(home, proj)).toMatchObject({ status: "stopped", stop: { reason: "breaker", limit: 3, count: 3 } });
+  });
+
+  it("the limit is the manifest's: 0 staged turns the freeze off whatever cairn.json says now, and a wider one is honoured", () => {
+    const off = fixture({ breakerLimit: 0 }, { breaker: 3 });
+    for (let i = 0; i < 4; i++) {
+      const r = refuse(off.proj, off.home);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(off.home, off.proj).status).toBe("running");
+
+    const wide = fixture({ breakerLimit: 5 }, { breaker: 1 });
+    for (let i = 1; i <= 4; i++) expect(refuse(wide.proj, wide.home).stderr).toContain(`refusal ${i} of 5`);
+    expect(refuse(wide.proj, wide.home).stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(wide.home, wide.proj).stop).toMatchObject({ limit: 5, count: 5 });
+  });
+
+  it("a manifest staged before the limit was recorded freezes at the default, never at what cairn.json says now", () => {
+    const { proj, home } = fixture({}, { breaker: 1 });
+    expect(refuse(proj, home).stderr).toContain("refusal 1 of 3");
+    expect(refuse(proj, home).stderr).toContain("refusal 2 of 3");
+    expect(refuse(proj, home).stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(home, proj).stop).toMatchObject({ limit: 3, count: 3 });
   });
 });

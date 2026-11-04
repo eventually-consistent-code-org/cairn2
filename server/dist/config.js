@@ -115,10 +115,12 @@ export const ConfigSchema = z.object({
         .prefault({}),
     // The circuit breaker (#358): guard refusals inside a live headless batch
     // run that freeze it. 0 turns the freeze off; refusals are still logged.
-    // The guards read this key raw from cairn.json (hooks never import the
-    // server) and treat anything but a whole number >= 0 as the default, 3 --
-    // this schema is what refuses the bad value at load. Strict like
-    // `verify`: an unknown key here is a typo, refused.
+    // run_manifest create copies this value into the manifest as breakerLimit
+    // (#433) and the guards read it THERE, never from cairn.json mid-run --
+    // the live run could edit this file; the runs folder is protected. So
+    // this is the owner's default for the next run, and this schema is what
+    // refuses a bad value at load. Strict like `verify`: an unknown key here
+    // is a typo, refused.
     auto: z
         .strictObject({ breaker: z.number().int().min(0).default(3) })
         .prefault({}),

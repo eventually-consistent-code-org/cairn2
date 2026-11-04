@@ -25,9 +25,11 @@
  *
  * Breaker (#358): every refusal is also handed to breaker.mjs, which
  *   appends its audit row (no raw command, a digest of it) and, while a
- *   batch run is live, counts it toward freezing the run. A run the breaker
- *   froze is refused any push from its own sessions -- the manifest reads
- *   `stopped`, which on its own would lift the mid-run push rule.
+ *   batch run is live, counts it toward freezing the run -- only from the
+ *   run's own session, the one its manifest names (#431); another session's
+ *   refusal counts nothing. A frozen run is refused any push from that
+ *   session alone. A run staged with no session takes the first call from a
+ *   session working in its checkout (breaker.mjs stampRunSession).
  *
  * Corpus: server/test/runguard-effects.test.ts (one test per effect, three
  *   spellings each, and the everyday git that stays allowed) and
@@ -724,13 +726,15 @@ function liveRuns(projectDir, baseDir) {
 }
 
 /**
- * True when a run the breaker froze is this session's own (#358): the
- * session ids of the refusals it counted (stop.sessions). Another session
- * -- the owner's, in the chair -- is never frozen. No session id, no match.
+ * True when a run the breaker froze is this session's own (#358, #431): the
+ * session the manifest names (sessionId -- the one whose refusals froze it),
+ * never the sessions its stop block happens to list. Another session -- the
+ * owner's, in the chair -- is never frozen, whatever it was refused. No
+ * session id, no match. Asserted: hooks.test.ts, "the breaker counts only
+ * the run's own session".
  */
 function frozenFor(state, sessionId) {
-  return typeof sessionId === "string" && sessionId !== ""
-    && Array.isArray(state?.stop?.sessions) && state.stop.sessions.includes(sessionId);
+  return typeof sessionId === "string" && sessionId !== "" && state?.sessionId === sessionId;
 }
 
 /**
@@ -1496,14 +1500,25 @@ function judgeLine(line, start, ctx) {
 
 try {
   const payload = JSON.parse(readFileSync(0, "utf8"));
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  CALL = { payload, projectDir };
+
+  // #431 -- a run staged with no session id takes the first session seen
+  // working in its own checkout, whatever the call: before any line is
+  // judged, so an allowed call stamps it too. In its own try, so a broken
+  // breaker stamps nothing and changes no judgement here.
+  try {
+    if (typeof BREAKER?.stampRunSession === "function") BREAKER.stampRunSession({ payload, projectDir });
+  } catch {
+    // the breaker's own failure: nothing stamped, the guard judges as before
+  }
+
   const tool = toolLines(payload);
   if (!tool.lines.length) process.exit(0);
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   const baseDir = process.env.CAIRN_HOME || join(homedir(), ".cairn");
   const cwd = resolve(payload?.cwd || projectDir);
   const allowDestructive = process.env[DESTRUCTIVE_ENV] === "1";
-  CALL = { payload, projectDir };
 
   // Read the run manifests at most once, and only if a command needs them
   let runs;
@@ -1587,6 +1602,11 @@ try {
  *   #432  a breaker that loads but misbehaves (no export, throws, returns a
  *         non-array) never turns a refusal into an allow: the record call is
  *         in its own try and its result type-checked, in all three guards
+ *   #431  the breaker counts only the run's own session: the manifest names
+ *         it (sessionId -- from the verb, else the first call from the run's
+ *         checkout stamps it), frozenFor compares against that id alone, and
+ *         a manifest with no id counts nothing (hooks.test.ts, "the breaker
+ *         counts only the run's own session")
  *   #363  no stash across linked worktrees: stash pop, apply and drop are
  *         discards-work rows under the linkedWorktrees probe (`git worktree
  *         list --porcelain`, more than one entry), no fourth effect; one

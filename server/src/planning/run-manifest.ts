@@ -33,6 +33,10 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
+ *   The run's session and the staged limit (#431, #433): `sessionId` names
+ *   the staging session, the only one counted toward the freeze and the only
+ *   one frozen; `breakerLimit` is `auto.breaker` at staging, read from here.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -381,6 +385,20 @@ export interface RunManifestState {
   /** Why the run stopped, when something other than the executor stopped
    * it (#358): today only the circuit breaker, written by the guards. */
   stop?: RunStop;
+  /** The session that staged the run (#431): the auto verb's
+   * $CLAUDE_CODE_SESSION_ID, else null until the run guard stamps the
+   * first session whose working directory is `checkout`. The breaker
+   * counts only this session's refusals; null counts nothing. Absent on
+   * manifests written before it existed, which read the same as null. */
+  sessionId?: string | null;
+  /** The checkout the run was staged from, resolved (#431): what the run
+   * guard's stamp compares a session's working directory against. */
+  checkout?: string;
+  /** cairn.json's `auto.breaker` as it read at staging (#433): the refusals
+   * that freeze this run, 0 off. The breaker reads it here, never from
+   * cairn.json mid-run. Absent on manifests written before it existed,
+   * which the breaker reads as its default, 3. */
+  breakerLimit?: number;
 }
 
 /** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
@@ -470,6 +488,9 @@ export const RunManifestSchema: z.ZodType<RunManifestState> = z.object({
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
   currentPhase: z.number().optional(),
   stop: RunStopSchema.optional(),
+  sessionId: z.string().nullable().optional(),
+  checkout: z.string().optional(),
+  breakerLimit: z.number().int().min(0).optional(),
 });
 
 // Internals
@@ -581,6 +602,10 @@ export function createRunManifest(
     ceiling?: { tokens?: number; usd?: number } | null;
     answers?: StagedAnswer[];
     effort?: RunManifestState["effort"];
+    /** The staging shell's session id (#431); blank or absent reads null. */
+    sessionId?: string | null;
+    /** cairn.json's auto.breaker at staging (#433); absent leaves the field out. */
+    breakerLimit?: number;
     createdAt?: string; // injectable for tests; wall clock otherwise
     baseDir?: string;
   },
@@ -614,6 +639,13 @@ export function createRunManifest(
     ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
     ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
     status: "staged",
+    // #431 -- the run's session, or null for the run guard to stamp; the
+    // checkout is what the stamp compares a session's working directory against
+    sessionId: typeof opts.sessionId === "string" && opts.sessionId.trim() ? opts.sessionId : null,
+    checkout: resolve(projectDir),
+    // #433 -- the limit the breaker reads for this run, snapshotted here where
+    // the runs folder is protected; cairn.json governs the next run only
+    ...(opts.breakerLimit !== undefined ? { breakerLimit: opts.breakerLimit } : {}),
   };
   writeManifestFile(path, state);
   return state;

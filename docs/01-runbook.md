@@ -1872,7 +1872,7 @@ nothing.
 | `continuity.recallIndex.maxCards` | positive integer | `20` | Banner card cap |
 | `drift.staleDays` | positive integer | `5` | Days of silence before `plan_drift` calls work stale |
 | `ship.confirm` | boolean | `true` | Ship's push-or-hold question before anything leaves the machine; `false` restores the silent push |
-| `auto.breaker` | integer ≥ 0 | `3` | Guard refusals inside a live headless batch run that freeze it (the circuit breaker, beside the run guard below). `0` turns the freeze off; every refusal is still logged |
+| `auto.breaker` | integer ≥ 0 | `3` | Guard refusals inside a live headless batch run that freeze it (the circuit breaker, beside the run guard below). `0` turns the freeze off; every refusal is still logged. Copied into the run manifest at staging and read from there — a mid-run edit governs the next run only (#433) |
 | `audit.debt.markers` | non-empty string[] | `["shortcut", "TODO", "FIXME", "HACK", "XXX"]` | The comment words `audit debt` greps for (each followed by a colon). An override replaces the list, never merges; an empty list is refused at load |
 | `leakGuard.enabled` | boolean | `true` | The commit-time leak guard hook, and the scan `peer_run` makes of outgoing input |
 | `leakGuard.allow` | string[] | `[]` | Path globs exempt from the guard |
@@ -2117,12 +2117,18 @@ refusal log (`~/.cairn/refusals/<project>.jsonl`): when, which guard and
 tool, the effect refused, a fixed reason, the session, the run if one is
 live, and a sha256 of the tool input. Never the command or the path
 itself: a command line can carry a credential, and the log outlives the
-session. While a batch run is live its rows carry its run id, and at
-`auto.breaker` of them (default 3) the breaker freezes the run — the
-manifest moves to `stopped` with a `stop` block naming the reason, the
-last three refusals and the sessions they came from. From then on:
+session. While a batch run is live, the rows from the run's own session
+— the one its manifest names, recorded at staging from the shell's
+`$CLAUDE_CODE_SESSION_ID`, else stamped by the run guard from the first
+call of a session working in the run's checkout — carry its run id, and
+at the limit staged into its manifest (`auto.breaker` as it read when the
+run was staged, default 3) the breaker freezes the run — the manifest
+moves to `stopped` with a `stop` block naming the reason, the
+last three refusals and the sessions they came from. A refusal from any
+other session is logged and never counted, so no session can freeze a
+run it never touched (#431). From then on:
 
-- the run's own sessions are refused any `git push` (a stopped manifest
+- the run's own session is refused any `git push` (a stopped manifest
   would otherwise lift the mid-run push rule). A workflow's subagents
   share their dispatching session's id, so they count as the run's —
   observed 2026-10-22, a claim about the harness that can expire. Your
@@ -2136,7 +2142,12 @@ last three refusals and the sessions they came from. From then on:
 A frozen run never resumes under its id: read the refusals in its
 report, fix the plan, then re-stage what's left with `/cairn:auto
 --batch`. There is no variable to set. `auto.breaker: 0` turns the
-freeze off; the rows are still written. An interactive session is never
+freeze off for the runs staged after it; the rows are still written.
+The limit is copied into the run manifest at staging and read from
+there, so a running batch cannot switch its own breaker off by editing
+`cairn.json` — a mid-run edit governs the next run only (#433; the runs
+folder is a protected zone, `cairn.json` is yours to edit on purpose). An
+interactive session is never
 frozen: with no live run the rows are only the audit, and a session that
 never named the run is never refused by its freeze. The breaker fails
 open — a refusal log it can't write or read means no breaker for that

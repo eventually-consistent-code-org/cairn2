@@ -33,6 +33,10 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
+ *   The run's session and the staged limit (#431, #433): `sessionId` names
+ *   the staging session, the only one counted toward the freeze and the only
+ *   one frozen; `breakerLimit` is `auto.breaker` at staging, read from here.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -378,6 +382,9 @@ export const RunManifestSchema = z.object({
     effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
     currentPhase: z.number().optional(),
     stop: RunStopSchema.optional(),
+    sessionId: z.string().nullable().optional(),
+    checkout: z.string().optional(),
+    breakerLimit: z.number().int().min(0).optional(),
 });
 // Internals
 /** Reads and validates the manifest file at `path`; null when absent. */
@@ -489,6 +496,13 @@ export function createRunManifest(projectDir, opts) {
         ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
         ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
         status: "staged",
+        // #431 -- the run's session, or null for the run guard to stamp; the
+        // checkout is what the stamp compares a session's working directory against
+        sessionId: typeof opts.sessionId === "string" && opts.sessionId.trim() ? opts.sessionId : null,
+        checkout: resolve(projectDir),
+        // #433 -- the limit the breaker reads for this run, snapshotted here where
+        // the runs folder is protected; cairn.json governs the next run only
+        ...(opts.breakerLimit !== undefined ? { breakerLimit: opts.breakerLimit } : {}),
     };
     writeManifestFile(path, state);
     return state;
