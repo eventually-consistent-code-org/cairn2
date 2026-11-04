@@ -103,6 +103,10 @@ const READS = {
   "read-tree": { alias: { n: "--dry-run" },
     longs: ["--dry-run", "--prefix", "--index-output", "--exclude-per-directory"],
     valued: ["--prefix", "--index-output", "--exclude-per-directory"] },
+  // #288 -- ref and reflog destruction; gc's --prune takes its date after `=` only
+  "update-ref": { alias: { d: "--delete" }, longs: ["--delete", "--no-deref", "--stdin", "--create-reflog"] },
+  gc: { longs: ["--prune", "--auto", "--aggressive"] },
+  prune: { alias: { n: "--dry-run" }, longs: ["--dry-run", "--expire"], valued: ["--expire"] },
   push: PUSH_READ,
 };
 
@@ -111,6 +115,10 @@ const DISCARDS = "it discards uncommitted work with no undo.";
 // Why a touches-owner-checkout row refuses mid-run in the owner's checkout (#216, #435)
 const REWRITES = "it rewrites the files or HEAD of the checkout it runs in.";
 
+// Why an explicit gc prune date refuses (#288): the default keeps two weeks of unreachable objects
+const PRUNES = "an explicit prune date reaches past the two weeks the default keeps -- `now` deletes every " +
+  "unreachable object, the dangling commits a reflog or `git fsck --lost-found` would have recovered.";
+
 // Why a stash pop, apply, drop or branch refuses once a repository has linked worktrees (#363, #438)
 const SHARED_STASH = "the stash is shared by every worktree of this repository, so the entry it takes " +
   "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
@@ -118,12 +126,15 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
 
 /**
  * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438,
- * #464, #288).
+ * #464, #468, #288).
  * Each row: the effect, the subcommand, the first word it needs (`action`,
  * read off before the flags are -- one word or a list, where "" is git's
  * default action: no word, or an option first, as in a bare `git stash`),
  * and `when` -- one of:
- *   flag       any of `names` is set (spelled out, shortened, or a short alias)
+ *   flag       any of `names` is set (spelled out, shortened, or a short
+ *              alias); with `value`, a regexp, only when the `=value` typed
+ *              with it, or the word it took, matches -- `gc --prune=now`,
+ *              never the bare `--prune` that keeps the default (#288)
  *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
  *              glob, the colon magic of #464, the repository root as an
  *              absolute path through the `repoRoot` probe, #288), or
@@ -149,6 +160,20 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * run in and nothing more, #468 -- `branch -D` (its reflog keeps the
  * commits), `restore --staged .` and `rm --cached .` (the index only, like
  * a plain `git reset`), deleting a feature branch, and `clean -n`.
+ *
+ * Refs (#288): a deleted branch is recoverable -- HEAD's reflog keeps the
+ * commits of any branch that was checked out, and `git fsck --lost-found`
+ * finds the rest as dangling objects -- until something prunes them. So
+ * `branch -D` stays off the table, and the commands that make its loss
+ * final are rows: `reflog delete` and `reflog expire` (the record), a
+ * `prune` that isn't a dry run and `gc` with an explicit prune date, typed
+ * or set inline as gc.pruneExpire (the objects), and `update-ref -d` (any
+ * ref, with its reflog, and none of `branch -d`'s checks). Their twins --
+ * a ref written, the reflog read, the default gc, `branch -D` itself --
+ * carry no row. Not seen, dated 2026-11-04: an `update-ref --stdin` batch
+ * whose delete lines arrive on stdin, and a gc.pruneExpire set in the
+ * repository's or the user's config rather than on the line. Asserted by
+ * runguard-effects.test.ts and runguard-guards.test.ts (#288).
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
  * apply or drop can take another worktree's work -- those rows, and the
@@ -218,6 +243,20 @@ export const EFFECT_TABLE = Object.freeze([
     cause: "more than one worktree", what: "`git stash branch`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "reflog", action: "expire", when: "always",
     what: "`git reflog expire`", why: "it erases the record git recovers lost commits from." },
+  // #288 -- the rest of ref and reflog destruction: what makes a deleted
+  // branch unrecoverable. `branch -D` itself stays off the table (below).
+  { effect: DISCARDS_WORK, sub: "reflog", action: "delete", when: "always",
+    what: "`git reflog delete`", why: "it erases the record git recovers lost commits from." },
+  { effect: DISCARDS_WORK, sub: "update-ref", when: "flag", names: ["--delete"],
+    what: "`git update-ref -d`", why: "it deletes any ref outright -- plumbing with none of `branch -d`'s checks -- " +
+      "and takes the ref's reflog with it, so nothing is left to find its commits by." },
+  { effect: DISCARDS_WORK, sub: "gc", when: "flag", names: ["--prune"], value: /^(?!(?:never|false)$)./i,
+    what: "`git gc --prune=<date>`", why: PRUNES },
+  { effect: DISCARDS_WORK, sub: "gc", when: "config", key: /^gc\.pruneExpire(?:=(?!(?:never|false)$)(.*))?$/i,
+    what: "`git gc --prune=<date>`", why: PRUNES },
+  { effect: DISCARDS_WORK, sub: "prune", when: "unlessOn", name: "--dry-run",
+    what: "`git prune`", why: "a bare prune deletes every unreachable object at once, and --expire only narrows " +
+      "it: the dangling commits a reflog or `git fsck --lost-found` would have recovered are gone." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--force", "--force-with-lease", "--force-if-includes"],
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "plusRef",
@@ -396,12 +435,15 @@ export function longNames(typed, names) {
  * every flag ever set, for the ones that refuse; `on` is each one's state
  * after any `--no-` negation, for the ones that make a command safe --
  * `git clean -n --no-dry-run` deletes. `typed` is the word that first set
- * each flag, cut at any `=` (#359): what a refusal names.
+ * each flag, cut at any `=` (#359): what a refusal names. `values` is what
+ * a long option was last given -- after its `=`, or the word it took --
+ * for the rows that read one (`gc --prune=now`, #288).
  */
 export function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
   const flags = new Set();
   const on = new Map();
   const typed = new Map();
+  const values = new Map();
   const words = [];
   const set = (n, word) => {
     flags.add(n);
@@ -415,7 +457,11 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
       const name = eq < 0 ? a : a.slice(0, eq);
       const hit = longNames(name, longs);
       for (const n of hit) set(n, name);
-      if (eq < 0 && hit.some((n) => valued.includes(n))) k++;
+      if (eq >= 0) for (const n of hit) values.set(n, a.slice(eq + 1));
+      if (eq < 0 && hit.some((n) => valued.includes(n))) {
+        for (const n of hit) values.set(n, args[k + 1] ?? "");
+        k++;
+      }
       if (!hit.length && name.startsWith("--no-")) {
         for (const n of longNames(`--${name.slice(5)}`, longs)) on.set(n, false);
       }
@@ -433,7 +479,7 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
     }
     words.push(a);
   }
-  return { flags, on, typed, words };
+  return { flags, on, typed, values, words };
 }
 
 /**
@@ -532,8 +578,9 @@ function rowCause(row, inv, probe) {
       // the action word it matched, or the subcommand for a row without one or a bare stash
       return row.action === undefined ? inv.sub : first || inv.sub;
     case "flag": {
-      const { flags, typed } = parsed();
-      const hit = row.names.find((n) => flags.has(n));
+      const { flags, typed, values } = parsed();
+      // a row with `value` wants the flag's value to match too (#288): `--prune=now`, not a bare `--prune`
+      const hit = row.names.find((n) => flags.has(n) && (row.value === undefined || row.value.test(values.get(n) ?? "")));
       return hit === undefined ? null : typed.get(hit) ?? hit;
     }
     case "unlessOn": {

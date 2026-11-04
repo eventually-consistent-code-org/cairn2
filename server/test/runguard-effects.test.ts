@@ -629,3 +629,62 @@ describe("git effects: the owner-checkout table meets its own definition (#468)"
       "submodule", "switch"]);
   });
 });
+
+describe("git effects: ref and reflog destruction discards work (#288)", () => {
+  // A deleted branch is recoverable: HEAD's reflog and `git fsck
+  // --lost-found` keep its commits -- until one of these runs. Each row:
+  // [the command, the word the refusal names, what the row calls it].
+  // Before #288 every one but `reflog expire` (#264) read read-only.
+  const refused: Array<[command: string, flag: string, what: string]> = [
+    ["git update-ref -d refs/heads/topic", "-d", "`git update-ref -d`"],
+    ["git update-ref --delete refs/heads/topic", "--delete", "`git update-ref -d`"],
+    ["git update-ref --del refs/remotes/origin/topic", "--del", "`git update-ref -d`"],
+    ["git update-ref -d refs/tags/v1 abc123", "-d", "`git update-ref -d`"],
+    ["git reflog delete HEAD@{1}", "delete", "`git reflog delete`"],
+    ["git reflog delete --rewrite refs/heads/main@{0}", "delete", "`git reflog delete`"],
+    ["git reflog expire --expire=now --all", "expire", "`git reflog expire`"],
+    ["git reflog expire --expire-unreachable=now refs/heads/main", "expire", "`git reflog expire`"],
+    ["git gc --prune=now", "--prune", "`git gc --prune=<date>`"],
+    ["git gc --prune=all", "--prune", "`git gc --prune=<date>`"],
+    ["git gc --aggressive --prune=1.minute.ago", "--prune", "`git gc --prune=<date>`"],
+    ["git gc -q --prun=now", "--prun", "`git gc --prune=<date>`"],
+    ["git prune", "prune", "`git prune`"],
+    ["git prune --expire=now", "prune", "`git prune`"],
+    ["git prune --expire now", "prune", "`git prune`"],
+    ["git prune -v --expire=2.weeks.ago", "prune", "`git prune`"],
+  ];
+
+  it("each discards work, carries no other effect, and names the word that caused it", () => {
+    for (const [c, flag, what] of refused) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.flag, c).toBe(flag);
+      expect(hit?.what, c).toBe(what);
+      expect(effects(c), c).toEqual([DISCARDS_WORK]);
+    }
+  });
+
+  it("the twins carry no row: a ref written, the reflog read, the default gc, a dry-run prune, the other prunes, and branch -D", () => {
+    for (const c of ["git update-ref refs/heads/topic HEAD", "git update-ref -m msg HEAD HEAD~1",
+      "git update-ref --no-deref refs/heads/topic HEAD~1", "git update-ref --stdin", "git update-ref --create-reflog refs/x HEAD",
+      "git reflog", "git reflog show", "git reflog show HEAD", "git reflog exists refs/heads/main",
+      "git gc", "git gc --auto", "git gc --aggressive", "git gc --prune", "git gc --no-prune", "git gc --prune=never",
+      "git gc --prune=false", "git gc -q",
+      "git prune -n", "git prune --dry-run", "git prune --dry-run --expire=now", "git prune -nv",
+      "git prune-packed", "git worktree prune", "git remote prune origin",
+      "git branch -D topic", "git branch -d topic", "git branch --delete --force topic"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the hostile spelling: gc.pruneExpire set inline makes a bare gc the `now` prune; `never` keeps it the everyday one", () => {
+    for (const c of ["git -c gc.pruneExpire=now gc", "git -c gc.pruneexpire=now gc --auto", "git -c gc.pruneExpire=1.hour.ago gc"]) {
+      expect(causes(c, DISCARDS_WORK).map((h) => [h.flag, h.what]), c).toEqual([["-c gc.pruneExpire", "`git gc --prune=<date>`"]]
+        .map(([f, w]) => [c.includes("pruneexpire") ? "-c gc.pruneexpire" : f, w]));
+    }
+    for (const c of ["git -c gc.pruneExpire=never gc", "git -c gc.pruneExpire=false gc", "git -c gc.auto=0 gc"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+    }
+  });
+});

@@ -52,9 +52,16 @@
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch;
  *   forced or whole-tree checkout/restore; a discarding switch; clean; a
- *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
- *   worktree remove; a stash pop, apply, drop or branch while more than
- *   one worktree shares the stash, #363, #438),
+ *   forced whole-tree rm, #434; stash clear; a forced worktree remove; a
+ *   stash pop, apply, drop or branch while more than one worktree shares
+ *   the stash, #363, #438; and the ref and reflog destruction that makes a
+ *   deleted branch unrecoverable, #288: reflog expire and delete,
+ *   update-ref -d, a prune that isn't a dry run, and gc with an explicit
+ *   prune date -- typed, or set inline as gc.pruneExpire. `branch -D`
+ *   stays off the table: HEAD's reflog and `git fsck --lost-found` keep its
+ *   commits until one of those runs. Not seen, dated 2026-11-04: an
+ *   `update-ref --stdin` batch's delete lines, and a gc.pruneExpire set in
+ *   the repository's or the user's config),
  *   options shortened as git allows (--har is --hard). A whole-tree
  *   pathspec is `.`, `..`, a bare glob, `:/`, `:(top)`, a lone `:` or any
  *   magic with nothing after it (#464: git reads `:` as everything), or the
@@ -1684,4 +1691,11 @@ try {
  *         discards-work overridden, a whole-tree restore, a clean or a
  *         forced whole-tree rm of the owner's checkout is still refused
  *         mid-run.
+ *   #288  the destructive-git table gaps after #264: ref and reflog
+ *         destruction joins discards-work (update-ref -d, reflog delete,
+ *         prune, gc with an explicit prune date or an inline gc.pruneExpire;
+ *         reflog expire was a #264 row already), `branch -D` stays off as
+ *         recoverable with the header saying why. The absolute-root
+ *         checkout spelling landed with #464; the mid-run restore, clean
+ *         and forced rm of the owner's checkout with #468.
  */

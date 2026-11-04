@@ -2885,3 +2885,70 @@ describe("run guard: the owner-checkout table meets its own definition (#468)", 
     }
   });
 });
+
+describe("run guard: ref and reflog destruction refused in every session (#288)", () => {
+  // Each row: [refused, its everyday twin]. A deleted branch is
+  // recoverable -- HEAD's reflog and `git fsck --lost-found` keep its
+  // commits -- until one of these runs; that is why `branch -D` stays off
+  // the table and these are on it. Before #288 every refused form but the
+  // reflog expire (#264) passed with exit 0; the 2026-10-07 sweep recorded
+  // the ref deletion passing.
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["git update-ref -d refs/heads/topic", "git update-ref refs/heads/topic HEAD"],
+    ["git update-ref --delete refs/remotes/origin/topic", "git update-ref -m msg refs/heads/topic HEAD"],
+    ["git update-ref --del refs/tags/v1", "git update-ref --no-deref refs/heads/topic HEAD~1"],
+    ["git reflog delete HEAD@{1}", "git reflog show"],
+    ["git reflog delete --rewrite main@{0}", "git reflog exists refs/heads/main"],
+    ["git reflog expire --expire=now --all", "git reflog"],
+    ["git gc --prune=now", "git gc"],
+    ["git gc --aggressive --prune=all", "git gc --aggressive"],
+    ["git gc -q --prun=1.hour.ago", "git gc --prune"],
+    ["git -c gc.pruneExpire=now gc", "git -c gc.pruneExpire=never gc"],
+    ["git prune", "git prune -n"],
+    ["git prune --expire=now", "git prune --dry-run --expire=now"],
+    ["git prune --expire 2.weeks.ago", "git prune-packed"],
+    ["timeout 5 git prune", "timeout 5 git worktree prune"],
+    ["git -C . reflog delete HEAD@{0}", "git -C . remote prune origin"],
+    ['echo "$(git update-ref -d refs/heads/topic)"', 'echo "$(git update-ref refs/heads/topic HEAD)"'],
+  ];
+
+  it("each is refused from the repository root and from a nested folder, naming the escape; its twin passes in both", () => {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    git(proj, "branch", "topic");
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("refused in every session");
+        expect(r.stderr, refused).toContain("effect: discards-work, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("branch -D stays off the table as recoverable; mentions pass; the owner's escape lifts each refused form", () => {
+    const { proj, home } = fixture();
+    git(proj, "branch", "topic");
+    for (const c of [
+      "git branch -D topic",
+      "git branch -d topic",
+      "git branch --delete --force topic",
+      "echo git prune",
+      'git commit -m "git reflog delete HEAD@{1}"',
+      "git log --oneline # git gc --prune=now",
+      "git gc --no-prune",
+      "git gc --prune=false",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+    for (const [refused] of pairs) {
+      expect(guard(proj, home, refused, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, refused).toBe(0);
+      if (!refused.startsWith("echo")) expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${refused}`).status, refused).toBe(0);
+    }
+  });
+});
