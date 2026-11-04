@@ -880,7 +880,11 @@ are members, and writes `cairn-workspace.json` at the root — nothing else;
 each member keeps its own tracker-first setup untouched. `focus <member>`
 repoints EVERY verb at that member — plan, work, issue calls, banner,
 handoff — because they all resolve through the same project dir; nothing
-downstream needs to know a workspace exists. `dispatch` decomposes a goal
+downstream needs to know a workspace exists. That repoint reaches a
+session launched at the workspace root (or in a folder no member owns);
+a session launched inside a member stays in that member whatever the
+focus says, and the tool result says which happened (`focusApplied`,
+#487). `dispatch` decomposes a goal
 into session-sized workstreams, queues them on the board, and prints
 copy-pasteable per-session opener lines — it NEVER auto-spawns sessions.
 The claim/update/done lifecycle runs from inside whichever session picked up
@@ -1832,11 +1836,12 @@ push, PR, review, merge. No locking machinery, on purpose.
 ### Workspaces
 
 `basecamp` (section 3) adds the multi-project layer: a workspace file
-naming member projects, a focus that repoints every verb, a dispatch board
-for parallel workstreams, and the focus-discipline rules that keep N
-parallel sessions from trampling each other. The compatibility guarantee is
-absolute: with no workspace file anywhere above your launch directory,
-nothing changes — every single-project setup behaves identically.
+naming member projects, a focus that repoints every verb of a root-launched
+session (a session launched inside a member is never redirected, #487), a
+dispatch board for parallel workstreams, and the focus-discipline rules that
+keep N parallel sessions from trampling each other. The compatibility
+guarantee is absolute: with no workspace file anywhere above your launch
+directory, nothing changes — every single-project setup behaves identically.
 
 ### Import and unplanned work
 

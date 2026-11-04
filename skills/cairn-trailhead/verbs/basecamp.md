@@ -48,11 +48,27 @@ workspace file itself.
 ## `basecamp focus <member>`
 
 `workspace_focus(project: <member>)`. One-line confirmation of what just
-changed, and the note that matters: **every verb now operates on that
-member** — `plan`, `work`, `issue_*` calls other verbs make, the
+changed, and the note that matters: **for a session launched at the
+workspace root (or in a folder no member owns), every verb now operates
+on that member** — `plan`, `work`, `issue_*` calls other verbs make, the
 banner, the handoff — all of it follows the focus automatically, because
 they resolve through the same project dir this call just repointed.
 Nothing downstream needs to know a workspace exists.
+
+**A session launched inside a member is never redirected** (#487). The
+focus file is one file under the workspace root, shared by every session
+beneath it; a session launched in member B is B's session, and another
+session's `basecamp focus a` does not move its writes. The tool result
+says which case you are in: `focusApplied: true` means this session now
+operates on the member; `focusApplied: false` with `projectDir` still your
+launch dir means the focus was written for the workspace but this session
+stays home. Say so in the confirmation, plainly — "focus is now `a`; this
+session stays in `b`" — never imply a redirect that did not happen.
+`workspace_status` reports the same three fields (`launchDir`,
+`resolvedProject`, `focusApplied`) on every call, so a redirect is a field
+to read, not a surprise to discover in another project's planning folder.
+(Asserted: `server/test/workspace-context.test.ts` "a member launch is
+never redirected" and the member-launch block in `server/test/mcp.test.ts`.)
 
 `focus <member>` on an unconfigured or unknown member fails with the
 tool's own error — say what it named as the problem, don't paper over
@@ -88,14 +104,20 @@ means N parallel sessions are running against the same workspace root at
 once, and the focus file (`.cairn/basecamp/focus.json`) is workspace-global
 — one file, shared by every session, last write wins. Another session's
 `basecamp focus` can flip it out from under you between two of your own
-tool calls. The step-5 race check below catches board writes that lose a
-race to another session's board update; it does **not** catch a wrong-member
-write, because by the time you re-read `board_get`, your `issue_create` or
-`issue_comment` already landed in whichever member happened to be focused
-at that instant — there's nothing left to detect. So: before ANY tracker or
-board write (not just at claim — every write, every step, every time),
-confirm `workspace_list()` still shows YOUR member as focus. If it doesn't,
-`workspace_focus` back to your member and re-verify before writing.
+tool calls. Which sessions that reaches is the #487 rule above: a session
+launched inside a member stays in that member whatever the focus says, so
+the safest shape for a dispatched workstream is to open the session in the
+member's own directory. A session launched at the workspace root is the
+one the focus moves, and for it the step-5 race check below catches board
+writes that lose a race to another session's board update; it does **not**
+catch a wrong-member write, because by the time you re-read `board_get`,
+your `issue_create` or `issue_comment` already landed in whichever member
+happened to be focused at that instant — there's nothing left to detect.
+So, from a root-launched session: before ANY tracker or board write (not
+just at claim — every write, every step, every time), confirm
+`workspace_status()` reports `focusApplied: true` and `resolvedProject`
+is YOUR member. If it doesn't, `workspace_focus` back to your member and
+re-verify before writing.
 
 **`claim <id>`** — in this order, always:
 
@@ -104,7 +126,11 @@ confirm `workspace_list()` still shows YOUR member as focus. If it doesn't,
    it, if visible), then pick different work.
 2. `workspace_focus(project: <that workstream's member>)` — focus
    switches next, because everything claim does next (the issue, the
-   session tag) needs to land in the right member's tracker.
+   session tag) needs to land in the right member's tracker. Read the
+   result: `focusApplied: false` with a `projectDir` that is not that
+   member means this session was launched inside a different member and
+   will not be moved (#487) — stop, say so, and open a session in the
+   workstream's own directory instead of creating the issue from here.
 3. If the workstream has no `issue` yet: `issue_create` in the now-focused
    member's tracker, plain-language title, `phase` left unset unless the
    workstream clearly maps to one. If it already names an issue, link to
