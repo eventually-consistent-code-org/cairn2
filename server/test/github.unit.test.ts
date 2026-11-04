@@ -309,3 +309,131 @@ describe("GitHubTracker re-phase (#142)", () => {
     expect(t.capabilities.hasPhaseReassign).toBe(true);
   });
 });
+
+// #485: the push gate is only as real as the service's rule on the default
+// branch. branchProtection() reads the rulesets endpoint first, falls back to
+// legacy branch protection, and never turns a failed read into an empty
+// list -- `source: "unreadable: <reason>"` carries the failure instead.
+describe("GitHubTracker branchProtection (#485)", () => {
+  /** URL-dispatching fetch: one canned reply per path suffix, every call recorded. */
+  function routeFetch(routes: Record<string, { status: number; body: unknown }>) {
+    const calls: string[] = [];
+    const f: FetchLike = async (url) => {
+      const u = String(url);
+      calls.push(u);
+      const hit = Object.keys(routes).find((suffix) => u.endsWith(suffix));
+      if (!hit) throw new Error(`unexpected url in test: ${u}`);
+      const fx = routes[hit];
+      return new Response(JSON.stringify(fx.body), { status: fx.status });
+    };
+    return { f, calls };
+  }
+  const repo = { status: 200, body: { full_name: "o/r", default_branch: "main" } };
+
+  it("rules present: the rulesets read names the four rules the gate rests on", async () => {
+    const { f, calls } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": {
+        status: 200,
+        body: [
+          { type: "pull_request", parameters: { required_approving_review_count: 1 } },
+          { type: "non_fast_forward" },
+          { type: "deletion" },
+          { type: "required_status_checks", parameters: {} },
+        ],
+      },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    await expect(t.branchProtection!()).resolves.toEqual({
+      default: "main",
+      rules: ["pull_request", "required_reviews:1", "non_fast_forward", "deletion"],
+      source: "rulesets",
+    });
+    // Rulesets answered, so the legacy endpoint is never asked.
+    expect(calls.some((u) => u.endsWith("/protection"))).toBe(false);
+  });
+
+  it("rules empty: rulesets [] and a legacy 'Branch not protected' is a measured no", async () => {
+    const { f } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+      "/repos/o/r/branches/main/protection": {
+        status: 404, body: { message: "Branch not protected" },
+      },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    await expect(t.branchProtection!()).resolves.toEqual({
+      default: "main", rules: [], source: "legacy",
+    });
+  });
+
+  it("legacy fallback: a 200 from the protection read maps reviews, force-push and deletion", async () => {
+    const { f } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+      "/repos/o/r/branches/main/protection": {
+        status: 200,
+        body: {
+          required_pull_request_reviews: { required_approving_review_count: 2 },
+          allow_force_pushes: { enabled: false },
+          allow_deletions: { enabled: true },
+        },
+      },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    await expect(t.branchProtection!()).resolves.toEqual({
+      default: "main",
+      rules: ["pull_request", "required_reviews:2", "non_fast_forward"],
+      source: "legacy",
+    });
+  });
+
+  it("unreadable: a 403 on the protection read is never an empty list", async () => {
+    const { f } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+      "/repos/o/r/branches/main/protection": {
+        status: 403, body: { message: "Resource not accessible by integration" },
+      },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    const out = await t.branchProtection!();
+    expect(out.default).toBe("main");
+    expect(out.rules).toEqual([]);
+    expect(out.source).toMatch(/^unreadable: .*403/);
+  });
+
+  it("unreadable: a 404 on the rulesets read (repo hidden from this token) carries the reason", async () => {
+    const { f } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 404, body: { message: "Not Found" } },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    const out = await t.branchProtection!();
+    expect(out.rules).toEqual([]);
+    expect(out.source).toMatch(/^unreadable: .*404/);
+  });
+
+  it("reuses the default branch the probe already read -- one /repos call, not two", async () => {
+    const { f, calls } = routeFetch({
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [{ type: "pull_request" }] },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    await t.probe!();
+    await t.branchProtection!();
+    expect(calls.filter((u) => u.endsWith("/repos/o/r")).length).toBe(1);
+  });
+
+  it("hostile twin: a default branch with a slash is one encoded path segment, not a deeper path", async () => {
+    const { f, calls } = routeFetch({
+      "/repos/o/r": { status: 200, body: { default_branch: "release/1.x" } },
+      "/repos/o/r/rules/branches/release%2F1.x": { status: 200, body: [{ type: "deletion" }] },
+    });
+    const t = new GitHubTracker({ repo: "o/r" }, f, () => "tok");
+    await expect(t.branchProtection!()).resolves.toEqual({
+      default: "release/1.x", rules: ["deletion"], source: "rulesets",
+    });
+    expect(calls.some((u) => u.endsWith("/rules/branches/release/1.x"))).toBe(false);
+  });
+});

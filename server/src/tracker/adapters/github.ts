@@ -4,8 +4,8 @@ import { CairnError } from "../../errors.js";
 import { fetchJson, paginate, type FetchLike } from "../http.js";
 import { runProbe } from "../probe.js";
 import type {
-  Capability, StateCategory, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase,
-  ProbeResult, Tracker,
+  BranchProtection, Capability, StateCategory, Issue, IssueCreate, IssuePatch, IssueState,
+  Milestone, Phase, ProbeResult, Tracker,
 } from "../types.js";
 import { assertCanonicalState, matchesState } from "../types.js";
 import { milestonesUnsupported, phaseCloseUnsupported } from "../unsupported.js";
@@ -54,6 +54,46 @@ interface GhIssue {
   labels: Array<{ name: string }>; milestone: { number: number } | null;
   assignee: { login: string } | null; updated_at: string; html_url: string;
   pull_request?: unknown;
+}
+
+// Wire shapes for the branch-protection read (#485), trimmed to the fields
+// the four reported rules need.
+interface GhRule { type: string; parameters?: { required_approving_review_count?: number } }
+interface GhLegacyProtection {
+  required_pull_request_reviews?: { required_approving_review_count?: number } | null;
+  allow_force_pushes?: { enabled?: boolean } | null;
+  allow_deletions?: { enabled?: boolean } | null;
+}
+
+/** Folds a review requirement into the rule list: the rule name, then the
+ *  count when the service states one. */
+function pushReviewRules(rules: string[], count: number | undefined): void {
+  rules.push("pull_request");
+  if (typeof count === "number") rules.push(`required_reviews:${count}`);
+}
+
+/** Rulesets answer: keep the rule types the gate rests on, drop the rest
+ *  (status checks, signatures, naming patterns are not the push gate). */
+function rulesFromRuleset(ruleset: GhRule[]): string[] {
+  const rules: string[] = [];
+  for (const r of ruleset) {
+    if (r.type === "pull_request") pushReviewRules(rules, r.parameters?.required_approving_review_count);
+    else if (r.type === "non_fast_forward" || r.type === "deletion") rules.push(r.type);
+  }
+  return rules;
+}
+
+/** Legacy answer: a protected branch blocks force pushes and deletions
+ *  unless the matching allow_* toggle is on, so an absent toggle reads as
+ *  the rule being in force. */
+function rulesFromLegacy(p: GhLegacyProtection): string[] {
+  const rules: string[] = [];
+  if (p.required_pull_request_reviews) {
+    pushReviewRules(rules, p.required_pull_request_reviews.required_approving_review_count);
+  }
+  if (p.allow_force_pushes?.enabled !== true) rules.push("non_fast_forward");
+  if (p.allow_deletions?.enabled !== true) rules.push("deletion");
+  return rules;
 }
 
 export class GitHubTracker implements Tracker {
@@ -107,7 +147,59 @@ export class GitHubTracker implements Tracker {
    *  the token is valid, not that the configured repo exists. One cheap
    *  call, same cost, but a typo'd repo now 404s instead of reading "ok". */
   async probe(): Promise<ProbeResult> {
-    return runProbe(() => this.api("GET", `/repos/${this.cfg.repo}`));
+    return runProbe(async () => {
+      // The same call carries the default branch; remember it so the
+      // branch-protection read (#485) does not ask twice.
+      const repo = await this.api("GET", `/repos/${this.cfg.repo}`) as { default_branch?: string };
+      if (typeof repo.default_branch === "string") this.defaultBranch = repo.default_branch;
+    });
+  }
+
+  private defaultBranch: string | undefined;
+
+  private async resolveDefaultBranch(): Promise<string> {
+    if (this.defaultBranch) return this.defaultBranch;
+    const repo = await this.api("GET", `/repos/${this.cfg.repo}`) as { default_branch?: string };
+    if (typeof repo.default_branch !== "string") {
+      throw new CairnError("TRACKER_DOWN", `no default_branch in the /repos/${this.cfg.repo} response`);
+    }
+    this.defaultBranch = repo.default_branch;
+    return this.defaultBranch;
+  }
+
+  /** What the service enforces on the default branch (#485): the rulesets
+   *  endpoint first, legacy branch protection when rulesets come back
+   *  empty. A read that fails is `source: "unreadable: <reason>"` with no
+   *  rules -- never an empty list dressed as a measurement (claims rule 2).
+   *  Endpoint shapes (rule `type` names, `required_approving_review_count`,
+   *  the legacy `allow_*` toggles, the 404 "Branch not protected" answer for
+   *  an unprotected branch) are a dated claim: as of 2026-11, per the GitHub
+   *  REST reference. Asserted against fixtures by github.unit.test.ts. */
+  async branchProtection(): Promise<BranchProtection> {
+    let branch = "unknown";
+    try {
+      branch = await this.resolveDefaultBranch();
+      const base = `/repos/${this.cfg.repo}`;
+      const seg = encodeURIComponent(branch);
+      const ruleset = await this.api("GET", `${base}/rules/branches/${seg}`) as GhRule[];
+      if (Array.isArray(ruleset) && ruleset.length > 0) {
+        return { default: branch, rules: rulesFromRuleset(ruleset), source: "rulesets" };
+      }
+      try {
+        const legacy = await this.api("GET", `${base}/branches/${seg}/protection`) as GhLegacyProtection;
+        return { default: branch, rules: rulesFromLegacy(legacy), source: "legacy" };
+      } catch (e) {
+        // GitHub's own spelling of "no protection here" is a 404 whose body
+        // says so -- that one is a measured empty, every other failure is not.
+        if (e instanceof CairnError && e.code === "NOT_FOUND" && /branch not protected/i.test(e.message)) {
+          return { default: branch, rules: [], source: "legacy" };
+        }
+        throw e;
+      }
+    } catch (e) {
+      const reason = e instanceof CairnError ? e.message : String(e);
+      return { default: branch, rules: [], source: `unreadable: ${reason}` };
+    }
   }
 
   private normalize(raw: GhIssue): Issue {

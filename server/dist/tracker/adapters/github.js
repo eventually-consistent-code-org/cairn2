@@ -37,6 +37,39 @@ export function resolveGithubToken(fromEnv = process.env.GITHUB_TOKEN, gh = ghAu
         throw new CairnError("AUTH_MISSING", "no GitHub credentials", "export GITHUB_TOKEN or run: gh auth login");
     }
 }
+/** Folds a review requirement into the rule list: the rule name, then the
+ *  count when the service states one. */
+function pushReviewRules(rules, count) {
+    rules.push("pull_request");
+    if (typeof count === "number")
+        rules.push(`required_reviews:${count}`);
+}
+/** Rulesets answer: keep the rule types the gate rests on, drop the rest
+ *  (status checks, signatures, naming patterns are not the push gate). */
+function rulesFromRuleset(ruleset) {
+    const rules = [];
+    for (const r of ruleset) {
+        if (r.type === "pull_request")
+            pushReviewRules(rules, r.parameters?.required_approving_review_count);
+        else if (r.type === "non_fast_forward" || r.type === "deletion")
+            rules.push(r.type);
+    }
+    return rules;
+}
+/** Legacy answer: a protected branch blocks force pushes and deletions
+ *  unless the matching allow_* toggle is on, so an absent toggle reads as
+ *  the rule being in force. */
+function rulesFromLegacy(p) {
+    const rules = [];
+    if (p.required_pull_request_reviews) {
+        pushReviewRules(rules, p.required_pull_request_reviews.required_approving_review_count);
+    }
+    if (p.allow_force_pushes?.enabled !== true)
+        rules.push("non_fast_forward");
+    if (p.allow_deletions?.enabled !== true)
+        rules.push("deletion");
+    return rules;
+}
 export class GitHubTracker {
     cfg;
     fetchImpl;
@@ -84,7 +117,60 @@ export class GitHubTracker {
      *  the token is valid, not that the configured repo exists. One cheap
      *  call, same cost, but a typo'd repo now 404s instead of reading "ok". */
     async probe() {
-        return runProbe(() => this.api("GET", `/repos/${this.cfg.repo}`));
+        return runProbe(async () => {
+            // The same call carries the default branch; remember it so the
+            // branch-protection read (#485) does not ask twice.
+            const repo = await this.api("GET", `/repos/${this.cfg.repo}`);
+            if (typeof repo.default_branch === "string")
+                this.defaultBranch = repo.default_branch;
+        });
+    }
+    defaultBranch;
+    async resolveDefaultBranch() {
+        if (this.defaultBranch)
+            return this.defaultBranch;
+        const repo = await this.api("GET", `/repos/${this.cfg.repo}`);
+        if (typeof repo.default_branch !== "string") {
+            throw new CairnError("TRACKER_DOWN", `no default_branch in the /repos/${this.cfg.repo} response`);
+        }
+        this.defaultBranch = repo.default_branch;
+        return this.defaultBranch;
+    }
+    /** What the service enforces on the default branch (#485): the rulesets
+     *  endpoint first, legacy branch protection when rulesets come back
+     *  empty. A read that fails is `source: "unreadable: <reason>"` with no
+     *  rules -- never an empty list dressed as a measurement (claims rule 2).
+     *  Endpoint shapes (rule `type` names, `required_approving_review_count`,
+     *  the legacy `allow_*` toggles, the 404 "Branch not protected" answer for
+     *  an unprotected branch) are a dated claim: as of 2026-11, per the GitHub
+     *  REST reference. Asserted against fixtures by github.unit.test.ts. */
+    async branchProtection() {
+        let branch = "unknown";
+        try {
+            branch = await this.resolveDefaultBranch();
+            const base = `/repos/${this.cfg.repo}`;
+            const seg = encodeURIComponent(branch);
+            const ruleset = await this.api("GET", `${base}/rules/branches/${seg}`);
+            if (Array.isArray(ruleset) && ruleset.length > 0) {
+                return { default: branch, rules: rulesFromRuleset(ruleset), source: "rulesets" };
+            }
+            try {
+                const legacy = await this.api("GET", `${base}/branches/${seg}/protection`);
+                return { default: branch, rules: rulesFromLegacy(legacy), source: "legacy" };
+            }
+            catch (e) {
+                // GitHub's own spelling of "no protection here" is a 404 whose body
+                // says so -- that one is a measured empty, every other failure is not.
+                if (e instanceof CairnError && e.code === "NOT_FOUND" && /branch not protected/i.test(e.message)) {
+                    return { default: branch, rules: [], source: "legacy" };
+                }
+                throw e;
+            }
+        }
+        catch (e) {
+            const reason = e instanceof CairnError ? e.message : String(e);
+            return { default: branch, rules: [], source: `unreadable: ${reason}` };
+        }
     }
     normalize(raw) {
         const labels = raw.labels.map((l) => l.name);

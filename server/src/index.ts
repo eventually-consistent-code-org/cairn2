@@ -31,6 +31,7 @@ import { makeTracker } from "./tracker/registry.js";
 import { CachedTracker } from "./tracker/cached.js";
 import { probeVerdictForError } from "./tracker/probe.js";
 import type {
+  BranchProtection,
   Tracker,
   Issue,
   IssueComment,
@@ -2406,18 +2407,32 @@ export function buildServer(deps: {
     },
     wrap(async () => {
       const d = dir();
+      let tracker: Tracker | undefined;
       const out: {
         tracker: ProbeResult;
+        branchProtection?: BranchProtection;
         docs?: ProbeResult;
         versions?: InstalledVersions;
         native?: NativeProbe;
         contextEconomy?: ThresholdDrift;
       } = {
         tracker: await safeProbe(async () => {
-          const t = await getTracker(d);
-          return t.probe ? t.probe() : { verdict: "ok" };
+          tracker = await getTracker(d);
+          return tracker.probe ? tracker.probe() : { verdict: "ok" };
         }),
       };
+      // Default-branch protection (#485): the push gate is the guard alone
+      // unless the service enforces a rule, so ship reads this first. Only
+      // trackers that hold the repository can answer; a verdict that is not
+      // ok skips the read and says so -- never an empty list for a read
+      // that did not happen (claims rule 2).
+      if (tracker?.branchProtection) {
+        out.branchProtection = out.tracker.verdict === "ok"
+          ? await tracker.branchProtection().catch((e: unknown) => ({
+            default: "unknown", rules: [], source: `unreadable: ${String(e)}` as const,
+          }))
+          : { default: "unknown", rules: [], source: `unreadable: tracker probe verdict ${out.tracker.verdict}` };
+      }
       const cfg = loadConfig(d);
       if (cfg.docs) {
         out.docs = await safeProbe(async () => {

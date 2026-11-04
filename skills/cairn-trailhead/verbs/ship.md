@@ -6,6 +6,21 @@ status: live
 
 Pre-ship gate, then ship:
 
+0. `config_probe()` — read `branchProtection` before anything else. The
+   service is where every route to a push ends (the run guard sees only
+   the agent's Bash tool; a plain terminal, a browser, a token in a script
+   never pass through it), so the gate is only as real as the rule the
+   repository enforces on its default branch. The probe looks for four:
+   `pull_request`, `required_reviews:<n>`, `non_fast_forward` (no force
+   push), `deletion`. When `rules` holds no `pull_request`, print one
+   line — "the push gate is the guard alone; no ruleset on <default>" —
+   and continue: measured, not blocking; the owner may run an unprotected
+   repository on purpose. When `source` starts `unreadable:`, print that
+   reason as the line instead — an unreadable protection is not an
+   empty one. Either line rides into the step-5 push summary. Trackers
+   that do not hold the repository (jira, linear, …) report no
+   `branchProtection`; say nothing. Asserted by probe-tools.test.ts and
+   github.unit.test.ts "(#485)"; dated 2026-11-04.
 1. `plan_drift()` — anything flagged: **stop** and report; do not push.
    The two exceptions are `stale-issue` and `stale-branch`, which are
    advisory: mention them in one line each with the rest of the summary and
@@ -26,6 +41,9 @@ Pre-ship gate, then ship:
 3. Engineer mode only (`user.mode: engineer` in cairn.json): no
    cairn-authored PR may still be awaiting human review — list any that
    are and stop. Human review is the merge gate; ship never overrides it.
+   That sentence rests on the default branch's ruleset, not on ship: with
+   no `pull_request` rule, step 0's line is the honest version of it
+   (dated 2026-11-04, #485).
 4. Docs catch-up (repo-local tier, gates passed, BEFORE the push
    confirmation): `docs_drift()` — for each verified phase being shipped
    that it flags, run the per-phase distill sequence (`distill <N>` in
@@ -42,7 +60,8 @@ Pre-ship gate, then ship:
    `N commits → origin/<branch>`, now including the generated-docs diff
    summary from step 4 (files, sections touched, ADR titles), plus any
    tracker mutations the gate itself performed (reassignments, ledger
-   repairs) — and ask ONE AskUserQuestion
+   repairs), plus step 0's branch-protection line when it printed one —
+   and ask ONE AskUserQuestion
    (push / hold). Push only on "push"; on "hold", stop and report.
    Any commit made after step 1 (plan docs, step-4 distill) moves HEAD
    past the drift stamp the run guard checks, so re-run `plan_drift()`
