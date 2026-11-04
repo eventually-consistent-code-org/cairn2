@@ -50,3 +50,11 @@ asks for stash rows under the owner-checkout effect as well; it adds its
 condition on top of these rows rather than a second set. A probe that
 cannot run — a non-repository folder, a failing git — answers no linked
 worktrees and the guard fails open, which the header states.
+
+## Amendment (2026-11-03)
+
+`git stash branch` joined the three rows: it pops an entry onto a new
+branch, so with linked worktrees it is the same destructive half under the
+same probe and the same reason. The pinned row list, the advisory, the
+guard header and the wave brief name the fourth action; the hook tests
+assert it (commit 326bd6b).

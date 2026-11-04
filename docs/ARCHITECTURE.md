@@ -121,13 +121,31 @@ reason.
   Azure Boards, ClickUp, Linear, and a zero-credential local backend)
   behind one normalized interface with per-backend capability flags, a
   shared HTTP core (retry/backoff, typed errors), and a contract test
-  suite every adapter must pass.
+  suite every adapter must pass. The interface carries one optional
+  question an adapter may answer — which category (open, in progress,
+  closed) a requested state name resolves to — so a caller that must
+  refuse a transition by its meaning rather than its spelling can ask;
+  today the local adapter answers it and the four adapters that accept
+  custom display names do not, which is the open half of that check and
+  is filed (#471).
 - `planning/` — plan artifacts, tracker mirroring, drift detection,
   per-phase distill manifests, milestone lifecycle — plus the headless-batch
   primitives: per-phase token estimation calibrated from recorded spend,
   the run manifest (push authorization and scope, ADR 0007), and the
   budget ledger enforcing the ceiling at phase/wave boundaries (ADR
   0008).
+
+  The plan status also derives, never asks for, what a fresh worktree
+  needs before code runs: the installer from the tracked lockfile at the
+  root and in each workspace package (`npm ci`, `pnpm install
+  --frozen-lockfile`, `bun install --frozen-lockfile`, `yarn --immutable`),
+  the ignored files a tracked `.worktreeinclude` lists for copying, and
+  whether a `.worktree-port` file exists to read. The wave brief pastes
+  those lines verbatim into the worker's standing rules and carries no
+  line at all when the repository has none of the three, so a worker
+  never installs from a guessed command. ADR 0032 — removeWhen: the
+  harness provisions a worktree (dependencies, ignored files, port) when
+  it creates one, so no brief has to say how.
 
   The plan↔tracker drift report has grown six reasons, and they are not
   all the same kind of thing. Two are errors the scan must not let pass:
@@ -166,11 +184,16 @@ reason.
   from timestamps it already controls (the claim comment, else the
   claim the server saw) and leaves a local receipt carrying that
   measurement with its source, the estimate with each number's
-  provenance, and the caller's own figure as a claim. The ledger
-  append consumes the receipt into one key=value segment on the line,
-  and falls back to git dates across the commit range when the close
-  measured nothing, since it is the only tool holding that range. A
-  missing receipt is written as a named degraded marker, never as
+  provenance, and the caller's own figure as a claim. A usage-limit
+  wait the platform narrated — recorded by the pause hook as rows in a
+  pauses log under the cairn home — is subtracted from the span and
+  reported beside it as paused minutes, so a run that sat at a limit for
+  two hours is not read as two hours of work (ADR 0020, amendment); the
+  log is read without a writer check today, which is filed (#470). The
+  ledger append consumes the receipt into one key=value segment on the
+  line, and falls back to git dates across the commit range when the
+  close measured nothing, since it is the only tool holding that range.
+  A missing receipt is written as a named degraded marker, never as
   blanks, and no part of this can fail a close or an append (ADRs 0020,
   0021).
 
@@ -179,19 +202,29 @@ reason.
   closes, writes the receipt and appends the ledger line through the one
   shared append; `issue_create` takes a claim, and the server resolves
   the base commit itself and keeps it as the stamp later checks key on.
-  With `verify.rerun` on (off by default) that append also re-runs the
-  owner-declared `verify:` line it reads out of the tracked plan the
-  owner approved (`plan_meta_set approve`, a stamp in local state) —
-  never the worker's string, never a line that changed since the
-  approval, never a line the run guard's effect classifier reads as
+  Every comment the server composes for a claim or a close passes the
+  same leak screen the hooks apply to a commit before it is posted: a
+  planning-directory path becomes a kind-named placeholder, and a
+  residual hit is refused with a typed code rather than posted (ADR 0016,
+  amendment). With `verify.rerun` on (off by default) the append also
+  re-runs the owner-declared `verify:` line it reads out of the tracked
+  plan the owner approved (`plan_meta_set approve`, a stamp in local
+  state) — never the worker's string, never a line that changed since
+  the approval, never a line the run guard's effect classifier reads as
   discarding work or moving a shared ref, and never a line it cannot
   classify, the one fail-closed check in cairn (#423) — under a minimal
   environment and a timeout — and records `observed` beside the claimed
   evidence; a mismatch is reported, never refused (ADR 0017,
-  amendments). The run manifest carries the circuit
-  breaker's stop as well: a run the hooks froze is refused its claims and
-  closes with `RUN_FROZEN`, and the one plain-language comment the freeze
-  owes is posted from here, once (ADR 0016, amendment). ADR 0026 —
+  amendments). The run manifest carries the circuit breaker's stop as
+  well: a run the hooks froze is refused its claims and closes with
+  `RUN_FROZEN`, and the one plain-language comment the freeze owes is
+  posted from here, once; an update that asks for a state whose category
+  resolves to in progress or closed is refused the same way, whatever
+  the state is called (ADR 0016, amendment). The manifest also records,
+  at staging, which session the run is — the id the staging shell
+  carried — and the breaker limit the project configuration held at that
+  moment, so the hooks judge the run by what was staged and never by a
+  file the run can edit (ADR 0033, in the hook section). ADR 0026 —
   removeWhen: every harness runs a skill-declared tool sequence
   atomically, so a chain with one right order can live in the verb file.
 
@@ -199,15 +232,31 @@ reason.
   write a `merge=union` attribute for it into the planning root's git
   attributes (idempotent; the write reports added-or-present), and the
   ledger's own header records that line order across branches is a merge
-  artifact. One precondition holds that up and is stated rather than
-  assumed: no two branches append lines for the same task. A closure on
-  one branch and its evidence fix-up on another read as closed or as
-  retracted depending on which side was merged into which — the phase's
-  closing security audit reproduced it, and the fix is filed for the next
-  hardening pass. ADR 0028 — removeWhen: the tracker alone is the record
-  of closures and no ledger file is ever merged.
+  artifact. The writer types what it writes: a base or head commit is a
+  7–40 character hex hash or the append is refused with a typed error
+  before any git call or tracker write, the range handed to git sits
+  behind `--end-of-options` with the path separator after it, and the
+  task reference, summary, evidence and note each pass through one
+  segment sanitizer so a field cannot spell a field separator; the
+  parser binds the last segment run on the line, so a forged passing
+  tail cannot hide the server's own observed result. The issue id and
+  close date do not yet pass the same sanitizer, which the closing audit
+  found and filed (#469). ADR 0034 — removeWhen: the ledger is a typed
+  store the tracker keeps, not a text file a tool parses. When two lines
+  speak for one task — a closure and a later evidence fix-up — the
+  readers rank them by commit ancestry (the line whose head descends
+  from the other's wins), then by the date on the line, then by file
+  order, and derive the phase's commit range the same way, so the merged
+  order of independent branches decides only when both the ancestry and
+  the day tie; that same-day independent case is the one the closing
+  audit reproduced and filed (#472). ADR 0028 — removeWhen: the tracker
+  alone is the record of closures and no ledger file is ever merged.
 - `memory/` — disposable FTS index + git-committed memory cards with
-  provenance, staleness checking, and phase/issue/role scopes.
+  provenance, staleness checking, and phase/issue/role scopes. A first
+  search against a project with no index reports that and creates
+  nothing; every tool annotated read-only is checked by one effect test
+  that runs it against a scratch project and a scratch cairn home and
+  asserts both are untouched afterwards.
 - `docs/` — documentation connectors (below) plus the marked-section
   writer: generated doc content lands only inside explicitly marked
   sections, never over hand-written prose (ADR 0006).
@@ -229,9 +278,12 @@ reason.
   steps of the audit verbs are two flags on one call. The debt mode's
   marker words are a configuration key (`audit.debt.markers`, default
   list, override replaces, empty refused); its dedup key rides in each
-  finding's detail, so the record schema did not move. ADR 0024 —
-  removeWhen: the tracker or platform turns source deferral markers into
-  tracked items on its own.
+  finding's detail, so the record schema did not move. The debt scan
+  never builds a shell line from the marker text it finds — the marker
+  is a single-quoted argument scoped by path, and the source comment it
+  matches is read as a specification, never as an instruction. ADR 0024
+  — removeWhen: the tracker or platform turns source deferral markers
+  into tracked items on its own.
 - `map/` — the project knowledge graph (build, query, diff).
 - `peers/` — external-CLI peer review and council runs (roster of
   five seats: codex, opencode, antigravity, grok, copilot; fixed-argv
@@ -410,7 +462,7 @@ rather than where it is written:
 | Key | Files | Why |
 |---|---|---|
 | **Per worktree** — the checkout folder, hashed | `handoff/`, `banner/`; active context stays in the checkout itself | one session's task in flight: two worktrees are two tasks |
-| **Per repository** — `git rev-parse --git-common-dir`, hashed | `index/`, `metrics/`, `observations/`, `state/` (the meter, the breaker-off flag), `loop/`, `yield/`, `outlook/`, `refusals/`, `runs/`, `ship-gate/`, `budget/` | knowledge of the project: every linked worktree reads and appends the same files, so a wave worker's observations and spend are the ones `retro` and the board see from the main checkout |
+| **Per repository** — `git rev-parse --git-common-dir`, hashed | `index/`, `metrics/`, `observations/`, `pauses/`, `state/` (the meter, the breaker-off flag), `loop/`, `yield/`, `outlook/`, `refusals/`, `runs/`, `ship-gate/`, `budget/` | knowledge of the project: every linked worktree reads and appends the same files, so a wave worker's observations and spend are the ones `retro` and the board see from the main checkout |
 
 A folder outside git falls back to the folder key, so it behaves exactly
 as before. One definition lives in `server/src/planning/run-manifest.ts`
@@ -419,12 +471,16 @@ as before. One definition lives in `server/src/planning/run-manifest.ts`
 byte for byte on a main checkout, a linked worktree and a plain folder.
 The observation log moved out of the checkout to the cairn home under the
 repository key, and rotates there: past a thousand rows the live file is
-renamed to a stamped closed segment and a fresh live file takes appends,
-so the live file is never rewritten; readers and `retro` read the live
-file plus the closed segments, and the retention guard prunes whole
-closed segments on rotation only. Every temp file in these stores carries
-the writer's pid and a random suffix, never a fixed name, so two writers
-cannot race on one rename.
+closed by linking it to a stamped segment name with a link that refuses
+an existing target — probing the segment number upward when another
+writer took the name first — and a fresh live file takes appends, so the
+live file is never rewritten and a segment another session just closed
+is never replaced; readers and `retro` read the live file plus the closed
+segments, and the retention guard prunes whole closed segments on
+rotation only. The pauses log beside it holds one append-only row per
+usage-limit event the platform narrated. Every temp file in these stores
+carries the writer's pid and a random suffix, never a fixed name, so two
+writers cannot race on one rename.
 
 On the first run after the upgrade, a file still under the old folder key
 is moved to the repository key with a hard link that refuses an existing
@@ -457,33 +513,57 @@ distinction matters more than the count.
 
 - **Recorders** write state and are invisible by construction: the
   breadcrumb that refreshes the session handoff, the observation
-  capture, the session-start resume injection, and the stop-time cost
-  tracker. Any error is a silent no-op — a recorder must never be the
-  reason a session stops. The observation capture appends one row to
-  the repository-keyed log and, past the cap, closes the live file by
-  renaming it to a stamped segment instead of rewriting it in place, so
-  a second hook writer loses nothing (one check-then-act window in the
-  rename remains and is filed; see the previous section).
+  capture, the session-start resume injection, the stop-time cost
+  tracker, and the usage-limit pause recorder. Any error is a silent
+  no-op — a recorder must never be the reason a session stops. The
+  observation capture appends one row to the repository-keyed log and,
+  past the cap, closes the live file with a link that refuses an existing
+  segment name and probes upward on collision, so two sessions rotating
+  at once each close a real segment and neither replaces the other's
+  (asserted by a deterministic replay test; the remaining
+  three-session window loses one telemetry row and is recorded). It
+  gates on the cairn folder beside the repository's shared git
+  directory, not the checkout's, so a linked worktree of a project that
+  ignores that folder still appends to the one log. The pause recorder
+  listens to the platform's own narration of a usage limit — the stop
+  that hit one, the resume that fired, the resume that went stale because
+  the machine slept, the resume that gave up — and writes each as one row
+  in the pauses log, one plain-language comment on a running batch's
+  umbrella issue, and a paused or stopped mark on the handoff; the
+  measured duration subtracts those windows (ADR 0020, amendment).
 - **Refusers** block a tool call and say why. The leak guard stops a
   commit whose staged diff would carry internal references into source.
   The run guard keeps an unattended run out of the working directory a
   human is using. The harness guard protects the configuration that
   decides what the agent may do at all — the hook directory, the tool
-  server config, the settings cascade, the plugin manifests — from the
-  agent it configures. Each refuses in one plain line naming the file
-  and the way to proceed deliberately, and each fails open on its own
-  error: an error inside a guard exits zero rather than blocking work,
-  and `hooks/hooks.json` leaves the platform's `onFailure: "block"`
-  unset so the harness does not invert that. The delivery half is the
-  platform's: since Claude Code 2.1.299 it fails closed when it
-  cannot reach the guard or read its answer — an action the guard
-  could have blocked is refused, not let through (a dated claim about
-  the harness, 2026-10-14; ADR 0016, #371). Their refusals
-  also add up: each appends an audit row (a digest of the input, never
-  the command), and a headless batch run refused `auto.breaker` times
-  is frozen by the circuit breaker, which writes the stop into the run
-  manifest itself — the server refuses the frozen run's claims and
-  closes and posts the comment the hooks can't (ADR 0016, amendment).
+  server config, the settings cascade, the plugin manifests, and the
+  folder git runs its hooks from (`core.hooksPath` when set, else the
+  repository's own hooks folder; a planted hook runs under the owner's
+  identity at their next commit) — from the agent it configures. Each
+  refuses in one plain line naming the file and the way to proceed
+  deliberately, and each fails open on its own error: an error inside a
+  guard exits zero rather than blocking work, and `hooks/hooks.json`
+  leaves the platform's `onFailure: "block"` unset so the harness does
+  not invert that. The delivery half is the platform's: since Claude
+  Code 2.1.299 it fails closed when it cannot reach the guard or read
+  its answer — an action the guard could have blocked is refused, not
+  let through (a dated claim about the harness, 2026-10-14; ADR 0016,
+  #371). Their refusals also add up: each appends an audit row (a digest
+  of the input, never the command) through one wrapped call that keeps
+  refusing even when the breaker library is missing or throws, and a
+  headless batch run is frozen by the circuit breaker after the limit
+  that was staged into its manifest, counting only refusals from the
+  session that staged the run — another session's refusal is logged and
+  never counted, and a manifest with no session yet counts nothing — so
+  a running batch can neither be frozen by a bystander nor switch its
+  own breaker off by editing the project configuration mid-run; the
+  freeze is written into the manifest itself, and the server refuses the
+  frozen run's claims and closes and posts the comment the hooks can't
+  (ADR 0016, amendment). ADR 0033 — removeWhen: the harness gives a
+  batch run a session identity and a kill switch of its own that the
+  run cannot reach. The pointer that names the hooks folder, and a
+  second manifest staged by the running batch, are the two routes the
+  closing audit found still open and filed (#465, #466).
 - **Advisers** say something and block nothing. The loop check notices
   the same tool called with the same input three times running and
   offers one line, once per streak.
@@ -492,34 +572,61 @@ The run guard reads its rules as data. A classifier beside it sorts each
 git invocation, from git's own option grammar, into three effects —
 discards-work, moves-shared-ref, touches-owner-checkout — with read-only
 the default, and every refusal names the effect and the flag that caused
-it, so a reader can audit why it fired (ADR 0016, amendment). Some rows
-hold only under a probe the guard answers once per invocation — a
-configured mirror, a deleted default branch, and linked worktrees: when
-the repository has more than one worktree, `stash pop`, `apply` and
-`drop` are refused as discarding work, because one `.git` means one
-stash and the entry may be another worker's; `stash push` is advised and
-proceeds, since stashing is recoverable and popping is the destructive
-half; with a single worktree the guard is byte-identical to before. The
-wave brief carries the matching standing rule: never stash, park work in
-progress as a commit on your own branch. ADR 0029 — removeWhen: git
-gives each worktree its own stash. The breaker
-is the other shared library: the one call every refuser makes to append
-its row and, while a batch run is live, count toward the freeze. Each
-hook's header names the axiom it derives from, and a sweep test fails on
-a header that names none. ADR 0025 — removeWhen: never; the
-classification is what makes the next unseen case recognizable.
+it, so a reader can audit why it fired (ADR 0016, amendment). It judges
+a git alias by what it runs: an alias passed inline on the command line
+is expanded before the table lookup, a subcommand the table does not know
+is probed once against the repository's configuration, and an alias that
+runs a shell command is refused outright in every session; the channels
+that define an alias through the environment or an included file are not
+yet read and are filed (#467). ADR 0036 — removeWhen: git exposes the
+resolved command of an alias before running it, or the harness classifies
+commands from their effect rather than their text. A forced recursive
+remove of the whole tree is a discards-work row refused in every session,
+while the cached, dry-run and single-path forms stay allowed (the bare
+colon spelling of the whole tree was missed and is filed, #464). The
+owner-checkout effect carries its definition in the header — a command
+touches the checkout when it rewrites the working files or replaces the
+checked-out commit — and rows for checkout, switch, merge, pull, rebase,
+cherry-pick, revert, am, mv, the stash actions that write the tree, and
+reset in its hard, merge and keep forms, refused mid-run when aimed at
+the owner's checkout; eight more commands that meet the definition are
+filed (#468). Some rows hold only under a probe the guard answers once
+per invocation — a configured mirror, a deleted default branch, and
+linked worktrees: when the repository has more than one worktree,
+`stash pop`, `apply`, `drop` and `branch` are refused as discarding
+work, because one `.git` means one stash and the entry may be another
+worker's; `stash push` is advised and proceeds, since stashing is
+recoverable and popping is the destructive half; with a single worktree
+the guard is byte-identical to before. The wave brief carries the
+matching standing rule: never stash, park work in progress as a commit
+on your own branch. ADR 0029 — removeWhen: git gives each worktree its
+own stash. The breaker is the other shared library: the one call every
+refuser makes to append its row and, while a batch run is live, count
+toward the freeze. Each hook's header names the axiom it derives from,
+and a sweep test fails on a header that names none. ADR 0025 —
+removeWhen: never; the classification is what makes the next unseen
+case recognizable.
 
-Two properties hold across all three. They import no server code — the
+Three properties hold across all three. They import no server code — the
 path schemes they need, including the repository key of the previous
 section, are recomputed in a shared helper, so the server stays the
 source of truth without becoming a dependency (asserted:
 `server/test/hooks.test.ts`, "plugin layer imports no server code" —
 every import in `hooks/scripts`, `scripts` and `scripts/lib`, followed
 transitively, is a `node:` builtin or a relative path inside the plugin
-layer, and a walk that matches no files fails; #391). And their
-escape hatches share one shape: an assignment prefixed to the command,
+layer, and a walk that matches no files fails; #391). Their escape
+hatches share one shape: an assignment prefixed to the command,
 prefix-only so that a mention elsewhere in the line cannot bypass the
-guard.
+guard. And every refused shape in the matrix test has an allowed twin
+that must pass and runs from the repository root and from a nested
+working directory alike, with a meta-test that fails when either column
+is empty — an over-match hides behind a refusal that was never paired
+with the harmless command beside it (asserted: `server/test/hooks.test.ts`,
+"every refused shape has an allowed twin, and holds from a subfolder";
+the matrix covers the shapes the audits named, not yet every table row,
+which is recorded). ADR 0035 — removeWhen: never; a guard that was never
+shown its harmless twin has only been tested for one of its two failure
+modes.
 
 The refusers are honest about their reach. They convert a silent
 success into a refusal a human sees; they are not isolation. The shell

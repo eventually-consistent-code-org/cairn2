@@ -2126,7 +2126,10 @@ run was staged, default 3) the breaker freezes the run — the manifest
 moves to `stopped` with a `stop` block naming the reason, the
 last three refusals and the sessions they came from. A refusal from any
 other session is logged and never counted, so no session can freeze a
-run it never touched (#431). From then on:
+run it never touched (#431) — with one stated exception: a run staged
+without a session id belongs to the first session seen working in
+exactly its checkout, which the run guard stamps on that session's first
+call (a residual, dated 2026-11-03). From then on:
 
 - the run's own session is refused any `git push` (a stopped manifest
   would otherwise lift the mid-run push rule). A workflow's subagents

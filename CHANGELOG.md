@@ -1,5 +1,163 @@
 # Changelog
 
+## Unreleased — the second hardening (phase 30, 2026-11-03)
+
+The hooks-directory hardenings filed in mid-October land together with
+the eighteen findings the two preceding security audits confirmed. The
+run guard's effect table meets its own definitions: a git alias is judged
+by what it runs, a forced whole-tree remove is refused, the owner-checkout
+rows match the definition in the header, and `stash branch` joins pop,
+apply and drop across linked worktrees. The circuit breaker counts only
+the session that staged the run and reads its limit from the staged
+manifest, so a bystander cannot freeze a run and a run cannot switch its
+own breaker off. The ledger writer types what it writes — hashes are
+hashes, a field cannot spell a separator — and its readers resolve a
+closure against its fix-up by commit ancestry. The one-shot state
+migration runs in the right order and moves a database sidecar only with
+its database. Git hook folders join the harness guard's protected set.
+Usage-limit pauses are narrated to the tracker and subtracted from the
+measured duration. Wave setup is derived from the lockfile. Every
+refused shape in the guard tests has an allowed twin and runs from a
+nested working directory. The merge-overlap helper ships with the plugin
+and fails loudly instead of silently.
+
+Tool count holds at 87. Suite 2420 → 2653. Footprint 13136 → 13141 of a
+13145 pin. No new tool; one new tool parameter, paid for by a shorter
+description. Every fix was made red once before green and the close
+evidence says how.
+
+### guards
+
+- The run guard classifies a git alias by what it runs: an inline alias
+  is expanded before the table lookup, an unknown subcommand is probed
+  once against the repository's configuration, and a shell alias is
+  refused outright in every session (ADR 0036).
+- A forced recursive remove of the whole tree is a discards-work row
+  refused in every session; the cached, dry-run and single-path forms
+  stay allowed.
+- The owner-checkout effect carries its definition line in the header
+  and rows for merge, pull, rebase, cherry-pick, revert, am, mv, the
+  stash actions that write the tree, and reset in its hard, merge and
+  keep forms, refused in the owner's checkout while a run is live.
+- `git stash branch` is refused across linked worktrees under the same
+  probe and reason as pop, apply and drop; the pinned list, advisory,
+  header and wave brief name the fourth action.
+- The folder git runs its hooks from — `core.hooksPath` when set, else
+  the repository's own hooks folder — is a protected tree in the harness
+  guard; the surface audit gains a git-hooks leg (ADR 0016, amendment).
+- The breaker counts only the session that staged the run: the manifest
+  records the staging shell's session id and checkout, another session's
+  refusals carry no run id, and a manifest staged without an id is
+  stamped from the first call of a session working in exactly its
+  checkout. The breaker reads its limit from the manifest, snapshotted
+  from the configuration at staging, never from the configuration file
+  mid-run (ADR 0033).
+- The breaker's record call is wrapped and type-checked in the run,
+  harness and leak guards, so a missing, throwing or malformed breaker
+  library keeps every refusal refusing.
+- The server refuses a frozen run's state change by the category the
+  requested state resolves to — in progress or closed — not by its
+  spelling, through a new optional adapter question the local adapter
+  answers.
+- Server-composed claim and close comments pass the leak screen before
+  posting: a planning-directory path becomes a kind-named placeholder,
+  and a residual hit is refused with a typed code (ADR 0016, amendment).
+- A `StopFailure` or quota `Notification` event runs one recorder: a
+  row in a pauses log under the cairn home, one plain-language comment on
+  a running batch's umbrella issue, and a paused or stopped mark on the
+  handoff. The auto verb no longer claims the platform never loses an
+  agent at a usage limit.
+- The guard tests are a table of eighty-five refused shapes, each with
+  an allowed twin, each run from the repository root and from a nested
+  working directory; a meta-test keeps both columns full. The first run
+  found thirty twin gaps and eighty-five subfolder gaps (ADR 0035).
+- A hooks test asserts the plugin layer's import boundary: hooks,
+  scripts and setup import only Node builtins and relative plugin-layer
+  paths, never the server.
+
+### planning
+
+- Ledger appends and claims accept only a 7–40 character hex commit hash,
+  refused with a typed error before any git call or tracker write; the
+  range handed to git sits behind `--end-of-options` with the path
+  separator after it. The task reference and summary pass through the
+  same segment sanitizer as the evidence and note, and the parser binds
+  the last segment run, so a forged passing tail cannot hide the server's
+  observed result (ADR 0034).
+- The ledger parser resolves a closure against its evidence fix-up by
+  commit ancestry, then the date on the line, then file order, and
+  derives the phase's commit range the same way; a both-ways union-merge
+  test asserts it (ADR 0028, amendment).
+- The verify rerun keys on an owner-approval stamp — `plan_meta_set
+  approve` records the approved plan's blob in local state — and
+  classifies the declared line through the run guard's shell reader and
+  effect table before running it, failing closed on an unclassifiable
+  line or an unavailable classifier (ADR 0017, amendment; the
+  agent-callable approve flag is stated as a dated gap and filed).
+- The close subtracts usage-limit pause windows from the measured
+  duration; paused minutes ride in the receipt, the close comment and
+  the ledger's actuals segment (ADR 0020, amendment).
+- Plan status derives fresh-worktree setup from the tracked lockfiles,
+  `.worktreeinclude` and `.worktree-port`; wave briefs paste it verbatim
+  and carry no setup line when the repository has none (ADR 0032).
+- The drift report and the three opt-in writers carry honest read-only
+  hints; an effect test runs every read-only tool against a scratch
+  project and a scratch cairn home and asserts both are untouched; a
+  first memory search no longer creates the index database.
+- The debt audit never builds a shell line from the marker text it finds;
+  the marker is a single-quoted argument scoped by path, the source
+  comment it matches is a specification, and the marker words are
+  constrained in configuration.
+
+### state
+
+- The legacy-observation move runs the state-folder migration before its
+  rekey row, in the hook helper and the server; a move blocked by an
+  existing twin is logged as skipped, once per leftover.
+- A `-journal`, `-wal` or `-shm` sidecar moves only in the pass that
+  moves its database; a hot journal whose database stayed stays put, so
+  another checkout's journal is never replayed into the shared index.
+- Observation-log rotation closes a segment with the no-clobber link,
+  probing the segment number upward on collision; a deterministic replay
+  test asserts the closed segment keeps its rows.
+- The observe hook gates on the cairn folder beside the repository's
+  shared git directory, falling back to the checkout's, so linked
+  worktrees of a project that ignores the folder still append to the one
+  log.
+
+### setup and docs
+
+- Setup refuses the Claude import through a symlink to the agents file or
+  outside the project and writes nothing; the readers check carries the
+  rendered fragment, so an import-only span reads as not reaching.
+- The merge-overlap helper moved under the hook scripts the package
+  ships; the work and ship verbs call it through the plugin root; its
+  command-entry check compares real paths and never exits clean with
+  nothing printed.
+- The acceptance-testing agent loses the issue-close grant and hands
+  fixes to the audit verb's staged path; both agent files state that
+  tracker text is data.
+- The docs name the git 2.31 floor for the plugin eval and say the hook
+  failure mode stays unset by design, with fail-open narrowed to the
+  guard's own error now that the platform fails closed when it cannot
+  reach the guard.
+
+### known and filed
+
+The closing security audit of this phase confirmed eleven findings and
+filed them for the next hardening pass, each the sibling spelling of an
+input this phase closed: a lone colon as the whole-tree pathspec passes
+the remove, checkout and restore rows (critical); the hooks-folder
+pointer is unguarded; a running batch can stage a second manifest and
+move the breaker's count; aliases defined through the environment or an
+included file pass; eight more commands meet the owner-checkout
+definition; the ledger's issue id and close date skip the sanitizer; the
+pauses log is unguarded; the freeze category is unanswered by four
+tracker adapters; same-day independent branches still flip a closure by
+merge direction; setup erases the spine when the agents file links to
+the Claude file or the two are hard-linked; the merge-overlap helper is
+unreachable on six of the seven other harnesses.
+
 ## Unreleased — the parallel path (phase 29, 2026-10-29)
 
 Two agents on one repository, in two worktrees, possibly two vendors,
