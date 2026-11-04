@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT, READ_ONLY, EFFECTS, EFFECT_TABLE,
-  classify, effectsOf, parseInvocation,
+  classify, effectsOf, parseInvocation, wholeTree,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/git-effects.mjs";
 
@@ -189,16 +189,18 @@ describe("git effects: a forced whole-tree rm discards work (#434)", () => {
       expect(rest, c).toEqual([]);
       expect(hit?.flag, c).toBe(flag);
       expect(hit?.what, c).toBe("a forced whole-tree `git rm`");
-      expect(effects(c), c).toEqual([DISCARDS_WORK]);
+      // ...and, since #468, deletes the files of the checkout it runs in
+      expect(effects(c), c).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
     }
   });
 
-  it("the unforced, cached, dry-run and single-path forms stay read-only", () => {
+  it("the unforced, cached, dry-run and single-path forms discard nothing; the ones that still delete files touch the checkout (#468)", () => {
     for (const c of ["git rm -r .", "git rm .", "git rm --cached -r .", "git rm -rf --cached .",
       "git rm -r -f --cached :/", "git rm -rfn .", "git rm -rf --dry-run .", "git rm -rf src/a.ts",
       "git rm -rf src", "git rm -f seed.txt", "git rm --cached seed.txt", "git rm -rf *.log"]) {
       expect(causes(c, DISCARDS_WORK), c).toEqual([]);
-      expect(effects(c), c).toEqual([READ_ONLY]);
+      const indexOnly = /--cached|-rfn|--dry-run/.test(c);
+      expect(effects(c), c).toEqual(indexOnly ? [READ_ONLY] : [TOUCHES_OWNER_CHECKOUT]);
     }
   });
 });
@@ -460,5 +462,229 @@ describe("git effects: an alias is classified by what it runs (#430)", () => {
     // a probe git can't answer -- a folder that is no repository -- leaves today's classification
     const r2 = guard(proj, home, `git -C ${join(proj, "nowhere")} hr HEAD~1`);
     expect(r2.status, r2.stderr).toBe(0);
+  });
+});
+
+describe("git effects: a lone colon, the magic forms and the repository root are the whole tree (#464, #288)", () => {
+  // git reads a pathspec of a colon and nothing after it as "everything"
+  // (gitglossary; measured against git 2.56 on 2026-11-04: `git rm -rfn --
+  // :` lists every tracked file), and so `::`, `:/:` and any long-form
+  // magic with no path after it. Before #464 the matcher knew `:/` and
+  // `:(top)` only, so `git rm -rf :` passed the guard and emptied the tree.
+  it("the colon spellings name the whole tree; a colon-prefixed real path and the exclude forms stay paths", () => {
+    for (const p of [":", "::", ":/", ":/:", ":/.", ":/*", ":(top)", ":(top,glob)", ":(glob,top)", ":(icase)", ":*"]) {
+      expect(wholeTree(p), p).toBe(true);
+    }
+    // the exclude forms stay paths by decision (phase 31 CONTEXT, 2026-11-04)
+    for (const p of [":/sub", ":/src/a.ts", ":(top)sub", "::sub", ":/:sub", ":!sub", ":!", ":(exclude)sub",
+      ":(top,exclude)", ":(exclude,top)", "seed.txt", "src", "*.ts", ""]) {
+      expect(wholeTree(p), p).toBe(false);
+    }
+  });
+
+  it("the repository root as an absolute path is the whole tree when the root is known; a folder under it is not (#288)", () => {
+    const root = "/work/repo";
+    for (const p of ["/work/repo", "/work/repo/", "/work/repo/.", "/work/repo/*", "/work/repo/./", "/work/repo/**"]) {
+      expect(wholeTree(p, root), p).toBe(true);
+      expect(wholeTree(p, `${root}/`), p).toBe(true);
+    }
+    for (const p of ["/work/repo/src", "/work/repo/seed.txt", "/work/repo2", "/work", "repo", "/work/repo/*.ts"]) {
+      expect(wholeTree(p, root), p).toBe(false);
+    }
+    // no root known: an absolute path is a path -- only the repository can say which one is its root
+    expect(wholeTree("/work/repo")).toBe(false);
+    expect(wholeTree("/work/repo", undefined)).toBe(false);
+  });
+
+  it("the rm, checkout and restore rows inherit every spelling and name it as the cause", () => {
+    const rows: Array<[string, string, string]> = [
+      ["git rm -rf :", "-rf", "a forced whole-tree `git rm`"],
+      ["git rm -r --force -- ::", "--force", "a forced whole-tree `git rm`"],
+      ["git checkout -- :", ":", "a whole-tree `git checkout`"],
+      ["git checkout :", ":", "a whole-tree `git checkout`"],
+      ["git checkout HEAD -- :/:", ":/:", "a whole-tree `git checkout`"],
+      ["git restore :", ":", "a whole-tree `git restore`"],
+      ["git restore -- ::", "::", "a whole-tree `git restore`"],
+      ["git restore -s HEAD~1 :(glob,top)", ":(glob,top)", "a whole-tree `git restore`"],
+      ["git restore --staged --worktree :", ":", "a whole-tree `git restore`"],
+    ];
+    for (const [c, flag, what] of rows) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.flag, c).toBe(flag);
+      expect(hit?.what, c).toBe(what);
+    }
+    // the twins: a colon-prefixed real path, the exclude forms, and the index-only or dry-run colon
+    for (const c of ["git rm -rf :/sub", "git rm -rf ::seed.txt", "git checkout -- :/sub", "git checkout -- :!sub",
+      "git restore :/sub", "git restore :(exclude)sub", "git restore --staged :", "git rm --cached -r :",
+      "git rm -rfn :", "git rm -r :"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+    }
+  });
+
+  it("the repository root comes in through the repoRoot probe, per word, in the word's own spelling (#288)", () => {
+    // the guard's probe: the word, trailing slash, dot or glob dropped, when it resolves to the root
+    const probe = { repoRoot: (w: string) => (/^\/work\/repo(?:\/\.|\/\*+|\/)*$/.test(w) ? "/work/repo" : undefined) };
+    for (const [c, flag] of [["git checkout -- /work/repo", "/work/repo"], ["git checkout HEAD /work/repo/", "/work/repo/"],
+      ["git restore /work/repo/.", "/work/repo/."], ["git rm -rf /work/repo/*", "-rf"]]) {
+      expect(causes(c, DISCARDS_WORK, probe).map((h) => h.flag), c).toEqual([flag]);
+    }
+    for (const c of ["git checkout -- /work/repo/src", "git restore /work/repo/seed.txt", "git rm -rf /work/other"]) {
+      expect(causes(c, DISCARDS_WORK, probe), c).toEqual([]);
+    }
+    // no probe (the server's line classifier, a test): an absolute path is a path
+    expect(causes("git checkout -- /work/repo", DISCARDS_WORK)).toEqual([]);
+  });
+});
+
+describe("git effects: the owner-checkout table meets its own definition (#468)", () => {
+  // The definition: a command touches the checkout it runs in when it
+  // rewrites the working files, or replaces the checked-out commit. Before
+  // #468 every command here read read-only and ran in the owner's checkout
+  // mid-run. Each row: [the command, the word the cause names, the row's name].
+  const rows: Array<[command: string, flag: string, what: string]> = [
+    ["git apply fix.patch", "apply", "`git apply`"],
+    ["git apply --index fix.patch", "apply", "`git apply`"],
+    ["git apply -R -p2 fix.patch", "apply", "`git apply`"],
+    ["git apply --directory=src fix.patch", "apply", "`git apply`"],
+    ["git bisect start", "start", "`git bisect`"],
+    ["git bisect start HEAD HEAD~5", "start", "`git bisect`"],
+    ["git bisect bad", "bad", "`git bisect`"],
+    ["git bisect good abc123", "good", "`git bisect`"],
+    ["git bisect new", "new", "`git bisect`"],
+    ["git bisect old", "old", "`git bisect`"],
+    ["git bisect skip", "skip", "`git bisect`"],
+    ["git bisect reset", "reset", "`git bisect`"],
+    ["git bisect replay bisect.log", "replay", "`git bisect`"],
+    ["git bisect run npm test", "run", "`git bisect`"],
+    ["git restore seed.txt", "restore", "`git restore`"],
+    ["git restore --source=HEAD~1 src/a.ts", "restore", "`git restore`"],
+    ["git restore --staged --worktree seed.txt", "restore", "`git restore`"],
+    ["git restore -SW seed.txt", "restore", "`git restore`"],
+    ["git checkout-index -f -a", "-f", "`git checkout-index --force`"],
+    ["git checkout-index --force -- seed.txt", "--force", "`git checkout-index --force`"],
+    ["git checkout-index -fu -a", "-fu", "`git checkout-index --force`"],
+    ["git checkout-index --forc -a", "--forc", "`git checkout-index --force`"],
+    ["git sparse-checkout set src", "set", "`git sparse-checkout`"],
+    ["git sparse-checkout add docs", "add", "`git sparse-checkout`"],
+    ["git sparse-checkout reapply", "reapply", "`git sparse-checkout`"],
+    ["git sparse-checkout disable", "disable", "`git sparse-checkout`"],
+    ["git sparse-checkout init --cone", "init", "`git sparse-checkout`"],
+    ["git read-tree -u HEAD", "-u", "`git read-tree -u`"],
+    ["git read-tree -mu HEAD topic", "-mu", "`git read-tree -u`"],
+    ["git read-tree --reset -u HEAD", "-u", "`git read-tree -u`"],
+    ["git submodule update --init --recursive", "update", "`git submodule update`"],
+    ["git submodule deinit -f lib", "deinit", "`git submodule deinit`"],
+    ["git rm -f seed.txt", "rm", "`git rm`"],
+    ["git rm seed.txt", "rm", "`git rm`"],
+    ["git rm -r src", "rm", "`git rm`"],
+    ["git clean -f", "clean", "`git clean`"],
+    ["git clean -fd", "clean", "`git clean`"],
+    ["git -c clean.requireForce=false clean -d", "clean", "`git clean`"],
+  ];
+
+  it("each touches the checkout it runs in, naming the word that caused it and the row's name", () => {
+    for (const [c, flag, what] of rows) {
+      const hits = causes(c, TOUCHES_OWNER_CHECKOUT);
+      expect(hits.map((h) => h.flag), c).toEqual([flag]);
+      expect(hits[0].what, c).toBe(what);
+      expect(hits[0].why, c).toMatch(/rewrites the files or HEAD/);
+      expect(effects(c), c).toContain(TOUCHES_OWNER_CHECKOUT);
+    }
+  });
+
+  it("the twins carry no row: the reads, the index-only forms, the dry runs, a write to temp files", () => {
+    for (const c of ["git apply --check fix.patch", "git apply --stat fix.patch", "git apply --numstat fix.patch",
+      "git apply --summary fix.patch", "git apply --cached fix.patch", "git apply --check --index fix.patch",
+      "git apply --cached -R fix.patch",
+      "git bisect log", "git bisect visualize", "git bisect view", "git bisect terms", "git bisect",
+      "git restore --staged seed.txt", "git restore -S .", "git restore --staged -- .",
+      "git checkout-index -a", "git checkout-index seed.txt", "git checkout-index -f --temp seed.txt",
+      "git checkout-index -a --prefix=/tmp/export/",
+      "git sparse-checkout list", "git sparse-checkout check-rules", "git sparse-checkout",
+      "git read-tree HEAD", "git read-tree -m HEAD topic", "git read-tree -u -n HEAD", "git read-tree -un HEAD",
+      "git read-tree --reset HEAD", "git read-tree --prefix=sub/ HEAD",
+      "git submodule status", "git submodule init", "git submodule summary", "git submodule",
+      "git rm --cached seed.txt", "git rm -n seed.txt", "git rm --dry-run -r .", "git rm -r --cached .",
+      "git clean -n", "git clean -nd", "git clean --dry-run -fdx", "git clean -fd --dry-run"]) {
+      expect(causes(c, TOUCHES_OWNER_CHECKOUT), c).toEqual([]);
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the #288 fold: a whole-tree restore, a clean and a forced whole-tree rm carry both effects, in table order", () => {
+    for (const c of ["git restore .", "git restore :", "git clean -fd", "git rm -rf .", "git checkout -- ."]) {
+      expect(effects(c), c).toEqual([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]);
+    }
+    for (const c of ["git restore --staged .", "git clean -n", "git rm --cached -r ."]) {
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the table's owner-checkout rows name exactly the subcommands the definition lists, one effect per row", () => {
+    const subs = new Set(EFFECT_TABLE.filter((r: { effect: string }) => r.effect === TOUCHES_OWNER_CHECKOUT)
+      .map((r: { sub: string }) => r.sub));
+    expect([...subs].sort()).toEqual(["am", "apply", "bisect", "checkout", "checkout-index", "cherry-pick", "clean",
+      "merge", "mv", "pull", "read-tree", "rebase", "reset", "restore", "revert", "rm", "sparse-checkout", "stash",
+      "submodule", "switch"]);
+  });
+});
+
+describe("git effects: ref and reflog destruction discards work (#288)", () => {
+  // A deleted branch is recoverable: HEAD's reflog and `git fsck
+  // --lost-found` keep its commits -- until one of these runs. Each row:
+  // [the command, the word the refusal names, what the row calls it].
+  // Before #288 every one but `reflog expire` (#264) read read-only.
+  const refused: Array<[command: string, flag: string, what: string]> = [
+    ["git update-ref -d refs/heads/topic", "-d", "`git update-ref -d`"],
+    ["git update-ref --delete refs/heads/topic", "--delete", "`git update-ref -d`"],
+    ["git update-ref --del refs/remotes/origin/topic", "--del", "`git update-ref -d`"],
+    ["git update-ref -d refs/tags/v1 abc123", "-d", "`git update-ref -d`"],
+    ["git reflog delete HEAD@{1}", "delete", "`git reflog delete`"],
+    ["git reflog delete --rewrite refs/heads/main@{0}", "delete", "`git reflog delete`"],
+    ["git reflog expire --expire=now --all", "expire", "`git reflog expire`"],
+    ["git reflog expire --expire-unreachable=now refs/heads/main", "expire", "`git reflog expire`"],
+    ["git gc --prune=now", "--prune", "`git gc --prune=<date>`"],
+    ["git gc --prune=all", "--prune", "`git gc --prune=<date>`"],
+    ["git gc --aggressive --prune=1.minute.ago", "--prune", "`git gc --prune=<date>`"],
+    ["git gc -q --prun=now", "--prun", "`git gc --prune=<date>`"],
+    ["git prune", "prune", "`git prune`"],
+    ["git prune --expire=now", "prune", "`git prune`"],
+    ["git prune --expire now", "prune", "`git prune`"],
+    ["git prune -v --expire=2.weeks.ago", "prune", "`git prune`"],
+  ];
+
+  it("each discards work, carries no other effect, and names the word that caused it", () => {
+    for (const [c, flag, what] of refused) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.flag, c).toBe(flag);
+      expect(hit?.what, c).toBe(what);
+      expect(effects(c), c).toEqual([DISCARDS_WORK]);
+    }
+  });
+
+  it("the twins carry no row: a ref written, the reflog read, the default gc, a dry-run prune, the other prunes, and branch -D", () => {
+    for (const c of ["git update-ref refs/heads/topic HEAD", "git update-ref -m msg HEAD HEAD~1",
+      "git update-ref --no-deref refs/heads/topic HEAD~1", "git update-ref --stdin", "git update-ref --create-reflog refs/x HEAD",
+      "git reflog", "git reflog show", "git reflog show HEAD", "git reflog exists refs/heads/main",
+      "git gc", "git gc --auto", "git gc --aggressive", "git gc --prune", "git gc --no-prune", "git gc --prune=never",
+      "git gc --prune=false", "git gc -q",
+      "git prune -n", "git prune --dry-run", "git prune --dry-run --expire=now", "git prune -nv",
+      "git prune-packed", "git worktree prune", "git remote prune origin",
+      "git branch -D topic", "git branch -d topic", "git branch --delete --force topic"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+      expect(effects(c), c).toEqual([READ_ONLY]);
+    }
+  });
+
+  it("the hostile spelling: gc.pruneExpire set inline makes a bare gc the `now` prune; `never` keeps it the everyday one", () => {
+    for (const c of ["git -c gc.pruneExpire=now gc", "git -c gc.pruneexpire=now gc --auto", "git -c gc.pruneExpire=1.hour.ago gc"]) {
+      expect(causes(c, DISCARDS_WORK).map((h) => [h.flag, h.what]), c).toEqual([["-c gc.pruneExpire", "`git gc --prune=<date>`"]]
+        .map(([f, w]) => [c.includes("pruneexpire") ? "-c gc.pruneexpire" : f, w]));
+    }
+    for (const c of ["git -c gc.pruneExpire=never gc", "git -c gc.pruneExpire=false gc", "git -c gc.auto=0 gc"]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+    }
   });
 });

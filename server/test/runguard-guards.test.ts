@@ -2650,3 +2650,305 @@ describe("run guard: a git alias is judged by what it runs (#430)", () => {
     expect(r.stderr).toContain("effect: touches-owner-checkout, from `switch`, via alias `sw`.");
   });
 });
+
+describe("run guard: a lone colon is the whole tree (#464)", () => {
+  // Each row: [refused, its harmless twin]. git reads a pathspec of a
+  // colon and nothing after it as everything (measured against git 2.56,
+  // 2026-11-04: `git rm -rfn -- :` lists every tracked file; a checkout or
+  // restore of `:` rewrites every file from the index). A colon-prefixed
+  // real path (`:/sub`) is that path. Before #464 every refused form here
+  // passed the guard with exit 0.
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["git rm -rf :", "git rm -rf :/sub"],
+    ["git rm -r --force -- :", "git rm -r --force -- :/sub/b.txt"],
+    ["git rm -rf ::", "git rm -rf ::seed.txt"],
+    ["git checkout -- :", "git checkout -- :/sub"],
+    ["git checkout :", "git checkout :/seed.txt"],
+    ["git checkout HEAD -- ::", "git checkout HEAD -- ::seed.txt"],
+    ["git restore :", "git restore :/sub"],
+    ["git restore -- ':(top)'", "git restore -- ':(top)sub'"],
+    ["git restore -s HEAD~1 ':(glob,top)'", "git restore -s HEAD~1 ':(glob)*.ts'"],
+    ["git restore ':/:'", "git restore ':/:seed.txt'"],
+    ["timeout 5 git rm -rf :", "timeout 5 git rm -rf :/sub"],
+  ];
+
+  /** The fixture plus a nested folder to run from -- the #383 matrix. */
+  function nested(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  it("each is refused from the repository root and from a nested folder, naming the escape; its twin passes in both", () => {
+    const { proj, home, sub } = nested();
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("refused in every session");
+        expect(r.stderr, refused).toContain("effect: discards-work, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the exclude forms (by decision), the index-only, dry-run and unforced colon pass; the owner's escape lifts the rest", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      "git checkout -- ':!sub'",
+      "git restore ':(exclude)sub'",
+      "git restore --staged :",
+      "git rm --cached -r :",
+      "git rm -rfn :",
+      "git rm -r :",
+      "echo git rm -rf :",
+      'git commit -m "git checkout -- :"',
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const [refused] of pairs) {
+      expect(guard(proj, home, refused, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, refused).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${refused}`).status, refused).toBe(0);
+    }
+  });
+
+  it("the repository root spelled as an absolute path is the whole tree, a folder under it a path (#288)", () => {
+    const { proj, home, sub } = nested();
+    // the folder as given and with its links resolved (/var vs /private/var on a Mac): git takes both
+    const roots = [...new Set([proj, realpathSync(proj)])];
+    for (const root of roots) {
+      const rows: Array<[refused: string, twin: string]> = [
+        [`git checkout -- ${root}`, `git checkout -- ${root}/seed.txt`],
+        [`git checkout HEAD ${root}/`, `git checkout HEAD ${root}/sub`],
+        [`git restore ${root}/.`, `git restore ${root}/sub/`],
+        [`git rm -rf ${root}`, `git rm -rf ${root}/sub`],
+        [`git rm -rf '${root}/*'`, `git rm -rf '${root}/*.log'`],
+      ];
+      for (const [refused, twin] of rows) {
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, refused, {}, cwd);
+          expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, refused).toContain("refused in every session");
+          const t = guard(proj, home, twin, {}, cwd);
+          expect(t.status, `${twin}\n${t.stderr}`).toBe(0);
+        }
+      }
+    }
+    // -C into the repository from outside it: judged where git runs
+    const outside = freshDir("cairn-runguard-outside-");
+    expect(guard(proj, home, `git -C ${proj} checkout -- ${proj}`, {}, outside).status).toBe(2);
+    // another repository's root is no whole tree here: git refuses a path outside the work tree itself
+    const other = fixture().proj;
+    expect(guard(proj, home, `git checkout -- ${other}`).status).toBe(0);
+    expect(guard(proj, home, `git rm -rf ${other}`).status).toBe(0);
+  });
+});
+
+describe("run guard: the owner-checkout table meets its own definition (#468)", () => {
+  const LIVE = { status: "running", phases: [], pushAuth: { granted: false } };
+  // the discards-work rows some of these also match aren't the rule under
+  // test, so the owner's escape lifts them for the whole leg
+  const lifted = { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" };
+
+  /** The fixture with a live run, a nested folder to run from, and one linked worktree -- the run's own place. */
+  function live(): { proj: string; home: string; sub: string; linked: string } {
+    const { proj, home } = fixture(LIVE);
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    const linked = join(freshDir("cairn-runguard-linked-"), "wt");
+    git(proj, "worktree", "add", "-q", "-b", "side", linked);
+    return { proj, home, sub, linked };
+  }
+
+  // Each row: [the command, the word the effect line names, the row's name
+  // for it, its harmless twin -- the same command kept off the work tree].
+  // Before #468 every command here passed in the owner's checkout mid-run
+  // with exit 0 while a checkout of a branch beside it was refused.
+  const rows: Array<[command: string, flag: string, name: string, twin: string]> = [
+    ["git apply fix.patch", "apply", "git apply", "git apply --check fix.patch"],
+    ["git apply --index fix.patch", "apply", "git apply", "git apply --cached fix.patch"],
+    ["git apply -R fix.patch", "apply", "git apply", "git apply --stat fix.patch"],
+    ["git bisect start", "start", "git bisect", "git bisect log"],
+    ["git bisect start HEAD HEAD~1", "start", "git bisect", "git bisect terms"],
+    ["git bisect bad", "bad", "git bisect", "git bisect visualize"],
+    ["git bisect good HEAD~1", "good", "git bisect", "git bisect log"],
+    ["git bisect skip", "skip", "git bisect", "git bisect view"],
+    ["git bisect reset", "reset", "git bisect", "git bisect log"],
+    ["git restore seed.txt", "restore", "git restore", "git restore --staged seed.txt"],
+    ["git restore --source=HEAD~1 -- seed.txt", "restore", "git restore", "git restore -S -- seed.txt"],
+    ["git restore -SW seed.txt", "restore", "git restore", "git restore -S seed.txt"],
+    ["git checkout-index -f -a", "-f", "git checkout-index --force", "git checkout-index -a"],
+    ["git checkout-index --force seed.txt", "--force", "git checkout-index --force", "git checkout-index seed.txt"],
+    ["git checkout-index -fu -a", "-fu", "git checkout-index --force", "git checkout-index -f --temp seed.txt"],
+    ["git sparse-checkout set src", "set", "git sparse-checkout", "git sparse-checkout list"],
+    ["git sparse-checkout add docs", "add", "git sparse-checkout", "git sparse-checkout check-rules"],
+    ["git sparse-checkout disable", "disable", "git sparse-checkout", "git sparse-checkout list"],
+    ["git read-tree -u HEAD", "-u", "git read-tree -u", "git read-tree HEAD"],
+    ["git read-tree -mu HEAD side", "-mu", "git read-tree -u", "git read-tree -m HEAD side"],
+    ["git read-tree --reset -u HEAD", "-u", "git read-tree -u", "git read-tree -u -n HEAD"],
+    ["git submodule update --init --recursive", "update", "git submodule update", "git submodule status"],
+    ["git submodule deinit -f lib", "deinit", "git submodule deinit", "git submodule init"],
+    ["git rm -f seed.txt", "rm", "git rm", "git rm --cached seed.txt"],
+    ["git rm seed.txt", "rm", "git rm", "git rm -n seed.txt"],
+    ["git rm -r sub", "rm", "git rm", "git rm -r --cached sub"],
+  ];
+
+  // The #288 fold: with discards-work overridden for the session, the
+  // whole-tree restore, the clean and the forced whole-tree rm of the
+  // owner's checkout are still refused mid-run -- the mid-run rule used
+  // to cover checkout, switch and hard reset only.
+  const folded: Array<[command: string, flag: string, name: string, twin: string]> = [
+    ["git restore .", "restore", "git restore", "git restore --staged ."],
+    ["git restore :", "restore", "git restore", "git restore -S :"],
+    ["git clean -fd", "clean", "git clean", "git clean -nd"],
+    ["git clean -f", "clean", "git clean", "git clean -n"],
+    ["git rm -rf .", "rm", "git rm", "git rm --cached -r ."],
+  ];
+
+  it("each is refused in the owner's checkout mid-run, from the root and from a nested folder, naming the run and the effect; its twin passes there", () => {
+    const { proj, home, sub } = live();
+    for (const [c, flag, name, twin] of rows) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("run-x");
+        expect(r.stderr, c).toContain(`this \`${name}\` targets the checkout you work in`);
+        expect(r.stderr, c).toContain(`effect: touches-owner-checkout, from \`${flag}\`.`);
+        expectOwnerTail(r.stderr, c);
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the #288 fold: with the destructive-git override set, the whole-tree restore, clean and forced rm are still refused mid-run, naming both effects", () => {
+    const { proj, home, sub } = live();
+    for (const [c, flag, name, twin] of folded) {
+      for (const cwd of [proj, sub]) {
+        for (const r of [guard(proj, home, c, lifted, cwd), guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`, {}, cwd)]) {
+          expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain(`this \`${name}\` targets the checkout you work in`);
+          expect(r.stderr, c).toContain(`effect: touches-owner-checkout, from \`${flag}\`; also discards-work.`);
+        }
+        expect(guard(proj, home, twin, lifted, cwd).status, twin).toBe(0);
+      }
+    }
+  });
+
+  it("each passes in the run's own worktree -- by cwd and by -C -- and in the owner's checkout once no run is live", () => {
+    const { proj, home, linked } = live();
+    for (const [c] of [...rows, ...folded]) {
+      const r = guard(proj, home, c, lifted, linked);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      const byC = guard(proj, home, `git -C ${linked} ${c.replace(/^git (-c \S+ )?/, "")}`, lifted);
+      expect(byC.status, `-C: ${c}\n${byC.stderr}`).toBe(0);
+    }
+    const idle = fixture();
+    for (const [c] of rows) {
+      const r = guard(idle.proj, idle.home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("CAIRN_RUN_OK=1 as the leading assignment lifts each one once", () => {
+    const { proj, home } = live();
+    for (const [c] of [...rows, ...folded]) {
+      expect(guard(proj, home, `CAIRN_RUN_OK=1 ${c}`, lifted).status, c).toBe(0);
+    }
+  });
+
+  it("the reads of the new subcommands, and a mention, still pass in the owner's checkout mid-run", () => {
+    const { proj, home } = live();
+    for (const c of [
+      "git apply --check fix.patch",
+      "git apply --numstat fix.patch",
+      "git bisect log",
+      "git sparse-checkout list",
+      "git read-tree HEAD",
+      "git read-tree --prefix=sub/ HEAD",
+      "git submodule status",
+      "git rm --cached seed.txt",
+      "git clean -n",
+      "git checkout-index -a --prefix=/tmp/export/",
+      "echo git apply fix.patch",
+      'git commit -m "git bisect start"',
+      "git log -- seed.txt",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+});
+
+describe("run guard: ref and reflog destruction refused in every session (#288)", () => {
+  // Each row: [refused, its everyday twin]. A deleted branch is
+  // recoverable -- HEAD's reflog and `git fsck --lost-found` keep its
+  // commits -- until one of these runs; that is why `branch -D` stays off
+  // the table and these are on it. Before #288 every refused form but the
+  // reflog expire (#264) passed with exit 0; the 2026-10-07 sweep recorded
+  // the ref deletion passing.
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["git update-ref -d refs/heads/topic", "git update-ref refs/heads/topic HEAD"],
+    ["git update-ref --delete refs/remotes/origin/topic", "git update-ref -m msg refs/heads/topic HEAD"],
+    ["git update-ref --del refs/tags/v1", "git update-ref --no-deref refs/heads/topic HEAD~1"],
+    ["git reflog delete HEAD@{1}", "git reflog show"],
+    ["git reflog delete --rewrite main@{0}", "git reflog exists refs/heads/main"],
+    ["git reflog expire --expire=now --all", "git reflog"],
+    ["git gc --prune=now", "git gc"],
+    ["git gc --aggressive --prune=all", "git gc --aggressive"],
+    ["git gc -q --prun=1.hour.ago", "git gc --prune"],
+    ["git -c gc.pruneExpire=now gc", "git -c gc.pruneExpire=never gc"],
+    ["git prune", "git prune -n"],
+    ["git prune --expire=now", "git prune --dry-run --expire=now"],
+    ["git prune --expire 2.weeks.ago", "git prune-packed"],
+    ["timeout 5 git prune", "timeout 5 git worktree prune"],
+    ["git -C . reflog delete HEAD@{0}", "git -C . remote prune origin"],
+    ['echo "$(git update-ref -d refs/heads/topic)"', 'echo "$(git update-ref refs/heads/topic HEAD)"'],
+  ];
+
+  it("each is refused from the repository root and from a nested folder, naming the escape; its twin passes in both", () => {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    git(proj, "branch", "topic");
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("refused in every session");
+        expect(r.stderr, refused).toContain("effect: discards-work, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("branch -D stays off the table as recoverable; mentions pass; the owner's escape lifts each refused form", () => {
+    const { proj, home } = fixture();
+    git(proj, "branch", "topic");
+    for (const c of [
+      "git branch -D topic",
+      "git branch -d topic",
+      "git branch --delete --force topic",
+      "echo git prune",
+      'git commit -m "git reflog delete HEAD@{1}"',
+      "git log --oneline # git gc --prune=now",
+      "git gc --no-prune",
+      "git gc --prune=false",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+    for (const [refused] of pairs) {
+      expect(guard(proj, home, refused, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, refused).toBe(0);
+      if (!refused.startsWith("echo")) expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${refused}`).status, refused).toBe(0);
+    }
+  });
+});

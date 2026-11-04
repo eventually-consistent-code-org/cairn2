@@ -52,10 +52,24 @@
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch;
  *   forced or whole-tree checkout/restore; a discarding switch; clean; a
- *   forced whole-tree rm, #434; stash clear; reflog expire; a forced
- *   worktree remove; a stash pop, apply, drop or branch while more than
- *   one worktree shares the stash, #363, #438),
- *   options shortened as git allows (--har is --hard). Their everyday
+ *   forced whole-tree rm, #434; stash clear; a forced worktree remove; a
+ *   stash pop, apply, drop or branch while more than one worktree shares
+ *   the stash, #363, #438; and the ref and reflog destruction that makes a
+ *   deleted branch unrecoverable, #288: reflog expire and delete,
+ *   update-ref -d, a prune that isn't a dry run, and gc with an explicit
+ *   prune date -- typed, or set inline as gc.pruneExpire. `branch -D`
+ *   stays off the table: HEAD's reflog and `git fsck --lost-found` keep its
+ *   commits until one of those runs. Not seen, dated 2026-11-04: an
+ *   `update-ref --stdin` batch's delete lines, and a gc.pruneExpire set in
+ *   the repository's or the user's config),
+ *   options shortened as git allows (--har is --hard). A whole-tree
+ *   pathspec is `.`, `..`, a bare glob, `:/`, `:(top)`, a lone `:` or any
+ *   magic with nothing after it (#464: git reads `:` as everything), or the
+ *   repository root as an absolute path (#288, the repoRoot probe); a
+ *   colon-prefixed real path (`:/src`) is that path. Not seen, by decision
+ *   (phase 31, 2026-11-04): an exclude-only pathspec (`:!src`,
+ *   `:(exclude)src`) stays a path here, though git reads it as everything
+ *   but the excluded (measured, git 2.56). Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
  *   stdout). Escape:
@@ -81,12 +95,21 @@
  *   replaces the checked-out commit, of the checkout it runs in --
  *   checkout, switch, merge, pull, rebase, cherry-pick, revert, am, mv,
  *   the stash actions that write the tree (push, save, a bare stash, pop,
- *   apply, branch) and reset in its hard, merge and keep forms (#435; the
- *   hard reset even with discards-work overridden) -- aimed at the owner's
- *   own checkout (see ownerCheckout) is refused: it changes the human's
- *   files underneath them, mid-edit. A commit adds to their branch and
- *   leaves the files as they left them, add and a soft or mixed reset
- *   touch the index only, and the reads touch nothing: those pass.
+ *   apply, branch), reset in its hard, merge and keep forms (#435), and
+ *   (#468) apply, bisect start / bad / good / new / old / skip / reset /
+ *   replay / run, restore, checkout-index --force, sparse-checkout set /
+ *   add / reapply / disable / init, read-tree -u, submodule update and
+ *   deinit, rm, and clean -- aimed at the owner's own checkout (see
+ *   ownerCheckout) is refused: it changes the human's files underneath
+ *   them, mid-edit. A whole-tree restore, a clean, a forced whole-tree rm
+ *   and a hard reset are refused there even with discards-work overridden
+ *   (#288). A commit adds to their branch and leaves the files as they
+ *   left them; add, rm --cached, restore --staged, apply --cached and a
+ *   soft or mixed reset touch the index only; a dry run, apply --check or
+ *   --stat, checkout-index --temp, bisect log, sparse-checkout list,
+ *   submodule status and the reads touch nothing: those pass. The table
+ *   (git-effects.mjs EFFECT_TABLE) and this sentence agree row for row;
+ *   runguard-effects.test.ts pins the subcommand list (#468).
  *   CAIRN_RUN_OK=1 as the leading assignment overrides that once. A hard
  *   reset there carries both effects; the refusal names both.
  *
@@ -1186,15 +1209,39 @@ function linkedWorktrees(at) {
 }
 
 /**
+ * The repository root at `at`, when `word` is its absolute path (#288, the
+ * whole-tree rows' repoRoot probe): `git rev-parse --show-toplevel`, links
+ * resolved, read once per target. The answer is the word's own spelling with
+ * its trailing `/`, `/.` or `/*` dropped -- `/tmp/repo` for a root git
+ * reports as `/private/tmp/repo` -- so the classifier's string compare
+ * meets it. A relative word, a path under the root, another repository's
+ * root (git refuses a path outside the work tree itself), or a target git
+ * can't read is undefined: a path, like the other probes' no. Asserted by
+ * runguard-guards.test.ts (#464, the #288 rows).
+ */
+function repoRoot(at, word) {
+  if (!isAbsolute(word)) return undefined;
+  if (at.top === undefined) {
+    const top = gitOut(at, ["rev-parse", "--show-toplevel"]);
+    at.top = top ? realPath(top) : null;
+  }
+  if (at.top === null) return undefined;
+  const bare = word.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+  return realPath(bare) === at.top ? bare : undefined;
+}
+
+/**
  * The repository's answers the classifier asks for at the target `at`
  * (#359): a remote that mirrors, a push that deletes the default branch --
- * defaultBranchSources reads which branches that is -- and a second
- * worktree sharing the stash (#363).
+ * defaultBranchSources reads which branches that is -- a second worktree
+ * sharing the stash (#363), and whether an absolute path is this
+ * repository's root (#288).
  */
 const repoProbe = (at) => ({
   mirrorConfigured: (inv) => mirrorConfigured(inv, at),
   deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
   linkedWorktrees: () => linkedWorktrees(at),
+  repoRoot: (word) => repoRoot(at, word),
 });
 
 // The subcommands the effect table knows: builtins, never aliases (#430).
@@ -1629,4 +1676,26 @@ try {
  *         configured one is asked of git once through gitOut, and a `!`
  *         shell alias is a discards-work row of its own. The gap predates
  *         #359; the rewrite's claim brought it in scope.
+ *   #464  a lone colon is the whole tree: git reads `:`, `::`, `:/:` and
+ *         any magic with no path after it as everything, so wholeTree
+ *         (git-effects.mjs) matches them and the rm, checkout and restore
+ *         rows inherit it; a colon-prefixed real path stays a path. The
+ *         repository root as an absolute path is the whole tree too (the
+ *         #288 spelling), through the repoRoot probe, links resolved.
+ *   #468  the owner-checkout table meets its own definition: rows for
+ *         apply, bisect (the actions that move HEAD), restore,
+ *         checkout-index --force, sparse-checkout set and kin, read-tree
+ *         -u, submodule update / deinit and rm, each with its index-only,
+ *         dry-run or read twin; `sparesTree` applies to every row kind,
+ *         `unlessOn` takes a list. clean joins them as the #288 fold: with
+ *         discards-work overridden, a whole-tree restore, a clean or a
+ *         forced whole-tree rm of the owner's checkout is still refused
+ *         mid-run.
+ *   #288  the destructive-git table gaps after #264: ref and reflog
+ *         destruction joins discards-work (update-ref -d, reflog delete,
+ *         prune, gc with an explicit prune date or an inline gc.pruneExpire;
+ *         reflog expire was a #264 row already), `branch -D` stays off as
+ *         recoverable with the header saying why. The absolute-root
+ *         checkout spelling landed with #464; the mid-run restore, clean
+ *         and forced rm of the owner's checkout with #468.
  */

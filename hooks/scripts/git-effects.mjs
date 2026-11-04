@@ -91,6 +91,22 @@ const READS = {
   rm: { alias: { f: "--force", n: "--dry-run" },
     longs: ["--force", "--cached", "--dry-run", "--pathspec-from-file"], valued: ["--pathspec-from-file"] },
   worktree: { alias: { f: "--force" }, longs: ["--force"] },
+  // #468 -- the owner-checkout rows that turn on a flag or are spared by one
+  apply: { short: "pC", alias: { R: "--reverse" },
+    longs: ["--check", "--stat", "--numstat", "--summary", "--cached", "--index", "--reverse", "--directory",
+      "--exclude", "--include", "--whitespace", "--build-fake-ancestor"],
+    valued: ["--directory", "--exclude", "--include", "--whitespace", "--build-fake-ancestor"] },
+  "checkout-index": { alias: { f: "--force", a: "--all", u: "--index", n: "--no-create" },
+    longs: ["--force", "--all", "--index", "--no-create", "--prefix", "--stage", "--temp", "--stdin"],
+    valued: ["--prefix", "--stage"] },
+  // read-tree's -u has no long spelling (builtin/read-tree.c); the row names `-u` itself
+  "read-tree": { alias: { n: "--dry-run" },
+    longs: ["--dry-run", "--prefix", "--index-output", "--exclude-per-directory"],
+    valued: ["--prefix", "--index-output", "--exclude-per-directory"] },
+  // #288 -- ref and reflog destruction; gc's --prune takes its date after `=` only
+  "update-ref": { alias: { d: "--delete" }, longs: ["--delete", "--no-deref", "--stdin", "--create-reflog"] },
+  gc: { longs: ["--prune", "--auto", "--aggressive"] },
+  prune: { alias: { n: "--dry-run" }, longs: ["--dry-run", "--expire"], valued: ["--expire"] },
   push: PUSH_READ,
 };
 
@@ -99,35 +115,65 @@ const DISCARDS = "it discards uncommitted work with no undo.";
 // Why a touches-owner-checkout row refuses mid-run in the owner's checkout (#216, #435)
 const REWRITES = "it rewrites the files or HEAD of the checkout it runs in.";
 
+// Why an explicit gc prune date refuses (#288): the default keeps two weeks of unreachable objects
+const PRUNES = "an explicit prune date reaches past the two weeks the default keeps -- `now` deletes every " +
+  "unreachable object, the dangling commits a reflog or `git fsck --lost-found` would have recovered.";
+
 // Why a stash pop, apply, drop or branch refuses once a repository has linked worktrees (#363, #438)
 const SHARED_STASH = "the stash is shared by every worktree of this repository, so the entry it takes " +
   "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
   "branch instead, and squash it before the close.";
 
 /**
- * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438).
+ * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438,
+ * #464, #468, #288).
  * Each row: the effect, the subcommand, the first word it needs (`action`,
  * read off before the flags are -- one word or a list, where "" is git's
  * default action: no word, or an option first, as in a bare `git stash`),
  * and `when` -- one of:
- *   flag       any of `names` is set (spelled out, shortened, or a short alias)
- *   wholeTree  a pathspec names the whole tree, or --pathspec-from-file
- *              hides it; `sparesTree` names the flags that keep the write
- *              off the work tree (`restore --staged`, `rm --cached`, a dry
- *              run), and `needs` the flag the row also wants and names (a
- *              forced rm, #434: unforced, git refuses a modified file itself)
- *   unlessOn   always, unless `name` is on at the end (a dry run)
+ *   flag       any of `names` is set (spelled out, shortened, or a short
+ *              alias); with `value`, a regexp, only when the `=value` typed
+ *              with it, or the word it took, matches -- `gc --prune=now`,
+ *              never the bare `--prune` that keeps the default (#288)
+ *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
+ *              glob, the colon magic of #464, the repository root as an
+ *              absolute path through the `repoRoot` probe, #288), or
+ *              --pathspec-from-file hides it; `needs` names the flag the
+ *              row also wants and names (a forced rm, #434: unforced, git
+ *              refuses a modified file itself)
+ *   unlessOn   always, unless `name` -- one, or any of a list -- is on at
+ *              the end (a dry run; `apply --check`)
+ * and on any row, `sparesTree` names the flags that keep the write off the
+ * work tree (`restore --staged`, `rm --cached`, `apply --cached`, a dry
+ * run, `checkout-index --temp`): on, the row doesn't match (#434, #468).
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
  *   plusRef    a refspec with a leading `+`
  *   config     a `-c` setting matching `key` that reads as true
  *   probe      the repository says so: probe[name](inv) is true
+ * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
+ * repository root when `word` is its absolute path (#288).
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
- * one a refusal names. The everyday neighbours stay off the table because
- * they are routine or recoverable: a single-path checkout/restore, a forced
- * single-path `rm` (#434), `branch -D` (its reflog keeps the commits),
- * `restore --staged .` and `rm --cached .` (the index only, like a plain
- * `git reset`), deleting a feature branch, and `clean -n`.
+ * one a refusal names. The everyday neighbours have no discards-work row
+ * because they are routine or recoverable: a single-path checkout/restore
+ * and a forced single-path `rm` (#434) -- which touch the checkout they
+ * run in and nothing more, #468 -- `branch -D` (its reflog keeps the
+ * commits), `restore --staged .` and `rm --cached .` (the index only, like
+ * a plain `git reset`), deleting a feature branch, and `clean -n`.
+ *
+ * Refs (#288): a deleted branch is recoverable -- HEAD's reflog keeps the
+ * commits of any branch that was checked out, and `git fsck --lost-found`
+ * finds the rest as dangling objects -- until something prunes them. So
+ * `branch -D` stays off the table, and the commands that make its loss
+ * final are rows: `reflog delete` and `reflog expire` (the record), a
+ * `prune` that isn't a dry run and `gc` with an explicit prune date, typed
+ * or set inline as gc.pruneExpire (the objects), and `update-ref -d` (any
+ * ref, with its reflog, and none of `branch -d`'s checks). Their twins --
+ * a ref written, the reflog read, the default gc, `branch -D` itself --
+ * carry no row. Not seen, dated 2026-11-04: an `update-ref --stdin` batch
+ * whose delete lines arrive on stdin, and a gc.pruneExpire set in the
+ * repository's or the user's config rather than on the line. Asserted by
+ * runguard-effects.test.ts and runguard-guards.test.ts (#288).
  *
  * Stash (#363): one `.git` means one stash, so with linked worktrees a pop,
  * apply or drop can take another worktree's work -- those rows, and the
@@ -140,16 +186,23 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * list|show` stay reads. Asserted by runguard-effects.test.ts and
  * runguard-guards.test.ts (#363, #438).
  *
- * Owner checkout (#216, #435): a command touches the checkout it runs in
- * when it rewrites the working files, or replaces the checked-out commit
- * with another -- checkout, switch, merge, pull, rebase, cherry-pick,
- * revert, am, mv, the stash actions that write the tree (push, save, a
- * bare stash, pop, apply, branch), and reset in its hard, merge and keep
- * forms. A commit adds to the branch and leaves the files as the human
- * left them; add, rm --cached and a soft or mixed reset touch the index
- * only; the reads touch nothing -- none has a row. The run guard refuses
- * the effect only mid-run, aimed at the owner's checkout. Asserted by
- * runguard-effects.test.ts and runguard-guards.test.ts (#435).
+ * Owner checkout (#216, #435, #468): a command touches the checkout it
+ * runs in when it rewrites the working files, or replaces the checked-out
+ * commit with another -- checkout, switch, merge, pull, rebase,
+ * cherry-pick, revert, am, mv, the stash actions that write the tree
+ * (push, save, a bare stash, pop, apply, branch), reset in its hard, merge
+ * and keep forms, and (#468) apply, bisect in the actions that move HEAD
+ * (start, bad, good, new, old, skip, reset, replay, run), restore,
+ * checkout-index --force, sparse-checkout set / add / reapply / disable /
+ * init, read-tree -u, submodule update and deinit, rm, and clean. A
+ * commit adds to the branch and leaves the files as the human left them;
+ * add, rm --cached, restore --staged, apply --cached and a soft or mixed
+ * reset touch the index only; a dry run, apply --check / --stat,
+ * checkout-index --temp, bisect log / visualize / terms, sparse-checkout
+ * list, submodule status / init and the reads touch nothing -- none has a
+ * row. The run guard refuses the effect only mid-run, aimed at the owner's
+ * checkout. Asserted by runguard-effects.test.ts (the subcommand list is
+ * pinned) and runguard-guards.test.ts (#435, #468).
  *
  * Aliases (#430): a row's `sub` is the subcommand git runs, so an alias is
  * resolved to it before the table is read (resolveAlias) and needs no row
@@ -190,6 +243,20 @@ export const EFFECT_TABLE = Object.freeze([
     cause: "more than one worktree", what: "`git stash branch`", why: SHARED_STASH },
   { effect: DISCARDS_WORK, sub: "reflog", action: "expire", when: "always",
     what: "`git reflog expire`", why: "it erases the record git recovers lost commits from." },
+  // #288 -- the rest of ref and reflog destruction: what makes a deleted
+  // branch unrecoverable. `branch -D` itself stays off the table (below).
+  { effect: DISCARDS_WORK, sub: "reflog", action: "delete", when: "always",
+    what: "`git reflog delete`", why: "it erases the record git recovers lost commits from." },
+  { effect: DISCARDS_WORK, sub: "update-ref", when: "flag", names: ["--delete"],
+    what: "`git update-ref -d`", why: "it deletes any ref outright -- plumbing with none of `branch -d`'s checks -- " +
+      "and takes the ref's reflog with it, so nothing is left to find its commits by." },
+  { effect: DISCARDS_WORK, sub: "gc", when: "flag", names: ["--prune"], value: /^(?!(?:never|false)$)./i,
+    what: "`git gc --prune=<date>`", why: PRUNES },
+  { effect: DISCARDS_WORK, sub: "gc", when: "config", key: /^gc\.pruneExpire(?:=(?!(?:never|false)$)(.*))?$/i,
+    what: "`git gc --prune=<date>`", why: PRUNES },
+  { effect: DISCARDS_WORK, sub: "prune", when: "unlessOn", name: "--dry-run",
+    what: "`git prune`", why: "a bare prune deletes every unreachable object at once, and --expire only narrows " +
+      "it: the dangling commits a reflog or `git fsck --lost-found` would have recovered are gone." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--force", "--force-with-lease", "--force-if-includes"],
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "plusRef",
@@ -231,6 +298,30 @@ export const EFFECT_TABLE = Object.freeze([
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "pop", when: "always", what: "`git stash pop`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "apply", when: "always", what: "`git stash apply`", why: REWRITES },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "stash", action: "branch", when: "always", what: "`git stash branch`", why: REWRITES },
+  // #468 -- the rest of the commands the definition names: each rewrites
+  // the working files or moves HEAD; its twin is the same command kept off
+  // the work tree (a check, a stat, --cached, --staged, a dry run, --temp)
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "apply", when: "unlessOn", name: ["--check", "--stat", "--numstat", "--summary"],
+    sparesTree: ["--cached"], what: "`git apply`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "bisect", when: "always",
+    action: ["start", "bad", "good", "new", "old", "skip", "reset", "replay", "run"], what: "`git bisect`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "restore", when: "always", sparesTree: ["--staged"],
+    what: "`git restore`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout-index", when: "flag", names: ["--force"], sparesTree: ["--temp"],
+    what: "`git checkout-index --force`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "sparse-checkout", when: "always",
+    action: ["set", "add", "reapply", "disable", "init"], what: "`git sparse-checkout`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "read-tree", when: "flag", names: ["-u"], sparesTree: ["--dry-run"],
+    what: "`git read-tree -u`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "submodule", action: "update", when: "always",
+    what: "`git submodule update`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "submodule", action: "deinit", when: "always",
+    what: "`git submodule deinit`", why: REWRITES },
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "rm", when: "always", sparesTree: ["--cached", "--dry-run"],
+    what: "`git rm`", why: REWRITES },
+  // the #288 fold: with discards-work overridden for the session, a clean
+  // of the owner's checkout mid-run is still refused, as a hard reset is
+  { effect: TOUCHES_OWNER_CHECKOUT, sub: "clean", when: "unlessOn", name: "--dry-run", what: "`git clean`", why: REWRITES },
 ]);
 
 // The subcommands the table knows (#430). In git a builtin wins over an
@@ -344,12 +435,15 @@ export function longNames(typed, names) {
  * every flag ever set, for the ones that refuse; `on` is each one's state
  * after any `--no-` negation, for the ones that make a command safe --
  * `git clean -n --no-dry-run` deletes. `typed` is the word that first set
- * each flag, cut at any `=` (#359): what a refusal names.
+ * each flag, cut at any `=` (#359): what a refusal names. `values` is what
+ * a long option was last given -- after its `=`, or the word it took --
+ * for the rows that read one (`gc --prune=now`, #288).
  */
 export function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
   const flags = new Set();
   const on = new Map();
   const typed = new Map();
+  const values = new Map();
   const words = [];
   const set = (n, word) => {
     flags.add(n);
@@ -363,7 +457,11 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
       const name = eq < 0 ? a : a.slice(0, eq);
       const hit = longNames(name, longs);
       for (const n of hit) set(n, name);
-      if (eq < 0 && hit.some((n) => valued.includes(n))) k++;
+      if (eq >= 0) for (const n of hit) values.set(n, a.slice(eq + 1));
+      if (eq < 0 && hit.some((n) => valued.includes(n))) {
+        for (const n of hit) values.set(n, args[k + 1] ?? "");
+        k++;
+      }
       if (!hit.length && name.startsWith("--no-")) {
         for (const n of longNames(`--${name.slice(5)}`, longs)) on.set(n, false);
       }
@@ -381,18 +479,32 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
     }
     words.push(a);
   }
-  return { flags, on, typed, words };
+  return { flags, on, typed, values, words };
 }
 
 /**
  * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, `:/`, `:/.`, `:(top)`, and a bare glob (`*`,
- * `**`, `./*` -- a pathspec `*` crosses `/`). A single path -- `src/a.ts`,
- * `.gitignore`, `:/src`, `*.ts` -- is not.
+ * `.`, `./`, `..`, `../..`, a bare glob (`*`, `**`, `./*` -- a pathspec
+ * `*` crosses `/`), and the magic spellings git reads as everything (#464):
+ * a lone `:`, `::`, `:/`, `:/:`, `:/.`, `:(top)`, and any long-form magic
+ * with no path after it (`:(glob,top)`, `:(icase)` -- measured against git
+ * 2.56, 2026-11-04: `git rm -rfn -- :` lists every tracked file). With
+ * `root`, the repository's own absolute path, that path too -- `/repo`,
+ * `/repo/`, `/repo/.`, `/repo/*` (#288); only the repository knows its
+ * root, so the guard's repoRoot probe supplies it per word. A single path
+ * -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` --
+ * is not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by
+ * decision (phase 31, 2026-11-04). Asserted by runguard-effects.test.ts
+ * and runguard-guards.test.ts (#464).
  */
-export function wholeTree(p) {
-  return p !== "" && /^(?::\/|:\(top\))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p);
+export function wholeTree(p, root) {
+  if (p === "") return false;
+  if (/^(?::(?:\/*:?|\((?!(?:\w+,)*exclude\b)\w+(?:,\w+)*\)))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p)) return true;
+  return root !== undefined && root !== null && bareRoot(p) === bareRoot(root);
 }
+
+/** A folder path with its trailing `/`, `/.` and `/*` spellings dropped -- what names the folder itself (#288). */
+const bareRoot = (p) => p.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
 
 /** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
 export const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
@@ -450,30 +562,42 @@ function rowCause(row, inv, probe) {
   const first = inv.args[0] === undefined || inv.args[0].startsWith("-") ? "" : inv.args[0];
   if (row.action !== undefined && ![].concat(row.action).includes(first)) return null;
   const args = row.action !== undefined && first !== "" ? inv.args.slice(1) : inv.args;
-  // past a bare `--` a push's words are still refspecs, not paths
-  const parsed = () => (inv.sub === "push" ? pushArgs(inv) : readArgs(args, READS[inv.sub]));
+  // past a bare `--` a push's words are still refspecs, not paths; read once per row
+  let read;
+  const parsed = () => (read ??= inv.sub === "push" ? pushArgs(inv) : readArgs(args, READS[inv.sub]));
+  // the write stays off the work tree, whatever the row's `when` (#434,
+  // #468): `restore --staged` (unless --worktree is on too), `rm --cached`,
+  // `apply --cached`, a dry run, `checkout-index --temp`; a --no- takes any
+  // of them back
+  if (row.sparesTree) {
+    const { flags, on } = parsed();
+    if (row.sparesTree.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+  }
   switch (row.when) {
     case "always":
       // the action word it matched, or the subcommand for a row without one or a bare stash
       return row.action === undefined ? inv.sub : first || inv.sub;
     case "flag": {
-      const { flags, typed } = parsed();
-      const hit = row.names.find((n) => flags.has(n));
+      const { flags, typed, values } = parsed();
+      // a row with `value` wants the flag's value to match too (#288): `--prune=now`, not a bare `--prune`
+      const hit = row.names.find((n) => flags.has(n) && (row.value === undefined || row.value.test(values.get(n) ?? "")));
       return hit === undefined ? null : typed.get(hit) ?? hit;
     }
-    case "unlessOn":
-      return parsed().on.get(row.name) === true ? null : inv.sub;
+    case "unlessOn": {
+      // one name or a list (#468): `apply --check`, `--stat`, `--numstat`, `--summary` apply nothing
+      const { on } = parsed();
+      return [].concat(row.name).some((n) => on.get(n) === true) ? null : inv.sub;
+    }
     case "wholeTree": {
-      const { flags, on, typed, words } = parsed();
-      // the write stays off the work tree: `restore --staged` (unless
-      // --worktree is on too), `rm --cached`, a dry run (#434); a --no-
-      // takes any of them back
-      if (row.sparesTree?.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
+      const { flags, typed, words } = parsed();
       // a row that also needs a flag names it: `-rf`, not `.` (#434)
       const need = row.needs?.find((n) => flags.has(n));
       if (row.needs && need === undefined) return null;
+      // the repository root as an absolute path is the whole tree too (#288):
+      // the repoRoot probe answers per word, or no word is the root
+      const root = typeof probe?.repoRoot === "function" ? probe.repoRoot : () => undefined;
       const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
-        : [...words, ...inv.paths].find(wholeTree) ?? null;
+        : [...words, ...inv.paths].find((w) => wholeTree(w, root(w))) ?? null;
       return tree === null || need === undefined ? tree : typed.get(need) ?? need;
     }
     case "pushTo": {
