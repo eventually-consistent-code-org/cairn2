@@ -7,6 +7,7 @@
 //   so an honest parse is a safe parse. Malformed lines are skipped with a
 //   note, never guessed at.
 // Author(s): John Reed
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CairnError } from "../errors.js";
@@ -87,6 +88,82 @@ function planIssuesAt(base) {
         return [];
     return parsePlanDoc(readFileSync(path, "utf8")).frontmatter.issues;
 }
+const dateOf = (r) => r.closedDate ?? r.loggedDate ?? "";
+/** Two sha spellings name one commit when one is a prefix of the other (7 vs 40 chars). */
+const sameCommit = (a, b) => a.startsWith(b) || b.startsWith(a);
+/** Steps 2 and 3 of the rule alone: the date on the line, then file order. */
+const laterDated = (x, y) => dateOf(x) !== dateOf(y) ? dateOf(x) > dateOf(y) : x.line > y.line;
+/**
+ * Build the line order for the repository that holds `cwd` (the phase dir;
+ * git discovers the repository upward, exactly as a hook run there would).
+ *
+ * :param cwd: the phase directory whose LEDGER.md is being read
+ * :returns the rule, with git's answers cached for this parse
+ */
+export function ledgerLineOrder(cwd) {
+    // One git call: exit status and stdout, or the status git died with.
+    // Anything but 0 or 1 (no repo, unknown or ambiguous sha, no git binary,
+    // a timeout) reads as "cannot say" to the callers below. Every sha handed
+    // in came off a line's `[0-9a-f]{7,40}` match, so none can read as an
+    // option, and the subcommand names are fixed here.
+    const git = (args) => {
+        try {
+            const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe", timeout: 5000 });
+            return { status: 0, out };
+        }
+        catch (e) {
+            return { status: e.status ?? null, out: "" };
+        }
+    };
+    const cache = new Map();
+    // Is `ancestor` reachable from `descendant`? null when git cannot say.
+    const isAncestor = (ancestor, descendant) => {
+        const key = `${ancestor}..${descendant}`;
+        if (!cache.has(key)) {
+            const { status } = git(["merge-base", "--is-ancestor", ancestor, descendant]);
+            cache.set(key, status === 0 ? true : status === 1 ? false : null);
+        }
+        return cache.get(key);
+    };
+    const later = (x, y) => {
+        if (!sameCommit(x.headCommit, y.headCommit)) {
+            if (isAncestor(y.headCommit, x.headCommit) === true)
+                return true;
+            if (isAncestor(x.headCommit, y.headCommit) === true)
+                return false;
+        }
+        return laterDated(x, y);
+    };
+    // One git call each for the whole set: the heads no other head descends
+    // from, and the commit every base descends from. Null when git cannot say.
+    const gitLines = (args) => {
+        const { status, out } = git(args);
+        return status === 0 ? out.split("\n").map((l) => l.trim()).filter(Boolean) : null;
+    };
+    const range = (spans) => {
+        if (spans.length === 0)
+            return null;
+        const heads = [...new Set(spans.map((s) => s.headCommit))];
+        const bases = [...new Set(spans.map((s) => s.baseCommit))];
+        // Head: among the independent tips (no ancestry between them, by git's
+        // own answer -- or all spans when it cannot say), the latest-dated,
+        // then the last in the file.
+        const tips = heads.length > 1 ? gitLines(["merge-base", "--independent", ...heads]) : null;
+        let headPool = tips ? spans.filter((s) => tips.some((t) => sameCommit(t, s.headCommit))) : spans;
+        if (headPool.length === 0)
+            headPool = spans;
+        const head = headPool.reduce((w, s) => (laterDated(s, w) ? s : w));
+        // Base: the one base the others descend from when there is one, else
+        // the earliest-dated, then the first in the file.
+        const common = bases.length > 1 ? gitLines(["merge-base", "--octopus", ...bases])?.[0] : undefined;
+        let basePool = common ? spans.filter((s) => sameCommit(common, s.baseCommit)) : [];
+        if (basePool.length === 0)
+            basePool = spans;
+        const base = basePool.reduce((w, s) => (laterDated(w, s) ? s : w));
+        return { base: base.baseCommit, head: head.headCommit };
+    };
+    return { later, range };
+}
 /**
  * Parse one phase dir's LEDGER.md -- the one ledger reader that
  * distill_manifest and plan_check's ledger gates share.
@@ -100,12 +177,11 @@ export function parseLedger(base) {
     const evidence = [];
     const superseded = [];
     const skipped = [];
-    let range = null;
-    // File order IS chronological order (append-only): keep the first base, move the head.
-    const extend = (b, h) => { range = { base: range ? range.base : b, head: h }; };
+    const spans = [];
+    const order = ledgerLineOrder(base);
     const path = join(base, "LEDGER.md");
     if (!existsSync(path))
-        return { entries, evidence, superseded, skipped, range };
+        return { entries, evidence, superseded, skipped, range: null, order };
     const lines = readFileSync(path, "utf8").split("\n");
     for (const [i, line] of lines.entries()) {
         // Only list lines are candidate entries; the header and the append-only
@@ -118,16 +194,7 @@ export function parseLedger(base) {
                 taskRef: ev[1], summary: ev[2], baseCommit: ev[3], headCommit: ev[4],
                 issueId: ev[5], loggedDate: ev[6], line: i + 1,
             });
-            extend(ev[3], ev[4]);
-            // A closure EARLIER in the file for the same taskRef was wrong: the
-            // evidence line is the correction, so that closure stops standing.
-            // (A closure written AFTER this line is a real later close and stays.)
-            for (let j = entries.length - 1; j >= 0; j--) {
-                if (entries[j].taskRef !== ev[1])
-                    continue;
-                const [gone] = entries.splice(j, 1);
-                superseded.push({ ...gone, supersededBy: i + 1 });
-            }
+            spans.push(evidence[evidence.length - 1]);
             continue;
         }
         const m = LEDGER_LINE_RE.exec(line);
@@ -144,9 +211,22 @@ export function parseLedger(base) {
             ...(observedExit !== undefined ? { observedExit } : {}),
             observedMismatch: m[7] !== undefined && OBSERVED_MISMATCH_RE.test(m[7]),
         });
-        extend(m[3], m[4]);
+        spans.push(entries[entries.length - 1]);
     }
-    return { entries, evidence, superseded, skipped, range };
+    // A closure for a task was wrong when an evidence line for the SAME task
+    // speaks after it (by the rule, not by position): the evidence line is the
+    // correction, so that closure stops standing. A closure that speaks after
+    // every such evidence line is a real later close and stays. Git is only
+    // asked when a task carries both kinds of line.
+    for (let j = entries.length - 1; j >= 0; j--) {
+        const c = entries[j];
+        const fix = evidence.find((e) => e.taskRef === c.taskRef && order.later(e, c));
+        if (!fix)
+            continue;
+        entries.splice(j, 1);
+        superseded.unshift({ ...c, supersededBy: fix.line });
+    }
+    return { entries, evidence, superseded, skipped, range: order.range(spans), order };
 }
 // Back to the published shapes: the gate fields are plan_check's, and the
 // manifest's result must not grow them.
@@ -155,8 +235,9 @@ const asEvidence = ({ taskRef, summary, baseCommit, headCommit, issueId, loggedD
 /**
  * Assemble the distill manifest for one phase: its PLAN.md issues, its
  * LEDGER.md entries (each carrying the commit range the task landed as), and
- * the union commit range those entries span. Pure filesystem reads -- no git,
- * no tracker, no LLM judgment; same repo state, same manifest.
+ * the union commit range those entries span. Filesystem reads plus git
+ * ancestry questions (#445) -- no tracker, no LLM judgment; same repo
+ * state, same manifest.
  *
  * :param projectDir: project root (the dir holding .cairn/)
  * :param phaseNumber: phase number, integer or one-decimal (1, 1.5, ...)

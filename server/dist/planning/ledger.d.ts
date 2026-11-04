@@ -29,8 +29,9 @@ export interface LedgerEntryInput {
      * line that claimed an issue still open. It renders `- [ ] … evidence for
      * <issueId> <date>` (closedDate is then the logged date), consumes no
      * close receipt, and every ledger reader treats it as not-a-closure. An
-     * evidence line for the same taskRef as an EARLIER closure line
-     * supersedes that closure: readers report the issue not closed.
+     * evidence line that speaks AFTER a closure line for the same taskRef
+     * (by commit ancestry, then date, then file order -- #445) supersedes
+     * that closure: readers report the issue not closed.
      */
     kind?: LedgerKind;
     /** Free-text note on an evidence line (e.g. "supersedes the closure line"). Evidence kind only. */

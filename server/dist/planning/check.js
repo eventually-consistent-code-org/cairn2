@@ -299,10 +299,21 @@ function judgeLedgerGates(projectDir, p) {
     const issues = new Set(list(data.issues));
     const tdd = new Set(list(data.tdd));
     const declaredAt = (key) => p.lines.findIndex((l) => l.startsWith(`${key}:`)) + 1 || 1;
-    // Last standing closure per issue, and last superseded one -- file order
-    // is chronological, so a later line is the one that speaks.
-    const { entries, superseded } = parseLedger(p.phaseDir);
-    const byIssue = (rows) => new Map(rows.map((r) => [bareId(r.issueId), r]));
+    // Last standing closure per issue, and last superseded one -- "last" by
+    // the parser's line order (commit ancestry, then the line's date, then
+    // file order; #445), never by file position alone, which a union merge
+    // decides.
+    const { entries, superseded, order } = parseLedger(p.phaseDir);
+    const byIssue = (rows) => {
+        const out = new Map();
+        for (const r of rows) {
+            const id = bareId(r.issueId);
+            const held = out.get(id);
+            if (!held || order.later(r, held))
+                out.set(id, r);
+        }
+        return out;
+    };
     const standing = byIssue(entries);
     const corrected = byIssue(superseded);
     const exempt = p.verified && p.phase !== null && p.phase <= EVIDENCE_GATE_SHIPPED;

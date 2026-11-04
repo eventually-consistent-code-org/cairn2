@@ -4,8 +4,13 @@
 //
 // Ordering across branches is by merge, not by append time: the ledger
 // merges by union (.gitattributes, #361), so lines from two branches land
-// in merge order. Readers treat it as a set of lines keyed by issue id;
-// asserted by test/ledger.test.ts "ledger ordering is a merge artifact".
+// in merge order. Readers never let file position decide between two
+// lines for one task: a closure and its evidence fix-up resolve by commit
+// ancestry, then the date on the line, then file order (#445, the rule
+// lives in distill-manifest.ts). Asserted by test/ledger.test.ts "ledger
+// ordering is a merge artifact" (closures of different tasks) and
+// "closure-plus-evidence across a union merge reads the same answer in
+// both directions" (a real union merge, both ways).
 //
 // removeWhen: never for the record -- a commit range and its evidence are
 // the audit trail, not a model workaround. The refusal on missing evidence
@@ -56,8 +61,9 @@ export interface LedgerEntryInput {
    * line that claimed an issue still open. It renders `- [ ] … evidence for
    * <issueId> <date>` (closedDate is then the logged date), consumes no
    * close receipt, and every ledger reader treats it as not-a-closure. An
-   * evidence line for the same taskRef as an EARLIER closure line
-   * supersedes that closure: readers report the issue not closed.
+   * evidence line that speaks AFTER a closure line for the same taskRef
+   * (by commit ancestry, then date, then file order -- #445) supersedes
+   * that closure: readers report the issue not closed.
    */
   kind?: LedgerKind;
   /** Free-text note on an evidence line (e.g. "supersedes the closure line"). Evidence kind only. */

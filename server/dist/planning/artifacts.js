@@ -109,8 +109,12 @@ function createIfAbsent(path, content, created, skipped) {
 }
 /**
  * The ledger is append-only, so git's union merge driver is correct by
- * construction: two branches that each appended a line keep both. The
- * attribute lives at the planning root, where `**` reaches every phase.
+ * construction: two branches that each appended a line keep both, and the
+ * readers rank two lines for one task by commit ancestry, date, then file
+ * order (#445), so the merge direction cannot change the answer. Asserted
+ * by test/ledger.test.ts "closure-plus-evidence across a union merge reads
+ * the same answer in both directions". The attribute lives at the planning
+ * root, where `**` reaches every phase.
  */
 export const LEDGER_UNION_LINE = "**/LEDGER.md merge=union";
 const LEDGER_UNION_RE = /^\*\*\/LEDGER\.md\s+(?:\S+\s+)*merge=union(?:\s|$)/;

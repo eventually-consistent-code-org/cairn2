@@ -8,6 +8,7 @@
 //   note, never guessed at.
 // Author(s): John Reed
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CairnError } from "../errors.js";
@@ -55,8 +56,10 @@ export interface DistillManifest {
    *  claimed pass -- a non-zero exit or a timeout, with the exit observed. */
   observedMismatches: (DistillLedgerEntry & { exit: string })[];
   /** Union range the ledger lines span (closure and evidence lines alike --
-   *  both landed commits): first line's base to last line's head (the ledger is append-only, so file order IS chronological order).
-   *  Null when the ledger has no parsed entries. */
+   *  both landed commits): the base the other bases descend from, to the
+   *  head that descends from the other heads (#445) -- never "the last
+   *  line", which is a merge artifact. Null when the ledger has no parsed
+   *  entries. */
   commitRange: { base: string; head: string } | null;
   /** One note per ledger line that LOOKED like an entry but didn't match the
    *  writer's grammar -- surfaced, not silently dropped. */
@@ -175,6 +178,121 @@ export interface ParsedLedger {
   entries: ParsedClosure[]; evidence: ParsedEvidence[];
   superseded: ParsedClosure[]; skipped: string[];
   range: { base: string; head: string } | null;
+  /** The line order this parse resolved by (#445), git answers cached, for
+   *  readers that still have lines of their own to rank. */
+  order: LedgerLineOrder;
+}
+
+// Which ledger line speaks last (#445)
+//
+// The ledger merges by union, so the order two branches' lines land in is
+// the merge direction, not time. Readers that resolve "a closure and its
+// fix-up for the same task" or "the range the phase spans" by file
+// position give opposite answers for the two merge orders of the same two
+// lines. The rule that reads the same both ways, in order:
+//   1. commit ancestry -- the line whose head commit descends from the
+//      other's head is later (git is asked; a sha git cannot place, no
+//      repository, or no git at all, is "cannot say" and falls through);
+//   2. the date written on the line (closedDate / loggedDate);
+//   3. file order, last -- the single-branch case this used to be.
+// Asserted by test/ledger.test.ts "closure-plus-evidence across a union
+// merge reads the same answer in both directions (#445)". Fail-open: git
+// trouble never fails a parse, it only loses the first step.
+
+/** The three fields the rule reads, present on closure and evidence lines alike. */
+export interface LedgerLineRef {
+  headCommit: string;
+  /** 1-indexed LEDGER.md line. */
+  line: number;
+  /** `closedDate` on a closure line, `loggedDate` on an evidence line. */
+  closedDate?: string;
+  loggedDate?: string;
+}
+
+const dateOf = (r: LedgerLineRef): string => r.closedDate ?? r.loggedDate ?? "";
+
+/** Two sha spellings name one commit when one is a prefix of the other (7 vs 40 chars). */
+const sameCommit = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
+
+/** Steps 2 and 3 of the rule alone: the date on the line, then file order. */
+const laterDated = (x: LedgerLineRef, y: LedgerLineRef): boolean =>
+  dateOf(x) !== dateOf(y) ? dateOf(x) > dateOf(y) : x.line > y.line;
+
+/** Ancestry questions for one ledger's repository, answered by git and cached per parse. */
+export interface LedgerLineOrder {
+  /** True when `x` speaks after `y` by the rule above. */
+  later(x: LedgerLineRef, y: LedgerLineRef): boolean;
+  /** The commit range the given lines span, by the same rule; null for none. */
+  range(spans: LedgerSpan[]): { base: string; head: string } | null;
+}
+
+/** One ledger line's commits, with what the tie-breaks read. */
+export interface LedgerSpan extends LedgerLineRef { baseCommit: string }
+
+/**
+ * Build the line order for the repository that holds `cwd` (the phase dir;
+ * git discovers the repository upward, exactly as a hook run there would).
+ *
+ * :param cwd: the phase directory whose LEDGER.md is being read
+ * :returns the rule, with git's answers cached for this parse
+ */
+export function ledgerLineOrder(cwd: string): LedgerLineOrder {
+  // One git call: exit status and stdout, or the status git died with.
+  // Anything but 0 or 1 (no repo, unknown or ambiguous sha, no git binary,
+  // a timeout) reads as "cannot say" to the callers below. Every sha handed
+  // in came off a line's `[0-9a-f]{7,40}` match, so none can read as an
+  // option, and the subcommand names are fixed here.
+  const git = (args: string[]): { status: unknown; out: string } => {
+    try {
+      const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe", timeout: 5000 });
+      return { status: 0, out };
+    } catch (e) {
+      return { status: (e as { status?: unknown }).status ?? null, out: "" };
+    }
+  };
+  const cache = new Map<string, boolean | null>();
+  // Is `ancestor` reachable from `descendant`? null when git cannot say.
+  const isAncestor = (ancestor: string, descendant: string): boolean | null => {
+    const key = `${ancestor}..${descendant}`;
+    if (!cache.has(key)) {
+      const { status } = git(["merge-base", "--is-ancestor", ancestor, descendant]);
+      cache.set(key, status === 0 ? true : status === 1 ? false : null);
+    }
+    return cache.get(key)!;
+  };
+  const later = (x: LedgerLineRef, y: LedgerLineRef): boolean => {
+    if (!sameCommit(x.headCommit, y.headCommit)) {
+      if (isAncestor(y.headCommit, x.headCommit) === true) return true;
+      if (isAncestor(x.headCommit, y.headCommit) === true) return false;
+    }
+    return laterDated(x, y);
+  };
+  // One git call each for the whole set: the heads no other head descends
+  // from, and the commit every base descends from. Null when git cannot say.
+  const gitLines = (args: string[]): string[] | null => {
+    const { status, out } = git(args);
+    return status === 0 ? out.split("\n").map((l) => l.trim()).filter(Boolean) : null;
+  };
+  const range = (spans: LedgerSpan[]): { base: string; head: string } | null => {
+    if (spans.length === 0) return null;
+    const heads = [...new Set(spans.map((s) => s.headCommit))];
+    const bases = [...new Set(spans.map((s) => s.baseCommit))];
+    // Head: among the independent tips (no ancestry between them, by git's
+    // own answer -- or all spans when it cannot say), the latest-dated,
+    // then the last in the file.
+    const tips = heads.length > 1 ? gitLines(["merge-base", "--independent", ...heads]) : null;
+    let headPool = tips ? spans.filter((s) => tips.some((t) => sameCommit(t, s.headCommit))) : spans;
+    if (headPool.length === 0) headPool = spans;
+    const head = headPool.reduce((w, s) => (laterDated(s, w) ? s : w));
+    // Base: the one base the others descend from when there is one, else
+    // the earliest-dated, then the first in the file.
+    const common = bases.length > 1 ? gitLines(["merge-base", "--octopus", ...bases])?.[0] : undefined;
+    let basePool = common ? spans.filter((s) => sameCommit(common, s.baseCommit)) : [];
+    if (basePool.length === 0) basePool = spans;
+    const base = basePool.reduce((w, s) => (laterDated(w, s) ? s : w));
+    return { base: base.baseCommit, head: head.headCommit };
+  };
+  return { later, range };
 }
 
 /**
@@ -190,11 +308,10 @@ export function parseLedger(base: string): ParsedLedger {
   const evidence: ParsedEvidence[] = [];
   const superseded: ParsedClosure[] = [];
   const skipped: string[] = [];
-  let range: { base: string; head: string } | null = null;
-  // File order IS chronological order (append-only): keep the first base, move the head.
-  const extend = (b: string, h: string): void => { range = { base: range ? range.base : b, head: h }; };
+  const spans: LedgerSpan[] = [];
+  const order = ledgerLineOrder(base);
   const path = join(base, "LEDGER.md");
-  if (!existsSync(path)) return { entries, evidence, superseded, skipped, range };
+  if (!existsSync(path)) return { entries, evidence, superseded, skipped, range: null, order };
   const lines = readFileSync(path, "utf8").split("\n");
   for (const [i, line] of lines.entries()) {
     // Only list lines are candidate entries; the header and the append-only
@@ -206,15 +323,7 @@ export function parseLedger(base: string): ParsedLedger {
         taskRef: ev[1], summary: ev[2], baseCommit: ev[3], headCommit: ev[4],
         issueId: ev[5], loggedDate: ev[6], line: i + 1,
       });
-      extend(ev[3], ev[4]);
-      // A closure EARLIER in the file for the same taskRef was wrong: the
-      // evidence line is the correction, so that closure stops standing.
-      // (A closure written AFTER this line is a real later close and stays.)
-      for (let j = entries.length - 1; j >= 0; j--) {
-        if (entries[j].taskRef !== ev[1]) continue;
-        const [gone] = entries.splice(j, 1);
-        superseded.push({ ...gone, supersededBy: i + 1 });
-      }
+      spans.push(evidence[evidence.length - 1]);
       continue;
     }
     const m = LEDGER_LINE_RE.exec(line);
@@ -231,9 +340,21 @@ export function parseLedger(base: string): ParsedLedger {
       ...(observedExit !== undefined ? { observedExit } : {}),
       observedMismatch: m[7] !== undefined && OBSERVED_MISMATCH_RE.test(m[7]),
     });
-    extend(m[3], m[4]);
+    spans.push(entries[entries.length - 1]);
   }
-  return { entries, evidence, superseded, skipped, range };
+  // A closure for a task was wrong when an evidence line for the SAME task
+  // speaks after it (by the rule, not by position): the evidence line is the
+  // correction, so that closure stops standing. A closure that speaks after
+  // every such evidence line is a real later close and stays. Git is only
+  // asked when a task carries both kinds of line.
+  for (let j = entries.length - 1; j >= 0; j--) {
+    const c = entries[j];
+    const fix = evidence.find((e) => e.taskRef === c.taskRef && order.later(e, c));
+    if (!fix) continue;
+    entries.splice(j, 1);
+    superseded.unshift({ ...c, supersededBy: fix.line });
+  }
+  return { entries, evidence, superseded, skipped, range: order.range(spans), order };
 }
 
 // Back to the published shapes: the gate fields are plan_check's, and the
@@ -246,8 +367,9 @@ const asEvidence = ({ taskRef, summary, baseCommit, headCommit, issueId, loggedD
 /**
  * Assemble the distill manifest for one phase: its PLAN.md issues, its
  * LEDGER.md entries (each carrying the commit range the task landed as), and
- * the union commit range those entries span. Pure filesystem reads -- no git,
- * no tracker, no LLM judgment; same repo state, same manifest.
+ * the union commit range those entries span. Filesystem reads plus git
+ * ancestry questions (#445) -- no tracker, no LLM judgment; same repo
+ * state, same manifest.
  *
  * :param projectDir: project root (the dir holding .cairn/)
  * :param phaseNumber: phase number, integer or one-decimal (1, 1.5, ...)
