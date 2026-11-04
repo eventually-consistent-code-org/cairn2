@@ -2529,11 +2529,21 @@ try {
   console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
   console.error("  If you did not ask for this, something the agent read did — check where the");
   console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
-  // #358 -- the audit row and the breaker's count; fixed text only, never the path
+  // #358 -- the audit row and the breaker's count; fixed text only, never the path.
+  // #432 -- in its own try, result used only when it is the promised array of
+  // lines: a breaker that loaded but misbehaves must not reach the outer catch,
+  // whose fail-open exit 0 would turn this refusal into an allow
+  // (asserted: hooks.test.ts, "missing, broken or misbehaving").
   const reason = hit.deep ? "a line nested past the reader's depth"
     : hit.lost ? "a write past a folder the guard can't follow" : `a write to ${hit.what}`;
-  const more = BREAKER?.recordRefusal({ guard: "harness", payload, effect: "changes-harness-config", reason, projectDir });
-  for (const line of more ?? []) console.error(line);
+  let more = [];
+  try {
+    const got = BREAKER?.recordRefusal({ guard: "harness", payload, effect: "changes-harness-config", reason, projectDir });
+    if (Array.isArray(got)) more = got;
+  } catch {
+    // the breaker's own failure: the refusal stands, nothing more is said
+  }
+  for (const line of more) console.error(line);
   process.exit(2);
 } catch {
   process.exit(0); // guard must never block work because IT broke

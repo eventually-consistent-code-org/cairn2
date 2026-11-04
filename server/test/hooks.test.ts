@@ -4109,7 +4109,13 @@ describe("circuit breaker (#358)", () => {
     expect(manifest(home, proj).status).toBe("running");
   });
 
-  it("a breaker.mjs that is missing or broken leaves every guard refusing as before", () => {
+  // #432: a breaker that fails to LOAD was handled; one that loads and then
+  // misbehaves -- no recordRefusal export, one that throws, one that returns
+  // something that is not an array of lines -- raised inside the guard's
+  // fail-open net AFTER the refusal text and BEFORE the refusing exit, so the
+  // harness saw an allow. Every shape here must still exit 2, with the
+  // refusal text printed and no breaker row.
+  it("a breaker.mjs that is missing, broken or misbehaving leaves every guard refusing as before", () => {
     const { proj, home } = breakerFixture({ status: "running" });
     const copy = join(freshDir("cairn-hooks-breaker-copy-"), "scripts");
     mkdirSync(copy);
@@ -4118,11 +4124,24 @@ describe("circuit breaker (#358)", () => {
       runHookRaw(join(copy, script), proj, payloadJson, { CAIRN_HOME: home });
     const write = JSON.stringify({ tool_name: "Write", tool_input: { file_path: join(proj, "hooks", "x.mjs") }, cwd: proj });
     stageFile(proj, "app.ts", 'const p = ".cai' + 'rn/plans/x";\n');
-    for (const label of ["missing", "broken"]) {
-      if (label === "broken") writeFileSync(join(copy, "breaker.mjs"), "export function recordRefusal( {\n");
-      expect(guard("pretooluse-runguard.mjs", bash("git reset --hard", proj)).status, label).toBe(2);
-      expect(guard("pretooluse-harnessguard.mjs", write).status, label).toBe(2);
-      expect(guard("pretooluse-leakguard.mjs", bash("git commit -m x", proj)).status, label).toBe(2);
+    const shapes: Record<string, string | null> = {
+      missing: null,
+      broken: "export function recordRefusal( {\n",
+      "no-export": "export const somethingElse = 1;\n",
+      throws: "export function recordRefusal() { throw new Error(\"boom\"); }\n",
+      "not-an-array": "export function recordRefusal() { return 42; }\n",
+    };
+    for (const [label, source] of Object.entries(shapes)) {
+      if (source !== null) writeFileSync(join(copy, "breaker.mjs"), source);
+      const run = guard("pretooluse-runguard.mjs", bash("git reset --hard", proj));
+      expect(run.status, label).toBe(2);
+      expect(run.stderr, label).toContain("cairn run guard");
+      const harness = guard("pretooluse-harnessguard.mjs", write);
+      expect(harness.status, label).toBe(2);
+      expect(harness.stderr, label).toContain("cairn harness guard");
+      const leak = guard("pretooluse-leakguard.mjs", bash("git commit -m x", proj));
+      expect(leak.status, label).toBe(2);
+      expect(leak.stderr, label).toContain("cairn leak guard");
     }
     expect(rows(home, proj)).toEqual([]);
     expect(manifest(home, proj).status).toBe("running");
@@ -5165,5 +5184,141 @@ describe("plugin layer imports no server code (#391)", () => {
       "A hook that loads server/dist pays for the whole MCP server on every tool call; " +
       "recompute the path scheme in hooks/scripts/lib.mjs instead (ARCHITECTURE.md, Hook surface)")
       .toEqual([]);
+  });
+});
+
+// #441: the hook gated on the checkout's own cairn folder. That folder is
+// ignored by git in this repository and in any project that ignores it, so a
+// fresh linked worktree has none and its session wrote no rows -- in the one
+// case the shared log (#362) was built for, this repository's own waves. The
+// gate is the repository's now: the cairn folder beside the git common dir
+// (the main checkout's), falling back to the checkout's own outside a
+// repository. The fixture here keeps the folder in the main checkout ONLY.
+describe("the observation hook records in a linked worktree with no cairn folder of its own (#441)", () => {
+  const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const payload = (target: string) => JSON.stringify({
+    session_id: "s", tool_name: "Bash", tool_input: { command: target }, tool_response: {},
+  });
+  const observe = (cwd: string, home: string, target: string) => spawnSync(process.execPath, [OBSERVE], {
+    cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, HOME: home }, input: payload(target), encoding: "utf8", timeout: 5000,
+  });
+  const sharedRows = (home: string) => {
+    const dir = join(home, ".cairn", "observations");
+    const names = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".jsonl")) : [];
+    return names.flatMap((n) => readFileSync(join(dir, n), "utf8").split("\n").filter(Boolean))
+      .map((l) => JSON.parse(l) as { target: string });
+  };
+
+  it("an ignored cairn folder in the main checkout alone is enough for a session in the linked worktree", () => {
+    const root = freshDir("cairn-obs-wt-");
+    const main = join(root, "main");
+    mkdirSync(main);
+    gitInit(main);
+    stageFile(main, ".gitignore", ".cairn\n");
+    stageFile(main, "a.txt", "a\n");
+    execFileSync("git", ["commit", "-q", "-m", "seed", "--no-gpg-sign"], { cwd: main });
+    mkdirSync(join(main, ".cairn"));
+    const linked = join(root, "linked");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "side", linked], { cwd: main });
+    expect(existsSync(join(linked, ".cairn"))).toBe(false); // the ignored folder never travels
+    const home = freshDir("cairn-obs-wt-home-");
+
+    expect(observe(linked, home, "from-linked").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["from-linked"]);
+    // the main checkout's session lands in the same one log
+    expect(observe(main, home, "from-main").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["from-linked", "from-main"]);
+    expect(readdirSync(join(home, ".cairn", "observations"))).toHaveLength(1);
+  });
+
+  it("outside a repository the checkout's own folder still decides, and a repository without one stays silent", () => {
+    const home = freshDir("cairn-obs-wt-home-");
+    const plain = freshDir("cairn-obs-plain-");
+    expect(observe(plain, home, "no-folder").status).toBe(0);
+    expect(sharedRows(home)).toEqual([]);
+    mkdirSync(join(plain, ".cairn"));
+    expect(observe(plain, home, "own-folder").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["own-folder"]);
+
+    const repo = freshDir("cairn-obs-repo-");
+    gitInit(repo);
+    const other = freshDir("cairn-obs-wt-home-");
+    expect(observe(repo, other, "repo-without").status).toBe(0);
+    expect(sharedRows(other)).toEqual([]);
+  });
+});
+
+// #439: two sessions can both see the live file past the cap. The close was
+// check-then-rename, and a rename REPLACES an existing name: when the loser's
+// existence check ran before the winner's rename, the loser then renamed the
+// winner's fresh, empty live file onto the segment the winner had just
+// closed -- a thousand rows gone, no error. The close is the no-clobber link
+// now (lib.mjs moveNoClobber, EEXIST instead of replacing), probing the
+// segment number upward on collision. The #351 race spawns real processes and
+// cannot aim at the window; this replay is exact: a preload patches fs so that
+// session A's close-and-reopen runs in the instant before session B's own
+// close lands -- the interleaving the audit reviewers walked by hand.
+describe("observation log rotation loses no segment to a racing session (#439)", () => {
+  const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const capMatch = /const MAX_LINES = (\d+);/.exec(readFileSync(OBSERVE, "utf8"));
+  const MAX_LINES = Number(capMatch?.[1]);
+
+  /** Session A, as a preload: on B's first attempt to close a segment (rename
+   *  or link onto a stamped name), A closes the live file under that very name
+   *  and reopens an empty one, then B's own call goes through. */
+  const FIRST_SESSION = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const { renameSync, linkSync, openSync, closeSync } = fs;
+const SEGMENT = /\\.\\d{8}-\\d{6}-\\d{2}\\.jsonl$/;
+let fired = false;
+function firstSessionCloses(from, to) {
+  if (fired || !SEGMENT.test(String(to))) return;
+  fired = true;
+  renameSync(from, to);
+  closeSync(openSync(from, "a"));
+}
+fs.renameSync = (from, to) => { firstSessionCloses(from, to); return renameSync(from, to); };
+fs.linkSync = (from, to) => { firstSessionCloses(from, to); return linkSync(from, to); };
+syncBuiltinESMExports();
+`;
+
+  function seedRows(n: number): string {
+    const base = Date.parse("2026-01-01T00:00:00.000Z");
+    return Array.from({ length: n }, (_, i) => JSON.stringify({
+      ts: new Date(base + i * 1000).toISOString(), session_id: "seed", tool: "Edit", target: `seed-${i}`, error: false,
+    })).join("\n") + "\n";
+  }
+
+  it("the second session's close lands beside the first's segment, never over it", () => {
+    expect(MAX_LINES).toBeGreaterThan(0); // an empty match is a failure, never a zero-row pass
+    const proj = freshDir("cairn-obs-race-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    mkdirSync(obsDir(proj), { recursive: true });
+    const live = obsLive(proj);
+    writeFileSync(live, seedRows(MAX_LINES + 1));
+    const preload = join(freshDir("cairn-obs-race-preload-"), "first-session.mjs");
+    writeFileSync(preload, FIRST_SESSION);
+
+    const r = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, OBSERVE], {
+      cwd: proj,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: proj, HOME: obsHome(proj) },
+      input: JSON.stringify({ session_id: "s-B", tool_name: "Bash", tool_input: { command: "ls" }, tool_response: {} }),
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(r.status).toBe(0);
+
+    // Session A closed the seed plus B's row; B's close must not have replaced it.
+    const closed = readdirSync(obsDir(proj)).filter((n) => n !== basename(live)).sort();
+    expect(closed.length).toBeGreaterThan(0);
+    const closedRows = closed
+      .flatMap((n) => readFileSync(join(obsDir(proj), n), "utf8").split("\n").filter(Boolean))
+      .map((l) => JSON.parse(l) as { target: string; session_id: string });
+    expect(closedRows).toHaveLength(MAX_LINES + 2);
+    expect(closedRows[0].target).toBe("seed-0");
+    expect(closedRows[closedRows.length - 1].session_id).toBe("s-B");
+    // and the live file is back, empty, ready for the next append
+    expect(existsSync(live)).toBe(true);
+    expect(readFileSync(live, "utf8")).toBe("");
   });
 });

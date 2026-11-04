@@ -146,10 +146,20 @@ try {
     console.error("cairn leak guard: staged changes leak internal refs —");
     for (const h of hits) console.error(`  ${h}`);
     console.error("fix the lines, allowlist the path via `/cairn tune`, or prefix the command with CAIRN_LEAK_OK=1 to override once.");
-    // #358 -- the audit row and the breaker's count: pattern names only, never a file or a match
+    // #358 -- the audit row and the breaker's count: pattern names only, never a file or a match.
+    // #432 -- in its own try, result used only when it is the promised array of
+    // lines: a breaker that loaded but misbehaves must not reach the outer catch,
+    // whose fail-open exit 0 would turn this refusal into an allow
+    // (asserted: hooks.test.ts, "missing, broken or misbehaving").
     const reason = `staged lines leak internal refs (${[...kinds].sort().join(", ")})`;
-    const more = BREAKER?.recordRefusal({ guard: "leak", payload, effect: "leaks-internal-refs", reason, projectDir });
-    for (const line of more ?? []) console.error(line);
+    let more = [];
+    try {
+      const got = BREAKER?.recordRefusal({ guard: "leak", payload, effect: "leaks-internal-refs", reason, projectDir });
+      if (Array.isArray(got)) more = got;
+    } catch {
+      // the breaker's own failure: the refusal stands, nothing more is said
+    }
+    for (const line of more) console.error(line);
     process.exit(2);
   }
   process.exit(0);

@@ -750,12 +750,23 @@ function pushRefusal(state) {
  * Prints a refusal, hands it to the breaker, and blocks (#358). `why` is
  * the row's { effect, reason } -- fixed text from the refusal site, never
  * the command. The breaker's lines (its count, or the freeze) follow the
- * refusal's own; it never throws, so the exit 2 stands whatever it does.
+ * refusal's own. The exit 2 stands whatever the breaker does (#432): the
+ * record call sits in its own try, and its result is used only when it is
+ * the array of lines the contract promises -- a breaker that loaded but
+ * has no recordRefusal, throws, or returns anything else is a broken
+ * breaker, and a broken breaker never turns a refusal into an allow
+ * (asserted: hooks.test.ts, "missing, broken or misbehaving").
  */
 function block(lines, why) {
   for (const line of lines) console.error(line);
-  const more = BREAKER?.recordRefusal({ guard: "run", payload: CALL.payload, projectDir: CALL.projectDir, ...why });
-  for (const line of more ?? []) console.error(line);
+  let more = [];
+  try {
+    const got = BREAKER?.recordRefusal({ guard: "run", payload: CALL.payload, projectDir: CALL.projectDir, ...why });
+    if (Array.isArray(got)) more = got;
+  } catch {
+    // the breaker's own failure: the refusal stands, nothing more is said
+  }
+  for (const line of more) console.error(line);
   process.exit(2);
 }
 
@@ -1517,6 +1528,9 @@ try {
  *         the everyday neighbours
  *   #358  every refusal recorded and counted; a frozen run's sessions push nothing
  *         (hooks.test.ts, "circuit breaker")
+ *   #432  a breaker that loads but misbehaves (no export, throws, returns a
+ *         non-array) never turns a refusal into an allow: the record call is
+ *         in its own try and its result type-checked, in all three guards
  *   #363  no stash across linked worktrees: stash pop, apply and drop are
  *         discards-work rows under the linkedWorktrees probe (`git worktree
  *         list --porcelain`, more than one entry), no fourth effect; one

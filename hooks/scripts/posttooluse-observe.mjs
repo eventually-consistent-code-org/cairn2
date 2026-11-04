@@ -8,8 +8,12 @@
  *   which tool, which target, did it error. Raw material for retro's candidate-card
  *   review (repeated error->fix churn, hotspot files) -- observations NEVER
  *   inject into context or become memory on their own; retro is the gate.
- *   Only fires in cairn-initialized projects (.cairn/ exists). Capped,
- *   fire-and-forget, invisible on failure.
+ *   Only fires in cairn-initialized repositories (#441): the cairn folder
+ *   beside the git common dir -- the main checkout's, which a linked
+ *   worktree of a project that ignores the folder never has of its own --
+ *   or, outside a repository, the checkout's own (asserted: hooks.test.ts,
+ *   "no cairn folder of its own"). Capped, fire-and-forget, invisible on
+ *   failure.
  *
  *   Which event carries which flag (#323): Claude Code emits NO PostToolUse
  *   event for a call that fails -- a failed call arrives as PostToolUseFailure
@@ -27,10 +31,10 @@
  */
 
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { metricsSegments, observationsPath, segmentStamp } from "./lib.mjs";
+import { basename, dirname, join } from "node:path";
+import { gitCommonDir, metricsSegments, moveNoClobber, observationsPath, segmentStamp } from "./lib.mjs";
 
 // Retention guard (CRN-27), segmented (#351). The live file is CLOSED --
 // renamed to a stamped segment, never rewritten -- once it passes MAX_LINES,
@@ -88,18 +92,28 @@ function lineCount(path) {
  *
  * Concurrency -- the three handoff questions:
  *   atomicity -- the handoff is one appendFileSync of one short line under
- *     O_APPEND; the rename below is one syscall. Nothing reads, trims and
- *     writes back, so there is no read-modify-write to lose a row in.
+ *     O_APPEND; the close is moveNoClobber's one link syscall, which fails
+ *     with EEXIST instead of replacing a segment another hook just closed
+ *     (#439 -- a rename replaces, so check-then-rename let the loser put the
+ *     winner's fresh empty live file over a thousand closed rows). Nothing
+ *     reads, trims and writes back, so there is no read-modify-write to lose
+ *     a row in.
  *   visibility -- a reader may see a torn last row; observations.ts counts it
  *     and skips its age. A hook that opened the live file just before another
- *     renamed it still writes into the same inode, now the closed segment --
+ *     closed it still writes into the same inode, now the closed segment --
  *     the row moves with the file, it is never lost.
  *   ordering -- none across sessions. Rows carry their own ts; readers take
  *     the oldest ts, never file position, so two writers interleaving is fine.
- * Two hooks can both see the count past the cap; the loser renames the fresh
- * (empty or near-empty) live file or finds it gone, and either way keeps
- * every row. A fresh empty live file is opened with "a", which never truncates.
- * Returns true when this call closed a segment.
+ * Two hooks can both see the count past the cap. The first link wins; the
+ * loser's link fails, and it re-reads the live file: the winner's fresh one
+ * is under the cap, so the loser rolls nothing. The one window left is a loser
+ * whose re-read still sees a full file (a third session filled it that fast),
+ * and it then closes THAT file under the next number -- a second, real
+ * segment, never a replaced one; prune counts rows, not files, so a small
+ * segment evicts nothing. A fresh empty live file is opened with "a", which
+ * never truncates. Asserted: hooks.test.ts, "racing session" (#439) replays
+ * the exact interleaving; "two appenders past MAX_LINES" (#351) races real
+ * processes. Returns true when this call closed a segment.
  */
 function rotate(path) {
   if (lineCount(path) <= MAX_LINES) return false;
@@ -109,14 +123,14 @@ function rotate(path) {
   // The counter is always present so every closed name is the same width.
   for (let n = 0; n < 100; n++) {
     const candidate = `${stem}.${stamp}-${String(n).padStart(2, "0")}.jsonl`;
-    if (existsSync(candidate)) continue;
-    try {
-      renameSync(path, candidate);
-    } catch {
-      return false; // another hook rotated first -- its rename kept every row
+    if (moveNoClobber(path, candidate)) {
+      closeSync(openSync(path, "a"));
+      return true;
     }
-    closeSync(openSync(path, "a"));
-    return true;
+    // The name was taken or the live file was gone: another hook closed a
+    // segment first. Roll on only if what is under the live name now is itself
+    // past the cap; the usual case is the winner's fresh file, well under it.
+    if (lineCount(path) <= MAX_LINES) return false;
   }
   return false; // 100 rotations inside one second -- keep the data, skip the roll
 }
@@ -139,12 +153,25 @@ function prune(path) {
   }
 }
 
+/**
+ * The repository is cairn-initialized (#441): its cairn folder sits beside
+ * the git common dir -- the main checkout's folder, which a linked worktree
+ * of a project that ignores the folder never has -- or, outside a
+ * repository (or under a bare common dir), beside the checkout itself. The
+ * git call is lib.mjs's, cached, so projectKey below pays nothing more.
+ */
+function cairnInitialized(projectDir) {
+  const common = gitCommonDir(projectDir);
+  if (common !== null && basename(common) === ".git" && existsSync(join(dirname(common), ".cairn"))) return true;
+  return existsSync(join(projectDir, ".cairn"));
+}
+
 function main() {
   const payload = readStdin();
   if (!payload?.tool_name) return;
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
-  if (!existsSync(join(projectDir, ".cairn"))) return; // cairn projects only
+  if (!cairnInitialized(projectDir)) return; // cairn repositories only
 
   // The shared log, after the one-shot move of any pre-#362 in-repo one.
   const path = observationsPath(projectDir);
