@@ -22,7 +22,9 @@
  *   stamp and run manifests the run guard trusts (#263: under CAIRN_HOME
  *   and ~/.cairn; the run report stays writable, the server's writes never
  *   pass a hook), the refusal log the circuit breaker counts (#358, same
- *   homes), the folder git runs its hooks from (#353: core.hooksPath
+ *   homes), the pauses log the duration measurement subtracts (#470, same
+ *   homes; asserted: hooks.test.ts "a forged pause row is refused"), the
+ *   folder git runs its hooks from (#353: core.hooksPath
  *   when set, else .git/hooks -- a hook planted there runs at the next
  *   checkout or commit, in every worktree, under the owner's identity),
  *   and the pointer that names that folder (#465: core.hooksPath set by
@@ -736,8 +738,9 @@ function configDirs() {
 
 /**
  * The protected places outside the project (#263): the ship-gate stamp
- * and the run manifests the run guard trusts, and the refusal log the
- * circuit breaker counts (#358), in every cairn home they can live in --
+ * and the run manifests the run guard trusts, the refusal log the
+ * circuit breaker counts (#358), and the pauses log the duration
+ * measurement subtracts (#470), in every cairn home they can live in --
  * CAIRN_HOME (the run guard reads it) and ~/.cairn (the server writes
  * it). The run report beside the manifests stays writable.
  *
@@ -777,6 +780,9 @@ function outsideZones() {
     add(join(base, "runs"), "the run manifests", false);
     // #358 -- the breaker counts these rows; a log the agent can empty is a breaker it can reset
     add(join(base, "refusals"), "the guard refusal log", true);
+    // #470 -- the duration measurement subtracts these rows; a log the
+    // measured party can append to is a report, not a measurement (ADR 0020)
+    add(join(base, "pauses"), "the usage-limit pauses log the duration measurement reads", true);
   }
   for (const home of HOMES) {
     add(join(home, ".claude", "plugins"), "the installed plugins and their registry", true);

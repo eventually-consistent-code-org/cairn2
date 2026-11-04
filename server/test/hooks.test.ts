@@ -5017,6 +5017,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
     { guard: "harness", shape: "plan_meta_set with approve", cwds: BOTH,
       refused: mcp("mcp__plugin_cairn_cairn__plan_meta_set", () => ({ phaseDir: "31-x", approve: true })),
       twin: mcp("mcp__plugin_cairn_cairn__plan_meta_set", () => ({ phaseDir: "31-x", waves: [["1"]] })) },
+    // #470: the pauses log the duration measurement subtracts, beside reading it
+    { guard: "harness", shape: "a pause row appended to the pauses log", cwds: BOTH,
+      refused: sh((c) => `echo '{"kind":"paused"}' >> ${c.cairnHome}/pauses/${projectKey(c.root)}.jsonl`),
+      twin: sh((c) => `cat ${c.cairnHome}/pauses/${projectKey(c.root)}.jsonl`) },
 
     // -- leak guard: each pattern, beside the exemption that lets it through
     { guard: "leak", shape: "a planning-folder path in a staged source file", cwds: BOTH,
@@ -5045,7 +5049,7 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
   ];
 
   /** The audit's row count per guard: the table never shrinks below it, so a deleted row is noticed too. */
-  const AUDIT_ROWS: Record<Guard, number> = { run: 25, harness: 55, leak: 8 };
+  const AUDIT_ROWS: Record<Guard, number> = { run: 25, harness: 56, leak: 8 };
 
   /** A project (a repo with one commit, a cairn.json, a nested pkg/lib), a home, a cairn home and a plugin root, all fresh. */
   function fixture(): Omit<Ctx, "cwd" | "rel"> {
@@ -6304,5 +6308,110 @@ describe("the approval stamp needs the owner's escape: plan_meta_set approve (#4
     expect(rows.length).toBe(2);
     expect(rows[0]).toMatchObject({ guard: "harness", tool: TOOL, effect: "changes-harness-config", session_id: "sess-approve" });
     expect(JSON.stringify(rows)).not.toContain("31-x"); // the digest, never the input
+  });
+});
+
+// #470: the measured duration subtracts the usage-limit pauses the pauses
+// log records, and nothing guarded the log: one row appended at claim time,
+// from any session string, turned an honest two hours into zero minutes with
+// two hours "paused on a usage limit". The pauses folder joins the harness
+// guard's protected zones under the cairn home, by the reasoning that put
+// the refusals log there (#358: a log the measured party can write is a
+// report, not a measurement). The server's half -- the measurement believes
+// only the claiming session's rows -- is measured-duration.test.ts.
+describe("the pauses log is the harness guard's: a forged pause row is refused (#470)", () => {
+  const WHAT = "the usage-limit pauses log";
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const ROW = JSON.stringify({ kind: "paused", type: "rate_limit", event: "StopFailure", observedAt: "2026-11-04T10:00:00.000Z", session_id: "s1" });
+
+  /** A project with a nested pkg/lib, an empty home, and a cairn home whose pauses log already holds one honest row. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-pauses-proj-");
+    const home = freshDir("cairn-hooks-pauses-home-");
+    const cairnHome = freshDir("cairn-hooks-pauses-cairnhome-");
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    execFileSync("git", ["init", "-q", p]);
+    const log = join(cairnHome, "pauses", `${projectKey(p)}.jsonl`);
+    mkdirSync(dirname(log), { recursive: true });
+    writeFileSync(log, ROW + "\n");
+    return { p, home, cairnHome, log };
+  }
+
+  function run(f: ReturnType<typeof fixture>, tool: string, input: Record<string, unknown>,
+    opts: { env?: Record<string, string>; cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome, ...opts.env,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in (opts.env ?? {}))) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd, session_id: "s1" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const expectRefused = (r: { status: number | null; stderr: string }, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(WHAT);
+    expect(r.stderr, label).toContain("file:");
+    expect(r.stderr, label).toContain("check where the");
+    expect(r.stderr, label).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+  };
+
+  it("the audit's forgery -- one row appended to the log -- is refused by every write shape, with the standard refusal; so is a log for a project that has none yet", () => {
+    const f = fixture();
+    const key = projectKey(f.p);
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ["Bash", { command: `echo '${ROW}' >> ${f.log}` }],
+      ["Bash", { command: `echo '${ROW}' >> $CAIRN_HOME/pauses/${key}.jsonl` }],
+      ["Bash", { command: `printf '%s\\n' '${ROW}' | tee -a ${f.log}` }],
+      ["Bash", { command: `cat >> ${f.log} <<'EOF'\n${ROW}\nEOF` }],
+      ["Bash", { command: `: > ${f.log}` }],
+      ["Bash", { command: `rm ${f.log}` }],
+      ["Bash", { command: `sed -i '' 's/paused/resumed/' ${f.log}` }],
+      ["Bash", { command: `mv /tmp/forged.jsonl ${f.log}` }],
+      ["Bash", { command: `cp /tmp/forged.jsonl ${f.cairnHome}/pauses/` }],
+      ["Bash", { command: `rm -rf ${f.cairnHome}/pauses` }],
+      ["Bash", { command: `chmod 000 ${f.cairnHome}/pauses` }],
+      ["Bash", { command: `bash -c "echo '${ROW}' >> ${f.log}"` }],
+      ["Write", { file_path: f.log, content: ROW }],
+      ["Edit", { file_path: f.log, old_string: "paused", new_string: "resumed" }],
+      [`${DC}write_file`, { path: f.log, content: ROW }],
+      [`${DC}start_process`, { command: `echo '${ROW}' >> ${f.log}`, timeout_ms: 1000 }],
+    ];
+    for (const [tool, input] of shapes) expectRefused(run(f, tool, input), `${tool} ${JSON.stringify(input)}`);
+    // the hostile spellings: a row under the claiming session's own id is still a write to the log;
+    // a log for a project that has none yet is the folder's business, and so is the ~/.cairn home
+    // the server reads when CAIRN_HOME is unset
+    expectRefused(run(f, "Write", { file_path: join(f.cairnHome, "pauses", "other-0123456789abcdef.jsonl"), content: ROW }), "new log");
+    expectRefused(run(f, "Bash", { command: `echo '${ROW}' >> ~/.cairn/pauses/${key}.jsonl` }), "home spelling");
+    expectRefused(run(f, "Write", { file_path: join(f.home, ".cairn", "pauses", `${key}.jsonl`), content: ROW }), "home Write");
+  });
+
+  it("the harmless twins: reading the log and writing beside it under the cairn home pass, and the owner's escape lets a row land", () => {
+    const f = fixture();
+    mkdirSync(join(f.cairnHome, "runs"), { recursive: true });
+    for (const c of [
+      `cat ${f.log}`, `tail -n 3 ${f.log}`, `wc -l ${f.log}`, `grep paused ${f.log}`, `ls ${f.cairnHome}/pauses`,
+      `cat ${f.log} > /tmp/pauses-copy.jsonl`,
+      `echo x >> ${f.cairnHome}/pauses-notes.md`,
+      `echo x > ${f.cairnHome}/runs/proj-0123456789abcdef-r1-report.md`,
+    ]) expect(run(f, "Bash", { command: c }).status, c).toBe(0);
+    expect(run(f, "Write", { file_path: join(f.cairnHome, "notes.md"), content: "x" }).status).toBe(0);
+    expect(run(f, `${DC}read_file`, { path: f.log }).status).toBe(0);
+    expect(run(f, "Bash", { command: `echo '${ROW}' >> ${f.log}` }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(run(f, "Bash", { command: `CAIRN_HARNESS_EDIT=1 echo '${ROW}' >> ${f.log}` }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      expectRefused(run(f, "Bash", { command: `echo '${ROW}' >> ${f.log}` }, { cwd: nested, bare }), `bare=${bare}`);
+      expectRefused(run(f, "Write", { file_path: f.log, content: ROW }, { cwd: nested, bare }), `Write, bare=${bare}`);
+      expect(run(f, "Bash", { command: `cat ${f.log}` }, { cwd: nested, bare }).status).toBe(0);
+    }
   });
 });

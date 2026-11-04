@@ -53,18 +53,22 @@ export declare function claimCommentTime(comments: IssueComment[]): string | nul
 export declare function pausesPath(projectDir: string, home?: string): string;
 /**
  * Minutes of usage-limit wait inside [claimAt, closeAt] according to one
- * pauses log's text. Zero for an empty log, an unparseable or reversed
+ * pauses log's text, believing `session`'s rows (#470; every row when no
+ * session is named). Zero for an empty log, an unparseable or reversed
  * span, or windows that all fall outside it -- never a throw.
  */
-export declare function pausedMinutesFromLog(raw: string, claimAt: string, closeAt: string): number;
+export declare function pausedMinutesFromLog(raw: string, claimAt: string, closeAt: string, session?: string | null): number;
 /** The same, read from the project's pauses log; a missing or unreadable
  *  log is zero minutes, which is exactly what no recorded pause means. */
-export declare function pausedMinutesIn(projectDir: string, claimAt: string, closeAt: string, home?: string): number;
-/** Where to find the pauses log when the close wants the wait subtracted;
- *  `home` is the test seam, absent in production. */
+export declare function pausedMinutesIn(projectDir: string, claimAt: string, closeAt: string, home?: string, session?: string | null): number;
+/** Where to find the pauses log when the close wants the wait subtracted,
+ *  and whose rows to believe (#470): the claiming session from the claim
+ *  stamp, null when the stamp carries none. `home` is the test seam,
+ *  absent in production. */
 export interface PauseSource {
     projectDir: string;
     home?: string;
+    session: string | null;
 }
 /**
  * Rungs one and two, at close. `comments` is undefined on backends that

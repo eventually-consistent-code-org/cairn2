@@ -34,7 +34,7 @@ import { resyncReport } from "./planning/resync.js";
 import { docsDriftReport } from "./planning/docs-drift.js";
 import { distillManifest } from "./planning/distill-manifest.js";
 import { estimatePhaseTokens, issueEstimate, metricsSegments } from "./planning/token-estimate.js";
-import { clearClaim, readClaimRecord, recordClaim, writeReceipt, } from "./planning/close-receipt.js";
+import { clearClaim, readClaimRecord, recordClaim, sessionOfServer, writeReceipt, } from "./planning/close-receipt.js";
 import { closeEvidenceText, composeClaimComment, composeCloseComment, headCommit, measureAtClose, } from "./planning/duration.js";
 import { issueCostUsd } from "./core/metrics.js";
 import { snapshotNote, trackerDelta } from "./planning/tracker-delta.js";
@@ -441,8 +441,10 @@ export function buildServer(deps) {
     const stampClaim = async (d, tracker, issue, claimAt, claim) => {
         // First claim wins; recordClaim never throws. A bare in_progress
         // transition (no claim block) still stamps the time, just no commit.
+        // The session is the server's own (#470): the key the pause recorder's
+        // rows carry, so the close believes only this session's pauses.
         if (issue.category === "in_progress")
-            recordClaim(d, issue.id, claimAt, claim?.baseCommit);
+            recordClaim(d, issue.id, claimAt, claim?.baseCommit, sessionOfServer());
         if (!claim)
             return {};
         try {
@@ -863,9 +865,11 @@ export function buildServer(deps) {
         }
         // A usage-limit wait inside the span comes off the number (#380); the
         // pauses log under the cairn home is read best-effort, like every
-        // other measurement here.
+        // other measurement here, and only the claiming session's rows are
+        // believed (#470) -- none when the stamp names no session.
         const { claimedAt, ...measured } = measureAtClose({
-            comments, observedClaimAt: claimRecord?.at ?? null, closedAt, pauses: { projectDir: d },
+            comments, observedClaimAt: claimRecord?.at ?? null, closedAt,
+            pauses: { projectDir: d, session: claimRecord?.sessionId ?? null },
         });
         // Typed close evidence (phase 23): one standard line, same shape on
         // every backend, posted before the state change so the close reads

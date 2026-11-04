@@ -17,7 +17,12 @@
 // it back and subtract the windows that fall inside [claim, close], saying
 // how much came off. No log, no window in the span, or a malformed row
 // leaves the number byte-identical to the plain span (asserted:
-// measured-duration.test.ts, close-receipt.test.ts).
+// measured-duration.test.ts, close-receipt.test.ts). The rows believed are
+// the claiming session's own (#470): the claim stamp carries the session
+// the server runs for, and a row any other session wrote -- or one with no
+// session, or any row at all under a claim that recorded none -- is not
+// this task's dead time. The log itself is the harness guard's (the pauses
+// zone under the cairn home); this is the narrowing, not the mechanism.
 //
 // Every function here returns a value instead of throwing: a measurement
 // that can fail a close is worse than no measurement.
@@ -188,20 +193,37 @@ function clippedMinutes(windows, from, to) {
     return Math.round(total / 60_000);
 }
 /**
+ * The rows the measurement believes (#470). With `session` named, only the
+ * claiming session's own rows: a row any other session wrote, or one with
+ * no session, is not this task's dead time, and a claim that recorded no
+ * session (null or empty) believes none -- the wait then stays in the
+ * number, which overstates work rather than letting a stranger's row take
+ * two hours off it. Undefined leaves every row in: the pure helper's caller
+ * decides, and the close always names one.
+ */
+function believed(rows, session) {
+    if (session === undefined)
+        return rows;
+    if (!session)
+        return [];
+    return rows.filter((r) => r.session === session);
+}
+/**
  * Minutes of usage-limit wait inside [claimAt, closeAt] according to one
- * pauses log's text. Zero for an empty log, an unparseable or reversed
+ * pauses log's text, believing `session`'s rows (#470; every row when no
+ * session is named). Zero for an empty log, an unparseable or reversed
  * span, or windows that all fall outside it -- never a throw.
  */
-export function pausedMinutesFromLog(raw, claimAt, closeAt) {
+export function pausedMinutesFromLog(raw, claimAt, closeAt, session) {
     const a = Date.parse(claimAt);
     const b = Date.parse(closeAt);
     if (Number.isNaN(a) || Number.isNaN(b) || b <= a)
         return 0;
-    return clippedMinutes(pauseWindows(parsePauseRows(raw), b), a, b);
+    return clippedMinutes(pauseWindows(believed(parsePauseRows(raw), session), b), a, b);
 }
 /** The same, read from the project's pauses log; a missing or unreadable
  *  log is zero minutes, which is exactly what no recorded pause means. */
-export function pausedMinutesIn(projectDir, claimAt, closeAt, home) {
+export function pausedMinutesIn(projectDir, claimAt, closeAt, home, session) {
     let raw;
     try {
         raw = readFileSync(pausesPath(projectDir, home), "utf8");
@@ -210,7 +232,7 @@ export function pausedMinutesIn(projectDir, claimAt, closeAt, home) {
         return 0;
     }
     try {
-        return pausedMinutesFromLog(raw, claimAt, closeAt);
+        return pausedMinutesFromLog(raw, claimAt, closeAt, session);
     }
     catch {
         return 0;
@@ -223,7 +245,7 @@ export function pausedMinutesIn(projectDir, claimAt, closeAt, home) {
 function lessPauses(m, claimedAt, closedAt, pauses) {
     if (!pauses || m.minutes === null)
         return m;
-    const paused = pausedMinutesIn(pauses.projectDir, claimedAt, closedAt, pauses.home);
+    const paused = pausedMinutesIn(pauses.projectDir, claimedAt, closedAt, pauses.home, pauses.session);
     return paused > 0
         ? { ...m, minutes: Math.max(0, m.minutes - paused), pausedMinutes: paused }
         : m;

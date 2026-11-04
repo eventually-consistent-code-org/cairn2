@@ -23,6 +23,17 @@ const CLAIM = "Starting now. Phase 24.7, wave 1, second task.\n\nBase commit:\n4
 const T0 = "2026-10-01T10:00:00.000Z";
 const at = (min: number) => new Date(Date.parse(T0) + min * 60_000).toISOString();
 
+// The claim stamp carries the session Claude Code hands the server (#470),
+// and this runner may be one such session. The blocks that care set the
+// variable themselves; every other block runs with it absent, as CI does.
+const SESSION_VAR = "CLAUDE_CODE_SESSION_ID";
+const savedSession = process.env[SESSION_VAR];
+beforeAll(() => { delete process.env[SESSION_VAR]; });
+afterAll(() => {
+  if (savedSession === undefined) delete process.env[SESSION_VAR];
+  else process.env[SESSION_VAR] = savedSession;
+});
+
 describe("isClaimComment", () => {
   it("recognises the work verb's claim comment", () => {
     expect(isClaimComment(CLAIM)).toBe(true);
@@ -666,25 +677,30 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
 
   describe("a usage-limit wait inside the span is subtracted (#380)", () => {
     // The pauses log lives under the cairn home, so HOME is a temp folder
-    // for this block -- a fixture log, and no real one touched.
+    // for this block -- a fixture log, and no real one touched. The server
+    // is "session s1" here: the session the pause hook's rows name (#470).
     let savedHome: string | undefined;
     beforeAll(() => {
       savedHome = process.env.HOME;
       process.env.HOME = mkdtempSync(join(tmpdir(), "cairn-pause-home-"));
+      process.env[SESSION_VAR] = "s1";
     });
     afterAll(() => {
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
+      delete process.env[SESSION_VAR];
     });
 
-    const pauseRow = (kind: string, min: number) =>
-      JSON.stringify({ kind, type: "x", event: "Notification", observedAt: at(min), session_id: "s1" });
+    const pauseRow = (kind: string, min: number, session: string | null = "s1") =>
+      JSON.stringify({ kind, type: "x", event: "Notification", observedAt: at(min), ...(session ? { session_id: session } : {}) });
 
     it("the worklog gets the measured minutes less the pause, not the span", async () => {
       const tracker = new WorklogFake();
       const { call, advance, projectDir } = await harness(tracker);
       const made = await call("issue_create", { title: "paused" });
       await call("issue_update", { id: made.json.id, state: "in_progress" });
+      // the stamp names the session the server runs for: the key the pause hook's rows carry
+      expect(readClaimRecord(projectDir, made.json.id)?.sessionId).toBe("s1");
       const log = pausesPath(projectDir, join(process.env.HOME!, ".cairn"));
       mkdirSync(dirname(log), { recursive: true });
       writeFileSync(log, [pauseRow("paused", 2), pauseRow("resumed", 5)].join("\n") + "\n");
@@ -693,6 +709,42 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       expect(closed.json.measured).toEqual({ minutes: 8, source: "observed_claim", pausedMinutes: 3 });
       expect(closed.json.claimedMinutes).toBe(90);
       expect(tracker.logged).toEqual([8]);
+    });
+
+    it("the audit's forgery: a row another session wrote, or one with no session, leaves 120 minutes at 120 (#470)", async () => {
+      const tracker = new WorklogFake();
+      const { call, advance, projectDir } = await harness(tracker);
+      const made = await call("issue_create", { title: "forged" });
+      await call("issue_update", { id: made.json.id, state: "in_progress" });
+      const log = pausesPath(projectDir, join(process.env.HOME!, ".cairn"));
+      mkdirSync(dirname(log), { recursive: true });
+      // one row at claim time, from any session string, left open to the close -- the reproduced attack
+      writeFileSync(log, [pauseRow("paused", 0, "any-string"), pauseRow("stale", 1, null), pauseRow("paused", 2, "s2")].join("\n") + "\n");
+      advance(120);
+      const closed = await call("issue_close", { id: made.json.id, timeSpentMinutes: 90 });
+      expect(closed.json.measured).toEqual({ minutes: 120, source: "observed_claim" });
+      expect(closed.json.measured).not.toHaveProperty("pausedMinutes");
+      expect(tracker.logged).toEqual([120]);
+    });
+
+    it("a claim stamped with no session believes no row: the wait stays in the number rather than a stranger's row taking it out (#470)", async () => {
+      delete process.env[SESSION_VAR];
+      try {
+        const tracker = new WorklogFake();
+        const { call, advance, projectDir } = await harness(tracker);
+        const made = await call("issue_create", { title: "unstamped" });
+        await call("issue_update", { id: made.json.id, state: "in_progress" });
+        expect(readClaimRecord(projectDir, made.json.id)).not.toHaveProperty("sessionId");
+        const log = pausesPath(projectDir, join(process.env.HOME!, ".cairn"));
+        mkdirSync(dirname(log), { recursive: true });
+        writeFileSync(log, [pauseRow("paused", 2), pauseRow("resumed", 5)].join("\n") + "\n");
+        advance(11);
+        const closed = await call("issue_close", { id: made.json.id, timeSpentMinutes: 90 });
+        expect(closed.json.measured).toEqual({ minutes: 11, source: "observed_claim" });
+        expect(tracker.logged).toEqual([11]);
+      } finally {
+        process.env[SESSION_VAR] = "s1";
+      }
     });
   });
 });
@@ -766,7 +818,8 @@ describe("usage-limit pauses inside the claim-to-close span (#380)", () => {
       writeFileSync(p, log(...rows));
     };
     const plain = { comments: [{ id: "c1", text: CLAIM, at: T0 }], observedClaimAt: null, closedAt: CLOSE };
-    const pauses = { projectDir, home };
+    // the rows below are session s1's, and so is the claim (#470)
+    const pauses = { projectDir, home, session: "s1" };
 
     it("no pauses file: byte-identical to today, no pausedMinutes field", () => {
       const m = measureAtClose({ ...plain, pauses });
@@ -899,5 +952,59 @@ describe("gitSpan never lets the range be read as an option (#428)", () => {
     expect(gitSpan(d, `--output=${join(d, "keep")}/`, "/keep/scratch.txt"))
       .toEqual({ minutes: null, source: "none" });
     expect(readFileSync(victim, "utf8")).toBe("keepme\n");
+  });
+});
+
+// #470: the measurement subtracts what the pauses log says, and the agent --
+// the party measured -- could append to it. The harness guard now refuses
+// that append (hooks.test.ts, "a forged pause row is refused (#470)"); this
+// is the server's half: the claim stamp carries the claiming session, and
+// the measurement believes only that session's rows. A row's author cannot
+// be proven from its content, so the guard is the mechanism and this is the
+// narrowing -- a forger past the guard must also name the claiming session.
+describe("the measurement believes only the claiming session's pause rows (#470)", () => {
+  const CLOSE = at(120);
+  const row = (kind: string, min: number, session: string | null = "s1") =>
+    JSON.stringify({ kind, type: "x", event: "Notification", observedAt: at(min), ...(session ? { session_id: session } : {}) });
+  const log = (...rows: string[]) => rows.join("\n") + "\n";
+
+  it("pausedMinutesFromLog with a session: that session's rows count; a foreign session's, an unsessioned row, and every row under no session do not", () => {
+    const own = log(row("paused", 30), row("resumed", 50));
+    expect(pausedMinutesFromLog(own, T0, CLOSE, "s1")).toBe(20);
+    expect(pausedMinutesFromLog(own, T0, CLOSE, "s2")).toBe(0);
+    expect(pausedMinutesFromLog(own, T0, CLOSE, null)).toBe(0);
+    expect(pausedMinutesFromLog(own, T0, CLOSE, "")).toBe(0);
+    // the audit's forgery: one row at claim time, from any session string, left open to the close
+    const forged = log(row("paused", 0, "any-string"));
+    expect(pausedMinutesFromLog(forged, T0, CLOSE, "s1")).toBe(0);
+    expect(pausedMinutesFromLog(forged, T0, CLOSE)).toBe(120); // the pure helper with no session named still reads every row
+    // a foreign row beside the own one neither opens nor closes the own window
+    expect(pausedMinutesFromLog(log(row("paused", 30), row("resumed", 40, "s2"), row("resumed", 50)), T0, CLOSE, "s1")).toBe(20);
+    // a row with no session_id is nobody's
+    expect(pausedMinutesFromLog(log(row("paused", 0, null)), T0, CLOSE, "s1")).toBe(0);
+  });
+
+  describe("measureAtClose: a foreign-session row leaves 120 minutes at 120", () => {
+    const home = mkdtempSync(join(tmpdir(), "cairn-pauses-foreign-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "cairn-pauses-foreign-project-"));
+    const write = (...rows: string[]) => {
+      const p = pausesPath(projectDir, home);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, log(...rows));
+    };
+    const plain = { comments: [{ id: "c1", text: CLAIM, at: T0 }], observedClaimAt: null, closedAt: CLOSE };
+
+    it("under the claiming session, and under a claim with no session; the honest row under the own session still comes off", () => {
+      write(row("paused", 0, "s2"));
+      expect(measureAtClose({ ...plain, pauses: { projectDir, home, session: "s1" } }))
+        .toEqual({ minutes: 120, source: "claim_comment", claimedAt: T0 });
+      expect(measureAtClose({ ...plain, pauses: { projectDir, home, session: null } }))
+        .toEqual({ minutes: 120, source: "claim_comment", claimedAt: T0 });
+      write(row("paused", 0, "s1"), row("resumed", 30, "s1"), row("paused", 40, "s2"));
+      expect(measureAtClose({ ...plain, pauses: { projectDir, home, session: "s1" } }))
+        .toEqual({ minutes: 90, source: "claim_comment", pausedMinutes: 30, claimedAt: T0 });
+      expect(measureAtClose({ ...plain, pauses: { projectDir, home, session: null } }))
+        .toEqual({ minutes: 120, source: "claim_comment", claimedAt: T0 });
+    });
   });
 });

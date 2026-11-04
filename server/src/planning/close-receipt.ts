@@ -111,31 +111,53 @@ function isReceipt(v: unknown, issueId: string): v is CloseReceipt {
 }
 
 /** What the claim stamp holds: when the server saw the issue go in
- *  progress and, when the claim carried one, the commit the work starts
+ *  progress, when the claim carried one, the commit the work starts
  *  from (#369) -- the close fold reads it back so the ledger append never
- *  has to be told. `baseCommit` is absent on stamps written by a bare
- *  state change and on stamps from before it was recorded. */
+ *  has to be told -- and the session that claimed (#470), the key the
+ *  pause recorder's rows carry, so the measurement at close believes only
+ *  that session's pauses. `baseCommit` is absent on stamps written by a
+ *  bare state change and on stamps from before it was recorded;
+ *  `sessionId` is absent when the server was started by a harness that
+ *  hands it none, and on older stamps. */
 export interface ClaimRecord {
   issueId: string;
   at: string;
   baseCommit?: string;
+  sessionId?: string;
+}
+
+/**
+ * The session this server runs for (#470): Claude Code starts its MCP
+ * servers with CLAUDE_CODE_SESSION_ID in their environment, the same id
+ * every hook payload carries -- a claim about the harness, dated
+ * 2026-11-04, measured on a live server's environment. Undefined under a
+ * harness that sets none; a stamp then carries no session and the
+ * measurement subtracts no pause (asserted: measured-duration.test.ts,
+ * "a claim stamped with no session believes no row").
+ */
+export function sessionOfServer(): string | undefined {
+  const s = process.env.CLAUDE_CODE_SESSION_ID?.trim();
+  return s ? s : undefined;
 }
 
 /**
  * Rung two's evidence: the moment this server moved the issue to in
- * progress, with the base commit beside it when the claim named one. The
- * FIRST claim wins -- a re-claim after a parked stretch is still the same
- * piece of work, and cycle time (and the commit range) run from its start.
+ * progress, with the base commit beside it when the claim named one, and
+ * the claiming session when the server knows its own (#470). The FIRST
+ * claim wins -- a re-claim after a parked stretch is still the same piece
+ * of work, and cycle time (and the commit range) run from its start.
  * Never throws; a claim must not fail because instrumentation could not
  * write.
  */
 export function recordClaim(projectDir: string, issueId: string, at: string,
-  baseCommit?: string): boolean {
+  baseCommit?: string, sessionId?: string): boolean {
   try {
     ensureDir(projectDir);
     const path = receiptPath(projectDir, issueId, "claim");
     if (existsSync(path)) return true;
-    const record: ClaimRecord = { issueId, at, ...(baseCommit ? { baseCommit } : {}) };
+    const record: ClaimRecord = {
+      issueId, at, ...(baseCommit ? { baseCommit } : {}), ...(sessionId ? { sessionId } : {}),
+    };
     writeFileSync(path, JSON.stringify(record) + "\n");
     return true;
   } catch {
@@ -144,8 +166,8 @@ export function recordClaim(projectDir: string, issueId: string, at: string,
 }
 
 /** The whole claim stamp, without consuming it; null when absent or
- *  unreadable. Tolerant of the older two-field shape: a stamp with no
- *  baseCommit still parses, it just carries none. */
+ *  unreadable. Tolerant of the older shapes: a stamp with no baseCommit or
+ *  no sessionId still parses, it just carries none. */
 export function readClaimRecord(projectDir: string, issueId: string): ClaimRecord | null {
   try {
     const raw = readFileSync(receiptPath(projectDir, issueId, "claim"), "utf8");
@@ -153,10 +175,12 @@ export function readClaimRecord(projectDir: string, issueId: string): ClaimRecor
     const at = r.at;
     if (typeof at !== "string" || Number.isNaN(Date.parse(at))) return null;
     const baseCommit = typeof r.baseCommit === "string" && r.baseCommit ? r.baseCommit : undefined;
+    const sessionId = typeof r.sessionId === "string" && r.sessionId ? r.sessionId : undefined;
     return {
       issueId: typeof r.issueId === "string" ? r.issueId : issueId,
       at,
       ...(baseCommit ? { baseCommit } : {}),
+      ...(sessionId ? { sessionId } : {}),
     };
   } catch {
     return null;
