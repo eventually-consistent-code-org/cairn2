@@ -18,7 +18,8 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT, READ_ONLY, EFFECTS, EFFECT_TABLE,
-  classify, effectsOf, envConfig, parseInvocation, wholeTree,
+  API_PROGRAMS, SIDE_DOOR_TABLE,
+  apiPath, classify, effectsOf, envConfig, ghAliasSet, parseInvocation, readOpts, sideDoor, sideEffectLine, wholeTree,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/git-effects.mjs";
 
@@ -740,5 +741,176 @@ describe("git effects: config from the environment channels is folded in git's o
     expect(effectsOf(parseInvocation(["git", "-c", "include.path=/tmp/x.cfg", "status"]))).toEqual([DISCARDS_WORK]);
     expect(effectsOf(parseInvocation(["git", "-c", "includeIf.gitdir:/r/.path=/tmp/x.cfg", "hr"]))).toEqual([DISCARDS_WORK]);
     expect(effectsOf(parseInvocation(["git", "-c", "core.excludesFile=/tmp/x.cfg", "status"]))).toEqual([READ_ONLY]);
+  });
+});
+
+describe("side doors to the push action: the non-git table, one test per row (#483)", () => {
+  type Side = { effect: string; flag: string; what: string; why: string; branch?: string; deletes?: string; alias?: string };
+  /** A plain command (no quoting) read as the guard reads it: program, then its words. */
+  const side = (command: string, aliases = new Map<string, string[]>()): Side | null => {
+    const [program, ...args] = command.trim().split(/\s+/);
+    return sideDoor(program, args, aliases);
+  };
+  const MERGE = "https://api.github.com/repos/o/r/pulls/1/merge";
+  /** The same API path reached by each program that can: gh api, curl and wget, with a write method. */
+  const writes = (path: string, method = "PUT", ...fields: string[]) => [
+    `gh api -X ${method} ${path} ${fields.map((f) => `-f ${f}`).join(" ")}`,
+    `curl -X ${method} https://api.github.com${path} ${fields.map((f) => `--data-urlencode ${f}`).join(" ")}`,
+    `wget --method=${method} https://api.github.com${path} ${fields.length ? `--post-data=${fields.join("&")}` : ""}`,
+  ];
+  const reads = (path: string) => [`gh api ${path}`, `curl https://api.github.com${path}`, `wget https://api.github.com${path}`];
+
+  it("the table has the eight rows the issue names, every one a moves-shared-ref cause, and names its three programs", () => {
+    expect(SIDE_DOOR_TABLE.map((r: { route: string }) => r.route)).toEqual([
+      "gh pr merge", "gh release create", "gh repo delete",
+      "pull request merge", "ref write", "branch merge", "release", "GraphQL mutation",
+    ]);
+    for (const row of SIDE_DOOR_TABLE) expect(typeof row.why, row.route).toBe("string");
+    expect(API_PROGRAMS).toEqual(["gh api", "curl", "wget"]);
+    expect(side("git push origin main")).toBeNull(); // git has its own table
+    expect(side("ls -la")).toBeNull();
+  });
+
+  it("row: gh pr merge, any flags, with -R before or after; pr view, checks, create and comment are not", () => {
+    for (const c of ["gh pr merge 1", "gh pr merge 1 --squash --delete-branch", "gh pr -R o/r merge 1",
+      "gh pr --repo=o/r merge", "gh pr merge --auto --admin 1"]) {
+      const hit = side(c);
+      expect(hit?.effect, c).toBe(MOVES_SHARED_REF);
+      expect(hit?.flag, c).toBe("gh pr merge");
+      expect(hit?.branch, c).toBeUndefined(); // the PR's base is only known to the API
+    }
+    for (const c of ["gh pr view 1", "gh pr checks 1", "gh pr create --title merge", "gh pr comment 1 --body merge",
+      "gh pr merge".replace("merge", "diff"), "gh issue close 1"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: gh release create names its --target branch, else none; list and view are not", () => {
+    expect(side("gh release create v1.0 --notes x")?.branch).toBeUndefined();
+    expect(side("gh release create v1.0 --target feature")?.branch).toBe("feature");
+    expect(side("gh release create --target=main v1.0")?.branch).toBe("main");
+    expect(side("gh release -R o/r create v1.0")?.flag).toBe("gh release create");
+    for (const c of ["gh release list", "gh release view v1.0", "gh release download v1.0"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: gh repo delete deletes outright; view, clone and sync are not", () => {
+    const hit = side("gh repo delete o/r --yes");
+    expect(hit?.effect).toBe(MOVES_SHARED_REF);
+    expect(hit?.deletes).toBe("the repository and every ref in it");
+    for (const c of ["gh repo view o/r", "gh repo clone o/r", "gh repo sync"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a pull request merge, by every program and write method, in every path spelling; a GET is a read", () => {
+    for (const method of ["PUT", "put", "POST", "PATCH"]) {
+      for (const c of writes("/repos/o/r/pulls/1/merge", method)) {
+        const hit = side(c);
+        expect(hit?.effect, c).toBe(MOVES_SHARED_REF);
+        expect(hit?.flag, c).toBe(`${method.toUpperCase()} /repos/o/r/pulls/1/merge`);
+        expect(hit?.what, c).toMatch(/^a `(gh api|curl|wget)` pull request merge$/);
+      }
+    }
+    for (const c of ["gh api -XPUT repos/o/r/pulls/1/merge", "gh api --method=PUT /repos/o/r/pulls/1/merge",
+      `gh api -X PUT ${MERGE}`, "gh api repos/o/r/pulls/1/merge -f commit_title=x", "gh api --input body.json repos/o/r/pulls/1/merge",
+      `curl -sSXPUT ${MERGE}`, `curl --request PUT ${MERGE}`, `curl -d {} ${MERGE}`, `curl --json {} ${MERGE}`, `curl -T body ${MERGE}`,
+      `curl -X PUT ${MERGE}?foo=bar`, "curl -X PUT https://ghe.example.com/api/v3/repos/o/r/pulls/1/merge",
+      `wget --method PUT ${MERGE}`, `wget --post-data={} ${MERGE}`]) {
+      expect(side(c)?.what, c).toMatch(/pull request merge$/);
+    }
+    for (const c of [...reads("/repos/o/r/pulls/1/merge"), "gh api -X GET repos/o/r/pulls/1/merge -f foo=bar",
+      `curl -I ${MERGE}`, `curl -G -d a=b ${MERGE}`, "curl -X PUT https://example.com/repos/o/r/pulls/1/merge",
+      "gh api -X PUT repos/o/r/pulls/1", "gh api -X PUT repos/o/r/pulls/1/merged"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a ref write names the branch from its path or its `ref` field, a tag by its own name, and a DELETE of a branch deletes", () => {
+    for (const c of writes("/repos/o/r/git/refs/heads/main", "PATCH", "sha=0123abc")) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/ref write$/);
+      expect(hit?.branch, c).toBe("main");
+      expect(hit?.deletes, c).toBeUndefined();
+    }
+    expect(side("gh api -X PATCH repos/o/r/git/refs/heads/feature%2Fx -f sha=0")?.branch).toBe("feature/x");
+    expect(side("gh api -X POST repos/o/r/git/refs -f ref=refs/heads/topic -f sha=0")?.branch).toBe("topic");
+    expect(side("curl -X POST -d {\"ref\":\"refs/heads/topic\",\"sha\":\"0\"} https://api.github.com/repos/o/r/git/refs")?.branch).toBe("topic");
+    expect(side("gh api -X DELETE repos/o/r/git/refs/tags/v1")?.branch).toBe("tags/v1");
+    const del = side("gh api -X DELETE repos/o/r/git/refs/heads/main");
+    expect(del?.deletes).toBe("the default branch");
+    expect(del?.flag).toBe("DELETE /repos/o/r/git/refs/heads/main");
+    for (const c of [...reads("/repos/o/r/git/refs/heads/main"), "gh api repos/o/r/git/ref/heads/main",
+      "gh api -X PATCH repos/o/r/git/blobs/0"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a branch merge names its `base`, as a field, a form, urlencoded data or JSON", () => {
+    for (const c of writes("/repos/o/r/merges", "POST", "base=main", "head=topic")) expect(side(c)?.branch, c).toBe("main");
+    expect(side("curl -X POST -d {\"base\":\"release\",\"head\":\"topic\"} https://api.github.com/repos/o/r/merges")?.branch).toBe("release");
+    expect(side("curl -F base=release -F head=topic https://api.github.com/repos/o/r/merges")?.branch).toBe("release");
+    expect(side("gh api -X POST repos/o/r/merges -F base=@file")?.branch).toBeUndefined(); // unread: the default, fail closed
+    expect(side("curl -d '' https://api.github.com/repos/o/r/merges".replace("''", "x=y"))?.branch).toBeUndefined();
+    for (const c of reads("/repos/o/r/merges")) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a release names its `target_commitish`, by id or by tag; the assets under one are not a release", () => {
+    for (const c of writes("/repos/o/r/releases", "POST", "tag_name=v1")) expect(side(c)?.what, c).toMatch(/release$/);
+    expect(side("gh api -X POST repos/o/r/releases -f tag_name=v1 -f target_commitish=feature")?.branch).toBe("feature");
+    expect(side("gh api -X PATCH repos/o/r/releases/12 -f draft=false")?.what).toBe("a `gh api` release");
+    expect(side("gh api -X DELETE repos/o/r/releases/tags/v1")?.deletes).toBeUndefined(); // the release, not the tag
+    for (const c of [...reads("/repos/o/r/releases"), "gh api repos/o/r/releases/latest",
+      "gh api -X POST repos/o/r/releases/12/assets?name=x --input a.tgz"]) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a GraphQL mutation that merges or moves a ref, by name; a query or another mutation is not; a body from a file is refused unread", () => {
+    for (const name of ["mergePullRequest", "enablePullRequestAutoMerge", "mergeBranch", "createRef", "updateRef", "updateRefs",
+      "deleteRef", "createCommitOnBranch"]) {
+      const c = `gh api graphql -f query=mutation{${name}(input:{}){clientMutationId}}`;
+      const hit = side(c);
+      expect(hit?.what, c).toBe("a `gh api` GraphQL mutation");
+      expect(hit?.flag, c).toBe(name);
+      expect(hit?.branch, c).toBeUndefined();
+    }
+    expect(side("curl -X POST https://api.github.com/graphql -d {\"query\":\"mutation{mergePullRequest(input:{}){clientMutationId}}\"}")?.flag)
+      .toBe("mergePullRequest");
+    for (const c of ["gh api graphql -F query=@merge.graphql", "gh api graphql --input q.json", "curl -d @body.json https://api.github.com/graphql",
+      "wget --post-file=body.json https://api.github.com/graphql"]) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/GraphQL mutation request from a file$/);
+      expect(hit?.flag, c).toMatch(/^(@|--input)/);
+    }
+    for (const c of ["gh api graphql -f query=query{repository(owner:\"o\",name:\"r\"){pullRequest(number:1){merged}}}",
+      "gh api graphql -f query=mutation{addComment(input:{}){clientMutationId}}",
+      "gh api graphql -f query=mutation{updateIssue(input:{}){clientMutationId}}",
+      "gh api graphql", "curl https://api.github.com/graphql"]) expect(side(c), c).toBeNull();
+  });
+
+  it("a gh alias set on the line is expanded, named in the cause, and never shadows a builtin; a shell alias is left to the reader (#315)", () => {
+    expect(ghAliasSet(["alias", "set", "m", "pr merge"])).toEqual(["m", ["pr", "merge"]]);
+    expect(ghAliasSet(["alias", "set", "--clobber", "m", "pr merge --squash"])).toEqual(["m", ["pr", "merge", "--squash"]]);
+    expect(ghAliasSet(["alias", "set", "-s", "m", "git push"])).toBeNull();
+    expect(ghAliasSet(["alias", "set", "m", "!git push"])).toBeNull();
+    expect(ghAliasSet(["alias", "list"])).toBeNull();
+    expect(ghAliasSet(["alias", "set", "m"])).toBeNull();
+    const aliases = new Map([["m", ["pr", "merge"]], ["v", ["pr", "view"]], ["pr", ["issue", "list"]], ["put", ["api", "-X", "PUT"]]]);
+    const m = side("gh m 1", aliases);
+    expect(m?.flag).toBe("gh pr merge");
+    expect(m?.alias).toBe("m");
+    expect(sideEffectLine(m)).toBe("  effect: moves-shared-ref, from `gh pr merge`, via gh alias `m` -- the push action by another route.");
+    expect(side("gh v 1", aliases)).toBeNull();
+    expect(side("gh pr merge 1", aliases)?.flag).toBe("gh pr merge"); // `pr` is gh's own, never the alias
+    expect(side("gh pr view 1", aliases)).toBeNull();
+    expect(side("gh put repos/o/r/pulls/1/merge", aliases)?.alias).toBe("put");
+    expect(side("gh m 1")).toBeNull(); // not set on this line: the Not seen block
+  });
+
+  it("the readers: pflag and getopt options, joined and separate, and GitHub's API paths by program", () => {
+    const r = readOpts(["-sSXPUT", "--data", "{}", "--json={}", "-H", "A: b", "--", "-X", "GET"],
+      { valued: ["--request", "--data", "--json", "--header"], alias: { X: "--request", H: "--header" } });
+    expect([...r.flags]).toEqual(["-s", "-S", "--request", "--data", "--json", "--header"]);
+    expect(r.values.get("--request")).toEqual(["PUT"]);
+    expect(r.values.get("--json")).toEqual(["{}"]);
+    expect(r.words).toEqual(["-X", "GET"]);
+    expect(apiPath("repos/o/r/pulls/1/merge")).toBe("/repos/o/r/pulls/1/merge");
+    expect(apiPath("/repos/o/r/merges?x=1#f")).toBe("/repos/o/r/merges");
+    expect(apiPath("https://api.github.com/repos/o/r/merges")).toBe("/repos/o/r/merges");
+    expect(apiPath("https://ghe.example.com/api/v3/repos/o/r/merges")).toBe("/repos/o/r/merges");
+    expect(apiPath("repos/o/r/merges", { url: true })).toBeNull();
+    expect(apiPath("https://example.com/repos/o/r/merges", { url: true })).toBeNull();
+    expect(apiPath("https://API.GitHub.com/repos/o/r/merges", { url: true })).toBe("/repos/o/r/merges");
+    expect(apiPath("mailto:x@y", {})).toBeNull();
   });
 });

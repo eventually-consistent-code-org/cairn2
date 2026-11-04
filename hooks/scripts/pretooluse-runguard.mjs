@@ -150,6 +150,51 @@
  *   prefix, which the alias probe reads from the session's files, not the
  *   line's (the push gate counts those too).
  *
+ *   The push action by another route (#483): moves-shared-ref is reachable
+ *   with no git on the line -- `gh pr merge`; a `gh api` write (-X PUT,
+ *   PATCH, POST or DELETE, or -f / -F fields or --input with no method)
+ *   to a pull request's /merge, to /git/refs, /merges or /releases, or a
+ *   GraphQL mutation that merges or moves a ref (mergePullRequest,
+ *   updateRef and kin; a request whose body is a file is refused unread);
+ *   `gh release create`; `gh repo delete`; and a curl or wget write (a
+ *   method, data, a form, an upload) to the same paths at api.github.com
+ *   or an enterprise /api/v3/ path. git-effects.mjs's SIDE_DOOR_TABLE
+ *   classifies them, and the two moves-shared-ref gates above apply as to
+ *   a push, the refusal naming the route ("a `gh api` pull request merge
+ *   is a push"). A route naming a branch (--target, a ref path, a `base`
+ *   field) is gated by that branch; one naming none -- a PR's base, a
+ *   mutation -- is taken as landing on the default branch, and the ship
+ *   gate matches the stamp against the checkout's HEAD: fail closed on
+ *   the cheaper read, decided phase 31, 2026-11-04. One deleting the
+ *   default branch or the repository never passes the gate. A `gh alias
+ *   set` earlier on the same line is expanded (`gh alias set m 'pr merge'
+ *   && gh m 1` is the merge); a gh builtin is never an alias. Reads (`gh
+ *   pr view`, a GET, a bare curl), `gh pr create`, `gh pr comment` and a
+ *   write to any other path pass; the owner's escapes are the push's.
+ *   Asserted by runguard-effects.test.ts (one test per row),
+ *   runguard-guards.test.ts (#483) and runguard-sidedoors.test.ts (#484,
+ *   every route under both gates beside its read twin).
+ *
+ *   Not seen, dated 2026-11-04 (#483, by decision: the guard reads what a
+ *   line spells, and every route below carries the owner's own signed-in
+ *   identity, so the control that covers it sits at the service, #485;
+ *   each line is pinned by runguard-sidedoors.test.ts "Not seen", so a
+ *   deleted line is red):
+ *   a browser tool (claude-in-chrome, playwright, chrome-devtools) clicking
+ *   the merge button as the signed-in user -- covered by branch protection
+ *   that requires a review the agent's session cannot give (#485).
+ *   Composio's GitHub tools, or any MCP tool that reaches GitHub with the
+ *   owner's token (GITHUB_MERGE_PULL_REQUEST and kin) -- covered by the
+ *   token's scope: an agent's token carries no contents or pull-requests
+ *   write (#485).
+ *   a gh alias or extension configured outside the line (`gh alias set`
+ *   in an earlier call, a gh-NAME on PATH) -- covered by the same branch
+ *   protection; the guard expands only an alias set on the line it judges.
+ *   a token read from the environment and used by a script or an
+ *   interpreter (`python -c` with requests, `node -e` with fetch, GH_TOKEN
+ *   handed to a program the guard can't read) -- covered by the token's
+ *   scope and the service's log, read instead of the agent's claim (#485).
+ *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
  *   on the line that could make a commit or move a ref refuses it: a git
@@ -246,7 +291,8 @@ import {
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
-  envConfig, longNames, parseInvocation, pushArgs, readArgs, resolveAlias, truthy,
+  envConfig, ghAliasSet, longNames, parseInvocation, pushArgs, readArgs, resolveAlias, sideDoor, sideEffectLine,
+  truthy,
 } from "./git-effects.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -368,7 +414,7 @@ let CALL = { payload: null, projectDir: process.cwd() };
  */
 function readLine(line) {
   const out = { invs: [], steps: [], unordered: /\$\(|`/.test(line), moves: [], repeats: false,
-    cdpaths: [], envSets: Object.fromEntries(GIT_ENV.map((k) => [k, []])), deep: false };
+    cdpaths: [], envSets: Object.fromEntries(GIT_ENV.map((k) => [k, []])), deep: false, ghAliases: new Map() };
   const walk = (text, depth, inherit) => {
     if (out.deep) return; // nothing more is read of a line the reader gave up on (#321)
     // the last command ended in `>&` or `<&`, so the `&` was a redirect's,
@@ -435,11 +481,28 @@ function readLine(line) {
         // run, their arguments, so a line that only mentions git stays clear
         // -- all but the one option that runs a program (rg --pre, man -P,
         // gh alias set --shell, #315), whose value is read either way.
+        // #483 -- the push action by another route: a gh, curl or wget
+        // command that moves a shared ref through GitHub's API is an
+        // invocation of its own (`side` is its cause), judged by the two
+        // moves-shared-ref gates, and its own step: its later words are
+        // its method and URL, never a command the runner backstop below
+        // should read. A `gh alias set` earlier on the line is kept, so
+        // `gh alias set m 'pr merge' && gh m 1` is the merge; the set
+        // itself moves no ref.
+        const alias = cmd === "gh" ? ghAliasSet(words.slice(1)) : null;
+        if (alias) out.ghAliases.set(alias[0], alias[1]);
+        const side = sideDoor(cmd, words.slice(1), out.ghAliases);
+        if (side) {
+          out.invs.push({ side, assigns, step: out.steps.length, wrapDirs, envAssigns: env.assigns,
+            envCleared: env.cleared, dirs: [], configs: [], configEnvs: [], unread: [], opts: {}, sub: "", args: [], paths: [] });
+          out.steps.push(true);
+          continue;
+        }
         if (depth < 3) {
           const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
           for (const line of inner) walk(line, depth + 1, env);
         }
-        out.steps.push(!HARMLESS.has(cmd) || writesFile(words));
+        out.steps.push(alias ? writesFile(words) : !HARMLESS.has(cmd) || writesFile(words));
         continue;
       }
 
@@ -1143,6 +1206,20 @@ const MOVED_BEFORE = "an earlier command on this line can make a commit or move 
   "guard checks what a push sends before the line runs";
 
 /**
+ * The default branch names at `at` (#251, #483): main, master, and the
+ * `remote`'s HEAD when the clone knows it. Shared by the push gate and the
+ * side-door gate, so both land on the same set.
+ */
+function defaultBranches(at, remote = "origin") {
+  const defaults = new Set(DEFAULT_BRANCHES);
+  if (/^[\w.-]+$/.test(remote)) {
+    const head = gitOut(at, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
+    if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
+  }
+  return defaults;
+}
+
+/**
  * What `git push <args>` would land on the default branch, as the source
  * revs being pushed there (null for a deletion, UNKNOWN when the settings
  * that decide it can't be read). Empty when the push never touches the
@@ -1168,14 +1245,9 @@ function branchSources(inv, at) {
   const del = flags.has("--delete");
   const tags = flags.has("--tags");
 
-  // Default branch names: main, master, and the remote's HEAD when known
   const current = gitOut(at, ["symbolic-ref", "--short", "-q", "HEAD"]);
   const remote = pushRemote(inv, at, positional, current);
-  const defaults = new Set(DEFAULT_BRANCHES);
-  if (/^[\w.-]+$/.test(remote)) {
-    const head = gitOut(at, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
-    if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
-  }
+  const defaults = defaultBranches(at, remote);
   const lands = (names) => names.some((n) => defaults.has(n));
 
   // Every local default branch, as the full ref -- a tag spelled the same
@@ -1390,22 +1462,9 @@ function shipGateRefusal(inv, at, ctx) {
     if (inv.movedBefore) return [MOVED_BEFORE, "  push as its own step, once the drift check has seen " +
       "the commit -- or run /cairn:ship."];
 
-    const from = stampDir(at, ctx);
-    const keyed = join(ctx.baseDir, "ship-gate", `${projectKey(from)}.json`);
-    const legacy = join(ctx.baseDir, "ship-gate", `${worktreeKey(from)}.json`);
-    const path = existsSync(keyed) || !existsSync(legacy) ? keyed : legacy;
-    let stamp;
-    try {
-      stamp = JSON.parse(readFileSync(path, "utf8"));
-    } catch (e) {
-      if (e?.code === "ENOENT") {
-        return [from === ctx.projectDir ? "no drift check has been recorded for this project"
-          : `it leaves from ${from}, another repository, and no drift check has been recorded there`];
-      }
-      if (e instanceof SyntaxError) return ["the last drift check's record is unreadable"];
-      return [`the last drift check's record can't be read (${e?.code ?? e})`,
-        `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`];
-    }
+    const got = readStamp(at, ctx);
+    if (got.why) return got.why;
+    const { stamp } = got;
     if (stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
 
     for (const src of sources) {
@@ -1421,6 +1480,149 @@ function shipGateRefusal(inv, at, ctx) {
   } catch {
     return null; // fail open for this check only -- the rest of the line still gets checked
   }
+}
+
+/**
+ * The ship-gate stamp covering a push from `at` (#251, #299, #306), as
+ * { stamp }, or { why } -- the refusal's lines -- when there is none the
+ * gate can use: missing (for this project, or for the other repository
+ * the push leaves from), unparsable, or unreadable. Shared by the push
+ * gate and the side-door gate (#483), so a route reads the one record.
+ */
+function readStamp(at, ctx) {
+  const from = stampDir(at, ctx);
+  const keyed = join(ctx.baseDir, "ship-gate", `${projectKey(from)}.json`);
+  const legacy = join(ctx.baseDir, "ship-gate", `${worktreeKey(from)}.json`);
+  const path = existsSync(keyed) || !existsSync(legacy) ? keyed : legacy;
+  try {
+    return { stamp: JSON.parse(readFileSync(path, "utf8")) };
+  } catch (e) {
+    if (e?.code === "ENOENT") {
+      return { why: [from === ctx.projectDir ? "no drift check has been recorded for this project"
+        : `it leaves from ${from}, another repository, and no drift check has been recorded there`] };
+    }
+    if (e instanceof SyntaxError) return { why: ["the last drift check's record is unreadable"] };
+    return { why: [`the last drift check's record can't be read (${e?.code ?? e})`,
+      `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`] };
+  }
+}
+
+/**
+ * Why a side-door route (#483, `inv.side`) may not land on the default
+ * branch yet, as [why, what to do instead?] like shipGateRefusal, or null
+ * when the ship gate is satisfied or doesn't apply. The route's branch,
+ * when it names one, is checked against the default names; none named
+ * (a PR's base, a mutation) is taken as the default branch, fail closed.
+ * A route that deletes the default branch or the repository never
+ * passes. The stamp is read at `at` as a push's is, and the commit it
+ * must match is the checkout's HEAD -- the commit the agent's work is at,
+ * the cheaper read (decided phase 31, 2026-11-04): a PR's own head is only
+ * known to the API. No commit to read refuses, never skips.
+ */
+function sideGateRefusal(inv, at, ctx) {
+  try {
+    const cause = inv.side;
+    if (cause.branch !== undefined && !defaultBranches(at).has(cause.branch)) return null;
+    if (cause.deletes) return [`it deletes ${cause.deletes}`];
+    if (inv.movedBefore) return [MOVED_BEFORE, "  run it as its own step, once the drift check has seen " +
+      "the commit -- or run /cairn:ship."];
+    const got = readStamp(at, ctx);
+    if (got.why) return got.why;
+    if (got.stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
+    const sha = gitOut(at, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+    if (sha === null) return ["no commit can be read here to match the drift check against"];
+    if (sha !== got.stamp.head) {
+      return [`the last drift check was for ${String(got.stamp.head).slice(0, 7)}, ` +
+        `not the commit this checkout is at (${sha.slice(0, 7)})`];
+    }
+    return null;
+  } catch {
+    return null; // fail open for this check only -- the live-run gate still runs
+  }
+}
+
+/**
+ * The live-run gate on a moves-shared-ref invocation (#252, #260, #358):
+ * refused while the run list can't be read, from a session the breaker
+ * froze, while a run is live without push authority for a phase in
+ * flight, and behind a commit or ref move earlier on the line. `tail` is
+ * the effect line the refusal ends with; `what`, a side-door route's name
+ * (#483), opens the refusal so the route is named on its first line, as
+ * the ship gate names it. Shared by a push and a side-door route: the
+ * authority a manifest grants covers the action, not the program that
+ * reaches it.
+ */
+function liveRunGate(inv, tail, ctx, what) {
+  const { live, frozen, unreadable } = ctx.currentRuns();
+  const lead = (text) => (what === undefined ? `cairn run guard: ${text}` : `cairn run guard: ${what} is a push, and ${text}`);
+  // a run list that can't be read can't vouch that no run is live
+  if (unreadable) {
+    refuse([
+      `cairn run guard: can't read the batch-run list at ${unreadable}, so this push ` +
+      "can't be checked against a live run's push authority.",
+      "  the owner should restore read access to it; nothing pushes until the guard can read it.",
+      tail,
+    ], undefined, { effect: MOVES_SHARED_REF, reason: "a push while the run list can't be read" });
+  }
+  // #358 -- a run the breaker froze reads `stopped`, which would lift
+  // the rule below; its own sessions stay refused, whatever authority
+  // it was granted. Any other session -- the owner's -- is untouched.
+  for (const run of frozen) {
+    if (!frozenFor(run.state, ctx.sessionId)) continue;
+    block([
+      lead(`batch run ${run.runId} was frozen by the circuit breaker ` +
+      `(${run.state.stop?.count ?? "repeated"} guard refusals), and this session is the run's — nothing it does pushes now.`),
+      "  the phase ends verified-not-pushed; the owner pushes it from their own terminal, or",
+      "  re-stages what's left with /cairn:auto --batch.",
+      tail,
+    ], { effect: MOVES_SHARED_REF, reason: "a push from a run the breaker froze" });
+  }
+  for (const run of live) {
+    const why = pushRefusal(run.state);
+    if (!why) continue;
+    block([
+      lead(`a batch run (${run.runId}) is in flight ${why}.`),
+      "  the phase ends verified-not-pushed; push it yourself from your own",
+      "  terminal once the run is done.",
+      tail,
+    ], { effect: MOVES_SHARED_REF, reason: "a push mid-run without push authority for a phase in flight" });
+  }
+  // authority covers a push the guard can see, not one a commit
+  // earlier on the line changes after the guard has looked
+  if (live.length && inv.movedBefore) {
+    refuse([
+      lead(`a batch run (${live[0].runId}) is in flight, and ${MOVED_BEFORE}.`),
+      "  push as its own step, so what it sends is what was checked.",
+      tail,
+    ], undefined, { effect: MOVES_SHARED_REF, reason: "a push mid-run behind an earlier ref move" });
+  }
+}
+
+/**
+ * Judges one side-door invocation (#483): the same two moves-shared-ref
+ * gates a push meets, the refusal naming the route. The stamp and HEAD
+ * are read in the repository the tool runs in when it is one, else the
+ * project's -- a `gh pr merge -R o/r` from outside any checkout still
+ * answers to the project's drift check.
+ */
+function judgeSideDoor(inv, prefixed, ctx) {
+  const cause = inv.side;
+  const tail = sideEffectLine(cause);
+  const here = { dir: ctx.cwd };
+  const at = repoOf(here) === null ? ctx.project : here;
+  if (process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
+    const why = sideGateRefusal(inv, at, ctx);
+    if (why) {
+      const target = cause.branch === undefined ? "The guard takes its target as the default branch"
+        : "It lands on the default branch";
+      refuse([
+        `cairn run guard: ${cause.what} is a push -- ${cause.why} ${target}, but ${why[0]}.`,
+        why[1] ?? "  run /cairn:ship instead -- it runs the drift check first, then pushes; merging shipped work is the owner's call.",
+        tail,
+      ], UNSHIPPED_ENV, { effect: MOVES_SHARED_REF, reason: "a default-branch push by another route the drift check hasn't cleared" });
+    }
+  }
+  liveRunGate(inv, tail, ctx, cause.what);
 }
 
 /**
@@ -1471,6 +1673,12 @@ function judgeLine(line, start, ctx) {
     // Overrides only count as the leading assignment of THIS command, so a
     // quoted mention elsewhere can't bypass the guard
     const prefixed = (name) => inv.assigns.includes(`${name}=1`);
+    // #483 -- a route to the push action that never runs git: the two
+    // moves-shared-ref gates, nothing else on this loop applies to it
+    if (inv.side) {
+      judgeSideDoor(inv, prefixed, ctx);
+      continue;
+    }
     const targets = invTargets(inv, places, lineEnv);
     const known = targets.filter((t) => t !== LOST);
     const lost = known.length < targets.length;
@@ -1527,48 +1735,7 @@ function judgeLine(line, start, ctx) {
     // staging gate and a manifest phase in flight. From ANY worktree --
     // the run's own is exactly where it pushes.
     if (shared) {
-      const { live, frozen, unreadable } = currentRuns();
-      // a run list that can't be read can't vouch that no run is live
-      if (unreadable) {
-        refuse([
-          `cairn run guard: can't read the batch-run list at ${unreadable}, so this push ` +
-          "can't be checked against a live run's push authority.",
-          "  the owner should restore read access to it; nothing pushes until the guard can read it.",
-          effectLine(inv, shared),
-        ], undefined, { effect: MOVES_SHARED_REF, reason: "a push while the run list can't be read" });
-      }
-      // #358 -- a run the breaker froze reads `stopped`, which would lift
-      // the rule below; its own sessions stay refused, whatever authority
-      // it was granted. Any other session -- the owner's -- is untouched.
-      for (const run of frozen) {
-        if (!frozenFor(run.state, ctx.sessionId)) continue;
-        block([
-          `cairn run guard: batch run ${run.runId} was frozen by the circuit breaker ` +
-          `(${run.state.stop?.count ?? "repeated"} guard refusals), and this session is the run's — nothing it does pushes now.`,
-          "  the phase ends verified-not-pushed; the owner pushes it from their own terminal, or",
-          "  re-stages what's left with /cairn:auto --batch.",
-          effectLine(inv, shared),
-        ], { effect: MOVES_SHARED_REF, reason: "a push from a run the breaker froze" });
-      }
-      for (const run of live) {
-        const why = pushRefusal(run.state);
-        if (!why) continue;
-        block([
-          `cairn run guard: a batch run (${run.runId}) is in flight ${why}.`,
-          "  the phase ends verified-not-pushed; push it yourself from your own",
-          "  terminal once the run is done.",
-          effectLine(inv, shared),
-        ], { effect: MOVES_SHARED_REF, reason: "a push mid-run without push authority for a phase in flight" });
-      }
-      // authority covers a push the guard can see, not one a commit
-      // earlier on the line changes after the guard has looked
-      if (live.length && inv.movedBefore) {
-        refuse([
-          `cairn run guard: a batch run (${live[0].runId}) is in flight, and ${MOVED_BEFORE}.`,
-          "  push as its own step, so what it sends is what was checked.",
-          effectLine(inv, shared),
-        ], undefined, { effect: MOVES_SHARED_REF, reason: "a push mid-run behind an earlier ref move" });
-      }
+      liveRunGate(inv, effectLine(inv, shared), ctx);
       continue;
     }
 
@@ -1778,4 +1945,14 @@ try {
  *         guard" half is refused on purpose -- a plan-less clone of the
  *         same remote is the hostile twin. Closed as decided (phase 31),
  *         one sentence in the rules above; the #306 test is the proof.
+ *   #483  the push action by another route: gh pr merge, gh api and curl
+ *         or wget writes to the merge, ref, merges and releases paths, a
+ *         ref-moving GraphQL mutation, gh release create and gh repo
+ *         delete are moves-shared-ref rows of a second, non-git table
+ *         (git-effects.mjs SIDE_DOOR_TABLE, sideDoor), judged by the same
+ *         two gates as a push through readStamp and liveRunGate, both
+ *         factored out of the push path for it. The routes the guard can't
+ *         read are the Not seen block in the rules above, each with its
+ *         service-side control; runguard-sidedoors.test.ts (#484) pins the
+ *         block line by line.
  */

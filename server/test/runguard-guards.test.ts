@@ -3136,3 +3136,216 @@ describe("run guard: a git alias is resolved from every channel the command line
     expect(at(proj, home, `git -c include.path=${join(proj, "inc.cfg")} status`, proj, lifted).status).toBe(0);
   });
 });
+
+describe("run guard: the push action by another route meets the push gates (#483)", () => {
+  // Each row: [a route that moves a shared ref without git, its read twin].
+  // Before #483 every refused form here passed the guard with exit 0: `gh`
+  // was a program that only prints its arguments, and curl was nothing.
+  const MERGE = "https://api.github.com/repos/o/r/pulls/1/merge";
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["gh pr merge 1", "gh pr view 1"],
+    ["gh pr merge 1 --squash --delete-branch", "gh pr checks 1"],
+    ["gh pr -R o/r merge 1", "gh pr -R o/r view 1"],
+    ["gh api -X PUT repos/o/r/pulls/1/merge", "gh api repos/o/r/pulls/1/merge"],
+    ["gh api -XPUT /repos/o/r/pulls/1/merge", "gh api -XGET /repos/o/r/pulls/1/merge"],
+    ["gh api --method=patch repos/o/r/git/refs/heads/main -f sha=0123abc", "gh api repos/o/r/git/refs/heads/main"],
+    ["gh api repos/o/r/pulls/1/merge -f commit_title=x", "gh api repos/o/r/pulls/1/commits -q .[].sha"],
+    ["gh api -X POST repos/o/r/merges -f base=main -f head=topic", "gh api repos/o/r/compare/main...topic"],
+    ["gh api -X POST repos/o/r/releases -f tag_name=v1", "gh api repos/o/r/releases"],
+    [`gh api -X PUT ${MERGE}`, `gh api ${MERGE}`],
+    ["gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+      "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 1) { merged } } }'"],
+    ["gh api graphql -F query=@merge.graphql", "gh api graphql -f query='mutation { addComment(input: {subjectId: \"x\", body: \"hi\"}) { clientMutationId } }'"],
+    ["gh release create v1.0 --notes x", "gh release list"],
+    ["gh repo delete o/r --yes", "gh repo view o/r"],
+    [`curl -X PUT ${MERGE} -H "Authorization: token x"`, `curl ${MERGE} -H "Authorization: token x"`],
+    [`curl -sS --request PUT '${MERGE}'`, `curl -sS --request GET '${MERGE}'`],
+    [`curl -sSXPUT ${MERGE}`, `curl -sSI ${MERGE}`],
+    ["curl -d '' https://api.github.com/repos/o/r/merges", "curl -G -d per_page=1 https://api.github.com/repos/o/r/releases"],
+    ["curl --json '{\"base\":\"main\",\"head\":\"topic\"}' https://api.github.com/repos/o/r/merges", "curl https://api.github.com/repos/o/r/merges"],
+    ["curl -X PATCH https://ghe.example.com/api/v3/repos/o/r/git/refs/heads/main -d '{\"sha\":\"0123abc\"}'",
+      "curl https://ghe.example.com/api/v3/repos/o/r/git/refs/heads/main"],
+    [`wget --method=PUT ${MERGE}`, `wget ${MERGE}`],
+    ["wget --post-data='{}' https://api.github.com/repos/o/r/merges", "wget -O - https://api.github.com/repos/o/r/merges"],
+    ["gh alias set m 'pr merge' && gh m 1", "gh alias set v 'pr view' && gh v 1"],
+    ["sudo gh pr merge 1", "sudo gh pr view 1"],
+    ["bash -c 'gh pr merge 1'", "bash -c 'gh pr view 1'"],
+    ["GH_TOKEN=x gh pr merge 1", "GH_TOKEN=x gh pr view 1"],
+    [`timeout 5 curl -X PUT ${MERGE}`, `timeout 5 curl ${MERGE}`],
+  ];
+
+  /** An unstamped fixture plus a nested folder to run from -- the #383 matrix. */
+  function nested(manifest?: Record<string, unknown>, stamped = false): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture(manifest, stamped);
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  const LIVE = { status: "running", phases: [{ number: 3, name: "p3" }], pushAuth: { granted: false, scope: "manifest-phases" } };
+  const GRANTED = { ...LIVE, pushAuth: { granted: true, scope: "manifest-phases", grantedAt: "2026-10-01T00:00:00Z" }, currentPhase: 3 };
+
+  it("without a stamp each route is refused from the root and a nested folder, naming the route; its read twin passes in both", () => {
+    const { proj, home, sub } = nested();
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("is a push");
+        expect(r.stderr, refused).toContain("/cairn:ship");
+        expect(r.stderr, refused).toContain("effect: moves-shared-ref, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_UNSHIPPED_PUSH");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the refusal names the route it came by, and an alias the name typed", () => {
+    const { proj, home } = nested();
+    for (const [c, route] of [
+      ["gh pr merge 1", "`gh pr merge` is a push"],
+      ["gh api -X PUT repos/o/r/pulls/1/merge", "a `gh api` pull request merge is a push"],
+      ["gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=0123abc", "a `gh api` ref write is a push"],
+      [`curl -X PUT ${MERGE}`, "a `curl` pull request merge is a push"],
+      [`wget --method=PUT ${MERGE}`, "a `wget` pull request merge is a push"],
+      ["gh release create v1.0", "`gh release create` is a push"],
+      ["gh api graphql -f query='mutation { updateRef(input: {refId: \"x\", oid: \"y\"}) { clientMutationId } }'",
+        "a `gh api` GraphQL mutation is a push"],
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(route);
+    }
+    const r = guard(proj, home, "gh alias set m 'pr merge' && gh m 1");
+    expect(r.stderr).toContain("from `gh pr merge`, via gh alias `m`");
+    // the mutation's own name is the flag; a request from a file names the file
+    expect(guard(proj, home, "gh api graphql -f query='mutation { updateRef(input: {}) { clientMutationId } }'").stderr)
+      .toContain("from `updateRef`");
+    expect(guard(proj, home, "gh api graphql -F query=@merge.graphql").stderr).toContain("from `@merge.graphql`");
+  });
+
+  it("a clean stamp at the checkout's HEAD lets a merge through; a stale or dirty one refuses", () => {
+    const { proj, home } = nested();
+    stamp(proj, home);
+    for (const c of ["gh pr merge 1", "gh api -X PUT repos/o/r/pulls/1/merge", `curl -X PUT ${MERGE}`,
+      "gh release create v1.0", "gh alias set m 'pr merge' && gh m 1"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+    git(proj, "commit", "-q", "--allow-empty", "-m", "later", "--no-gpg-sign");
+    const stale = guard(proj, home, "gh pr merge 1");
+    expect(stale.status).toBe(2);
+    expect(stale.stderr).toContain("not the commit this checkout is at");
+    stamp(proj, home, { clean: false });
+    const dirty = guard(proj, home, `curl -X PUT ${MERGE}`);
+    expect(dirty.status).toBe(2);
+    expect(dirty.stderr).toContain("flagged drift");
+  });
+
+  it("a route naming another branch skips the ship gate; one deleting the default branch or the repository never passes it", () => {
+    const { proj, home } = nested();
+    for (const c of [
+      "gh release create v1.0 --target feature",
+      "gh api -X PATCH repos/o/r/git/refs/heads/feature -f sha=0123abc",
+      "gh api -X DELETE repos/o/r/git/refs/heads/feature",
+      "gh api -X POST repos/o/r/merges -f base=feature -f head=topic",
+      "gh api -X POST repos/o/r/git/refs -f ref=refs/heads/feature -f sha=0123abc",
+      "gh api -X DELETE repos/o/r/git/refs/tags/v1",
+      "curl -X POST -d '{\"base\":\"feature\",\"head\":\"topic\"}' https://api.github.com/repos/o/r/merges",
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+    stamp(proj, home);
+    for (const [c, why] of [
+      ["gh api -X DELETE repos/o/r/git/refs/heads/main", "it deletes the default branch"],
+      ["curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/main", "it deletes the default branch"],
+      ["gh repo delete o/r --yes", "it deletes the repository"],
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(why);
+    }
+  });
+
+  it("a commit earlier on the line refuses a merge after it, as it does a push (#305)", () => {
+    const { proj, home } = nested();
+    stamp(proj, home);
+    const r = guard(proj, home, "git commit -am wip && gh pr merge 1");
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("an earlier command on this line can make a commit or move a ref first");
+    // a gh alias set moves no ref, so the alias row above meets the gate itself; a read beside it passes
+    expect(guard(proj, home, "gh pr view 1 && gh pr checks 1").status).toBe(0);
+  });
+
+  it("mid-run without push authority every route is refused naming the run, with no escape; granted authority lets them through", () => {
+    const { proj, home, sub } = nested(LIVE, true);
+    for (const [refused, twin] of pairs.slice(0, 8)) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("run-x");
+        expect(r.stderr, refused).toContain("effect: moves-shared-ref, from `");
+        expect(guard(proj, home, twin, {}, cwd).status, twin).toBe(0);
+      }
+    }
+    expect(guard(proj, home, "gh pr merge 1", { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status).toBe(2);
+    expect(guard(proj, home, "CAIRN_ALLOW_UNSHIPPED_PUSH=1 gh pr merge 1").status).toBe(2);
+    const granted = nested(GRANTED, true);
+    for (const c of ["gh pr merge 1", "gh api -X PUT repos/o/r/pulls/1/merge", `curl -X PUT ${MERGE}`]) {
+      expect(guard(granted.proj, granted.home, c).status, c).toBe(0);
+    }
+  });
+
+  it("the owner's escape lifts the ship gate for the session or the one command, never a quoted mention of it", () => {
+    const { proj, home } = nested();
+    for (const [refused] of pairs.slice(0, 6)) {
+      expect(guard(proj, home, refused, { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status, refused).toBe(0);
+      expect(guard(proj, home, `CAIRN_ALLOW_UNSHIPPED_PUSH=1 ${refused}`).status, refused).toBe(0);
+    }
+    expect(guard(proj, home, 'gh pr merge 1 --body "CAIRN_ALLOW_UNSHIPPED_PUSH=1"').status).toBe(2);
+  });
+
+  it("quoted mentions, other writes, and the reads the issue keeps out of scope pass", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      "echo gh pr merge 1",
+      'git commit -m "gh pr merge 1"',
+      'gh pr create --title x --body "then gh pr merge 1"',
+      `gh pr comment 1 --body "curl -X PUT ${MERGE}"`,
+      'gh issue create --title "gh api -X PUT repos/o/r/pulls/1/merge"',
+      "gh api -X POST repos/o/r/issues -f title=x",
+      "gh api -X PATCH repos/o/r/pulls/1 -f title=x",
+      "gh api -X DELETE repos/o/r/issues/comments/1",
+      "gh api -X GET repos/o/r/pulls/1/merge -f foo=bar",
+      "curl -X PUT https://example.com/repos/o/r/pulls/1/merge",
+      "curl -X POST https://api.github.com/repos/o/r/issues -d '{}'",
+      "gh release view v1.0",
+      "gh alias set m 'pr merge'",
+      "gh alias set pr 'issue list' && gh pr view 1",
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    // a builtin is never an alias: shadowing `pr` on the line doesn't unrefuse the merge
+    expect(guard(proj, home, "gh alias set pr 'issue list' && gh pr merge 1").status).toBe(2);
+  });
+
+  it("reaches the guard through an MCP tool's command line too (#310)", () => {
+    const { proj, home } = nested();
+    const run = (command: string) => {
+      const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home };
+      delete env.CAIRN_ALLOW_UNSHIPPED_PUSH;
+      return spawnSync(process.execPath, [RUNGUARD], {
+        cwd: proj, env, encoding: "utf8", timeout: 5000,
+        input: JSON.stringify({ tool_name: "mcp__dc__start_process", tool_input: { command }, cwd: proj }),
+      });
+    };
+    expect(run("gh pr merge 1").status).toBe(2);
+    expect(run(`curl -X PUT ${MERGE}`).status).toBe(2);
+    expect(run("gh pr view 1").status).toBe(0);
+  });
+});

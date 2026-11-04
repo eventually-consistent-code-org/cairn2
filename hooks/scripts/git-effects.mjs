@@ -22,6 +22,10 @@
  *   the guard passes (the line's own prefix, then its environment) and
  *   folded into `configs` in git's order, so the same rows and the same
  *   alias walk see them; what the lookup can't read lands in `unread`.
+ *   The push action has routes that never run git (#483): SIDE_DOOR_TABLE
+ *   and sideDoor read a gh, curl or wget line for a merge, a ref write or
+ *   a release at GitHub's API, as the one moves-shared-ref the guard
+ *   gates by the same two rules as a push.
  *
  * removeWhen: the run guard meets its own removeWhen -- it is this
  *   module's only reader.
@@ -754,4 +758,349 @@ export function effectLine(inv, cause) {
   const others = effectsOf(inv).filter((e) => e !== cause.effect && e !== READ_ONLY);
   const via = inv.alias === undefined ? "" : `, via alias \`${inv.alias}\``;
   return `  effect: ${cause.effect}, from \`${cause.flag}\`${via}` + (others.length ? `; also ${others.join(", ")}.` : ".");
+}
+
+// Side doors to the push action (#483)
+
+// Why a route that merges a pull request is a push.
+const MERGES_PR = "it merges a pull request onto its base branch, as a push would.";
+
+/**
+ * The GraphQL mutations that merge a pull request or move a ref (a claim
+ * about GitHub's schema, dated 2026-11-04): what a `gh api graphql` or a
+ * curl to /graphql can do that a REST path above does.
+ */
+const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRef|updateRefs|deleteRef|createCommitOnBranch)\b/;
+
+/**
+ * The side-door table (#483): the routes to "move a shared ref" that never
+ * run git, each the effect MOVES_SHARED_REF. Two kinds of row:
+ *   a gh command  `sub` and `action` (`gh pr merge`, `gh release create`,
+ *                 `gh repo delete`); `branchOpt` names the option that
+ *                 says which branch (a release's --target), `deletes` what
+ *                 the command deletes outright
+ *   an API path   `path`, a regexp on the endpoint's path, reached by `gh
+ *                 api`, curl or wget with a write method (API_PROGRAMS);
+ *                 `ref` is the capture group naming the ref, `field` the
+ *                 request field naming the branch instead (a merge's
+ *                 `base`, a release's `target_commitish`, a created ref's
+ *                 `ref`), `mutation` the GraphQL names a body must carry
+ * A row that names no branch leaves `branch` undefined: the guard takes
+ * the target as the default branch, fail closed on the cheaper read
+ * (decided phase 31, 2026-11-04) -- a PR's base is only known to the API.
+ * Reads (`gh pr view`, a GET, curl with no method or data), `gh pr
+ * create`, `gh pr comment` and a write to any other path have no row.
+ * Asserted by runguard-effects.test.ts (one test per row),
+ * runguard-guards.test.ts (#483) and runguard-sidedoors.test.ts (#484).
+ */
+export const SIDE_DOOR_TABLE = Object.freeze([
+  { route: "gh pr merge", sub: "pr", action: "merge", what: "`gh pr merge`", why: MERGES_PR },
+  { route: "gh release create", sub: "release", action: "create", branchOpt: "--target",
+    what: "`gh release create`", why: "it creates a tag on the remote, a ref every clone fetches." },
+  { route: "gh repo delete", sub: "repo", action: "delete", deletes: "the repository and every ref in it",
+    what: "`gh repo delete`", why: "it deletes the repository and every ref in it." },
+  { route: "pull request merge", path: /\/pulls\/\d+\/merge\/?$/i, why: MERGES_PR },
+  { route: "ref write", path: /\/git\/refs(?:\/(.+?))?\/?$/i, ref: 1, field: "ref",
+    why: "it creates, moves or deletes a ref on the remote, as a push would." },
+  { route: "branch merge", path: /\/merges\/?$/i, field: "base",
+    why: "it merges one branch into another on the remote, as a push would." },
+  { route: "release", path: /\/releases(?:\/\d+|\/tags\/[^/]+)?\/?$/i, field: "target_commitish",
+    why: "it creates or changes a release, and the tag it stands on." },
+  { route: "GraphQL mutation", path: /\/graphql\/?$/i, mutation: REF_MUTATIONS,
+    why: "a GraphQL mutation can merge a pull request or move a ref, as a push would." },
+]);
+
+/** The programs that reach the API-path rows, by the name a line spells. */
+export const API_PROGRAMS = Object.freeze(["gh api", "curl", "wget"]);
+
+// The gh subcommands the table knows: builtins in gh, never expanded as an
+// alias -- gh refuses `gh alias set pr ...` itself, so a line that sets one
+// can't unrefuse the merge.
+const GH_TABLED = new Set(SIDE_DOOR_TABLE.map((r) => r.sub).filter((s) => s !== undefined).concat("api"));
+
+// How each program's args are read (readOpts): the options that take a
+// value, and the short letters that stand for them (pflag for gh, getopt
+// for curl and wget). Only the options this table reads need listing; a
+// value left unread is a bare word nothing here looks at.
+const GH_SUB_READ = { valued: ["--repo", "--target"], alias: { R: "--repo" } };
+const GH_API_READ = {
+  valued: ["--method", "--raw-field", "--field", "--header", "--jq", "--template", "--preview", "--hostname",
+    "--input", "--cache"],
+  alias: { X: "--method", f: "--raw-field", F: "--field", H: "--header", q: "--jq", t: "--template", p: "--preview" },
+};
+const CURL_READ = {
+  valued: ["--request", "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode", "--json",
+    "--form", "--form-string", "--upload-file", "--header", "--url", "--user", "--user-agent", "--cookie",
+    "--cookie-jar", "--continue-at", "--dump-header", "--referer", "--cert", "--config", "--max-time", "--output",
+    "--ftp-port", "--quote", "--range", "--telnet-option", "--proxy-user", "--write-out", "--proxy",
+    "--speed-time", "--speed-limit", "--time-cond", "--oauth2-bearer", "--url-query", "--variable", "--retry",
+    "--connect-timeout", "--max-redirs", "--limit-rate", "--output-dir", "--key", "--cacert", "--resolve",
+    "--interface"],
+  alias: { A: "--user-agent", b: "--cookie", c: "--cookie-jar", C: "--continue-at", d: "--data", D: "--dump-header",
+    e: "--referer", E: "--cert", F: "--form", H: "--header", K: "--config", m: "--max-time", o: "--output",
+    P: "--ftp-port", Q: "--quote", r: "--range", t: "--telnet-option", T: "--upload-file", u: "--user",
+    U: "--proxy-user", w: "--write-out", x: "--proxy", X: "--request", y: "--speed-time", Y: "--speed-limit",
+    z: "--time-cond", G: "--get", I: "--head" },
+};
+const WGET_READ = {
+  valued: ["--method", "--post-data", "--post-file", "--body-data", "--body-file", "--header", "--output-document",
+    "--output-file", "--append-output", "--directory-prefix", "--user-agent", "--timeout", "--tries", "--user",
+    "--password", "--http-user", "--http-password", "--referer", "--load-cookies", "--save-cookies"],
+  alias: { O: "--output-document", o: "--output-file", a: "--append-output", P: "--directory-prefix",
+    U: "--user-agent", T: "--timeout", t: "--tries" },
+};
+
+// The request bodies curl and wget send, by the option that carries them.
+const CURL_BODIES = ["--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode", "--json", "--form",
+  "--form-string"];
+const WGET_BODIES = ["--post-data", "--post-file", "--body-data", "--body-file"];
+
+// The methods that read; everything else writes.
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * A non-git program's args, read the way pflag and getopt read them
+ * (#483): `--name=v` and `--name v` for a `valued` long name, `-x v` and
+ * `-xv` for a short letter `alias` files under one, any other `-` word a
+ * switch, and the bare words in order; past a bare `--` every word is
+ * bare. `flags` is every name set; `values`, every value a name was
+ * given, in order.
+ */
+export function readOpts(args, { valued = [], alias = {} } = {}) {
+  const flags = new Set();
+  const values = new Map();
+  const words = [];
+  const give = (n, v) => {
+    flags.add(n);
+    if (v !== undefined) values.set(n, [...(values.get(n) ?? []), v]);
+  };
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === "--") {
+      words.push(...args.slice(k + 1));
+      break;
+    }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const name = eq < 0 ? a : a.slice(0, eq);
+      if (eq >= 0) give(name, a.slice(eq + 1));
+      else if (valued.includes(name)) give(name, args[++k] ?? "");
+      else give(name);
+      continue;
+    }
+    if (/^-[^-]/.test(a)) {
+      for (let c = 1; c < a.length; c++) {
+        const name = alias[a[c]] ?? `-${a[c]}`;
+        if (valued.includes(name)) {
+          give(name, a.slice(c + 1) || (args[++k] ?? ""));
+          break;
+        }
+        give(name);
+      }
+      continue;
+    }
+    words.push(a);
+  }
+  return { flags, values, words };
+}
+
+/**
+ * The path a word names at GitHub's API (#483), query and fragment
+ * dropped, or null: for gh, its endpoint as typed (`repos/o/r/...`,
+ * `/repos/...`) or any URL's path, an enterprise host's `/api/v3` prefix
+ * cut off; for curl and wget (`url` true), only a URL at api.github.com,
+ * or one whose path starts `/api/v3/` -- GitHub Enterprise's REST root (a
+ * dated claim, 2026-11-04) -- is GitHub's.
+ */
+export function apiPath(word, { url = false } = {}) {
+  const m = /^(?:https?:\/\/([^/?#]+))?([^?#]*)/i.exec(String(word));
+  if (!m) return null;
+  const host = m[1];
+  let path = m[2];
+  if (host === undefined && url) return null;
+  if (host !== undefined && url && !/^api\.github\.com$/i.test(host) && !/^\/api\/v3\//i.test(path)) return null;
+  if (host === undefined && !url && /^[a-z]+:/i.test(word)) return null; // some other scheme
+  path = path.replace(/^\/api\/v3(?=\/)/i, "");
+  return `/${path.replace(/^\/+/, "")}`;
+}
+
+/**
+ * The `[name, words]` a `gh alias set NAME VALUE` on a line defines
+ * (#483), the value split as gh splits it (aliasWords), or null: for any
+ * other gh command, a missing value, or a `--shell` / `!` alias -- that
+ * one runs a shell line, judged by the reader already (#315), never
+ * expanded here. `args` are the words after `gh`.
+ */
+export function ghAliasSet(args) {
+  if (args[0] !== "alias" || args[1] !== "set") return null;
+  const bare = [];
+  for (let i = 2; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") {
+      bare.push(...args.slice(i + 1));
+      break;
+    }
+    if (a === "-s" || /^--shell(?:=true)?$/.test(a)) return null;
+    if (!a.startsWith("-")) bare.push(a);
+  }
+  const [name, value] = bare;
+  if (typeof name !== "string" || typeof value !== "string" || value.startsWith("!")) return null;
+  const words = aliasWords(value);
+  return words.length ? [name, words] : null;
+}
+
+/**
+ * A request body's fields as [key, value] pairs (#483): a `k=v` word (gh's
+ * -f / -F, curl's --data-urlencode, a form), a `k=v&k2=v2` string, or a
+ * JSON object's top-level strings. A body the guard can't read -- `@file`,
+ * `@-` for stdin -- is the pair ["@", word], for the rows that refuse it.
+ */
+function bodyFields(bodies) {
+  const out = [];
+  for (const b of bodies) {
+    if (b.startsWith("@")) {
+      out.push(["@", b]);
+      continue;
+    }
+    if (/^\s*\{/.test(b)) {
+      try {
+        for (const [k, v] of Object.entries(JSON.parse(b))) out.push([k, typeof v === "string" ? v : JSON.stringify(v)]);
+        continue;
+      } catch {
+        // not JSON after all: read as k=v below
+      }
+    }
+    for (const part of b.split("&")) {
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      const v = part.slice(eq + 1);
+      out.push(v.startsWith("@") ? ["@", v] : [part.slice(0, eq), v]);
+    }
+  }
+  return out;
+}
+
+/**
+ * The branch a ref write names (#483): `heads/x` and `refs/heads/x` are
+ * branch x, as git reads them; a tag or any other ref keeps its name,
+ * which is never a default branch's.
+ */
+const refBranch = (ref) => ref.replace(/^refs\//, "").replace(/^heads\//, "");
+
+/**
+ * The API-path cause of one `program` (an API_PROGRAMS name) with `args`
+ * after it, or null: the method, the endpoint and the body read by the
+ * program's own options, then the path rows of SIDE_DOOR_TABLE. A write
+ * is any method but GET, HEAD and OPTIONS; with no method typed, gh posts
+ * when it has fields or an input (a claim about gh 2.x, 2026-11-04), curl
+ * posts data and puts an upload, wget posts a body. A GraphQL request
+ * whose body sits in a file or on stdin is refused unread, like an include
+ * on a git line (#467).
+ */
+function apiSideDoor(program, args) {
+  const spec = program === "gh api" ? GH_API_READ : program === "curl" ? CURL_READ : WGET_READ;
+  const { flags, values, words } = readOpts(args, spec);
+  const last = (n) => values.get(n)?.at(-1);
+  const all = (names) => names.flatMap((n) => values.get(n) ?? []);
+  let bodies;
+  let method;
+  if (program === "gh api") {
+    bodies = all(["--raw-field", "--field"]);
+    if (flags.has("--input")) bodies.push(`@${last("--input") ?? "-"}`);
+    method = last("--method") ?? (bodies.length ? "POST" : "GET");
+  } else if (program === "curl") {
+    bodies = all(CURL_BODIES);
+    const upload = flags.has("--upload-file");
+    method = last("--request") ?? (flags.has("--head") ? "HEAD" : flags.has("--get") ? "GET"
+      : upload ? "PUT" : bodies.length ? "POST" : "GET");
+  } else {
+    bodies = all(WGET_BODIES);
+    for (const n of ["--post-file", "--body-file"]) for (const f of values.get(n) ?? []) bodies.push(`@${f}`);
+    method = last("--method") ?? (bodies.length ? "POST" : "GET");
+  }
+  method = method.toUpperCase();
+  if (READ_METHODS.has(method)) return null;
+  // gh's one endpoint; for curl and wget any word at GitHub's API (fail closed on a stray one)
+  const paths = program === "gh api" ? [words[0] === undefined ? null : apiPath(words[0])]
+    : args.map((w) => apiPath(w, { url: true }));
+  const fields = bodyFields(bodies);
+  const field = (k) => fields.filter(([key]) => key === k).map(([, v]) => v).at(-1);
+  for (const path of paths) {
+    if (path === null) continue;
+    for (const row of SIDE_DOOR_TABLE) {
+      if (row.path === undefined) continue;
+      const m = row.path.exec(path);
+      if (!m) continue;
+      const what = `a \`${program}\` ${row.route}`;
+      if (row.mutation) {
+        const unread = field("@");
+        if (unread !== undefined) {
+          return { effect: MOVES_SHARED_REF, flag: unread, what: `${what} request from a file`,
+            why: "its body sits in a file or on stdin the guard can't read, and " + row.why.replace(/\.$/, "; it is refused as if it did.") };
+        }
+        const hit = bodies.map((b) => row.mutation.exec(b)).find(Boolean);
+        if (!hit) continue;
+        return { effect: MOVES_SHARED_REF, flag: hit[1], what, why: row.why };
+      }
+      let ref = row.ref === undefined ? undefined : m[row.ref];
+      if (ref === undefined && row.field !== undefined) ref = field(row.field);
+      let branch;
+      try {
+        branch = ref === undefined ? undefined : refBranch(decodeURIComponent(ref));
+      } catch {
+        branch = refBranch(ref);
+      }
+      const deletes = method === "DELETE" && row.ref !== undefined && branch !== undefined ? "the default branch" : undefined;
+      return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, branch, deletes };
+    }
+  }
+  return null;
+}
+
+/**
+ * What a non-git command does to a shared ref (#483): the cause -- {
+ * effect: MOVES_SHARED_REF, flag, what, why, branch, deletes, alias } --
+ * or null when `program` (the command's name, lower case) with `args` is
+ * no route on SIDE_DOOR_TABLE. `branch` is the one the route names, or
+ * undefined when only the API knows (a PR's base): the guard takes that
+ * as the default branch. `deletes` names what a route deletes outright.
+ * `aliases` is the Map of `gh alias set` names a line defined before this
+ * command (ghAliasSet): `gh m 1` with m = `pr merge` is the merge, `alias`
+ * the name typed; a name the table knows is gh's own and never expanded.
+ * Pure: a route the line only spells is read from the words alone.
+ */
+export function sideDoor(program, args, aliases = new Map()) {
+  if (program === "curl" || program === "wget") return apiSideDoor(program, args);
+  if (program !== "gh") return null;
+  let i = 0;
+  while (i < args.length && args[i].startsWith("-")) i++; // gh has no option that takes a value here
+  let sub = args[i];
+  let rest = args.slice(i + 1);
+  let alias;
+  if (sub !== undefined && !GH_TABLED.has(sub) && aliases.has(sub)) {
+    alias = sub;
+    [sub, ...rest] = [...aliases.get(sub), ...rest];
+  }
+  if (sub === "api") {
+    const cause = apiSideDoor("gh api", rest);
+    return cause && alias !== undefined ? { ...cause, alias } : cause;
+  }
+  for (const row of SIDE_DOOR_TABLE) {
+    if (row.sub === undefined || row.sub !== sub) continue;
+    const { values, words } = readOpts(rest, GH_SUB_READ);
+    if (words[0] !== row.action) continue;
+    const branch = row.branchOpt === undefined ? undefined : values.get(row.branchOpt)?.at(-1);
+    return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}`, what: row.what, why: row.why,
+      branch, deletes: row.deletes, alias };
+  }
+  return null;
+}
+
+/**
+ * The effect line a side-door refusal adds (#483): the one effect, the
+ * route that caused it, and the gh alias typed when there was one.
+ */
+export function sideEffectLine(cause) {
+  const via = cause.alias === undefined ? "" : `, via gh alias \`${cause.alias}\``;
+  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via} -- the push action by another route.`;
 }
