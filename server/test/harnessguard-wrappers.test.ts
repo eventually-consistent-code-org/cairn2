@@ -877,6 +877,8 @@ describe("harness guard folds the names find -exec and xargs run (#300)", () => 
     writeFileSync(join(scripts, "shell-words.mjs"),
       reader.replace("WRAPPERS.get(name)", "WRAPPERS.get(name.toLowerCase())"));
     copyFileSync(HARNESSGUARD, join(scripts, "pretooluse-harnessguard.mjs"));
+    // the guard's other import (#459: lib.mjs projectRoot), copied as is -- builtins only
+    copyFileSync(join(dirname(HARNESSGUARD), "lib.mjs"), join(scripts, "lib.mjs"));
     const run = (projectDir: string, command: string): number | null => {
       const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir };
       for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
