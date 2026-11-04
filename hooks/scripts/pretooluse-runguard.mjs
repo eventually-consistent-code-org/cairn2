@@ -165,9 +165,13 @@
  *   fail, so all of them, as the harness guard counts them), then its env
  *   -C and -C, under every GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR the
  *   session, the line or its own --git-dir / --work-tree give it. A push
- *   from another repository needs that repository's own stamp, and a
- *   checkout writing the owner's work tree, or moving their HEAD, is the
- *   owner's checkout. A folder or path only the shell can work out (cd
+ *   from another repository needs that repository's own stamp -- a
+ *   plan-less repository (no plan, so no stamp) is refused, not skipped,
+ *   because a plan-less clone of the same remote is the hostile twin of
+ *   the project (#326, decided phase 31, 2026-11-04; asserted by
+ *   runguard-guards.test.ts #306, "a push leaving another repository") --
+ *   and a checkout writing the owner's work tree, or moving their HEAD,
+ *   is the owner's checkout. A folder or path only the shell can work out (cd
  *   "$X", cd -, GIT_DIR=$(...)) refuses any push -- what it lands can't be
  *   told -- unless the ship gate's escape is set, and mid-run, any
  *   command that touches the owner's checkout (#435).
@@ -1769,4 +1773,9 @@ try {
  *         include on the line, and a setting the table reads from a value
  *         the guard can't (GIT_CONFIG_PARAMETERS among them), are
  *         discards-work rows with no `sub`: refused in every session.
+ *   #326  a push leaving another repository is judged by that repository's
+ *         stamp (the wrong-stamp half, fixed by #306); the "no plan, no
+ *         guard" half is refused on purpose -- a plan-less clone of the
+ *         same remote is the hostile twin. Closed as decided (phase 31),
+ *         one sentence in the rules above; the #306 test is the proof.
  */
