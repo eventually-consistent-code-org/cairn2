@@ -307,6 +307,20 @@ didn't pass. A failed verify is a failed verify.
 
 The pre-push gate:
 
+0. Branch protection — `config_probe` reads what the repository enforces
+   on its default branch and ship says when the push gate is the guard
+   alone. The run guard sees only the agent's Bash tool; a plain
+   terminal, a browser, a token in a script never pass through it, so
+   the gate is only as real as the rule at the service where every route
+   ends. The probe looks for four rules — `pull_request`,
+   `required_reviews:<n>`, `non_fast_forward` (no force push),
+   `deletion` — from the rulesets endpoint first, legacy branch
+   protection second. No `pull_request` rule: one line, "the push gate
+   is the guard alone; no ruleset on <default>", and ship continues —
+   measured, not blocking, because an unprotected repository can be a
+   choice. A read that fails is reported as `unreadable: <reason>`,
+   never as an empty rule list. GitHub only, as of 2026-11-04 (#485);
+   other trackers report nothing here.
 1. Drift check — anything flagged: stop and report. Do not push.
 2. Every phase with a VERIFICATION.md must show all its issues closed
    (spot-checked live) — any still open: stop. A stale `planned` roadmap
@@ -314,7 +328,10 @@ The pre-push gate:
    treated as a failed gate. Ship never writes `shipped (v<N>)` into a
    row — that flip is `summit`'s, at the milestone archive.
 3. Engineer mode only: no cairn-authored PR may still be awaiting human
-   review. Human review is the merge gate; ship never overrides it.
+   review. Human review is the merge gate; ship never overrides it —
+   and that sentence rests on the default branch's ruleset, not on
+   ship: with no `pull_request` rule there, step 0's line is the honest
+   version of it (dated 2026-11-04, #485).
 4. Docs catch-up: any verified phase the docs-drift report still flags
    gets a per-phase distill pass — CHANGELOG entry, phase ADRs, marked
    ARCHITECTURE sections — committed before the push. Advisory: a docs
