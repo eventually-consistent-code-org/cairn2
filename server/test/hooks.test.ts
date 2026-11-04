@@ -4109,7 +4109,13 @@ describe("circuit breaker (#358)", () => {
     expect(manifest(home, proj).status).toBe("running");
   });
 
-  it("a breaker.mjs that is missing or broken leaves every guard refusing as before", () => {
+  // #432: a breaker that fails to LOAD was handled; one that loads and then
+  // misbehaves -- no recordRefusal export, one that throws, one that returns
+  // something that is not an array of lines -- raised inside the guard's
+  // fail-open net AFTER the refusal text and BEFORE the refusing exit, so the
+  // harness saw an allow. Every shape here must still exit 2, with the
+  // refusal text printed and no breaker row.
+  it("a breaker.mjs that is missing, broken or misbehaving leaves every guard refusing as before", () => {
     const { proj, home } = breakerFixture({ status: "running" });
     const copy = join(freshDir("cairn-hooks-breaker-copy-"), "scripts");
     mkdirSync(copy);
@@ -4118,11 +4124,24 @@ describe("circuit breaker (#358)", () => {
       runHookRaw(join(copy, script), proj, payloadJson, { CAIRN_HOME: home });
     const write = JSON.stringify({ tool_name: "Write", tool_input: { file_path: join(proj, "hooks", "x.mjs") }, cwd: proj });
     stageFile(proj, "app.ts", 'const p = ".cai' + 'rn/plans/x";\n');
-    for (const label of ["missing", "broken"]) {
-      if (label === "broken") writeFileSync(join(copy, "breaker.mjs"), "export function recordRefusal( {\n");
-      expect(guard("pretooluse-runguard.mjs", bash("git reset --hard", proj)).status, label).toBe(2);
-      expect(guard("pretooluse-harnessguard.mjs", write).status, label).toBe(2);
-      expect(guard("pretooluse-leakguard.mjs", bash("git commit -m x", proj)).status, label).toBe(2);
+    const shapes: Record<string, string | null> = {
+      missing: null,
+      broken: "export function recordRefusal( {\n",
+      "no-export": "export const somethingElse = 1;\n",
+      throws: "export function recordRefusal() { throw new Error(\"boom\"); }\n",
+      "not-an-array": "export function recordRefusal() { return 42; }\n",
+    };
+    for (const [label, source] of Object.entries(shapes)) {
+      if (source !== null) writeFileSync(join(copy, "breaker.mjs"), source);
+      const run = guard("pretooluse-runguard.mjs", bash("git reset --hard", proj));
+      expect(run.status, label).toBe(2);
+      expect(run.stderr, label).toContain("cairn run guard");
+      const harness = guard("pretooluse-harnessguard.mjs", write);
+      expect(harness.status, label).toBe(2);
+      expect(harness.stderr, label).toContain("cairn harness guard");
+      const leak = guard("pretooluse-leakguard.mjs", bash("git commit -m x", proj));
+      expect(leak.status, label).toBe(2);
+      expect(leak.stderr, label).toContain("cairn leak guard");
     }
     expect(rows(home, proj)).toEqual([]);
     expect(manifest(home, proj).status).toBe("running");

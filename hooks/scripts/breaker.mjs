@@ -44,12 +44,15 @@
  *     server refuses claim and close with RUN_FROZEN.
  *
  * Fail-open, both ways: a breaker that breaks never blocks a call, and never
- *   un-blocks one -- recordRefusal never throws, so the guard's exit 2
- *   stands, and each guard loads this module with a dynamic import that
- *   falls back to no breaker, so a missing or broken breaker.mjs leaves the
- *   guard refusing exactly as before. A refusal log that can't be written
- *   or read means no breaker for that run, said once per run (a marker
- *   under <cairn home>/state).
+ *   un-blocks one. recordRefusal is written never to throw, but the guards
+ *   do not rely on that (#432): each one loads this module with a dynamic
+ *   import that falls back to no breaker, calls recordRefusal inside its
+ *   own try, and prints its result only when it is an array -- so a
+ *   breaker.mjs that is missing, fails to parse, exports no recordRefusal,
+ *   throws, or returns anything else leaves the guard refusing exactly as
+ *   before (asserted: hooks.test.ts, "missing, broken or misbehaving"). A
+ *   refusal log that can't be written or read means no breaker for that
+ *   run, said once per run (a marker under <cairn home>/state).
  *
  * Concurrency, at the two handoffs:
  *   the refusal log -- many writers (three guards run in parallel per call,
