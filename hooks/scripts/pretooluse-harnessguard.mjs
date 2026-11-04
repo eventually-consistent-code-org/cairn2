@@ -426,18 +426,24 @@ const INIT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const CLAUDE_MCP_WRITES = ["add", "add-json", "add-from-claude-desktop", "remove", "reset-project-choices"];
 
 // The `claude plugin` subcommands that change which plugins load (#308),
-// aliases too: what each writes is in claudeTargets. list, details,
-// validate, eval, tag, test and help change nothing.
+// aliases too: what each writes is in claudeTargets. The read-only ones
+// are CLAUDE_PLUGIN_READS below; help changes nothing either.
 const CLAUDE_PLUGIN_INSTALLS = ["install", "i", "uninstall", "remove", "update", "prune", "autoremove"];
 const CLAUDE_PLUGIN_TOGGLES = ["enable", "disable"];
 const CLAUDE_PLUGIN_INITS = ["init", "new"];
 const CLAUDE_MARKET_WRITES = ["add", "remove", "rm", "update"];
 
+// The plugin subcommands that only read: list, details, validate, and the
+// authoring group eval (whose own `init` scaffolds), tag and test. Command
+// words too (#350), so `claude plugin eval init --help` is help, not a
+// scaffold described "--help".
+const CLAUDE_PLUGIN_READS = ["eval", "list", "details", "validate", "tag", "test"];
+
 // The words that name a claude subcommand; a help flag right after a run
-// of only these is help, never a value some option swallowed (#308).
+// of only these is help, never a value some option swallowed (#308, #350).
 const CLAUDE_COMMAND_WORDS = ["mcp", "plugin", "plugins", "marketplace", "import", "configure",
   ...CLAUDE_MCP_WRITES, ...CLAUDE_PLUGIN_INSTALLS, ...CLAUDE_PLUGIN_TOGGLES, ...CLAUDE_PLUGIN_INITS,
-  ...CLAUDE_MARKET_WRITES];
+  ...CLAUDE_MARKET_WRITES, ...CLAUDE_PLUGIN_READS];
 
 // The settings file each `--scope` writes.
 const SCOPE_SETTINGS = { user: "~/.claude/settings.json", project: ".claude/settings.json",
@@ -1890,7 +1896,8 @@ function gitTargets(args, seg, ctx, add) {
  * marketplaces plugins install from; import brings another agent's config
  * in. A dry run (prune, import) and help pass -- help only as the last
  * word, right after the subcommand words, where no option can have
- * swallowed it as a value.
+ * swallowed it as a value; the read-only plugin words count as subcommand
+ * words there (#350), so `claude plugin eval init --help` is help.
  */
 function claudeTargets(args, ctx, add) {
   // a nested shell's "$1" is whatever its caller's xargs or find handed it

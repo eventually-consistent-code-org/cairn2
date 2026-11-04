@@ -4936,6 +4936,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
       refused: sh(() => "claude mcp add x -- node s.js"), twin: sh(() => "claude mcp list") },
     { guard: "harness", shape: "claude plugin install", cwds: BOTH,
       refused: sh(() => "claude plugin install foo"), twin: sh(() => "claude plugin list") },
+    // #350: the read-only plugin words (eval, list, details, validate, tag, test) are command
+    // words too, so a help flag right after `eval init` is help, not a scaffold
+    { guard: "harness", shape: "claude plugin eval init", cwds: BOTH,
+      refused: sh(() => "claude plugin eval init helper"), twin: sh(() => "claude plugin eval init --help") },
     // -- harness guard: surfaces outside the project ----------------------
     { guard: "harness", shape: "the machine-wide settings", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude/settings.json"), twin: sh(() => "echo x > $HOME/.claude/notes.md") },
@@ -5593,5 +5597,50 @@ describe("the guards find the project root without CLAUDE_PROJECT_DIR (#459)", (
     // nothing above pkg/lib says where the project is: the guard judges the
     // folder it stands in, as every guard did before #459, and this passes
     expect(judge(HARNESSGUARD, join(dir, "pkg", "lib"), bash("echo x > ../../hooks/hooks.json")).status).toBe(0);
+  });
+});
+
+// #350 -- `claude plugin eval init --help` was refused as a machine-wide
+// skills write: `eval` was not a command word, so the help flag after `eval
+// init` was read as a value and `init` as the scaffold it names. The
+// read-only plugin words (eval, list, details, validate, tag, test) join
+// CLAUDE_COMMAND_WORDS so help detection reaches through them; the #383
+// table carries the refused/twin pair from both cwds. Here: the hostile
+// spellings the issue never named -- help after a value, help not last, a
+// plugin named like a read-only word -- stay refused, and the words still
+// write nothing on their own.
+describe("harness guard reads help through the read-only claude plugin words (#350)", () => {
+  function run(command: string) {
+    const p = freshDir("cairn-hooks-pluginwords-proj-");
+    const home = freshDir("cairn-hooks-pluginwords-home-");
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("help right after the read-only words and a write word is help; the write without it is still refused", () => {
+    for (const c of ["claude plugin eval init --help", "claude plugin eval init -h", "claude plugin eval --help",
+      "claude plugin list --help", "claude plugin details --help", "claude plugin validate -h",
+      "claude plugin tag --help", "claude plugin test -h", "claude plugin eval init marketplace add --help"]) {
+      expect(run(c).status, c).toBe(0);
+    }
+    for (const c of ["claude plugin eval init", "claude plugin eval init helper", "claude plugin eval init helper --with hooks"]) {
+      const r = run(c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("your machine-wide skills");
+    }
+  });
+
+  it("hostile: help after a value, help not last, or a plugin named like a read-only word keeps the write refused", () => {
+    for (const c of ["claude plugin eval init helper --help", "claude plugin eval init --help helper",
+      "claude plugin eval init --description -h", "claude plugin install list", "claude plugin install eval",
+      "claude plugin disable test"]) {
+      expect(run(c).status, c).toBe(2);
+    }
   });
 });
