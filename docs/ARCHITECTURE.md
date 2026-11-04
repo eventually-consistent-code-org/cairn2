@@ -561,7 +561,29 @@ distinction matters more than the count.
   server config, the settings cascade, the plugin manifests, and the
   folder git runs its hooks from (`core.hooksPath` when set, else the
   repository's own hooks folder; a planted hook runs under the owner's
-  identity at their next commit) — from the agent it configures. Each
+  identity at their next commit) — from the agent it configures. The
+  write guard, the fourth since 2026-11-04 (#454), keeps a subagent
+  inside the write authority its type was given: it reads the hook
+  payload's `agent_type` (present inside subagents per the Claude Code
+  hooks docs read 2026-11-03 — a dated claim, so its tests are synthetic
+  payloads) and refuses an Edit, Write or NotebookEdit, or a shell line
+  that redirects or `tee`s into a project file, from a type the policy
+  lists as read-only or limits to a few path globs — `guards.writers` in
+  cairn.json, read raw, with a shipped default (the acceptance agent
+  writes nothing; the designer writes its draft folder) — naming the
+  type, the path and the key that would allow it; the main session
+  carries no `agent_type` and is never limited, a harness that sends
+  none is unchanged, and a shape it does not read is in its header's
+  dated "Not seen" block, which a test pins (asserted:
+  `server/test/writeguard.test.ts`). Its readers, by role: the subagent
+  whose call it refused (the refusal is the tool's error), the
+  dispatching session (through the subagent's transcript), the breaker
+  (the audit row, below), and the owner (the cairn.json key the refusal
+  names). It is paid for per call: a fourth Node process on every Edit,
+  Write, NotebookEdit and Bash call, about 90 ms on the development
+  machine with start-up almost all of it (measured 2026-11-04, twenty
+  calls each way; the other guards cost the same), and nothing resident
+  — no tool, no parameter, no description. Each
   refuses in one plain line naming the file and the way to proceed
   deliberately, and each fails open on its own error: an error inside a
   guard exits zero rather than blocking work, and `hooks/hooks.json`

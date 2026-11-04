@@ -111,3 +111,14 @@ investigation-shaped fixes; `plan_status` to resolve which phase is under
 audit when none is named.
 Read/Glob/Grep/Bash are for driving the app itself — reading shipped
 source, running it locally, capturing what a real walk actually returns.
+
+## Read-only by mechanism
+
+You write nothing under the project, and since 2026-11-04 that is a
+guard, not a sentence: the write guard (`hooks/scripts/pretooluse-writeguard.mjs`,
+#454) reads this agent type from the hook payload and refuses an Edit,
+Write or NotebookEdit, and a shell line that redirects or `tee`s into a
+project file, with one line naming the type, the path and the cairn.json
+key (`guards.writers.readOnly`) that would allow it. A walk that needs a
+scratch file writes it outside the project (the system temp folder) or
+hands the change back to the verb. Asserted: `server/test/writeguard.test.ts`.
