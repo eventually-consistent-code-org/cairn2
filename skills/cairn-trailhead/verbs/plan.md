@@ -139,11 +139,26 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
    move happened. Ask before adopting.
 8. Approve (engineer mode, `verify.rerun` on): the owner's stamp is what
    lets the close-time re-run execute this plan's `verify:` lines (#423,
-   ADR 0017). Ask once, with the final PLAN.md in front of the user —
-   "approve this plan as written?" — and on a yes call
-   `plan_meta_set(phaseDir, approve: true)`; the result's `approval`
-   carries the blob, time and identity. A no, vibe mode, or rerun off:
-   skip the call — nothing runs server-side until the stamp exists, and
-   that is the design, not a gap. Never pass `approve` on the user's
-   behalf.
+   ADR 0017). The stamp is a human act by mechanism, not by this step's
+   manners: the harness guard refuses `plan_meta_set(approve: true)`
+   unless the session was started with `CAIRN_HARNESS_EDIT=1` in its
+   environment (#460; asserted: `server/test/hooks.test.ts` "the approval
+   stamp needs the owner's escape"). So this step TELLS, never asks. Read
+   the escape from the shell (`echo "${CAIRN_HARNESS_EDIT:-unset}"`):
+   - `1`: the owner started this session to approve. Show the final
+     PLAN.md, then call `plan_meta_set(phaseDir, approve: true)`; the
+     result's `approval` carries the blob, time and identity.
+   - anything else: do NOT call it — the refusal would be yours, and in a
+     batch run it counts toward the breaker. Report the plan as
+     unapproved and tell the owner in one line how to approve: start a
+     session with `CAIRN_HARNESS_EDIT=1` set in its environment and run
+     `/cairn:plan <N>` again with the plan as written, which reaches this
+     step. That escape is session-wide (every harness-guard refusal is
+     off while it is set), so the approving session is one the owner
+     starts for that purpose and ends after.
+   Vibe mode, or rerun off: skip the call — nothing runs server-side until
+   the stamp exists, and that is the design, not a gap. Never pass
+   `approve` on the user's behalf, and never put a question to the user
+   in place of the escape: a yes typed into a prompt is still the agent's
+   call to make, and the guard would refuse it anyway.
 9. Report the plan summary and next step `/cairn:work <N>`.

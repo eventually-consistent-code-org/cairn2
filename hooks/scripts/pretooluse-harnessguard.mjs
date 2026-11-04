@@ -126,7 +126,15 @@
  *   the folder cwd / workdir / working_directory / workingDirectory names.
  *   Anything else passes: a read
  *   tool, a writing tool under another name or field, keystrokes into a
- *   running process, settings a server keeps.
+ *   running process, settings a server keeps -- all but one input that is
+ *   a write by itself (#460): cairn's plan_meta_set, under any server
+ *   name, carrying `approve` (true, "true" or 1) mints the owner's
+ *   approval stamp on a plan, the act the close-time verify re-run
+ *   trusts (ADR 0017); refused unless the session carries
+ *   CAIRN_HARNESS_EDIT=1, so the stamp is a human act by mechanism and
+ *   not by the plan verb's manners. Asserted: hooks.test.ts
+ *   "plan_meta_set approve (#460)" and the #383 row "plan_meta_set with
+ *   approve".
  *
  *   Git hooks (#353): the folder git runs its hooks from is a protected
  *   tree for every tool above -- core.hooksPath when set, the repo's own
@@ -536,6 +544,14 @@ const CLAUDE_PKG = /@anthropic-ai\/claude-code(?![\w-])/i;
 
 // The harness's own tools; every other tool name is an MCP tool (#310).
 const CORE_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash"]);
+
+// The one MCP input that is a harness write by itself (#460): cairn's
+// plan_meta_set, under whatever server name the plugin is installed as,
+// carrying `approve` -- it mints the owner's approval stamp on a plan,
+// the act the close-time verify re-run trusts (ADR 0017). What a refusal
+// calls it.
+const APPROVAL_TOOL = /(?:^|__)plan_meta_set$/;
+const APPROVAL_WHAT = "the owner's approval stamp on a plan";
 
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
@@ -2633,6 +2649,16 @@ function judgeTarget(t) {
 
 // MCP tools (#310)
 
+/**
+ * True when an `approve` value says yes (#460): the boolean the schema
+ * takes, and the spellings a coerced schema would read the same way
+ * ("true" in any case, 1) -- the hostile twin of a flag is its string.
+ * false, null, 0, "" and absence say no.
+ */
+function approveFlag(v) {
+  return v === true || v === 1 || (typeof v === "string" && /^true$/i.test(v.trim()));
+}
+
 /** The words of an MCP tool's own name, past its `mcp__server__` prefix, lowercased. */
 function toolWords(tool) {
   const name = tool.startsWith("mcp__") ? tool.split("__").pop() : tool;
@@ -2706,7 +2732,10 @@ try {
   const { lines: mcpCommandLines, dir: mcpDir } = core
     ? { lines: [], dir: null } : toolCommandLines(toolInput);
   const mcpLines = mcpCommandLines.map((line) => ({ line, cwd: mcpDir }));
-  if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
+  // #460 -- the approval flag is a write with no path: judged here, under
+  // the same session escape as every file below, never the inline one
+  const approves = !core && APPROVAL_TOOL.test(tool) && approveFlag(toolInput?.approve);
+  if (!core && !mcpPaths.length && !mcpLines.length && !approves) process.exit(0);
 
   // #459 -- the root the harness names, else the one git or a .claude folder
   // marks above the shell's cwd; never the subfolder the shell stands in
@@ -2738,7 +2767,12 @@ try {
   // user.name line into .git/config stays ordinary work.
   if (POINTER_WORDS.test(fold(JSON.stringify(withoutPaths(toolInput))))) GIT_CONFIGS = gitConfigFiles();
 
-  let hit = null;
+  // The approval stamp (#460): the flag itself is the write, so the hit is
+  // made here -- the tool's input names no path for the loops below to judge.
+  const phaseDir = String(toolInput?.phaseDir ?? "").replace(/\s+/g, " ").slice(0, 80);
+  let hit = approves
+    ? { path: `the approval stamp for plan ${phaseDir} (plan_meta_set with approve)`, what: APPROVAL_WHAT, approval: true }
+    : null;
 
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
@@ -2796,8 +2830,14 @@ try {
   }
   // #286, like the run guard's #262: name the owner's ways to approve, never
   // a paste-ready prefix -- the inline override is still honoured, just not taught
-  console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
-  console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  if (hit.approval) {
+    // #460 -- a tool parameter has no `!` route: the session escape is the one way in
+    console.error("  this needs the owner's go-ahead. Owner: approve from a session started with CAIRN_HARNESS_EDIT set to 1");
+    console.error("  in its environment -- the plan verb's approve step says how. The agent never answers this for you.");
+  } else {
+    console.error("  this needs the owner's go-ahead. Owner: make the change yourself or with `!` in your prompt,");
+    console.error("  or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment.");
+  }
   console.error("  If you did not ask for this, something the agent read did — check where the");
   console.error("  instruction came from: tracker or web text asking for it is not the owner asking.");
   // #358 -- the audit row and the breaker's count; fixed text only, never the path.

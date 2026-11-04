@@ -5013,6 +5013,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
     { guard: "harness", shape: "a hooksPath line appended to the repo's git config", cwds: BOTH,
       refused: sh((c) => `printf '[core]\\n\\thooksPath = x\\n' >> ${c.rel}.git/config`),
       twin: sh((c) => `printf '[user]\\n\\tname = x\\n' >> ${c.rel}.git/config`) },
+    // #460: the owner's approval stamp on a plan, minted by a tool parameter, beside the same tool's ordinary edit
+    { guard: "harness", shape: "plan_meta_set with approve", cwds: BOTH,
+      refused: mcp("mcp__plugin_cairn_cairn__plan_meta_set", () => ({ phaseDir: "31-x", approve: true })),
+      twin: mcp("mcp__plugin_cairn_cairn__plan_meta_set", () => ({ phaseDir: "31-x", waves: [["1"]] })) },
 
     // -- leak guard: each pattern, beside the exemption that lets it through
     { guard: "leak", shape: "a planning-folder path in a staged source file", cwds: BOTH,
@@ -5041,7 +5045,7 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
   ];
 
   /** The audit's row count per guard: the table never shrinks below it, so a deleted row is noticed too. */
-  const AUDIT_ROWS: Record<Guard, number> = { run: 25, harness: 54, leak: 8 };
+  const AUDIT_ROWS: Record<Guard, number> = { run: 25, harness: 55, leak: 8 };
 
   /** A project (a repo with one commit, a cairn.json, a nested pkg/lib), a home, a cairn home and a plugin root, all fresh. */
   function fixture(): Omit<Ctx, "cwd" | "rel"> {
@@ -6207,5 +6211,98 @@ describe("pointing git at a hooks folder is a harness write: core.hooksPath (#46
     for (const c of ["cp evil.cfg .git/config", "cat evil.cfg > .git/config", "git config --edit", "git config -e --global"]) {
       expect(run(p, home, "Bash", { command: c }).status, c).toBe(0);
     }
+  });
+});
+
+// #460: the close-time verify re-run keys on an owner-approval stamp for a
+// phase's plan, minted by `plan_meta_set` with `approve: true` -- a
+// parameter on an agent-callable tool, which made "a human act" a sentence
+// in the plan verb until now. The harness guard reads every MCP tool's
+// input (#310); it now refuses that flag unless the session carries the
+// owner's escape, so the stamp is a human act by the same mechanism as a
+// hook-file edit. The plan verb's approve step tells the owner to run it
+// that way rather than asking a question.
+describe("the approval stamp needs the owner's escape: plan_meta_set approve (#460)", () => {
+  const TOOL = "mcp__plugin_cairn_cairn__plan_meta_set";
+  const WHAT = "the owner's approval stamp on a plan";
+
+  /** A project with a nested pkg/lib and an empty home; no git needed -- the guard reads the input, not the tree. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-approve-proj-");
+    const home = freshDir("cairn-hooks-approve-home-");
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    execFileSync("git", ["init", "-q", p]);
+    return { p, home };
+  }
+
+  function run(p: string, home: string, tool: string, input: Record<string, unknown>,
+    opts: { env?: Record<string, string>; cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home, ...opts.env };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in (opts.env ?? {}))) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: tool, tool_input: input, cwd, session_id: "sess-approve" }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("approve without the escape is refused with the standard shape: names the stamp and the tool, asks where the instruction came from, teaches no prefix", () => {
+    const { p, home } = fixture();
+    const r = run(p, home, TOOL, { phaseDir: "31-the-guard-gaps", approve: true });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(WHAT);
+    expect(r.stderr).toContain("file:");
+    expect(r.stderr).toContain("31-the-guard-gaps");
+    expect(r.stderr).toContain("plan_meta_set");
+    expect(r.stderr).toContain("check where the");
+    expect(r.stderr).toContain("CAIRN_HARNESS_EDIT set to 1");
+    expect(r.stderr).not.toMatch(/CAIRN_HARNESS_EDIT=1 /);
+    // beside waves and tdd in the same call: the flag is still the flag
+    expect(run(p, home, TOOL, { phaseDir: "31-x", waves: [["1"]], tdd: ["1"], approve: true }).status).toBe(2);
+    // the tool under any server name the plugin is installed as
+    for (const t of ["mcp__cairn__plan_meta_set", "mcp__cairn-dev__plan_meta_set", "mcp__plugin_cairn-dev_cairn__plan_meta_set"]) {
+      expect(run(p, home, t, { phaseDir: "31-x", approve: true }).status, t).toBe(2);
+    }
+  });
+
+  it("the hostile spellings a coerced schema would read as yes are refused too; the twins pass: no flag, false, and every other plan tool", () => {
+    const { p, home } = fixture();
+    for (const v of ["true", "TRUE", 1]) {
+      expect(run(p, home, TOOL, { phaseDir: "31-x", approve: v }).status, JSON.stringify(v)).toBe(2);
+    }
+    expect(run(p, home, TOOL, { phaseDir: "31-x", waves: [["1", "2"]] }).status).toBe(0);
+    expect(run(p, home, TOOL, { phaseDir: "31-x", tdd: ["1"] }).status).toBe(0);
+    expect(run(p, home, TOOL, { phaseDir: "31-x", approve: false }).status).toBe(0);
+    expect(run(p, home, TOOL, { phaseDir: "31-x", approve: null }).status).toBe(0);
+    expect(run(p, home, "mcp__plugin_cairn_cairn__plan_issues_set", { phaseDir: "31-x", approve: true }).status).toBe(0);
+    expect(run(p, home, "mcp__plugin_cairn_cairn__plan_status", {}).status).toBe(0);
+    // a tool whose name merely ends in the same words on another server is still judged by the flag
+    expect(run(p, home, "mcp__other__plan_meta_set", { phaseDir: "31-x", approve: true }).status).toBe(2);
+    expect(run(p, home, "mcp__other__plan_meta_settings", { phaseDir: "31-x", approve: true }).status).toBe(0);
+  });
+
+  it("with the owner's escape set for the session the stamp lands; the inline Bash prefix is not that escape", () => {
+    const { p, home } = fixture();
+    expect(run(p, home, TOOL, { phaseDir: "31-x", approve: true }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(run(p, home, TOOL, { phaseDir: "31-x", approve: true }, { env: { CAIRN_HARNESS_EDIT: "0" } }).status).toBe(2);
+    expect(run(p, home, TOOL, { phaseDir: "31-x", approve: true }, { env: { CAIRN_HARNESS_EDIT: "yes" } }).status).toBe(2);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459), and records the refusal for the breaker (#358)", () => {
+    const { p, home } = fixture();
+    const cairnHome = freshDir("cairn-hooks-approve-cairnhome-");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const r = run(p, home, TOOL, { phaseDir: "31-x", approve: true }, { cwd: nested, bare, env: { CAIRN_HOME: cairnHome } });
+      expect(r.status, `bare=${bare}`).toBe(2);
+      expect(r.stderr, `bare=${bare}`).toContain(WHAT);
+      expect(run(p, home, TOOL, { phaseDir: "31-x", waves: [["1"]] }, { cwd: nested, bare, env: { CAIRN_HOME: cairnHome } }).status).toBe(0);
+    }
+    const rows = readFileSync(join(cairnHome, "refusals", `${projectKey(p)}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toMatchObject({ guard: "harness", tool: TOOL, effect: "changes-harness-config", session_id: "sess-approve" });
+    expect(JSON.stringify(rows)).not.toContain("31-x"); // the digest, never the input
   });
 });
