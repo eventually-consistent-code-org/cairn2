@@ -44,6 +44,7 @@ describe("sunset clauses (#210)", () => {
       "server/src/audit/record.ts",
       "hooks/scripts/pretooluse-leakguard.mjs",
       "hooks/scripts/pretooluse-runguard.mjs",
+      "hooks/scripts/pretooluse-writeguard.mjs",
       "hooks/scripts/shell-words.mjs",
       "hooks/scripts/posttooluse-loopcheck.mjs",
       "hooks/scripts/stop-costtracker.mjs",
@@ -206,7 +207,7 @@ describe("axioms (#356)", () => {
 
   const adrs = readdirSync(join(ROOT, "docs/adr")).filter((f) => /^00\d\d-.*\.md$/.test(f));
   const hooks = [
-    "pretooluse-runguard", "pretooluse-harnessguard", "pretooluse-leakguard",
+    "pretooluse-runguard", "pretooluse-harnessguard", "pretooluse-leakguard", "pretooluse-writeguard",
     "posttooluse-loopcheck", "posttooluse-observe", "stop-costtracker",
     "sessionstart-continuity", "posttooluse-breadcrumb",
   ].map((h) => `hooks/scripts/${h}.mjs`);

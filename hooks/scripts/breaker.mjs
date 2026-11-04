@@ -2,7 +2,7 @@
 
 /**
  * Purpose: the circuit breaker (#358) -- every PreToolUse guard refusal (run
- *   guard, harness guard, leak guard) appends one audit row, and a headless
+ *   guard, harness guard, leak guard, write guard) appends one audit row, and a headless
  *   batch run whose guards keep refusing it is frozen. A run that keeps
  *   reaching past the ship gate, or for its own hooks, is a run whose plan
  *   went wrong; the guards could only refuse the one call in front of them.
@@ -11,7 +11,8 @@
  *   { ts, guard, tool, effect, reason, session_id, run_id?, input_sha256 }
  *   `effect` is what was refused -- the run guard's git effect (#359:
  *   discards-work, moves-shared-ref, touches-owner-checkout), or the other
- *   guards' own (changes-harness-config, leaks-internal-refs); `reason` is
+ *   guards' own (changes-harness-config, leaks-internal-refs, and the
+ *   write guard's writes-outside-grant, #454); `reason` is
  *   fixed text chosen at the refusal site. Never the raw command or path:
  *   a command line can carry a credential and this log outlives the
  *   session, so the input is kept only as its sha256 (the mcp-bouncer audit
@@ -79,7 +80,7 @@
  *   run, said once per run (a marker under <cairn home>/state).
  *
  * Concurrency, at the two handoffs:
- *   the refusal log -- many writers (three guards run in parallel per call,
+ *   the refusal log -- many writers (four guards run in parallel per call,
  *     in every session), no rewriter.
  *     Atomicity: one appendFileSync of one short line per refusal, O_APPEND.
  *     Visibility: a reader may see a torn last row; it skips any line that
@@ -407,7 +408,7 @@ export function stampRunSession({ payload, projectDir }) {
  * when no run is live or the refusal is not the run's own session's (#431).
  * Never throws: the guard exits 2 whatever happens here.
  *
- * :param guard: "run" | "harness" | "leak"
+ * :param guard: "run" | "harness" | "leak" | "write"
  * :param payload: the hook's stdin payload (tool_name, tool_input, session_id)
  * :param effect: what was refused (see the row above)
  * :param reason: fixed text from the refusal site -- never the command

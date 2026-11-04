@@ -76,6 +76,12 @@ export declare const ConfigSchema: z.ZodObject<{
     auto: z.ZodPrefault<z.ZodObject<{
         breaker: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strict>>;
+    guards: z.ZodOptional<z.ZodObject<{
+        writers: z.ZodOptional<z.ZodObject<{
+            readOnly: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            paths: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodArray<z.ZodString>>>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
     peers: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
         codex: "codex";
         opencode: "opencode";
