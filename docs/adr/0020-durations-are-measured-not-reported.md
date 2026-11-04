@@ -51,6 +51,25 @@ both of the first two rungs the earliest claim wins.
 The caller's number survives as a claim, stored beside the measurement
 and never in place of it. Worklogs receive the measured minutes.
 
+**Pauses (#380, 2026-11).** A usage-limit wait inside the span is dead
+time, not work: up to five hours, longer when the machine slept across
+the reset, and until now the first two rungs ate it and the worklog said
+the task took that long. The pause recorder (the notification hook, #379)
+appends one row per platform event to the machine's pauses log, per
+repository. At close the server reads the rows back and forms windows: a
+`rate_limit` stop opens one, the next `quota_auto_resume_fired` closes it;
+a wait that went stale or disabled, or whose resume was never recorded,
+closes at that session's next recorded event or at the close itself.
+Overlapping windows from several sessions are one wait. The minutes inside
+the span come off the measurement, and the receipt, the close comment and
+the ledger's actuals segment carry the paused figure beside the measured
+one. The rung label is unchanged, and so is the caller's claim. No pauses
+log, no window in the span, or a malformed row leaves the measurement
+byte-identical to the plain span (asserted: `server/test/measured-duration.test.ts`,
+`server/test/close-receipt.test.ts`). The git rung measures commit dates
+and knows nothing of pauses; a span computed there still includes any
+wait (a claim as of 2026-11, by inspection of `gitSpan`).
+
 ## Consequences
 
 Durations stop being invented, and the claimed-to-measured ratio becomes

@@ -841,8 +841,11 @@ export function buildServer(deps) {
                 comments = undefined;
             }
         }
+        // A usage-limit wait inside the span comes off the number (#380); the
+        // pauses log under the cairn home is read best-effort, like every
+        // other measurement here.
         const { claimedAt, ...measured } = measureAtClose({
-            comments, observedClaimAt: claimRecord?.at ?? null, closedAt,
+            comments, observedClaimAt: claimRecord?.at ?? null, closedAt, pauses: { projectDir: d },
         });
         // Typed close evidence (phase 23): one standard line, same shape on
         // every backend, posted before the state change so the close reads

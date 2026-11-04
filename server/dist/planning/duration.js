@@ -11,6 +11,14 @@
 //                        place the commit range is known)
 //   4. none           -- recorded as such, never guessed
 //
+// A usage-limit wait inside the span (#380) is dead time, not work: the
+// pause recorder (the notification-pause hook, #379) appends one row per
+// platform event to the machine's pauses log, and the first two rungs read
+// it back and subtract the windows that fall inside [claim, close], saying
+// how much came off. No log, no window in the span, or a malformed row
+// leaves the number byte-identical to the plain span (asserted:
+// measured-duration.test.ts, close-receipt.test.ts).
+//
 // Every function here returns a value instead of throwing: a measurement
 // that can fail a close is worse than no measurement.
 //
@@ -18,6 +26,10 @@
 // turn and self-reports land within measured error across a milestone --
 // and even then this is cheaper, so expect it to stay (ADR 0020).
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { projectKey } from "./run-manifest.js";
 const NONE = { minutes: null, source: "none" };
 /** Whole minutes from start to end; null when either stamp is unparseable
  *  or the span runs backwards (clock skew, a stamp from another claim). */
@@ -92,21 +104,153 @@ export function claimCommentTime(comments) {
     return stamps[0] ?? null;
 }
 /**
+ * `<cairn home>/pauses/<projectKey>.jsonl` -- the hook-side pausesPath's
+ * twin. Per repository, not per worktree: a batch run spans worktrees and
+ * the limit that stalls it stalls the run. The server reads the home as
+ * `~/.cairn` like every other repository-state path here; `home` is the
+ * test seam.
+ */
+export function pausesPath(projectDir, home = join(homedir(), ".cairn")) {
+    return join(home, "pauses", `${projectKey(projectDir)}.jsonl`);
+}
+/** The rows that parse, oldest first. A torn last line, a non-object, a row
+ *  with no readable kind or stamp: skipped, never fatal. */
+function parsePauseRows(raw) {
+    const rows = [];
+    for (const line of raw.split("\n")) {
+        if (!line.trim())
+            continue;
+        try {
+            const v = JSON.parse(line);
+            if (!v || typeof v !== "object" || Array.isArray(v) || typeof v.kind !== "string")
+                continue;
+            const at = typeof v.observedAt === "string" ? Date.parse(v.observedAt) : NaN;
+            if (Number.isNaN(at))
+                continue;
+            rows.push({ kind: v.kind, at, session: typeof v.session_id === "string" ? v.session_id : "" });
+        }
+        catch {
+            // malformed row -- the next one may still be fine
+        }
+    }
+    return rows.sort((a, b) => a.at - b.at);
+}
+/**
+ * The pause windows the rows describe, as epoch-ms [from, to] pairs, one
+ * open window per session at a time. A `paused` row (the platform's
+ * rate_limit stop) opens a window; a `stale` or `stopped` row (the
+ * auto-resume went stale across a sleep, or was disabled) opens one too when
+ * none is open, since the wait is on either way. The window closes at the
+ * session's next recorded event -- `resumed` (quota_auto_resume_fired) in
+ * the ordinary case, and otherwise whatever row that session writes next,
+ * which is the first proof it took a turn again -- or at `closeAt` when
+ * nothing closed it by then. Rows of other sessions never close a window:
+ * one worker's resume says nothing about another's wait. needs_input rows
+ * (an agent stopped for a human) are not pauses and are left alone.
+ */
+function pauseWindows(rows, closeAt) {
+    const windows = [];
+    const open = new Map();
+    for (const r of rows) {
+        const from = open.get(r.session);
+        if (from !== undefined && r.kind !== "needs_input") {
+            windows.push([from, r.at]);
+            open.delete(r.session);
+        }
+        if (r.kind === "paused" || r.kind === "stale" || r.kind === "stopped")
+            open.set(r.session, r.at);
+    }
+    for (const from of open.values())
+        windows.push([from, closeAt]);
+    return windows;
+}
+/** Whole minutes of `windows` that fall inside [from, to], overlaps merged
+ *  so a limit that stalls three sessions at once is one wait, not three. */
+function clippedMinutes(windows, from, to) {
+    const inside = windows
+        .map(([a, b]) => [Math.max(a, from), Math.min(b, to)])
+        .filter(([a, b]) => b > a)
+        .sort((x, y) => x[0] - y[0]);
+    let total = 0;
+    let cur = null;
+    for (const w of inside) {
+        if (cur && w[0] <= cur[1]) {
+            cur[1] = Math.max(cur[1], w[1]);
+        }
+        else {
+            if (cur)
+                total += cur[1] - cur[0];
+            cur = [w[0], w[1]];
+        }
+    }
+    if (cur)
+        total += cur[1] - cur[0];
+    return Math.round(total / 60_000);
+}
+/**
+ * Minutes of usage-limit wait inside [claimAt, closeAt] according to one
+ * pauses log's text. Zero for an empty log, an unparseable or reversed
+ * span, or windows that all fall outside it -- never a throw.
+ */
+export function pausedMinutesFromLog(raw, claimAt, closeAt) {
+    const a = Date.parse(claimAt);
+    const b = Date.parse(closeAt);
+    if (Number.isNaN(a) || Number.isNaN(b) || b <= a)
+        return 0;
+    return clippedMinutes(pauseWindows(parsePauseRows(raw), b), a, b);
+}
+/** The same, read from the project's pauses log; a missing or unreadable
+ *  log is zero minutes, which is exactly what no recorded pause means. */
+export function pausedMinutesIn(projectDir, claimAt, closeAt, home) {
+    let raw;
+    try {
+        raw = readFileSync(pausesPath(projectDir, home), "utf8");
+    }
+    catch {
+        return 0;
+    }
+    try {
+        return pausedMinutesFromLog(raw, claimAt, closeAt);
+    }
+    catch {
+        return 0;
+    }
+}
+/** The measurement with the wait taken off: `pausedMinutes` rides beside the
+ *  number ONLY when there was a pause, so a close with none is byte-identical
+ *  to today's. Floors at zero -- a wait longer than the span is a clock
+ *  story, not negative work. */
+function lessPauses(m, claimedAt, closedAt, pauses) {
+    if (!pauses || m.minutes === null)
+        return m;
+    const paused = pausedMinutesIn(pauses.projectDir, claimedAt, closedAt, pauses.home);
+    return paused > 0
+        ? { ...m, minutes: Math.max(0, m.minutes - paused), pausedMinutes: paused }
+        : m;
+}
+/**
  * Rungs one and two, at close. `comments` is undefined on backends that
  * cannot enumerate them (GitHub today) -- that is not a failure, the ladder
- * simply starts one rung down.
+ * simply starts one rung down. With `pauses` the usage-limit wait inside
+ * the span is subtracted (#380); without it the span stands as measured.
  */
 export function measureAtClose(input) {
     const fromComment = input.comments ? claimCommentTime(input.comments) : null;
     if (fromComment) {
         const m = spanMinutes(fromComment, input.closedAt);
-        if (m !== null)
-            return { minutes: m, source: "claim_comment", claimedAt: fromComment };
+        if (m !== null) {
+            const measured = { minutes: m, source: "claim_comment" };
+            return { ...lessPauses(measured, fromComment, input.closedAt, input.pauses), claimedAt: fromComment };
+        }
     }
     if (input.observedClaimAt) {
         const m = spanMinutes(input.observedClaimAt, input.closedAt);
         if (m !== null) {
-            return { minutes: m, source: "observed_claim", claimedAt: input.observedClaimAt };
+            const measured = { minutes: m, source: "observed_claim" };
+            return {
+                ...lessPauses(measured, input.observedClaimAt, input.closedAt, input.pauses),
+                claimedAt: input.observedClaimAt,
+            };
         }
     }
     return { ...NONE, claimedAt: null };
@@ -138,11 +282,21 @@ const RUNG_TEXT = {
     observed_claim: "claim the server saw to close",
     git_span: "first to last commit",
 };
-/** The close comment's line: the number, always with where it came from. */
+/** `5h 10m`, `2h`, `3m` -- minutes as a reader says them. */
+function hoursMinutes(n) {
+    const h = Math.floor(n / 60);
+    const m = n % 60;
+    return h === 0 ? `${m}m` : m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+/** The close comment's line: the number, always with where it came from,
+ *  and the wait it no longer includes when there was one (#380). */
 export function measuredText(m) {
-    return m.minutes === null || m.source === "none"
-        ? "measured: not derivable at close (the ledger append takes it from the commit range)"
-        : `measured: ~${m.minutes}m (${RUNG_TEXT[m.source]})`;
+    if (m.minutes === null || m.source === "none") {
+        return "measured: not derivable at close (the ledger append takes it from the commit range)";
+    }
+    const paused = m.pausedMinutes
+        ? `, ${hoursMinutes(m.pausedMinutes)} paused on a usage limit (subtracted)` : "";
+    return `measured: ~${m.minutes}m (${RUNG_TEXT[m.source]})${paused}`;
 }
 /**
  * The evidence + measured block every close posts (phase 23, #232): one

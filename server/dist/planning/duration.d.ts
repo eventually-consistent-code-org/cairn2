@@ -44,14 +44,39 @@ export declare function isClaimComment(text: string): boolean;
  *  the same first-claim rule the observed stamp follows. */
 export declare function claimCommentTime(comments: IssueComment[]): string | null;
 /**
+ * `<cairn home>/pauses/<projectKey>.jsonl` -- the hook-side pausesPath's
+ * twin. Per repository, not per worktree: a batch run spans worktrees and
+ * the limit that stalls it stalls the run. The server reads the home as
+ * `~/.cairn` like every other repository-state path here; `home` is the
+ * test seam.
+ */
+export declare function pausesPath(projectDir: string, home?: string): string;
+/**
+ * Minutes of usage-limit wait inside [claimAt, closeAt] according to one
+ * pauses log's text. Zero for an empty log, an unparseable or reversed
+ * span, or windows that all fall outside it -- never a throw.
+ */
+export declare function pausedMinutesFromLog(raw: string, claimAt: string, closeAt: string): number;
+/** The same, read from the project's pauses log; a missing or unreadable
+ *  log is zero minutes, which is exactly what no recorded pause means. */
+export declare function pausedMinutesIn(projectDir: string, claimAt: string, closeAt: string, home?: string): number;
+/** Where to find the pauses log when the close wants the wait subtracted;
+ *  `home` is the test seam, absent in production. */
+export interface PauseSource {
+    projectDir: string;
+    home?: string;
+}
+/**
  * Rungs one and two, at close. `comments` is undefined on backends that
  * cannot enumerate them (GitHub today) -- that is not a failure, the ladder
- * simply starts one rung down.
+ * simply starts one rung down. With `pauses` the usage-limit wait inside
+ * the span is subtracted (#380); without it the span stands as measured.
  */
 export declare function measureAtClose(input: {
     comments?: IssueComment[];
     observedClaimAt: string | null;
     closedAt: string;
+    pauses?: PauseSource;
 }): Measured & {
     claimedAt: string | null;
 };
@@ -63,7 +88,8 @@ export declare function measureAtClose(input: {
  * or no git -> none.
  */
 export declare function gitSpan(projectDir: string, base: string, head: string): Measured;
-/** The close comment's line: the number, always with where it came from. */
+/** The close comment's line: the number, always with where it came from,
+ *  and the wait it no longer includes when there was one (#380). */
 export declare function measuredText(m: Measured): string;
 /**
  * The evidence + measured block every close posts (phase 23, #232): one
