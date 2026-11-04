@@ -1247,8 +1247,14 @@ wires a project for Grok Build, GitHub Copilot CLI, Codex, Gemini CLI, or
 Cursor:
 
 ```bash
-node setup/cairn-setup.mjs <harness> [--project <dir>]
+node setup/cairn-setup.mjs <harness> [--project <dir>] [--git-hooks]
 ```
+
+`--git-hooks` adds the git layer of the ship gate — a `pre-push` hook
+that refuses an unshipped default-branch push from any process in the
+checkout, not only the one harness that runs the run guard (section 10,
+"The git layer"). Opt-in, because it writes `core.hooksPath` into the
+repository's config.
 
 Three things happen everywhere: a `cairn` entry merges into the project's
 `.mcp.json` (never clobbering yours), the generated verb-registry fragment
@@ -2093,6 +2099,46 @@ Two more rules close the ways around the gate:
 Other branches and tags are untouched. The refusal points at
 `/cairn:ship`, which runs the drift check and then pushes. This is the
 hook half of ship's "never push with flagged drift".
+
+**The git layer** (dated 2026-11-04, #456). The run guard sees a push
+only when it goes through the Bash tool of a harness that runs the
+hook; a human's own terminal, a harness wired for skills but not hooks
+(Codex, Gemini, Copilot, OpenCode, Zed), and a script that shells out to
+git all push past it. `cairn-setup <harness> --git-hooks` is the opt-in
+second layer, never the default: it writes `core.hooksPath` into the
+repository's config, which is the owner's ground, so the flag is the
+consent. It installs a `pre-push` hook under the cairn home folder's
+`githooks/` directory, points `core.hooksPath` at it (an absolute path,
+local to that `.git/config`, so every worktree of the repository runs
+it), and copies the hook's script beside the verb helpers. The hook is a
+thin caller: the effect comes from the shared effect table, the stamp
+and the default-branch names from the shared hook library, the refusal
+is the run guard's own text, and the same `CAIRN_ALLOW_UNSHIPPED_PUSH`
+escape is honoured, said aloud on stderr, and never spelled as a prefix.
+A project's own `pre-push` survives below the cairn markers and still
+reads its refs from stdin; a `core.hooksPath` already set is respected
+(the hook goes into that folder, the setting stays); live hooks in
+`.git/hooks` refuse the install in one line rather than go silent under
+a new path. `--check` reports whether the hook is installed and whether
+git still runs hooks from there, and `plan_drift` measures the layer as
+`guardReach.gitLayer` (`present`, `absent`, `unknown`), a field beside
+the flags and never one of them, which ship mentions in one line. The
+hook's readers: any process running git in the checkout; its store: the
+hook script; its signal: the refusal text on stderr. Asserted:
+`server/test/setup.test.ts` and `server/test/sweep-surface.test.ts`
+"(#456)", pushes made from a plain shell with every harness variable
+stripped.
+
+What no local layer sees: `git push --no-verify` skips every pre-push
+hook, as does a clone whose config never got the `hooksPath`. The only
+layer that survives `--no-verify` is a rule at the host, and that is a
+sentence cairn can state, not a mechanism it owns: on GitHub, a ruleset
+or branch protection on the default branch (`pull_request`,
+`non_fast_forward`, `deletion` are the rules `config_probe` reads for
+ship's step 0, #485); on GitLab, a protected branch with "Allowed to
+push and merge" set to no one and merge requests required. Where that
+rule is missing, ship's "the push gate is the guard alone" line is the
+honest version of the gate.
 
 **While a batch run is live** — a run manifest for this project reads
 `running` — two more rules apply. A batch run works inside its own
