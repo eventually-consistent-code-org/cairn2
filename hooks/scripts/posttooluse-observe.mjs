@@ -8,8 +8,12 @@
  *   which tool, which target, did it error. Raw material for retro's candidate-card
  *   review (repeated error->fix churn, hotspot files) -- observations NEVER
  *   inject into context or become memory on their own; retro is the gate.
- *   Only fires in cairn-initialized projects (.cairn/ exists). Capped,
- *   fire-and-forget, invisible on failure.
+ *   Only fires in cairn-initialized repositories (#441): the cairn folder
+ *   beside the git common dir -- the main checkout's, which a linked
+ *   worktree of a project that ignores the folder never has of its own --
+ *   or, outside a repository, the checkout's own (asserted: hooks.test.ts,
+ *   "no cairn folder of its own"). Capped, fire-and-forget, invisible on
+ *   failure.
  *
  *   Which event carries which flag (#323): Claude Code emits NO PostToolUse
  *   event for a call that fails -- a failed call arrives as PostToolUseFailure
@@ -29,8 +33,8 @@
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { metricsSegments, moveNoClobber, observationsPath, segmentStamp } from "./lib.mjs";
+import { basename, dirname, join } from "node:path";
+import { gitCommonDir, metricsSegments, moveNoClobber, observationsPath, segmentStamp } from "./lib.mjs";
 
 // Retention guard (CRN-27), segmented (#351). The live file is CLOSED --
 // renamed to a stamped segment, never rewritten -- once it passes MAX_LINES,
@@ -149,12 +153,25 @@ function prune(path) {
   }
 }
 
+/**
+ * The repository is cairn-initialized (#441): its cairn folder sits beside
+ * the git common dir -- the main checkout's folder, which a linked worktree
+ * of a project that ignores the folder never has -- or, outside a
+ * repository (or under a bare common dir), beside the checkout itself. The
+ * git call is lib.mjs's, cached, so projectKey below pays nothing more.
+ */
+function cairnInitialized(projectDir) {
+  const common = gitCommonDir(projectDir);
+  if (common !== null && basename(common) === ".git" && existsSync(join(dirname(common), ".cairn"))) return true;
+  return existsSync(join(projectDir, ".cairn"));
+}
+
 function main() {
   const payload = readStdin();
   if (!payload?.tool_name) return;
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
-  if (!existsSync(join(projectDir, ".cairn"))) return; // cairn projects only
+  if (!cairnInitialized(projectDir)) return; // cairn repositories only
 
   // The shared log, after the one-shot move of any pre-#362 in-repo one.
   const path = observationsPath(projectDir);

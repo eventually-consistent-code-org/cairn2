@@ -52,19 +52,27 @@ export function worktreeKey(projectDir) {
   return keyOf(abs, basename(abs));
 }
 
-/** The repository's common git dir, real path, or null outside a repository. */
+const COMMON_DIR_CACHE = new Map();
+
+/** The repository's common git dir, real path, or null outside a repository.
+ *  One git call per folder per process (#441): the observe hook asks for the
+ *  gate and projectKey asks again, and a hook is one short-lived process. */
 export function gitCommonDir(projectDir) {
   const cwd = resolve(projectDir);
+  if (COMMON_DIR_CACHE.has(cwd)) return COMMON_DIR_CACHE.get(cwd);
   const env = { ...process.env };
   for (const k of GIT_LOCATION_ENV) delete env[k];
+  let common = null;
   try {
     const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
       cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
     }).trim();
-    return out ? realpathSync(resolve(cwd, out)) : null;
+    common = out ? realpathSync(resolve(cwd, out)) : null;
   } catch {
-    return null; // not a repository, no git on PATH, or no such folder
+    common = null; // not a repository, no git on PATH, or no such folder
   }
+  COMMON_DIR_CACHE.set(cwd, common);
+  return common;
 }
 
 /** The repository's key; outside a repository, worktreeKey. */

@@ -365,7 +365,9 @@ describe("the shared observation log (#362)", () => {
 
   it("both worktrees' hooks append to one log, and the server reads it", () => {
     const { main, linked } = repoWithWorktree();
-    for (const d of [main, linked]) mkdirSync(join(d, ".cairn"), { recursive: true });
+    // the main checkout's folder only (#441): a linked worktree of a project
+    // that ignores it has none, and its session must still record
+    mkdirSync(join(main, ".cairn"), { recursive: true });
     expect(observe(main, "from-main").status).toBe(0);
     expect(observe(linked, "from-linked").status).toBe(0);
     const live = observationsPath(main);

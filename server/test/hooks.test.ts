@@ -5187,6 +5187,67 @@ describe("plugin layer imports no server code (#391)", () => {
   });
 });
 
+// #441: the hook gated on the checkout's own cairn folder. That folder is
+// ignored by git in this repository and in any project that ignores it, so a
+// fresh linked worktree has none and its session wrote no rows -- in the one
+// case the shared log (#362) was built for, this repository's own waves. The
+// gate is the repository's now: the cairn folder beside the git common dir
+// (the main checkout's), falling back to the checkout's own outside a
+// repository. The fixture here keeps the folder in the main checkout ONLY.
+describe("the observation hook records in a linked worktree with no cairn folder of its own (#441)", () => {
+  const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const payload = (target: string) => JSON.stringify({
+    session_id: "s", tool_name: "Bash", tool_input: { command: target }, tool_response: {},
+  });
+  const observe = (cwd: string, home: string, target: string) => spawnSync(process.execPath, [OBSERVE], {
+    cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, HOME: home }, input: payload(target), encoding: "utf8", timeout: 5000,
+  });
+  const sharedRows = (home: string) => {
+    const dir = join(home, ".cairn", "observations");
+    const names = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".jsonl")) : [];
+    return names.flatMap((n) => readFileSync(join(dir, n), "utf8").split("\n").filter(Boolean))
+      .map((l) => JSON.parse(l) as { target: string });
+  };
+
+  it("an ignored cairn folder in the main checkout alone is enough for a session in the linked worktree", () => {
+    const root = freshDir("cairn-obs-wt-");
+    const main = join(root, "main");
+    mkdirSync(main);
+    gitInit(main);
+    stageFile(main, ".gitignore", ".cairn\n");
+    stageFile(main, "a.txt", "a\n");
+    execFileSync("git", ["commit", "-q", "-m", "seed", "--no-gpg-sign"], { cwd: main });
+    mkdirSync(join(main, ".cairn"));
+    const linked = join(root, "linked");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "side", linked], { cwd: main });
+    expect(existsSync(join(linked, ".cairn"))).toBe(false); // the ignored folder never travels
+    const home = freshDir("cairn-obs-wt-home-");
+
+    expect(observe(linked, home, "from-linked").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["from-linked"]);
+    // the main checkout's session lands in the same one log
+    expect(observe(main, home, "from-main").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["from-linked", "from-main"]);
+    expect(readdirSync(join(home, ".cairn", "observations"))).toHaveLength(1);
+  });
+
+  it("outside a repository the checkout's own folder still decides, and a repository without one stays silent", () => {
+    const home = freshDir("cairn-obs-wt-home-");
+    const plain = freshDir("cairn-obs-plain-");
+    expect(observe(plain, home, "no-folder").status).toBe(0);
+    expect(sharedRows(home)).toEqual([]);
+    mkdirSync(join(plain, ".cairn"));
+    expect(observe(plain, home, "own-folder").status).toBe(0);
+    expect(sharedRows(home).map((r) => r.target)).toEqual(["own-folder"]);
+
+    const repo = freshDir("cairn-obs-repo-");
+    gitInit(repo);
+    const other = freshDir("cairn-obs-wt-home-");
+    expect(observe(repo, other, "repo-without").status).toBe(0);
+    expect(sharedRows(other)).toEqual([]);
+  });
+});
+
 // #439: two sessions can both see the live file past the cap. The close was
 // check-then-rename, and a rename REPLACES an existing name: when the loser's
 // existence check ran before the winner's rename, the loser then renamed the
