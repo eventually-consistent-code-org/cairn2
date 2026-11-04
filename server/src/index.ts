@@ -113,7 +113,7 @@ import { thresholdDrift, type ThresholdDrift } from "./context/threshold.js";
 import { registerPlanResources } from "./core/resources.js";
 import { installedVersions, type InstalledVersions } from "./core/versions.js";
 import type { Handoff, CheckpointArtifacts } from "./core/continuity.js";
-import { appendLedger, checkLedgerEntry, type LedgerEntryInput } from "./planning/ledger.js";
+import { appendLedger, assertCommitHash, checkLedgerEntry, type LedgerEntryInput } from "./planning/ledger.js";
 import {
   checkBudget,
   openRunLedger,
@@ -538,7 +538,11 @@ export function buildServer(deps: {
 
   const resolveClaim = (d: string, claim: ClaimInput): ResolvedClaim => {
     const explicit = claim.baseCommit?.trim();
-    if (explicit) return { ...claim, baseCommit: explicit };
+    // A hash, nothing else (#428): the stamp is what the close fold reads
+    // the ledger range from, so HEAD or a branch here would make that range
+    // whatever the reference points at when the close happens. Refused
+    // before any tracker write, like the no-git case below.
+    if (explicit) return { ...claim, baseCommit: assertCommitHash(explicit, "claim.baseCommit") };
     const head = headCommit(d);
     if (head) return { ...claim, baseCommit: head };
     throw new CairnError(

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffoldProject, scaffoldPhase } from "../src/planning/artifacts.js";
@@ -941,5 +941,63 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
     expect(r.observed).toMatchObject({ skipped: "unclassifiable" });
     expect(r.line).toContain(" — observed skipped=unclassifiable — ");
     expect(existsSync(join(d, "ran.marker"))).toBe(false);
+  });
+});
+
+describe("a commit reference is a hash, nothing else (#428)", () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  /** A scaffolded project that is also a repository with one commit, so a
+   *  range that reached git would have something to log. */
+  const repo = () => {
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 4, "Hash Phase");
+    git(d, "init", "-q");
+    git(d, "config", "user.email", "t@t");
+    git(d, "config", "user.name", "t");
+    git(d, "add", ".");
+    git(d, "commit", "-qm", "base", "--no-gpg-sign");
+    return { d, phaseDir };
+  };
+
+  it("an option-shaped base is refused with a typed error before any git call; the file it named is untouched", () => {
+    const { d, phaseDir } = repo();
+    mkdirSync(join(d, "keep"));
+    const victim = join(d, "keep", "scratch.txt");
+    writeFileSync(victim, "keepme\n");
+    // `${base}..${head}` reads as --output=<d>/keep/../keep/scratch.txt: a
+    // bare concatenation hands git an output option, git logs into the
+    // victim and exits 0, and the append succeeds -- the reviewers' repro.
+    const forged = { ...entry, baseCommit: `--output=${join(d, "keep")}/`, headCommit: "/keep/scratch.txt" };
+    let err: unknown;
+    try { appendLedger(d, phaseDir, forged); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(CairnError);
+    expect((err as CairnError).code).toBe("CONFIG_INVALID");
+    expect((err as CairnError).message).toMatch(/baseCommit/);
+    expect(readFileSync(victim, "utf8")).toBe("keepme\n");
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+  });
+
+  it("HEAD, main, a too-short hash and a non-hex one are refused on either end, before anything is consumed", () => {
+    const { d, phaseDir } = repo();
+    const cases = [
+      ["baseCommit", "HEAD"], ["headCommit", "main"], ["baseCommit", "abc12"], ["headCommit", "g1b2c3d"],
+    ] as const;
+    for (const [field, value] of cases) {
+      let err: unknown;
+      try { checkLedgerEntry(d, phaseDir, { ...entry, [field]: value }); } catch (e) { err = e; }
+      expect(err, `${field}=${value}`).toBeInstanceOf(CairnError);
+      expect((err as CairnError).code, `${field}=${value}`).toBe("CONFIG_INVALID");
+      expect((err as CairnError).message).toContain(field);
+    }
+  });
+
+  it("a 7 to 40 character hash of either case passes and shortens to 7 on the line as before", () => {
+    const { d, phaseDir } = repo();
+    const res = appendLedger(d, phaseDir, {
+      ...entry, baseCommit: "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2", headCommit: " d4e5f6a ",
+    });
+    expect(res.line).toContain("commits A1B2C3D..d4e5f6a —");
   });
 });

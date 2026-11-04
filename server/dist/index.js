@@ -46,7 +46,7 @@ import { summarise, sessionSpans } from "./context/meter.js";
 import { thresholdDrift } from "./context/threshold.js";
 import { registerPlanResources } from "./core/resources.js";
 import { installedVersions } from "./core/versions.js";
-import { appendLedger, checkLedgerEntry } from "./planning/ledger.js";
+import { appendLedger, assertCommitHash, checkLedgerEntry } from "./planning/ledger.js";
 import { checkBudget, openRunLedger, recordBoundary, refreshSpend, } from "./planning/budget-ledger.js";
 import { composeFreezeComment, createRunManifest, grantPushAuth, isFrozenByBreaker, markFreezeCommented, readRunManifest, readRunManifestWithPath, runFrozenError, setCurrentPhase, setRunStatus, } from "./planning/run-manifest.js";
 import { writeBanner, bannerStats } from "./memory/banner.js";
@@ -343,8 +343,12 @@ export function buildServer(deps) {
     });
     const resolveClaim = (d, claim) => {
         const explicit = claim.baseCommit?.trim();
+        // A hash, nothing else (#428): the stamp is what the close fold reads
+        // the ledger range from, so HEAD or a branch here would make that range
+        // whatever the reference points at when the close happens. Refused
+        // before any tracker write, like the no-git case below.
         if (explicit)
-            return { ...claim, baseCommit: explicit };
+            return { ...claim, baseCommit: assertCommitHash(explicit, "claim.baseCommit") };
         const head = headCommit(d);
         if (head)
             return { ...claim, baseCommit: head };

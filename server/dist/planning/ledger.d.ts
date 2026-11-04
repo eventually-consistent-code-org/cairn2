@@ -39,6 +39,20 @@ export interface LedgerEntryInput {
 }
 export type LedgerKind = "close" | "evidence";
 /**
+ * Refuses a commit reference that is not a hash, with the field named so
+ * the caller knows which end of the range to fix. Shared by the ledger's
+ * own validation (base and head of the range) and the claim block in
+ * index.ts (the stamp the close fold will read the range from). A moving
+ * reference would make the range a different thing each time it is read;
+ * an option-shaped one would make `git log` do whatever the option says
+ * (asserted: ledger.test.ts "a commit reference is a hash, nothing else").
+ *
+ * :param value: the string the caller supplied
+ * :param field: its name in the caller's input ("baseCommit", "claim.baseCommit")
+ * :returns the trimmed hash
+ */
+export declare function assertCommitHash(value: string, field: string): string;
+/**
  * The `verify:` command a phase's PLAN.md declared for one issue (#206),
  * or null when the plan names none. One parser for the whole server
  * (#357): plan_check's `declaredVerifyIn` reads the task block, and the

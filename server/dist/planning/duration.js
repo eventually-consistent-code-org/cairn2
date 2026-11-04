@@ -264,7 +264,17 @@ export function measureAtClose(input) {
  */
 export function gitSpan(projectDir, base, head) {
     try {
-        const out = execFileSync("git", ["-C", projectDir, "log", "--reverse", "--format=%aI%x09%cI", `${base}..${head}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+        const out = execFileSync("git", 
+        // The range sits behind --end-of-options (#428): git reads nothing
+        // after it as an option, so a base shaped like `--output=<file>` is a
+        // bad revision (caught below as none) instead of a write to that
+        // file. The trailing "--" closes the revision list the usual way, so
+        // the range can never be taken for a path either. Both ends are
+        // already checked to be hashes upstream (ledger.ts assertCommitHash);
+        // this is the fence a caller that skipped the check still meets.
+        // --end-of-options needs git 2.24+ (as of 2026-11, per the git docs);
+        // an older git errors, and the measurement degrades to none.
+        ["-C", projectDir, "log", "--reverse", "--format=%aI%x09%cI", "--end-of-options", `${base}..${head}`, "--"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
         if (!out)
             return NONE;
         const rows = out.split("\n").map((l) => l.split("\t"));
