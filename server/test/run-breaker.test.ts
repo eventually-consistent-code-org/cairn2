@@ -292,3 +292,67 @@ describe("a name the adapter cannot place falls closed while a run is frozen (#4
     expect((await call("issue_update", { id: issue.id, state: "open" })).isError).toBe(false);
   });
 });
+
+// #466 -- through the tool, as the running batch would call it: its own
+// session, refused twice, stages a second run to move the breaker's count.
+// The server says RUN_LIVE and writes nothing; hooks.test.ts proves the
+// breaker would have judged the first run anyway. Once the run has ended,
+// the next run stages as before -- the owner's re-stage path is untouched.
+describe("a running batch cannot stage a second run (#466)", () => {
+  const RUN4 = "run-live-one";
+  const RUN5 = "run-live-two";
+  let savedHome: string | undefined;
+  let home: string;
+  let projectDir: string;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { isError: res.isError === true, json: JSON.parse(text) };
+  };
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "cairn-breaker-live-home-"));
+    process.env.HOME = home;
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-breaker-live-proj-"));
+    writeFileSync(join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    const server = buildServer({ projectDir, tracker: new FakeTracker() });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-breaker-live", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("create is RUN_LIVE while the run reads running, from any session; once it has ended, the next run stages", async () => {
+    const phases = [{ number: 1, name: "one", estimate }];
+    expect((await call("run_manifest", { action: "create", runId: RUN4, phases, sessionId: "sess-run" })).isError).toBe(false);
+    await call("run_manifest", { action: "set_status", runId: RUN4, status: "running" });
+
+    // the run's own session stages a second run to move the count
+    const decoy = await call("run_manifest", { action: "create", runId: RUN5, phases, sessionId: "sess-run" });
+    expect(decoy.isError).toBe(true);
+    expect(decoy.json.code).toBe("RUN_LIVE");
+    expect(decoy.json.message).toContain(RUN4);
+    expect(decoy.json.nextAction).toContain("set_status");
+    expect((await call("run_manifest", { action: "read", runId: RUN5 })).json.code).toBe("NOT_FOUND");
+    // a different session id on the decoy changes nothing: the gate is the project's, not the session's
+    expect((await call("run_manifest", { action: "create", runId: RUN5, phases, sessionId: "sess-other" })).json.code).toBe("RUN_LIVE");
+    // the running run itself is untouched by the refused creates
+    expect((await call("run_manifest", { action: "read", runId: RUN4 })).json.status).toBe("running");
+
+    // the twin: the run ends, and the next one stages at the configured limit
+    await call("run_manifest", { action: "set_status", runId: RUN4, status: "complete" });
+    const next = await call("run_manifest", { action: "create", runId: RUN5, phases, sessionId: "sess-run" });
+    expect(next.isError).toBe(false);
+    expect(next.json).toMatchObject({ runId: RUN5, status: "staged", breakerLimit: 3 });
+  });
+});

@@ -561,3 +561,64 @@ describe("the staged breaker limit (#433)", () => {
     }
   });
 });
+
+// #466 -- the breaker judges every running manifest the refusing session owns
+// (hooks.test.ts), and the server closes the route that made a second one:
+// create is refused with RUN_LIVE while any manifest of the project reads
+// running. A run that ended -- complete, stopped, frozen -- blocks nothing, a
+// staged one blocks nothing, and another project's run in the same cairn
+// home is not this project's.
+describe("one running manifest per project (#466)", () => {
+  const stage = (projectDir: string, baseDir: string, runId: string, breakerLimit?: number) =>
+    createRunManifest(projectDir, { runId, phases: PHASES, breakerLimit, createdAt: CREATED, baseDir });
+
+  it("create is RUN_LIVE while another run of the project reads running, and nothing is written", () => {
+    const { projectDir, baseDir } = setup();
+    stage(projectDir, baseDir, "run-live");
+    // staged blocks nothing: the owner may stage twice and abandon one
+    stage(projectDir, baseDir, "run-also-staged");
+    setRunStatus(projectDir, "run-live", "running", baseDir);
+
+    let caught: unknown;
+    try {
+      stage(projectDir, baseDir, "run-decoy", 0); // the running batch, refused twice, stages a run with no limit
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(CairnError);
+    expect((caught as CairnError).code).toBe("RUN_LIVE");
+    expect((caught as CairnError).message).toContain("run-live");
+    expect((caught as CairnError).message).toContain("run-decoy");
+    expect((caught as CairnError).nextAction).toContain("set_status");
+    // the decoy never landed; the project's manifests are the two the owner staged
+    expect(() => readRunManifest(projectDir, "run-decoy", baseDir)).toThrow(/no run manifest/);
+    expect(listRunManifests(projectDir, baseDir).map((m) => m.runId).sort()).toEqual(["run-also-staged", "run-live"]);
+  });
+
+  it("a run that ended blocks nothing: complete, stopped, or frozen by the breaker", () => {
+    for (const end of ["complete", "stopped", "frozen"] as const) {
+      const { projectDir, baseDir } = setup();
+      stage(projectDir, baseDir, "run-live");
+      setRunStatus(projectDir, "run-live", "running", baseDir);
+      if (end === "frozen") {
+        const path = runManifestPath(projectDir, "run-live", baseDir);
+        const doc = JSON.parse(readFileSync(path, "utf8"));
+        doc.status = "stopped";
+        doc.stop = { reason: "breaker", at: CREATED, limit: 3, count: 3, refusals: [], sessions: ["sess-run"] };
+        writeFileSync(path, JSON.stringify(doc));
+        expect(isFrozenByBreaker(readRunManifest(projectDir, "run-live", baseDir))).toBe(true);
+      } else {
+        setRunStatus(projectDir, "run-live", end, baseDir);
+      }
+      expect(stage(projectDir, baseDir, "run-next"), end).toMatchObject({ runId: "run-next", status: "staged" });
+    }
+  });
+
+  it("another project's running run in the same cairn home is not this project's", () => {
+    const { projectDir, baseDir } = setup();
+    const theirs = tempDir("cairn-manifest-other-proj-");
+    stage(theirs, baseDir, "run-theirs");
+    setRunStatus(theirs, "run-theirs", "running", baseDir);
+    expect(stage(projectDir, baseDir, "run-mine").status).toBe("staged");
+  });
+});
