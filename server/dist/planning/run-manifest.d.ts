@@ -33,20 +33,9 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
- *   The run's session (#431): `sessionId` names the session that staged
- *   the run -- the auto verb's $CLAUDE_CODE_SESSION_ID -- and only that
- *   session's refusals count toward its freeze; the run guard refuses a
- *   frozen run's pushes by that id alone. Null when the verb had none,
- *   until the run guard stamps it from the first hook event of a session
- *   whose working directory is `checkout`; a null id counts nothing.
- *
- *   The staged limit (#433): `breakerLimit` is cairn.json's `auto.breaker`
- *   as it read when the run was staged, and the breaker reads it from
- *   here, never from cairn.json -- that file is the agent's own
- *   configuration surface, unprotected on purpose, and a running batch
- *   could write the limit to zero mid-run and never freeze. The runs
- *   folder is already a protected zone (harness guard). The cairn.json
- *   value is the owner's default for the next run, never the live one.
+ *   The run's session and the staged limit (#431, #433): `sessionId` names
+ *   the staging session, the only one counted toward the freeze and the only
+ *   one frozen; `breakerLimit` is `auto.breaker` at staging, read from here.
  *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who

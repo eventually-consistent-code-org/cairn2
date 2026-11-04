@@ -25,14 +25,11 @@
  *
  * Breaker (#358): every refusal is also handed to breaker.mjs, which
  *   appends its audit row (no raw command, a digest of it) and, while a
- *   batch run is live, counts it toward freezing the run -- only when it
- *   comes from the run's own session, the one its manifest names (#431);
- *   another session's refusal is logged and counts nothing. A run the
- *   breaker froze is refused any push from that session alone -- the
- *   manifest reads `stopped`, which on its own would lift the mid-run push
- *   rule. Where staging recorded no session, the first call from a session
- *   whose working directory is the run's checkout stamps it (breaker.mjs,
- *   stampRunSession), before any line is judged.
+ *   batch run is live, counts it toward freezing the run -- only from the
+ *   run's own session, the one its manifest names (#431); another session's
+ *   refusal counts nothing. A frozen run is refused any push from that
+ *   session alone. A run staged with no session takes the first call from a
+ *   session working in its checkout (breaker.mjs stampRunSession).
  *
  * Corpus: server/test/runguard-effects.test.ts (one test per effect, three
  *   spellings each, and the everyday git that stays allowed) and
