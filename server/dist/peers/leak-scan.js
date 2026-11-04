@@ -16,9 +16,13 @@
  *   input is text, not a file in this repo, so no exemption applies here --
  *   every pattern runs at full strength.
  *
- *   Scope note: these patterns catch planning paths, phase refs, cairn
- *   labels and Jira-style tracker ids, plus whatever the user adds in
- *   leakGuard.extraPatterns. They are not a secret scanner.
+ *   Scope: these patterns catch planning paths, phase refs, cairn labels,
+ *   Jira-style tracker ids, and the key-shaped secrets of #280 -- a cloud
+ *   access key, a GitHub or Slack token, a private-key header, and a
+ *   key|secret|token assignment with a long opaque value -- plus whatever
+ *   the user adds in leakGuard.extraPatterns. A hit never carries the
+ *   text, so a secret's line is reported and its value is not; what the
+ *   secret shapes do not read is the hook's Not seen block.
  * Author(s): John Reed
  */
 // Constants
@@ -35,9 +39,11 @@ const placeholder = (name) => `[redacted ${name}]`;
 const tokenAround = (re) => new RegExp(`[^\\s\`]*(?:${re.source})[^\\s\`]*`, re.flags.includes("g") ? re.flags : `${re.flags}g`);
 /**
  * Builds the pattern list, mirroring buildPatterns in the hook module:
- * three built-ins, a tracker-id pattern for a Jira project key, then the
- * user's extraPatterns. An invalid user regex is skipped silently -- the
- * guard must never crash the flow it guards.
+ * three built-ins, the five secret shapes (#280, same regex source as the
+ * hook's -- change one side and the parity test goes red), a tracker-id
+ * pattern for a Jira project key, then the user's extraPatterns. An
+ * invalid user regex is skipped silently -- the guard must never crash
+ * the flow it guards.
  *
  * :param config: cairn.json (parsed or raw); null/undefined = built-ins only
  * :returns the patterns, in the hook's order
@@ -47,6 +53,11 @@ export function buildLeakPatterns(config) {
         { name: "cairn-path", re: /\.cairn\// },
         { name: "phase-ref", re: /\b(?:phases\/\d{2}(?:\.\d+)?-[a-z0-9-]+|milestones\/v\d+)\b/ },
         { name: "cairn-label", re: /cairn:(?:seed|backlog)/ },
+        { name: "secret-aws-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
+        { name: "secret-github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/ },
+        { name: "secret-slack-token", re: /\bxox[abeprs]-[A-Za-z0-9-]{10,}\b/ },
+        { name: "secret-private-key", re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/ },
+        { name: "secret-assignment", re: /\b(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|secret[_-]?key|secret|token|password|passwd)["']?\s*[:=]{1,3}\s*["']?(?=[^\s"'`]*[A-Za-z])(?=[^\s"'`]*\d)[A-Za-z0-9_\-/+=]{20,}/i },
     ];
     const projectKey = config?.tracker?.type === "jira"
         ? config.tracker.config?.projectKey : undefined;

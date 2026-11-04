@@ -765,7 +765,12 @@ the matched text, because the error travels back through the agent and
 can land in a tracker comment — and nothing is sent. `leakGuard.enabled:
 false` turns this scan off along with the commit guard; the
 `leakGuard.allow` path globs don't apply, since the input is text, not a
-file. It is not a secret scanner.
+file. Key-shaped secrets are in the set too (#280): a cloud access key, a
+GitHub or Slack token, a private-key header, and a `key|secret|token`
+assignment with a long opaque value — the line is named, the value never
+is. What those five shapes do not read (an encoded value, a prefix the
+set does not know, a repository's history) is the commit guard's dated
+"Not seen" block, pinned by `hooks.test.ts`.
 
 ### Caps (`cairn.json` → `peers` block)
 

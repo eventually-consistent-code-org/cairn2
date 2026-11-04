@@ -6415,3 +6415,127 @@ describe("the pauses log is the harness guard's: a forged pause row is refused (
     }
   });
 });
+
+
+// #280 -- key-shaped secrets join the leak guard: a cloud access key, a
+// GitHub or Slack token, a private-key header, or a key|secret|token
+// assignment with a long opaque value, in a staged source file, refuses
+// the commit. The refusal names the file and line and withholds the value
+// (stderr travels back through the agent). Each refused shape runs beside
+// its harmless twin, from the project root and from pkg/lib, the nested
+// row once more with CLAUDE_PROJECT_DIR stripped (#383, #459). Fixtures
+// are spelled in pieces so this file's own diff never trips the live guard.
+describe("the leak guard refuses key-shaped secrets, names the line and withholds the value (#280)", () => {
+  const AWS = "AKIA" + "IOSFODNN7EXAMPLE";
+  const GH = "ghp_" + "0123456789abcdefghijABCDEFGHIJklmnopqr";
+  const SLACK = "xoxb-" + "1234567890-abcdefghij";
+  const PEM = "-----BEGIN " + "RSA PRIVATE KEY-----";
+  const OPAQUE = "a1b2c3d4e5f6a7b8c9d0e1f2";
+
+  /** One refused line beside the twin that must pass, in a file of the same name. */
+  const ROWS: Array<{ shape: string; kind: string; file: string; refused: string; twin: string }> = [
+    { shape: "a cloud access key", kind: "secret-aws-key", file: "app.ts",
+      refused: `const id = "${AWS}";\n`, twin: 'const id = "AKIA is the Amazon key prefix";\n' },
+    { shape: "a GitHub token", kind: "secret-github-token", file: "setup.sh",
+      refused: `GITHUB_TOKEN=${GH}\n`, twin: "GITHUB_TOKEN=$(cat ~/.token)\n" },
+    { shape: "a Slack token", kind: "secret-slack-token", file: "notify.ts",
+      refused: `const slack = "${SLACK}";\n`, twin: 'const slack = "xoxb-' + 'example";\n' },
+    { shape: "a private-key header", kind: "secret-private-key", file: "fixture.pem",
+      refused: `${PEM}\nMIIE\n`, twin: "-----BEGIN PUBLIC KEY-----\nMIIB\n" },
+    { shape: "a key|secret|token assignment with an opaque value", kind: "secret-assignment", file: "config.ts",
+      refused: `const token = "${OPAQUE}";\n`, twin: "const token = process.env.GITHUB_TOKEN;\n" },
+    // the hostile spelling the issue never named: the server-source
+    // exemption (#140) is cairn-path only, so a secret there is still refused
+    { shape: "a secret in server source, which the path exemption does not cover", kind: "secret-aws-key", file: "server/src/config.ts",
+      refused: `const id = "${AWS}";\n`, twin: 'const dir = ".cairn' + '/plans/x";\n' },
+  ];
+
+  /** A repository with one commit, a github cairn.json and a nested pkg/lib. */
+  function repo(): { root: string; home: string } {
+    const root = freshDir("cairn-hooks-secrets-");
+    const home = freshDir("cairn-hooks-secrets-home-");
+    gitInit(root);
+    stageFile(root, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init", "--no-gpg-sign"], { cwd: root });
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    mkdirSync(join(root, "server", "src"), { recursive: true });
+    writeFileSync(join(root, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    return { root, home };
+  }
+
+  /** The guard judged from `cwd`, CLAUDE_PROJECT_DIR set to the root as the platform does, or stripped (#459). */
+  function judge(r: { root: string; home: string }, cwd: string, withVar: boolean): { status: number | null; stderr: string } {
+    const env: Record<string, string | undefined> = {
+      ...process.env, HOME: r.home, CLAUDE_PROJECT_DIR: r.root, GIT_CONFIG_NOSYSTEM: "1",
+    };
+    for (const k of Object.keys(env)) {
+      const strip = k.startsWith("CAIRN_") || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL"
+        || (k === "CLAUDE_PROJECT_DIR" && !withVar);
+      if (strip) delete env[k];
+    }
+    const res = spawnSync(process.execPath, [LEAKGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "git commit -m x" }, cwd }),
+    });
+    return { status: res.status, stderr: res.stderr ?? "" };
+  }
+
+  for (const row of ROWS) {
+    it(`${row.shape} -- refused from the root and from a subfolder, naming the line and withholding the value; its twin passes from both`, () => {
+      const r = repo();
+      stageFile(r.root, row.file, row.refused);
+      const nested = join(r.root, "pkg", "lib");
+      for (const [cwd, withVar] of [[r.root, true], [nested, true], [nested, false]] as Array<[string, boolean]>) {
+        const got = judge(r, cwd, withVar);
+        expect(got.status, `${row.shape}: refused from ${cwd === r.root ? "root" : "pkg/lib"}, var ${withVar} -- ${got.stderr.split("\n")[0]}`).toBe(2);
+        expect(got.stderr).toContain(`${row.file}:1: [${row.kind}]`);
+        // the line, never the value -- not the key, the token, the header's
+        // key type, nor the opaque string
+        for (const value of [AWS, GH, SLACK, OPAQUE, "RSA PRIVATE"]) expect(got.stderr).not.toContain(value);
+        expect(got.stderr).toContain("(value withheld)");
+      }
+      const t = repo();
+      stageFile(t.root, row.file, row.twin);
+      const tn = join(t.root, "pkg", "lib");
+      for (const [cwd, withVar] of [[t.root, true], [tn, true], [tn, false]] as Array<[string, boolean]>) {
+        const got = judge(t, cwd, withVar);
+        expect(got.status, `${row.shape}: twin from ${cwd === t.root ? "root" : "pkg/lib"}, var ${withVar} -- ${got.stderr.split("\n")[0]}`).toBe(0);
+      }
+    });
+  }
+
+  it("a widened commit (-am) catches a secret in an unstaged tracked file too", () => {
+    const r = repo();
+    stageFile(r.root, "app.ts", "const ok = true;\n");
+    execFileSync("git", ["commit", "-q", "-m", "app", "--no-gpg-sign"], { cwd: r.root });
+    writeFileSync(join(r.root, "app.ts"), `const id = "${AWS}";\n`);
+    const res = spawnSync(process.execPath, [LEAKGUARD], {
+      cwd: r.root, env: { ...process.env, HOME: r.home, CLAUDE_PROJECT_DIR: r.root }, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "git commit -am x" }, cwd: r.root }),
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain("app.ts:1: [secret-aws-key] (value withheld)");
+    expect(res.stderr).not.toContain(AWS);
+  });
+
+  // The shapes the guard knows it does not see are written into its
+  // header, dated, rather than half-guarded (ADR 0016); a deleted line is
+  // red here by phrase and by line count.
+  it("the guard's Not seen block names each unseen secret shape, dated, and its line count is the pin", () => {
+    const source = readFileSync(LEAKGUARD, "utf8");
+    const MARK = " *   Not seen, dated 2026-11-04 (#280";
+    const start = source.indexOf(MARK);
+    expect(start, "the Not-seen block opens with its date and issue").toBeGreaterThan(-1);
+    const block = source.slice(start).split("\n *\n")[0];
+    for (const phrase of [
+      "by decision", "ADR 0016",
+      "an allowlisted path",
+      "the commit message",
+      "an encoded or split value",
+      "a prefix this set does not know",
+      'hooks.test.ts "the leak guard refuses key-shaped secrets',
+    ]) expect(block, phrase).toContain(phrase);
+    expect(block.split("\n").length, block).toBe(17);
+  });
+});

@@ -24,11 +24,44 @@
  *   projectRoot, shared with the harness guard (asserted: hooks.test.ts,
  *   the #383 nested rows run once more with the variable stripped).
  *
+ *   Secrets (#280): key-shaped secrets -- a cloud access key, a GitHub or
+ *   Slack token, a private-key header, a key|secret|token assignment with
+ *   a long opaque value -- are leak patterns too, shared with the server's
+ *   outbound screen through leak-patterns.mjs. The refusal names the file
+ *   and line and withholds the value (asserted: hooks.test.ts "the leak
+ *   guard refuses key-shaped secrets"). The Not seen block below is what
+ *   the set does not read.
+ *
  * removeWhen: never for the scan itself; this hook can retire if the
  *   platform offers a pre-commit content policy cairn can register
  *   patterns with.
  * derives: axiom 1 (tracker-truth)
  * Author(s): John Reed
+ */
+
+/**
+ * Secrets -- what the five shapes do not read.
+ *
+ *   Not seen, dated 2026-11-04 (#280, by decision under ADR 0016 -- each
+ *   is a shape the secret patterns know they do not read, written here
+ *   rather than half-guarded; a test pins this block, so a deleted line
+ *   is red: hooks.test.ts "the leak guard refuses key-shaped secrets"):
+ *   - a secret in an allowlisted path: markdown, docs/ and the globs in
+ *     leakGuard.allow skip every pattern, the secret ones with them --
+ *     the allowlist is per path, never per kind, as #140 settled it.
+ *   - a secret in the commit message: the guard reads the staged diff,
+ *     never the -m text.
+ *   - an encoded or split value: base64, hex-wrapped, or a token built
+ *     from pieces at runtime reads as opaque text, not as a key.
+ *   - a prefix this set does not know: five shapes ship (a cloud access
+ *     key, GitHub and Slack tokens, a private-key header, an assignment);
+ *     another vendor's prefix is a leakGuard.extraPatterns line, and a
+ *     repository's history is a job for a real secret scanner.
+ *   - a value under twenty characters, or one without both a letter and
+ *     a digit: the assignment shape trades those for precision.
+ *
+ *   A refused secret is a secret to rotate: the guard keeps it out of the
+ *   next commit, not out of the shell history or the editor's swap file.
  */
 
 import { execFileSync } from "node:child_process";
@@ -152,9 +185,9 @@ try {
   }
 
   if (hits.length > 0) {
-    console.error("cairn leak guard: staged changes leak internal refs —");
+    console.error("cairn leak guard: staged changes leak internal refs or secrets —");
     for (const h of hits) console.error(`  ${h}`);
-    console.error("fix the lines, allowlist the path via `/cairn tune`, or prefix the command with CAIRN_LEAK_OK=1 to override once.");
+    console.error("fix the lines (a real secret: rotate it too), allowlist the path via `/cairn tune`, or prefix the command with CAIRN_LEAK_OK=1 to override once.");
     // #358 -- the audit row and the breaker's count: pattern names only, never a file or a match.
     // #432 -- in its own try, result used only when it is the promised array of
     // lines: a breaker that loaded but misbehaves must not reach the outer catch,
