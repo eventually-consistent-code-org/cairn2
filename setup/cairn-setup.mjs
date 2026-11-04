@@ -2,7 +2,7 @@
 
 // cairn-setup — wire cairn into a non-Claude harness (CRN-71).
 //
-//   node setup/cairn-setup.mjs <harness> [--project <dir>] [--local] [--check]
+//   node setup/cairn-setup.mjs <harness> [--project <dir>] [--local] [--check] [--git-hooks]
 //   harness: grok | copilot | codex | gemini | cursor | claude
 //
 // What it does, per project:
@@ -19,6 +19,10 @@
 //      folder beside them, with the copied verbs re-pointed at it (#474)
 //   4. harness-specific wiring (Copilot mcp-config + instructions + prompts;
 //      Codex prints its config.toml block; Gemini merges settings + GEMINI.md)
+//   5. with --git-hooks only: a pre-push git hook that applies the ship
+//      gate's default-branch rule to every process in the checkout, and
+//      core.hooksPath pointed at it (#456). Opt-in, never default: a git
+//      config write is the owner's ground, and the flag is the consent.
 //
 // Every copied-artifact surface gets a version stamp (.cairn-manifest.json:
 // source version + install date) so `--check` can answer "what's actually
@@ -26,14 +30,16 @@
 // this clone's version, prints a per-surface table, writes NOTHING, and
 // exits non-zero when anything lags — so it can gate. It also walks the
 // readers: whether the harness's session-start file reaches the fragment
-// (setup/spine-reach.mjs holds the table).
+// (setup/spine-reach.mjs holds the table), and the git layer: whether the
+// pre-push hook is installed and git still runs hooks from there (#456).
 //
 // Additive and idempotent: existing config entries are merged, never
 // clobbered; re-running produces byte-identical results.
 // Dependency-free node — builtins only.
 
+import { execFileSync } from "node:child_process";
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -47,7 +53,7 @@ const HARNESSES = ["grok", "copilot", "codex", "gemini", "cursor", "opencode", "
 
 function usage(msg) {
   if (msg) console.error(msg);
-  console.error(`usage: node setup/cairn-setup.mjs <${HARNESSES.join("|")}> [--project <dir>] [--local] [--check]`);
+  console.error(`usage: node setup/cairn-setup.mjs <${HARNESSES.join("|")}> [--project <dir>] [--local] [--check] [--git-hooks]`);
   process.exit(msg ? 1 : 0);
 }
 
@@ -64,6 +70,7 @@ if (projIdx >= 0 && (!args[projIdx + 1] || args[projIdx + 1].startsWith("--"))) 
 const projectDir = resolve(projIdx >= 0 ? args[projIdx + 1] : process.cwd());
 const useLocal = args.includes("--local");
 const checkMode = args.includes("--check");
+const gitHooks = args.includes("--git-hooks");
 
 // --- helpers -----------------------------------------------------------------
 
@@ -313,6 +320,178 @@ function mergeCodexToml(path) {
   console.log(`  ${path}: [mcp_servers.cairn] block written.`);
 }
 
+// --- the git layer of the ship gate (#456) -----------------------------------
+
+// The run guard sees a push only through the Bash tool of a harness that
+// runs the hook; a human's terminal, a harness wired for skills but not
+// hooks, and a script that shells out to git all push past it. `--git-hooks`
+// installs a pre-push hook that applies the same rule to every process in
+// the checkout. Opt-in, never default: it writes core.hooksPath into the
+// repository's config, the owner's ground (axiom 5), so the flag is the
+// consent. The hook file is a thin caller over the copied pre-push.mjs
+// (its imports land beside it in the scripts folder); the rule lives in
+// git-effects.mjs and lib.mjs. Asserted: setup.test.ts "(#456)".
+const PREPUSH = "pre-push.mjs";
+const GITHOOKS_REL = [".cairn", "githooks"].join("/");
+const HOOK_BEGIN = "# cairn:begin -- managed by cairn-setup --git-hooks; do not edit inside markers";
+const HOOK_END = "# cairn:end";
+const SH_SHEBANG = /^#!.*\b(?:sh|bash|dash|ksh|zsh)\b/;
+
+/** git's trimmed answer at `dir`, or null when it says no (no repository, no git on PATH). */
+function gitAt(dir, gitArgs) {
+  try {
+    return execFileSync("git", gitArgs, {
+      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** A hooks folder as git reads one: `~` expanded, a relative path from the worktree root. */
+function hooksDirOf(value) {
+  return resolve(projectDir, value.replace(/^~(?=\/|$)/, homedir()));
+}
+
+/** The marker-delimited block: the gate runs first, and the refs git handed
+ *  over stay on stdin for whatever the owner keeps below the markers. The
+ *  script is looked for where git runs the hook ($PWD is the worktree root),
+ *  then at this install's own copy -- a linked worktree has no copy of its
+ *  own. Exit 2 from the script is the refusal; anything else fails open. */
+function hookBlock() {
+  const script = `${SCRIPTS_REL}/${PREPUSH}`;
+  return [
+    HOOK_BEGIN,
+    "# The git layer of cairn's ship gate: a push landing on the default branch",
+    "# is refused without a clean drift stamp for the exact commit pushed, judged",
+    "# by the shared effect table and stamp reader (no rule lives in this file).",
+    "# Exit 2 from the script refuses the push; anything else fails open, so a",
+    "# missing node or script never blocks a push -- it says so instead. The refs",
+    "# git hands this hook are kept on stdin for whatever follows the markers.",
+    `cairn_prepush="$PWD/${script}"`,
+    `[ -f "$cairn_prepush" ] || cairn_prepush="${join(projectDir, SCRIPTS_REL, PREPUSH)}"`,
+    'if command -v node >/dev/null 2>&1 && [ -f "$cairn_prepush" ]; then',
+    "  if cairn_refs=$(mktemp 2>/dev/null); then",
+    '    cat > "$cairn_refs"',
+    '    node "$cairn_prepush" "$@" < "$cairn_refs"; cairn_rc=$?',
+    '    exec < "$cairn_refs"',
+    '    rm -f "$cairn_refs"',
+    "  else",
+    '    node "$cairn_prepush" "$@"; cairn_rc=$?',
+    "  fi",
+    '  [ "$cairn_rc" -ne 2 ] || exit 1',
+    "else",
+    '  echo "cairn pre-push: node or $cairn_prepush not found -- this push was not judged" >&2',
+    "fi",
+    HOOK_END,
+  ].join("\n") + "\n";
+}
+
+/** The existing hook with the cairn block spliced in: replaced between the
+ *  markers; else put right after a sh shebang (one is written when there is
+ *  no file or no shebang). Another interpreter's hook is refused -- sh lines
+ *  at its top would break it. An orphaned marker is refused, never guessed. */
+function spliceHook(body, block) {
+  const start = body.indexOf(HOOK_BEGIN);
+  const end = body.indexOf(HOOK_END);
+  if (start >= 0 && end > start) {
+    const after = body.slice(end + HOOK_END.length).replace(/^\n/, "");
+    return { next: body.slice(0, start) + block + after };
+  }
+  if (start >= 0 || end >= 0) return { error: "an orphaned cairn marker (begin without end, or end without begin)" };
+  if (body.length === 0) return { next: `#!/bin/sh\n${block}` };
+  const nl = body.indexOf("\n");
+  const first = nl < 0 ? body : body.slice(0, nl);
+  if (!first.startsWith("#!")) return { next: `#!/bin/sh\n${block}${body}` };
+  if (!SH_SHEBANG.test(first)) {
+    return { error: `runs under ${first.slice(2).trim()}, not sh -- call ${SCRIPTS_REL}/${PREPUSH} from it by hand` };
+  }
+  return { next: `${first}\n${block}${nl < 0 ? "" : body.slice(nl + 1)}` };
+}
+
+/** Where the hook goes: the folder core.hooksPath names when set (respected,
+ *  the setting stays), else cairn's own, which the install then names --
+ *  unless the folder git runs today holds live hooks a new hooksPath would
+ *  silence: refused, the owner moves them or sets the path. */
+function gitHooksTarget() {
+  if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
+    return { error: "not a git repository -- nothing for a pre-push hook to guard" };
+  }
+  const ours = join(projectDir, GITHOOKS_REL);
+  const configured = gitAt(projectDir, ["config", "--get", "core.hooksPath"]);
+  if (configured) return { dir: hooksDirOf(configured), configured };
+  const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
+  const todayDir = today ? hooksDirOf(today) : null;
+  let live = [];
+  try {
+    live = readdirSync(todayDir).filter((n) => !n.startsWith(".") && !n.endsWith(".sample"));
+  } catch { /* no hooks folder yet: nothing a hooksPath would silence */ }
+  if (live.length) {
+    return { error: `${todayDir} holds live hooks (${live.join(", ")}) that a core.hooksPath would silence -- ` +
+      `move them under ${ours}, or set core.hooksPath yourself, then re-run` };
+  }
+  return { dir: ours, configured: null };
+}
+
+/** Install the git layer: the script beside the verb helpers, the hook under
+ *  the markers, core.hooksPath set once. Idempotent: a re-run is byte-identical. */
+function installGitHooks() {
+  const target = gitHooksTarget();
+  if (target.error) {
+    console.error(`  --git-hooks: ${target.error}.`);
+    process.exit(1);
+  }
+  const scriptsOut = join(projectDir, SCRIPTS_REL);
+  for (const f of helperClosure(join(repoRoot, "hooks", "scripts"), [PREPUSH])) {
+    copyFileSync(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));
+  }
+  const path = join(target.dir, "pre-push");
+  let body = "";
+  try {
+    body = readFileSync(path, "utf8");
+  } catch { /* new file */ }
+  const { next, error } = spliceHook(body, hookBlock());
+  if (error) {
+    console.error(`  ${path}: ${error} -- then re-run cairn-setup.`);
+    process.exit(1);
+  }
+  mkdirSync(target.dir, { recursive: true });
+  if (next !== body) writeFileSync(path, next);
+  chmodSync(path, 0o755);
+  if (target.configured === null && gitAt(projectDir, ["config", "core.hooksPath", target.dir]) === null) {
+    console.error(`  core.hooksPath could not be set to ${target.dir} -- set it yourself, then re-run cairn-setup.`);
+    process.exit(1);
+  }
+  console.log(`  ${path}: pre-push hook ${next === body ? "already current..." : "installed (the ship gate's default-branch rule, for every process here)."}`);
+  console.log(`  core.hooksPath: ${target.configured === null ? `set to ${target.dir}` : `already ${target.configured}, left as is -- the hook went into that folder`}.`);
+}
+
+/** Read-only, for --check: where git runs hooks today, and whether cairn's
+ *  pre-push is there with its script. null outside a repository (no line). */
+function gitLayerStatus() {
+  const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
+  if (today === null) return null;
+  const dir = hooksDirOf(today);
+  const script = join(projectDir, SCRIPTS_REL, PREPUSH);
+  const carries = (p) => {
+    try {
+      return readFileSync(p, "utf8").includes(HOOK_BEGIN);
+    } catch {
+      return false;
+    }
+  };
+  if (carries(join(dir, "pre-push"))) {
+    return existsSync(script) ? { detail: `installed at ${dir}; git runs hooks from there` }
+      : { detail: `installed at ${dir}, but ${script} is missing -- not reached; re-run with --git-hooks`, lagging: true };
+  }
+  const ours = join(projectDir, GITHOOKS_REL);
+  if (carries(join(ours, "pre-push"))) {
+    return { detail: `installed at ${ours}, but git runs hooks from ${dir} -- not reached; re-run with --git-hooks, or point core.hooksPath back`, lagging: true };
+  }
+  return { detail: "not installed (opt-in: --git-hooks adds the pre-push ship gate)" };
+}
+
 // --- version stamps + --check (#82) ------------------------------------------
 
 // The harness installs above are point-in-time COPIES — without a stamp there
@@ -423,6 +602,14 @@ if (checkMode) {
     }
   }
 
+  // The git layer (#456): is the pre-push hook where git runs hooks from?
+  // Absent is opt-in, never lagging; installed but unreached lags.
+  const layer = gitLayerStatus();
+  if (layer) {
+    console.log(`  git hooks (pre-push): ${layer.detail}`);
+    if (layer.lagging) lagging++;
+  }
+
   const latest = await npmLatestVersion();
   if (latest !== "unknown" && latest !== sourceVersion) {
     console.log(`  note: npm has v${latest}; this clone is v${sourceVersion} — pull/update before reinstalling.`);
@@ -445,6 +632,7 @@ mergeMcpJson(join(projectDir, ".mcp.json"));
 installFragment(join(projectDir, "AGENTS.md"), fragment);
 const claudeImport = installClaudeImport(join(projectDir, "CLAUDE.md"), { create: harness === "claude" });
 installVerbs();
+if (gitHooks) installGitHooks();
 
 if (harness === "copilot") {
   mergeMcpJson(join(homedir(), ".copilot", "mcp-config.json"));
