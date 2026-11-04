@@ -20,7 +20,15 @@ hand-edits (single-writer rule).
   rejects type mismatches with `CONFIG_INVALID` and the file is untouched,
   so a wrong guess is safe but report it plainly.
 - `tune leakguard off|on` = `config_set({leakGuard: {enabled: false|true}})`
-  — the guard's front door.
+  — the guard's front door. `off` is owner-only (below).
+- Owner-only keys (#281): `leakGuard.enabled`, `ship.confirm`,
+  `auto.breaker`, `peers.<provider>.execCapable`, `guards.writers`. The
+  server answers `OWNER_ONLY` when a patch sets one away from its safe
+  value (on, on, 3, false; the write table has none) and the session was
+  not started with `CAIRN_HARNESS_EDIT=1`. Render it human-first: the key,
+  then "this one is the owner's — set it in cairn.json yourself, or start
+  the session with CAIRN_HARNESS_EDIT set to 1". Never route around it
+  with a file write: the harness guard refuses that too.
 - `tune mode vibe|engineer` = `config_set({user: {mode: <value>}})` — the
   collaboration posture switch. Engineer mode requires `user.handle`
   (assignment identity); the server rejects the combination without it —

@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -269,5 +269,51 @@ describe("cursor-adapter preToolUse runs the run guard and the harness guard (#2
     expect(run("MCP:read_file", { path: join(proj, "src", "a.ts") }).permission).toBe("deny");
     // no harness guard script beside the adapter and none in a repo two levels up
     expect(run("Write", { file_path: join(proj, "src", "a.ts") }).permission).toBe("deny");
+  });
+});
+
+// #293: the probe that would have captured a real Cursor file-tool payload
+// could not run on 2026-11-04 (the Cursor CLI on the development machine
+// was not signed in, and signing in is the owner's act), and Cursor's hooks
+// docs read that day still show only the Shell payload for preToolUse. So
+// the file-tool mapping stays what #269 guessed, the header says so with
+// the date, and this block pins the sentence -- a header that drops the
+// date or claims the shape confirmed is red here until a captured payload
+// replaces the synthetic fixtures above. The user-level hooks file the same
+// docs confirm (~/.cursor/hooks.json, scripts under ~/.cursor/hooks/) is
+// protected through the adapter the way the project one is.
+describe("Cursor's file-tool payload is marked unconfirmed, dated, and its user-level hooks are protected (#293)", () => {
+  const source = readFileSync(ADAPTER, "utf8");
+  const header = source.slice(0, source.indexOf("*/"));
+
+  it("the adapter header says the file-tool payload is partial, unconfirmed, with the date and the docs it rests on", () => {
+    expect(header).toMatch(/partial, unconfirmed/i);
+    expect(header).toMatch(/2026-11-04/);
+    expect(header).toMatch(/PATH_KEYS/);
+    expect(header).toMatch(/cursor-adapter\.test\.ts/);
+  });
+
+  it("Write and Delete on the user-level hooks file and scripts folder are denied through the adapter; the rest of ~/.cursor passes", () => {
+    const proj = fresh("cairn-cursor-");
+    execFileSync("git", ["init", "-q"], { cwd: proj });
+    const home = fresh("cairn-home-");
+    mkdirSync(join(home, ".cursor", "hooks"), { recursive: true });
+    writeFileSync(join(home, ".cursor", "hooks.json"), "{}");
+    const pre = (tool: string, input: Record<string, unknown>) => JSON.parse(runAdapter({
+      hook_event_name: "preToolUse", tool_name: tool, tool_input: input, cwd: proj, workspace_roots: [proj],
+    }, home));
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ["Write", { file_path: join(home, ".cursor", "hooks.json"), contents: "{}" }],
+      ["Edit", { file_path: join(home, ".cursor", "hooks", "format.sh"), contents: "x" }],
+      ["Delete", { path: join(home, ".cursor", "hooks.json") }],
+      ["Delete", { path: join(home, ".cursor", "hooks") }],
+    ];
+    for (const [tool, input] of refused) {
+      const resp = pre(tool, input);
+      expect(resp.permission, `${tool} ${JSON.stringify(input)}`).toBe("deny");
+      expect(resp.agent_message, `${tool} ${JSON.stringify(input)}`).toContain("machine-wide Cursor hooks");
+    }
+    expect(pre("Write", { file_path: join(home, ".cursor", "rules", "style.mdc"), contents: "x" })).toEqual({ permission: "allow" });
+    expect(pre("Read", { path: join(home, ".cursor", "hooks.json") })).toEqual({ permission: "allow" });
   });
 });

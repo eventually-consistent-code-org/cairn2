@@ -5809,9 +5809,10 @@ describe("the harness guard's Not seen block is dated, pinned and measured (#289
       "runs arbitrary code",
       "the editor",
       "a variable the line never assigns",
+      "An owner-only cairn.json key",
     ]) expect(block, phrase).toContain(phrase);
     // the line count is the pin: a shape added or removed moves it, on purpose, in the same change
-    expect(block.split("\n").length, block).toBe(31);
+    expect(block.split("\n").length, block).toBe(35);
   });
 
   it("the Coverage says find -exec, xargs and a heredoc fed to a shell are read, and cites this block", () => {
@@ -6832,5 +6833,246 @@ describe("the leak guard refuses key-shaped secrets, names the line and withhold
       'hooks.test.ts "the leak guard refuses key-shaped secrets',
     ]) expect(block, phrase).toContain(phrase);
     expect(block.split("\n").length, block).toBe(17);
+  });
+});
+
+// #293 -- Cursor reads a second hooks file: ~/.cursor/hooks.json, its
+// scripts under ~/.cursor/hooks/ (Cursor's hooks docs, read 2026-11-04 --
+// a dated claim about the harness; the project-level pair was #269's). A
+// hook planted there runs in every Cursor session on the machine, outside
+// any tool call, so both are the harness: refused like the project's and
+// named, in any letter case, by the file tools and the shell; the rest of
+// ~/.cursor (rules, skills, a .bak) and every read stay ordinary. Each
+// refused shape runs beside its harmless twin, from the project root and
+// from pkg/lib, the nested row once more with CLAUDE_PROJECT_DIR stripped
+// (#383, #459). Cursor's own Write and Delete reach this through the
+// adapter: cursor-adapter.test.ts "(#293)".
+describe("the harness guard protects Cursor's user-level hooks: ~/.cursor/hooks.json and ~/.cursor/hooks/ (#293)", () => {
+  const WHAT = "your machine-wide Cursor hooks";
+
+  /** A project with a nested pkg/lib, and a home holding the user-level hooks file, a hook script and a rules folder. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-293-proj-");
+    const home = freshDir("cairn-hooks-293-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    mkdirSync(join(home, ".cursor", "hooks"), { recursive: true });
+    mkdirSync(join(home, ".cursor", "rules"), { recursive: true });
+    writeFileSync(join(home, ".cursor", "hooks.json"), JSON.stringify({ version: 1, hooks: {} }));
+    writeFileSync(join(home, ".cursor", "hooks", "format.sh"), "#!/bin/sh\n");
+    return { p, home };
+  }
+
+  function run(f: ReturnType<typeof fixture>, payload: Record<string, unknown>, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ ...payload, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const file = (tool: string, file_path: string) => ({ tool_name: tool, tool_input: { file_path } });
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
+
+  /** Each refused shape beside its twin -- the same tool on the harmless neighbour, or the read of the same file. */
+  const pairs = (home: string): Array<[refused: Record<string, unknown>, twin: Record<string, unknown>]> => [
+    [file("Write", join(home, ".cursor", "hooks.json")), file("Write", join(home, ".cursor", "hooks.json.bak"))],
+    [file("Edit", join(home, ".cursor", "hooks.json")), file("Edit", join(home, ".cursor", "rules", "style.mdc"))],
+    // the hostile spellings: letter case, ~ and $HOME, the scripts folder and a cairn install inside it
+    [file("Write", join(home, ".CURSOR", "Hooks.json")), file("Write", join(home, ".CURSOR", "Rules", "a.mdc"))],
+    [file("Write", "~/.cursor/hooks.json"), file("Write", "~/.cursor/mcp.json.bak")],
+    [file("Write", join(home, ".cursor", "hooks", "format.sh")), file("Write", join(home, ".cursor", "skills", "x", "SKILL.md"))],
+    [file("Write", join(home, ".cursor", "hooks", "cairn", "pretooluse-harnessguard.mjs")), file("Write", join(home, ".cursor", "notes.md"))],
+    [bash("echo '{}' > ~/.cursor/hooks.json"), bash("cat ~/.cursor/hooks.json")],
+    [bash("echo x > $HOME/.cursor/hooks/format.sh"), bash("cat $HOME/.cursor/hooks/format.sh")],
+    [bash("cd ~/.cursor && echo '{}' > hooks.json"), bash("cd ~/.cursor && cat hooks.json")],
+    [bash("rm -rf ~/.cursor/hooks"), bash("ls ~/.cursor/hooks")],
+    [bash("rm ~/.cursor/hooks.json"), bash("ls -la ~/.cursor/hooks.json")],
+    [bash("cp /tmp/evil.json ~/.cursor/hooks.json"), bash("cp ~/.cursor/hooks.json /tmp/hooks-backup.json")],
+    [bash("sed -i '' 's/a/b/' ~/.cursor/hooks.json"), bash("grep -n version ~/.cursor/hooks.json")],
+    [bash("mkdir -p ~/.cursor/hooks/cairn"), bash("mkdir -p ~/.cursor/rules/new")],
+    [bash("chmod +x ~/.cursor/hooks/format.sh"), bash("chmod +x ~/.cursor/rules/run.sh")],
+    [bash("echo x > ~/.cursor/hooks/*.sh"), bash("echo x > ~/.cursor/rules/*.mdc")],
+    [bash("tee ~/.cursor/hooks.json < /tmp/evil.json"), bash("tee /tmp/copy.json < ~/.cursor/hooks.json")],
+  ];
+
+  it("refuses Write, Edit and the shell writes on the user-level hooks file and its scripts folder, naming them, in any letter case; the rest of ~/.cursor and every read pass", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs(f.home)) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused.tool_input)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused.tool_input)).toContain(WHAT);
+      expect(run(f, twin).status, JSON.stringify(twin.tool_input)).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs(f.home)) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused.tool_input)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin.tool_input)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the guard header names the user-level file beside the project one, and cites this block", () => {
+    const source = readFileSync(HARNESSGUARD, "utf8");
+    const header = source.slice(0, source.indexOf("*/"));
+    expect(header).toMatch(/~\/\.cursor\/hooks\.json[\s\S]*#293/);
+    expect(header).toContain('hooks.test.ts "(#293)"');
+  });
+});
+
+// #281 -- the switches that widen what the agent may do -- the commit leak
+// guard's off switch, ship's confirmation, the breaker's limit, a peer
+// CLI's licence to run the product, the write authority table -- live in
+// cairn.json, a file no guard protected: a steered agent could grant itself
+// what a guard refuses, then make the call. The server owns the list
+// (config.ts OWNER_ONLY_KEYS; config_set refuses them there) and the hook
+// reads a generated copy. An Edit or Write onto cairn.json is applied to
+// the file in the guard's head and the keys compared, so only a key set
+// away from its safe value is refused -- the template's `enabled: true`
+// and a sibling key land; a shell line or an MCP input the guard cannot
+// evaluate is refused when it writes cairn.json and spells a key's last
+// word, whatever it sets. Each refused shape runs beside its harmless twin,
+// from the project root and from pkg/lib, the nested row once more with
+// CLAUDE_PROJECT_DIR stripped (#383, #459). What the guard cannot see --
+// a key arriving in content the line doesn't spell -- is in the header's
+// Not seen block and measured below.
+describe("an owner-only key in cairn.json needs the owner: the harness guard (#281)", () => {
+  const WHAT = "an owner-only key in cairn.json";
+  const DC = "mcp__plugin_desktop-commander_desktop-commander__";
+  const CONFIG = {
+    tracker: { type: "github", config: { repo: "o/r" } },
+    leakGuard: { enabled: true, allow: [] },
+    peers: { codex: { enabled: true } },
+    drift: { staleDays: 5 },
+  };
+  const text = (obj: unknown) => JSON.stringify(obj, null, 2) + "\n";
+
+  /** A project with a cairn.json whose owner-only keys sit at their safe values, and a nested pkg/lib; a home. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-281-proj-");
+    const home = freshDir("cairn-hooks-281-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "cairn.json"), text(CONFIG));
+    writeFileSync(join(p, "evil.json"), text({ ...CONFIG, auto: { breaker: 0 } }));
+    return { p, home };
+  }
+
+  function run(f: ReturnType<typeof fixture>, payload: Record<string, unknown>, opts: { cwd?: string; bare?: boolean; env?: Record<string, string> } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    Object.assign(env, opts.env ?? {});
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ ...payload, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const write = (file_path: string, content: string) => ({ tool_name: "Write", tool_input: { file_path, content } });
+  const edit = (file_path: string, old_string: string, new_string: string, replace_all = false) =>
+    ({ tool_name: "Edit", tool_input: { file_path, old_string, new_string, replace_all } });
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
+  const mcp = (tool: string, input: Record<string, unknown>) => ({ tool_name: tool, tool_input: input });
+
+  /** Each refused shape beside its twin. `rel` climbs from the shell's folder to the root; file tools take the absolute path. */
+  const pairs = (p: string, rel: string): Array<[refused: Record<string, unknown>, twin: Record<string, unknown>, key: string]> => {
+    const cfg = join(p, "cairn.json");
+    return [
+      // Write: the whole file, each key set away from its safe value, beside the same file with it at the safe value or untouched
+      [write(cfg, text({ ...CONFIG, leakGuard: { enabled: false, allow: [] } })), write(cfg, text(CONFIG)), "leakGuard.enabled"],
+      [write(cfg, text({ ...CONFIG, ship: { confirm: false } })), write(cfg, text({ ...CONFIG, ship: { confirm: true } })), "ship.confirm"],
+      [write(cfg, text({ ...CONFIG, auto: { breaker: 0 } })), write(cfg, text({ ...CONFIG, auto: { breaker: 3 } })), "auto.breaker"],
+      [write(cfg, text({ ...CONFIG, auto: { breaker: 99 } })), write(cfg, text({ ...CONFIG, drift: { staleDays: 9 } })), "auto.breaker"],
+      [write(cfg, text({ ...CONFIG, peers: { codex: { enabled: true }, grok: { execCapable: true } } })),
+        write(cfg, text({ ...CONFIG, peers: { codex: { enabled: false, execCapable: false } } })), "peers.grok.execCapable"],
+      [write(cfg, text({ ...CONFIG, guards: { writers: { readOnly: [] } } })), write(cfg, text({ ...CONFIG, guards: {} })), "guards.writers"],
+      // the hostile spellings: the key behind a JSON escape, a file that does not parse but spells the word, the file beside its example
+      [write(cfg, '{"tracker":{"type":"github","config":{"repo":"o/r"}},"auto":{"brea\\u006ber":0}}'),
+        write(cfg, '{"tracker":{"type":"github","config":{"repo":"o/r"}},"drift":{"stale\\u0044ays":9}}'), "auto.breaker"],
+      [write(cfg, '{ "auto": { "breaker": 0 '), write(cfg, '{ "drift": { "staleDays": 9 '), "auto.breaker"],
+      [write(join(p, "cairn.json"), text({ tracker: CONFIG.tracker, leakGuard: { enabled: false } })),
+        write(join(p, "cairn.json.example"), text({ tracker: CONFIG.tracker, leakGuard: { enabled: false } })), "leakGuard.enabled"],
+      // Edit: the sed-shaped flip that never spells leakGuard, a replace_all that reaches it, a fragment the guard can't place
+      [edit(cfg, '"enabled": true,\n    "allow"', '"enabled": false,\n    "allow"'), edit(cfg, '"allow": []', '"allow": ["x"]'), "leakGuard.enabled"],
+      [edit(cfg, "true", "false", true), edit(cfg, '"codex": {\n      "enabled": true', '"codex": {\n      "enabled": false'), "leakGuard.enabled"],
+      [edit(cfg, '"staleDays": 5', '"staleDays": 5,\n    "x": 1\n  },\n  "ship": { "confirm": false'), edit(cfg, '"staleDays": 5', '"staleDays": 9'), "ship.confirm"],
+      [edit(cfg, "not in the file", '"breaker": 0'), edit(cfg, "not in the file", '"maxInputChars": 5'), "auto.breaker"],
+      // the shell: a redirect, sed, jq, tee, a heredoc, a JSON escape, a cd first
+      [bash(`echo '{"auto":{"breaker":0}}' > ${rel}cairn.json`), bash(`echo '{"auto":{"breaker":0}}' > ${rel}cairn.json.bak`), "auto.breaker"],
+      [bash(`echo '{"ship":{"confirm":false}}' > ${rel}cairn.json`), bash(`echo '{"drift":{"staleDays":9}}' > ${rel}cairn.json`), "ship.confirm"],
+      [bash(`sed -i '' 's/"enabled": true/"enabled": false/' ${rel}cairn.json`), bash(`sed -i '' 's/"staleDays": 5/"staleDays": 9/' ${rel}cairn.json`), "leakGuard.enabled"],
+      [bash(`jq '.ship.confirm=false' ${rel}cairn.json > /tmp/c.json && mv /tmp/c.json ${rel}cairn.json`), bash(`jq '.ship.confirm' ${rel}cairn.json > /tmp/c.json`), "ship.confirm"],
+      [bash(`echo '{"peers":{"codex":{"execCapable":true}}}' | tee ${rel}cairn.json`), bash(`tee /tmp/x.json < ${rel}cairn.json`), "peers.*.execCapable"],
+      [bash(`cat > ${rel}cairn.json <<'EOF'\n{"guards":{"writers":{}}}\nEOF`), bash(`cat > ${rel}cairn.json <<'EOF'\n{"drift":{"staleDays":9}}\nEOF`), "guards.writers"],
+      [bash(`printf '{"auto":{"brea\\u006ber":0}}' > ${rel}cairn.json`), bash(`printf '{"drift":{"stale\\u0044ays":9}}' > ${rel}cairn.json`), "auto.breaker"],
+      [bash(`cd ${rel || "."} && echo '{"ship":{"confirm":false}}' > cairn.json`), bash(`cd ${rel || "."} && grep confirm cairn.json`), "ship.confirm"],
+      // MCP: a write, an edit block and a command line onto the file
+      [mcp(`${DC}write_file`, { path: cfg, content: '{"auto":{"breaker":0}}' }), mcp(`${DC}write_file`, { path: cfg, content: '{"drift":{"staleDays":9}}' }), "auto.breaker"],
+      [mcp(`${DC}edit_block`, { file_path: cfg, old_string: '"staleDays": 5', new_string: '"confirm": false' }),
+        mcp(`${DC}edit_block`, { file_path: cfg, old_string: '"staleDays": 5', new_string: '"staleDays": 9' }), "ship.confirm"],
+      [mcp(`${DC}start_process`, { command: `echo '{"ship":{"confirm":false}}' > ${rel}cairn.json`, timeout_ms: 1000 }),
+        mcp(`${DC}start_process`, { command: `cat ${rel}cairn.json`, timeout_ms: 1000 }), "ship.confirm"],
+    ];
+  };
+
+  it("refuses an Edit, Write, shell line or MCP input that sets an owner-only key away from its safe value, naming the key; the safe value, a sibling key, a read and a removal pass", () => {
+    const f = fixture();
+    for (const [refused, twin, key] of pairs(f.p, "")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused.tool_input)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused.tool_input)).toContain(`${WHAT} (${key})`);
+      expect(r.stderr, JSON.stringify(refused.tool_input)).toContain("file: ");
+      expect(r.stderr, JSON.stringify(refused.tool_input)).toContain("owner's go-ahead");
+      expect(run(f, twin).status, JSON.stringify(twin.tool_input)).toBe(0);
+    }
+    // a removal restores the defaults, a read is a read, and the words elsewhere are words
+    for (const c of ["rm cairn.json", "cat cairn.json", "grep -n enabled cairn.json", "cp cairn.json /tmp/backup.json",
+      "echo 'breaker enabled confirm' > notes.txt", "git add cairn.json", "echo '{\"auto\":{\"breaker\":0}}' > pkg/cairn.json"]) {
+      expect(run(f, bash(c)).status, c).toBe(0);
+    }
+    // the owner's escapes: the inline prefix, and the session variable
+    expect(run(f, bash("CAIRN_HARNESS_EDIT=1 echo '{\"auto\":{\"breaker\":0}}' > cairn.json")).status).toBe(0);
+    expect(run(f, write(join(f.p, "cairn.json"), text({ ...CONFIG, auto: { breaker: 0 } })), { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    // the quoted override is text, not the escape (#262's shape)
+    expect(run(f, bash("echo 'CAIRN_HARNESS_EDIT=1' > cairn.json && echo '{\"auto\":{\"breaker\":0}}' > cairn.json")).status).toBe(2);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs(f.p, "../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused.tool_input)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin.tool_input)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("what the Not seen block says is not seen, is not: a key arriving in content the line doesn't spell passes -- the measured gap", () => {
+    const f = fixture();
+    for (const c of ["cp evil.json cairn.json", "mv evil.json cairn.json", "cat evil.json > cairn.json"]) {
+      expect(run(f, bash(c)).status, c).toBe(0);
+    }
+    const source = readFileSync(HARNESSGUARD, "utf8");
+    const header = source.slice(0, source.indexOf("*/"));
+    expect(header).toMatch(/owner-only[\s\S]*cp evil\.json cairn\.json/);
+    expect(header).toContain('hooks.test.ts "(#281)"');
+  });
+
+  it("the hook reads the generated copy, never the server: its import is the sibling file, and the list there is the server's (config.test.ts holds the bytes)", async () => {
+    const source = readFileSync(HARNESSGUARD, "utf8");
+    expect(source).toMatch(/^import \{[^}]*OWNER_ONLY_KEYS[^}]*\} from "\.\/owner-keys\.mjs";$/m);
+    const hook = await import(pathToFileURL(join(scriptsDir, "owner-keys.mjs")).href);
+    expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"]);
   });
 });

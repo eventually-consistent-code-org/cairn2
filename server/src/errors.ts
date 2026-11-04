@@ -9,7 +9,13 @@ export type ErrorCode =
   // #466: a run manifest of the project already reads running, so a second
   // one is refused -- a running batch cannot stage the run the breaker would
   // count against instead; nextAction names the live run and how it ends
-  | "RUN_LIVE";
+  | "RUN_LIVE"
+  // #281: a config_set patch sets a key only the owner may set (the leak
+  // guard's off switch, ship's confirmation, the breaker's limit, a peer's
+  // execCapable, the write table) away from its safe value, and the
+  // session carries no CAIRN_HARNESS_EDIT=1; nextAction names the owner's
+  // ways in
+  | "OWNER_ONLY";
 
 export class CairnError extends Error {
   constructor(

@@ -110,5 +110,23 @@ export declare const ConfigSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export type CairnConfig = z.infer<typeof ConfigSchema>;
+export declare const OWNER_ONLY_KEYS: readonly ["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"];
+export type OwnerOnlyKey = (typeof OWNER_ONLY_KEYS)[number];
+export declare const OWNER_ONLY_SAFE: Readonly<Partial<Record<OwnerOnlyKey, unknown>>>;
+/**
+ * The owner-only keys a patch sets away from their safe value (#281), as
+ * the dotted paths it names, in list order -- `peers.codex.execCapable`,
+ * not the pattern. Empty when the patch touches none, sets one to its
+ * safe value, or deletes one.
+ */
+export declare function ownerOnlyKeysIn(patch: unknown): string[];
+/**
+ * Refuses a patch that sets an owner-only key away from its safe value
+ * (#281) unless the session carries the owner's escape, CAIRN_HARNESS_EDIT
+ * set to exactly 1 -- the same escape the harness guard honours, so the
+ * tool route and the file route open with one act. The typed code names
+ * the keys and the owner's ways in; the agent is never taught a prefix.
+ */
+export declare function assertOwnerOnly(patch: unknown, env?: NodeJS.ProcessEnv): void;
 export declare function loadConfig(projectDir: string): CairnConfig;
 export declare function writeConfigPatch(projectDir: string, patch: Record<string, unknown>): CairnConfig;
