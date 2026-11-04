@@ -5510,3 +5510,132 @@ describe("a running batch cannot switch its own breaker off (#433)", () => {
     expect(manifest(home, proj).stop).toMatchObject({ limit: 3, count: 3 });
   });
 });
+
+// #466: the breaker judged the newest running manifest, and the tool that
+// creates one is agent-callable with no owner gate, so a running batch that
+// kept being refused could stage a second run -- its own session's at a
+// limit of zero, or anyone's -- and every refusal was counted against the
+// decoy while the real run kept pushing. The breaker now judges every
+// running manifest the refusing session owns, whatever their order, and a
+// refusal counts toward each of them; the server refuses the second
+// manifest outright (RUN_LIVE, run-manifest.test.ts and run-breaker.test.ts).
+// This block is the hook's half, with the decoy written by hand the way the
+// audit's two reviewers reproduced it -- the route the tool no longer offers.
+describe("a running batch cannot move the breaker's count by staging a second run (#466)", () => {
+  const RUN = "run-real";
+  const DECOY = "run-decoy";
+  const tracker = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  /** A manifest as the server writes one, running by default, staged by sess-run at a limit of 3. */
+  function writeRun(home: string, proj: string, runId: string, extra: Record<string, unknown> = {}) {
+    const created = "2026-11-04T00:00:00.000Z";
+    writeFileSync(join(home, "runs", `${projectKey(proj)}-${runId}.json`), JSON.stringify({
+      version: 1, runId, project: basename(proj), created,
+      phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
+      ceiling: null,
+      pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
+      status: "running", currentPhase: 1, sessionId: "sess-run", checkout: proj, breakerLimit: 3, ...extra,
+    }, null, 2));
+  }
+
+  /** A committed project with a cairn.json, an isolated cairn home, and the real run live. */
+  function fixture() {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    mkdirSync(join(proj, "server"));
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify(tracker));
+    const home = freshDir("cairn-hooks-second-run-home-");
+    mkdirSync(join(home, "runs"), { recursive: true });
+    writeRun(home, proj, RUN);
+    return { proj, home };
+  }
+
+  const manifest = (home: string, proj: string, runId: string) =>
+    JSON.parse(readFileSync(join(home, "runs", `${projectKey(proj)}-${runId}.json`), "utf8"));
+
+  const rows = (home: string, proj: string): Array<Record<string, unknown>> =>
+    readFileSync(join(home, "refusals", `${projectKey(proj)}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+  /** One run-guard call from `session`, standing in `cwd` -- a hard reset is refused in every session. */
+  const guard = (proj: string, home: string, command: string, session = "sess-run", cwd = proj) =>
+    runHookRaw(RUNGUARD, proj, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd, session_id: session }),
+      { CAIRN_HOME: home });
+  const refuse = (proj: string, home: string, session = "sess-run", cwd = proj) => guard(proj, home, "git reset --hard", session, cwd);
+
+  it("a second manifest the run's own session stages mid-run, at a limit of zero, leaves the first freezing on its third refusal", () => {
+    const { proj, home } = fixture();
+    expect(refuse(proj, home).stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+    expect(refuse(proj, home).stderr).toContain("refusal 2 of 3");
+    // the run, refused twice, stages a second run of its own, switches it on, and sets its limit to nothing
+    writeRun(home, proj, DECOY, { created: "2026-11-04T01:00:00.000Z", breakerLimit: 0 });
+    const third = refuse(proj, home, "sess-run", join(proj, "server")); // from a nested working directory
+    expect(third.status).toBe(2);
+    expect(third.stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(home, proj, RUN)).toMatchObject({
+      status: "stopped", stop: { reason: "breaker", limit: 3, count: 3, sessions: ["sess-run"] },
+    });
+    // the decoy's limit of zero is the decoy's own: it stays running, unfrozen, where the owner can see it
+    expect(manifest(home, proj, DECOY).status).toBe("running");
+    // and the frozen run's session pushes nothing, decoy or no decoy
+    const push = guard(proj, home, "git push origin feature");
+    expect(push.status).toBe(2);
+    expect(push.stderr).toContain(`batch run ${RUN} was frozen by the circuit breaker`);
+  });
+
+  it("a second manifest with a limit of its own is judged too: the session's refusals count toward every run it owns", () => {
+    const { proj, home } = fixture();
+    writeRun(home, proj, DECOY, { created: "2026-11-04T01:00:00.000Z" });
+    for (let i = 1; i <= 2; i++) {
+      const r = refuse(proj, home);
+      expect(r.stderr).toContain(`refusal ${i} of 3 for batch run ${RUN}`);
+      expect(r.stderr).toContain(`refusal ${i} of 3 for batch run ${DECOY}`);
+    }
+    const third = refuse(proj, home);
+    expect(third.stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(third.stderr).toContain(`batch run ${DECOY} is frozen`);
+    expect(manifest(home, proj, RUN).stop).toMatchObject({ reason: "breaker", count: 3 });
+    expect(manifest(home, proj, DECOY).stop).toMatchObject({ reason: "breaker", count: 3 });
+    // the rows carry the run the session staged first; the count is the session's, not the id's
+    expect(rows(home, proj).map((r) => r.run_id)).toEqual([RUN, RUN, RUN]);
+  });
+
+  it("the hostile spellings: a decoy forged older than the run, and a newer one staged by another session, move nothing", () => {
+    // forged older than the real run, at a limit of zero: order never decides which run is judged
+    const older = fixture();
+    writeRun(older.home, older.proj, DECOY, { created: "2026-11-03T00:00:00.000Z", breakerLimit: 0 });
+    for (let i = 1; i <= 2; i++) expect(refuse(older.proj, older.home).stderr).toContain(`refusal ${i} of 3 for batch run ${RUN}`);
+    expect(refuse(older.proj, older.home).stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(older.home, older.proj, RUN).status).toBe("stopped");
+
+    // the newest manifest is another session's: not the refusing session's run, so not its shield either
+    const other = fixture();
+    writeRun(other.home, other.proj, DECOY, { created: "2026-11-04T01:00:00.000Z", sessionId: "sess-other" });
+    for (let i = 1; i <= 2; i++) expect(refuse(other.proj, other.home).stderr).toContain(`refusal ${i} of 3 for batch run ${RUN}`);
+    expect(refuse(other.proj, other.home).stderr).toContain(`batch run ${RUN} is frozen`);
+    expect(manifest(other.home, other.proj, RUN).status).toBe("stopped");
+    // another session's run is never frozen by this session's refusals (#431)
+    expect(manifest(other.home, other.proj, DECOY).status).toBe("running");
+    expect(guard(other.proj, other.home, "git push origin feature", "sess-other").status).toBe(0);
+  });
+
+  it("the harmless twins: a staged or finished manifest beside the run counts nothing, and the run that follows a finished one starts at zero", () => {
+    const { proj, home } = fixture();
+    writeRun(home, proj, "run-staged", { created: "2026-11-04T01:00:00.000Z", status: "staged" });
+    writeRun(home, proj, "run-done", { created: "2026-11-03T00:00:00.000Z", status: "complete" });
+    for (let i = 1; i <= 2; i++) {
+      const r = refuse(proj, home);
+      expect(r.stderr).toContain(`refusal ${i} of 3 for batch run ${RUN}`);
+      expect(r.stderr).not.toContain("run-staged");
+      expect(r.stderr).not.toContain("run-done");
+    }
+    // the run ends on its own and the staged one starts: two rows behind it, its count is still its own
+    writeRun(home, proj, RUN, { status: "complete" });
+    writeRun(home, proj, "run-staged", { created: "2026-11-04T01:00:00.000Z" });
+    expect(refuse(proj, home).stderr).toContain("refusal 1 of 3 for batch run run-staged");
+    expect(manifest(home, proj, "run-staged").status).toBe("running");
+    expect(manifest(home, proj, RUN).status).toBe("complete");
+    expect(manifest(home, proj, "run-done").status).toBe("complete");
+  });
+});
