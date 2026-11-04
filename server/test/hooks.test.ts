@@ -4703,13 +4703,16 @@ describe("pause recorder hook (#379)", () => {
 // code comment the guard already exempts" -- does not exist: leak-patterns
 // exempts by PATH (markdown, docs/, server/src and server/dist), never by
 // comment syntax, so the leak twins here use those exemptions. One
-// under-match the subfolder runs surfaced is out of this issue's scope and
-// reported with it, not fixed here: with CLAUDE_PROJECT_DIR unset, the leak
-// and harness guards take the payload cwd as the project root, so from a
-// subfolder the leak guard finds no cairn.json and the harness guard sees
-// `../../hooks/hooks.json` as outside the project. Claude Code sets the
-// variable for every hook (dated claim, 2026-11, per the hooks reference),
-// so every row here runs with it set, as the platform does.
+// under-match the subfolder runs surfaced was filed as #459 and is closed
+// here: with CLAUDE_PROJECT_DIR unset, the leak and harness guards used to
+// take the payload cwd as the project root, so from a subfolder the leak
+// guard found no cairn.json and the harness guard saw `../../hooks/hooks.json`
+// as outside the project. Claude Code sets the variable for every hook
+// (dated claim, 2026-11, per the hooks reference); the other harnesses are
+// a claim too, so every nested row runs twice -- once with the variable set,
+// as the platform does, and once with it stripped, so the guards' own root
+// lookup (lib.mjs projectRoot: git top level, else the nearest folder
+// holding .claude, else the cwd) is what that run judges against.
 describe("every refused shape has an allowed twin, and holds from a subfolder (#383)", () => {
   type Guard = "run" | "harness" | "leak";
   type Cwd = "root" | "nested";
@@ -4923,6 +4926,13 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
       refused: sh((c) => `cd ${c.rel}.claude/skills && git clone https://x/y`), twin: sh((c) => `cd ${c.rel}pkg && git clone https://x/y`) },
     { guard: "harness", shape: "a write handed to another shell", cwds: BOTH,
       refused: sh((c) => `bash -c "echo > ${c.rel}hooks/hooks.json"`), twin: sh((c) => `bash -c "cat ${c.rel}hooks/hooks.json | head"`) },
+    // #289: the computed-path shapes the Coverage says are read -- find -exec, xargs, a heredoc fed to a shell
+    { guard: "harness", shape: "find -exec onto a hook file", cwds: BOTH,
+      refused: sh((c) => `find ${c.rel}hooks -name '*.json' -exec rm {} \\;`), twin: sh((c) => `find ${c.rel}hooks -name '*.json' -exec cat {} \\;`) },
+    { guard: "harness", shape: "a hook path piped into xargs rm", cwds: BOTH,
+      refused: sh((c) => `echo ${c.rel}hooks/hooks.json | xargs rm`), twin: sh((c) => `echo ${c.rel}hooks/hooks.json | xargs cat`) },
+    { guard: "harness", shape: "a heredoc fed to a shell", cwds: BOTH,
+      refused: sh((c) => `bash <<'EOF'\nrm ${c.rel}hooks/hooks.json\nEOF`), twin: sh((c) => `bash <<'EOF'\ncat ${c.rel}hooks/hooks.json\nEOF`) },
     { guard: "harness", shape: "chmod of a protected folder", cwds: BOTH,
       refused: sh((c) => `chmod -R 777 ${c.rel}hooks`), twin: sh((c) => `chmod -R 777 ${c.rel}pkg`) },
     { guard: "harness", shape: "git checkout -- of a hook file", cwds: BOTH,
@@ -4933,11 +4943,19 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
       refused: sh(() => "claude mcp add x -- node s.js"), twin: sh(() => "claude mcp list") },
     { guard: "harness", shape: "claude plugin install", cwds: BOTH,
       refused: sh(() => "claude plugin install foo"), twin: sh(() => "claude plugin list") },
+    // #350: the read-only plugin words (eval, list, details, validate, tag, test) are command
+    // words too, so a help flag right after `eval init` is help, not a scaffold
+    { guard: "harness", shape: "claude plugin eval init", cwds: BOTH,
+      refused: sh(() => "claude plugin eval init helper"), twin: sh(() => "claude plugin eval init --help") },
     // -- harness guard: surfaces outside the project ----------------------
     { guard: "harness", shape: "the machine-wide settings", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude/settings.json"), twin: sh(() => "echo x > $HOME/.claude/notes.md") },
     { guard: "harness", shape: "the machine-wide MCP config", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude.json"), twin: sh(() => "echo x > $HOME/.claude.json.bak") },
+    // #304: the same files under CLAUDE_CONFIG_DIR; the guard spells $HOME out in the variable's value
+    { guard: "harness", shape: "the settings under CLAUDE_CONFIG_DIR", cwds: BOTH,
+      refused: { ...sh(() => "echo x > $HOME/claude-config/settings.json"), env: { CLAUDE_CONFIG_DIR: "$HOME/claude-config" } },
+      twin: { ...sh(() => "echo x > $HOME/claude-config/notes.md"), env: { CLAUDE_CONFIG_DIR: "$HOME/claude-config" } } },
     { guard: "harness", shape: "the plugin registry", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude/plugins/installed_plugins.json"), twin: sh(() => "echo x > $HOME/.claude/todo.md") },
     { guard: "harness", shape: ".git/hooks", cwds: BOTH,
@@ -5049,19 +5067,21 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
 
   /**
    * One guard, one call, from where the shell stands. CLAUDE_PROJECT_DIR is
-   * the project root whatever the cwd, as the platform sets it; the payload's
-   * cwd and the child's cwd are the shell's folder. Every owner escape, the
-   * real plugin root and any git env the runner carries are stripped, so the
-   * only thing a row can lean on is what the row itself set up.
+   * the project root whatever the cwd, as the platform sets it -- or, with
+   * `withVar` false (#459), absent, as a harness that sets nothing leaves it;
+   * the payload's cwd and the child's cwd are the shell's folder. Every owner
+   * escape, the real plugin root and any git env the runner carries are
+   * stripped, so the only thing a row can lean on is what the row itself set up.
    */
-  function judge(guard: Guard, c: Ctx, side: Side): { status: number | null; stderr: string } {
+  function judge(guard: Guard, c: Ctx, side: Side, withVar = true): { status: number | null; stderr: string } {
     const env: Record<string, string | undefined> = {
       ...process.env, HOME: c.home, CLAUDE_PROJECT_DIR: c.root, CAIRN_HOME: c.cairnHome,
       CLAUDE_PLUGIN_ROOT: c.plugin, GIT_CONFIG_NOSYSTEM: "1", ...side.env,
     };
     for (const k of Object.keys(env)) {
       const strip = (k.startsWith("CAIRN_") && k !== "CAIRN_HOME") || k === "CDPATH"
-        || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL";
+        || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL"
+        || (k === "CLAUDE_PROJECT_DIR" && !withVar);
       if (strip && !(k in (side.env ?? {}))) delete env[k];
     }
     const r = spawnSync(process.execPath, [GUARD[guard]], {
@@ -5085,6 +5105,12 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
         if (!staged) { row.refused.setup?.(c); staged = true; }
         const r = judge(row.guard, c, row.refused);
         expect(r.status, `${row.shape}: refused payload from ${where} (${where === "nested" ? "pkg/lib" : "project root"}) -- ${r.stderr.split("\n")[0]}`).toBe(2);
+        // #459 -- the nested row once more with no CLAUDE_PROJECT_DIR: the
+        // guard has to find the root above pkg/lib by itself
+        if (where === "nested") {
+          const bare = judge(row.guard, c, row.refused, false);
+          expect(bare.status, `${row.shape}: refused payload from pkg/lib with CLAUDE_PROJECT_DIR unset -- ${bare.stderr.split("\n")[0]}`).toBe(2);
+        }
       }
       if (!shared) { f = fixture(); staged = false; }
       for (const where of row.cwds) {
@@ -5092,6 +5118,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
         if (!staged) { row.twin.setup?.(c); staged = true; }
         const r = judge(row.guard, c, row.twin);
         expect(r.status, `${row.shape}: allowed twin from ${where} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+        if (where === "nested") {
+          const bare = judge(row.guard, c, row.twin, false);
+          expect(bare.status, `${row.shape}: allowed twin from pkg/lib with CLAUDE_PROJECT_DIR unset -- ${bare.stderr.split("\n")[0]}`).toBe(0);
+        }
       }
     });
   }
@@ -5508,5 +5538,321 @@ describe("a running batch cannot switch its own breaker off (#433)", () => {
     expect(refuse(proj, home).stderr).toContain("refusal 2 of 3");
     expect(refuse(proj, home).stderr).toContain(`batch run ${RUN} is frozen`);
     expect(manifest(home, proj).stop).toMatchObject({ limit: 3, count: 3 });
+  });
+});
+
+// #459 -- with no CLAUDE_PROJECT_DIR the leak and harness guards took the
+// shell's folder as the project root, so from a package folder a write onto
+// `../../hooks/hooks.json` fell outside the project and passed. The twin
+// table above now runs every nested row once more with the variable
+// stripped (the fix's own assertion). This block pins the fallback order
+// lib.mjs projectRoot promises -- git top level, then the nearest folder
+// holding .claude, then the cwd -- and the hostile spelling the issue never
+// named: a GIT_DIR inherited from a git hook, which would make rev-parse
+// answer for another repository.
+describe("the guards find the project root without CLAUDE_PROJECT_DIR (#459)", () => {
+  /** One guard call from `cwd` with no project directory, override, plugin root or CAIRN_* in its env. */
+  function judge(guard: string, cwd: string, payload: Record<string, unknown>, extra: Record<string, string> = {}) {
+    const env: Record<string, string | undefined> = {
+      ...process.env, HOME: freshDir("cairn-hooks-root-home-"), GIT_CONFIG_NOSYSTEM: "1", ...extra,
+    };
+    for (const k of Object.keys(env)) {
+      const strip = k === "CLAUDE_PROJECT_DIR" || k.startsWith("CAIRN_") || k === "CDPATH" || k === "CLAUDE_PLUGIN_ROOT"
+        || k === "GIT_DIR" || k === "GIT_WORK_TREE";
+      if (strip && !(k in extra)) delete env[k];
+    }
+    const r = spawnSync(process.execPath, [guard], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ ...payload, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
+
+  /** A repository with one commit, a cairn.json and a nested pkg/lib. */
+  function repo() {
+    const root = freshDir("cairn-hooks-root-");
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: root });
+    stageFile(root, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init", "--no-gpg-sign"], { cwd: root });
+    writeFileSync(join(root, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    return root;
+  }
+
+  it("a .claude folder marks the root when the folder is no repository", () => {
+    const root = freshDir("cairn-hooks-root-");
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    const nested = join(root, "pkg", "lib");
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks/hooks.json")).status).toBe(2);
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks-notes.json")).status).toBe(0);
+  });
+
+  it("hostile: a GIT_DIR inherited from a git hook can't move the root to another repository", () => {
+    const root = repo();
+    const other = repo();
+    const nested = join(root, "pkg", "lib");
+    const extra = { GIT_DIR: join(other, ".git"), GIT_WORK_TREE: other };
+    const r = judge(HARNESSGUARD, nested, bash("echo x > ../../hooks/hooks.json"), extra);
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("the hook directory");
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks-notes.json"), extra).status).toBe(0);
+  });
+
+  it("outside any repository and any .claude holder the cwd is the root -- the fail-open floor the headers date", () => {
+    const dir = freshDir("cairn-hooks-root-");
+    mkdirSync(join(dir, "pkg", "lib"), { recursive: true });
+    expect(judge(HARNESSGUARD, dir, bash("echo x > hooks/hooks.json")).status).toBe(2);
+    // nothing above pkg/lib says where the project is: the guard judges the
+    // folder it stands in, as every guard did before #459, and this passes
+    expect(judge(HARNESSGUARD, join(dir, "pkg", "lib"), bash("echo x > ../../hooks/hooks.json")).status).toBe(0);
+  });
+});
+
+// #350 -- `claude plugin eval init --help` was refused as a machine-wide
+// skills write: `eval` was not a command word, so the help flag after `eval
+// init` was read as a value and `init` as the scaffold it names. The
+// read-only plugin words (eval, list, details, validate, tag, test) join
+// CLAUDE_COMMAND_WORDS so help detection reaches through them; the #383
+// table carries the refused/twin pair from both cwds. Here: the hostile
+// spellings the issue never named -- help after a value, help not last, a
+// plugin named like a read-only word -- stay refused, and the words still
+// write nothing on their own.
+describe("harness guard reads help through the read-only claude plugin words (#350)", () => {
+  function run(command: string) {
+    const p = freshDir("cairn-hooks-pluginwords-proj-");
+    const home = freshDir("cairn-hooks-pluginwords-home-");
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: p, HOME: home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: p }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("help right after the read-only words and a write word is help; the write without it is still refused", () => {
+    for (const c of ["claude plugin eval init --help", "claude plugin eval init -h", "claude plugin eval --help",
+      "claude plugin list --help", "claude plugin details --help", "claude plugin validate -h",
+      "claude plugin tag --help", "claude plugin test -h", "claude plugin eval init marketplace add --help"]) {
+      expect(run(c).status, c).toBe(0);
+    }
+    for (const c of ["claude plugin eval init", "claude plugin eval init helper", "claude plugin eval init helper --with hooks"]) {
+      const r = run(c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("your machine-wide skills");
+    }
+  });
+
+  it("hostile: help after a value, help not last, or a plugin named like a read-only word keeps the write refused", () => {
+    for (const c of ["claude plugin eval init helper --help", "claude plugin eval init --help helper",
+      "claude plugin eval init --description -h", "claude plugin install list", "claude plugin install eval",
+      "claude plugin disable test"]) {
+      expect(run(c).status, c).toBe(2);
+    }
+  });
+});
+
+// #304 -- CLAUDE_CONFIG_DIR moves Claude Code's user config out of ~/.claude:
+// settings.json, settings.local.json, .claude.json and the plugins, skills,
+// agents, commands and hooks folders live under it instead (dated claim,
+// 2026-11-04, per the Claude Code settings reference). The guard followed
+// only the home spellings, so a session started with the variable set had
+// its live settings writable. Now the folder is a zone like the home ones:
+// its *.json files and those five trees, from any cwd, in the $VAR spelling
+// too; ~/.claude stays protected beside it. Hostile: a config dir that IS
+// the home or the project, or a relative one, protects nothing extra rather
+// than making every file there the harness.
+describe("harness guard follows CLAUDE_CONFIG_DIR (#304)", () => {
+  /** A project (with a nested pkg/lib), a home and a config dir laid out as Claude Code leaves it. */
+  function fixture(cfgInProject = false) {
+    const p = freshDir("cairn-hooks-cfgdir-proj-");
+    const home = freshDir("cairn-hooks-cfgdir-home-");
+    const cfg = cfgInProject ? join(p, "config") : freshDir("cairn-hooks-cfgdir-cfg-");
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    for (const d of ["plugins", "skills/s", "agents", "commands", "hooks"]) mkdirSync(join(cfg, d), { recursive: true });
+    writeFileSync(join(cfg, "settings.json"), "{}");
+    writeFileSync(join(cfg, ".claude.json"), "{}");
+    writeFileSync(join(cfg, "plugins", "installed_plugins.json"), "{}");
+    writeFileSync(join(cfg, "notes.md"), "notes\n");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), "{}");
+    return { p, home, cfg };
+  }
+
+  function run(f: { p: string; home: string; cfg: string }, tool: string, input: Record<string, unknown>, cwd = f.p, cfgValue = f.cfg) {
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CLAUDE_CONFIG_DIR: cfgValue,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: tool, tool_input: input, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+  const bash = (command: string) => ["Bash", { command }] as const;
+
+  it("the settings, the MCP config and the five folders under the config dir are refused for every tool; their neighbours pass", () => {
+    const f = fixture();
+    const refused: Array<[tool: string, input: Record<string, unknown>, what: string]> = [
+      ["Edit", { file_path: join(f.cfg, "settings.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, "settings.local.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, ".claude.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, "skills", "s", "SKILL.md") }, "your machine-wide skills"],
+      ["Edit", { file_path: join(f.cfg, "plugins", "installed_plugins.json") }, "the installed plugins and their registry"],
+      [...bash(`echo x > ${f.cfg}/settings.json`), "your machine-wide Claude settings"],
+      [...bash("echo x > $CLAUDE_CONFIG_DIR/settings.json"), "your machine-wide Claude settings"],
+      [...bash("echo x > ${CLAUDE_CONFIG_DIR}/.claude.json"), "your machine-wide Claude settings"],
+      [...bash(`rm ${f.cfg}/*.json`), "your machine-wide Claude settings"],
+      [...bash(`rm -rf ${f.cfg}/skills`), "your machine-wide skills"],
+      [...bash(`mkdir -p ${f.cfg}/agents/new`), "your machine-wide agent definitions"],
+      [...bash(`cp /tmp/x ${f.cfg}/commands/c.md`), "your machine-wide slash commands"],
+      [...bash(`mv /tmp/x ${f.cfg}/hooks/run.sh`), "your machine-wide Claude hooks"],
+      [...bash(`rm -rf ${f.cfg}`), "your machine-wide Claude settings"],
+      [...bash(`chmod -R 777 ${f.cfg}`), "your machine-wide Claude settings"],
+      [...bash(`echo x > ${f.home}/.claude/settings.json`), "your machine-wide Claude settings"],
+    ];
+    for (const [tool, input, what] of refused) {
+      const r = run(f, tool, input);
+      expect(r.status, JSON.stringify(input)).toBe(2);
+      expect(r.stderr, JSON.stringify(input)).toContain(what);
+    }
+    const allowed: Array<[tool: string, input: Record<string, unknown>]> = [
+      ["Edit", { file_path: join(f.cfg, "notes.md") }],
+      ["Write", { file_path: join(f.cfg, "history.jsonl") }],
+      ["Write", { file_path: join(f.cfg, "projects", "x", "session.jsonl") }],
+      [...bash(`echo x > ${f.cfg}/todo.md`)],
+      [...bash("echo x > $CLAUDE_CONFIG_DIR/todo.md")],
+      [...bash(`cat ${f.cfg}/settings.json`)],
+      [...bash(`ls ${f.cfg}/skills`)],
+      [...bash(`mkdir -p ${f.cfg}/projects/new`)],
+    ];
+    for (const [tool, input] of allowed) {
+      const r = run(f, tool, input);
+      expect(r.status, `${JSON.stringify(input)} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("holds from a nested cwd, with the config dir spelled relative to the shell's folder", () => {
+    const f = fixture(true);
+    const nested = join(f.p, "pkg", "lib");
+    expect(run(f, ...bash("echo x > ../../config/settings.json"), nested).status).toBe(2);
+    expect(run(f, ...bash("echo x > ../../config/notes.md"), nested).status).toBe(0);
+    expect(run(f, "Edit", { file_path: join(f.cfg, "settings.json") }, nested).status).toBe(2);
+    expect(run(f, "Edit", { file_path: join(f.cfg, "notes.md") }, nested).status).toBe(0);
+  });
+
+  it("hostile: a config dir that is the home or the project, or a relative one, adds nothing; the home rules still hold", () => {
+    const f = fixture();
+    writeFileSync(join(f.p, "package.json"), "{}");
+    for (const cfgValue of [f.home, f.p, "config", ""]) {
+      expect(run(f, ...bash("echo x > package.json"), f.p, cfgValue).status, cfgValue).toBe(0);
+      expect(run(f, ...bash(`echo x > ${f.home}/notes.json`), f.p, cfgValue).status, cfgValue).toBe(0);
+      expect(run(f, ...bash(`echo x > ${f.home}/.claude/settings.json`), f.p, cfgValue).status, cfgValue).toBe(2);
+      expect(run(f, ...bash(`echo x > ${f.home}/.claude.json`), f.p, cfgValue).status, cfgValue).toBe(2);
+    }
+    // ~/.claude named as the config dir is the default spelled out: nothing doubles, nothing is lost
+    expect(run(f, ...bash(`echo x > ${f.home}/.claude/settings.json`), f.p, join(f.home, ".claude")).status).toBe(2);
+    expect(run(f, ...bash(`echo x > ${f.home}/.claude/notes.md`), f.p, join(f.home, ".claude")).status).toBe(0);
+  });
+});
+
+// #289 -- paths a command finds for itself. Closed by decision (phase 31,
+// 2026-11-04): the guard reads what a line spells, and the shapes it cannot
+// read -- an archive's or an unreadable patch's members, a listing that
+// names nothing protected -- are written into the header's Not-seen block,
+// dated, rather than half-guarded (ADR 0016). Three things make that a
+// mechanism instead of a sentence: the block is pinned here phrase by
+// phrase and line by line, so a deleted line is red; what the Coverage says
+// is read (find -exec, xargs, a heredoc fed to a shell) is run, from the
+// root and from a subfolder, beside its twin; and what the block says is
+// not seen is measured passing, so the header and the guard move together.
+describe("the harness guard's Not seen block is dated, pinned and measured (#289)", () => {
+  const source = readFileSync(HARNESSGUARD, "utf8");
+  const header = source.slice(0, source.indexOf("*/"));
+  const MARK = " *   Not seen, dated 2026-11-04 (#289";
+
+  /** The block: from its dated opening line to the blank comment line that ends it. */
+  function notSeenBlock(): string {
+    const start = header.indexOf(MARK);
+    expect(start, "the Not-seen block opens with its date and issue").toBeGreaterThan(-1);
+    return header.slice(start).split("\n *\n")[0];
+  }
+
+  it("the block is dated, closes by decision, and names each unseen shape -- a deleted line is red here", () => {
+    const block = notSeenBlock();
+    for (const phrase of [
+      "by decision", "ADR 0016",
+      "a write in an interpreter",
+      "a substitution's output",
+      "archive or patch the guard can't read",
+      "discovers for itself",
+      "cp -p, rsync -a or tar copy",
+      "starts by name off PATH",
+      "runs arbitrary code",
+    ]) expect(block, phrase).toContain(phrase);
+    // the line count is the pin: a shape added or removed moves it, on purpose, in the same change
+    expect(block.split("\n").length, block).toBe(22);
+  });
+
+  it("the Coverage says find -exec, xargs and a heredoc fed to a shell are read, and cites this block", () => {
+    expect(header).toMatch(/find -exec, xargs and a heredoc\s+\*\s+fed to a shell/);
+    expect(header).toContain('asserted: hooks.test.ts "Not seen block (#289)"');
+  });
+
+  /** A project with a hook file, a source file, a readable patch onto the hook and a nested pkg/lib. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-notseen-proj-");
+    const home = freshDir("cairn-hooks-notseen-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks", "scripts"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    writeFileSync(join(p, "a.tgz"), "not an archive the guard reads");
+    writeFileSync(join(p, "fix.diff"), "--- a/hooks/hooks.json\n+++ b/hooks/hooks.json\n@@ -1 +1 @@\n-{}\n+{\"x\":1}\n");
+    return { p, home };
+  }
+
+  function run(f: { p: string; home: string }, command: string, cwd = f.p) {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  it("what the Coverage says is read, is: a listing word, a find walk, an xargs stream and a heredoc shell line, from the root and pkg/lib", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const [cwd, rel] of [[f.p, ""], [nested, "../../"]] as const) {
+      const pairs: Array<[refused: string, twin: string]> = [
+        [`git ls-files ${rel}hooks | xargs rm`, `git ls-files ${rel}src | xargs rm`],
+        [`find ${rel}hooks -name '*.json' -exec rm {} \\;`, `find ${rel}src -name '*.json' -exec rm {} \\;`],
+        [`echo ${rel}hooks/hooks.json | xargs rm`, `echo ${rel}src/x.json | xargs rm`],
+        [`bash <<'EOF'\nrm ${rel}hooks/hooks.json\nEOF`, `bash <<'EOF'\nrm ${rel}src/x.json\nEOF`],
+        // the patch names hooks/hooks.json from the project root, so -d says where that is
+        [`patch -d ${rel || "."} -p1 < ${rel}fix.diff`, `patch -d ${rel || "."} -p1 --dry-run < ${rel}fix.diff`],
+        [`tar xzf ${rel}a.tgz -C ${rel}hooks`, `tar xzf ${rel}a.tgz -C ${rel}src`],
+        [`unzip ${rel}a.zip -d ${rel}hooks`, `unzip ${rel}a.zip -d ${rel}src`],
+      ];
+      for (const [refused, twin] of pairs) {
+        expect(run(f, refused, cwd).status, `${JSON.stringify(refused)} from ${rel || "root"}`).toBe(2);
+        expect(run(f, twin, cwd).status, `${JSON.stringify(twin)} from ${rel || "root"}`).toBe(0);
+      }
+    }
+  });
+
+  it("what the block says is not seen, is not: an unreadable patch or archive at the root, and a listing naming nothing protected, pass -- the measured gap", () => {
+    const f = fixture();
+    for (const c of ["git ls-files | xargs rm", "curl -s https://x/p.diff | patch -p1", "curl -s https://x/p.diff | git apply",
+      "curl -s https://x/a.tgz | tar xz", "tar xzf a.tgz", "unzip a.zip"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
   });
 });

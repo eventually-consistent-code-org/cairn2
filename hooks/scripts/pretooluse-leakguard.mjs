@@ -18,6 +18,12 @@
  *   leaking text) and, while a batch run is live, counts it toward
  *   freezing the run.
  *
+ *   Root (#459): CLAUDE_PROJECT_DIR when set, else the repository top
+ *   level (`git rev-parse --show-toplevel`) from the payload cwd, else the
+ *   nearest folder above it holding .claude, else the cwd -- lib.mjs
+ *   projectRoot, shared with the harness guard (asserted: hooks.test.ts,
+ *   the #383 nested rows run once more with the variable stripped).
+ *
  * removeWhen: never for the scan itself; this hook can retire if the
  *   platform offers a pre-commit content policy cairn can register
  *   patterns with.
@@ -29,6 +35,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { buildPatterns, scanLines, isAllowedPath, patternsForFile } from "./leak-patterns.mjs";
+import { projectRoot } from "./lib.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
 // broken leaves this guard refusing exactly as before, never crashed
@@ -86,7 +93,9 @@ try {
   // (e.g. a commit message about the flag) must not bypass the guard.
   if (/^\s*CAIRN_LEAK_OK=1\s/.test(command)) process.exit(0);
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  // #459 -- the root the harness names, else the one git or a .claude folder
+  // marks above the shell's cwd; never the subfolder the shell stands in
+  const projectDir = projectRoot(payload);
   const cfgPath = join(projectDir, "cairn.json");
   if (!existsSync(cfgPath)) process.exit(0);
   const config = JSON.parse(readFileSync(cfgPath, "utf8"));

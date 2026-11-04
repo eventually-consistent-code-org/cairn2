@@ -40,6 +40,14 @@
  *   only its own command, #265), never taught by a refusal (#286). What
  *   each tool is read for, and what it can't see, is under Coverage below.
  *
+ *   Root (#459): CLAUDE_PROJECT_DIR when set, else the repository top
+ *   level (`git rev-parse --show-toplevel`) from the payload cwd, else the
+ *   nearest folder above it holding .claude, else the cwd -- lib.mjs
+ *   projectRoot, shared with the leak guard, so a shell standing in a
+ *   package folder of a project whose harness set no variable is still
+ *   judged against the project (asserted: hooks.test.ts, the #383 nested
+ *   rows run once more with the variable stripped).
+ *
  *   Breaker (#358): each refusal is handed to breaker.mjs, which appends
  *   its audit row (a digest of the input, never the path) and, while a
  *   batch run is live, counts it toward freezing the run -- a run that
@@ -64,7 +72,8 @@
  *   WRITES -- redirects and the operands of commands that change files,
  *   through wrappers and program runners (xcrun, script, flock, #307;
  *   strace, runuser, #311), bash -c, su -c, find -exec, xargs and a heredoc
- *   fed to a shell. Any other heredoc body is data, but the $(...) or
+ *   fed to a shell (asserted: hooks.test.ts "Not seen block (#289)", and
+ *   the #383 rows). Any other heredoc body is data, but the $(...) or
  *   backtick an unquoted body (`<<EOF`) runs is read as a line of its own
  *   (#322); a quoted delimiter (`<<'EOF'`) keeps the body literal. A
  *   program runner the table doesn't name is backed up by
@@ -128,14 +137,37 @@
  *   PATH, only .git/hooks is known; a hooksPath holding the project or
  *   the home folder is skipped rather than made every write a hook.
  *
- *   Not seen: a write in an interpreter (python -c, an MCP tool running
- *   python or javascript), a write that only exists in a substitution's
- *   output (`$(cat script)` run as a command -- the body of a $(...), a
- *   <(...), >(...) or $((...)), and the literal target after any of them
- *   are read, #319, #320), an archive's members,
- *   paths an upstream command finds, modes cp -p, rsync or tar copy, the
- *   program a hook or an MCP server starts by name off PATH. An MCP server
- *   that runs arbitrary code is that same class: gate it with the
+ *   CLAUDE_CONFIG_DIR (#304): when set, Claude Code keeps its settings,
+ *   .claude.json and its plugins, skills, agents, commands and hooks
+ *   folders there instead of ~/.claude (dated claim, 2026-11-04, per the
+ *   Claude Code settings reference), so that folder is judged like the
+ *   home ones -- its *.json files and those five trees, `$CLAUDE_CONFIG_DIR`
+ *   spelled out -- and its settings and .claude.json are read for the
+ *   scripts they run (#312, #314). ~/.claude stays protected beside it. A
+ *   config dir that is the home or the project, or a relative one, adds
+ *   nothing. Asserted: hooks.test.ts "follows CLAUDE_CONFIG_DIR (#304)".
+ *
+ *   Not seen, dated 2026-11-04 (#289, by decision: the guard reads what a
+ *   line spells; what a command computes at run time is the operating
+ *   system's to isolate, ADR 0016; each shape below is pinned by
+ *   hooks.test.ts "Not seen block (#289)", one sentence a shape):
+ *   a write in an interpreter (python -c, an MCP tool running python or
+ *   javascript).
+ *   A write that only exists in a substitution's output (`$(cat script)`
+ *   run as a command -- the body of a $(...), a <(...), >(...) or $((...)),
+ *   and the literal target after any of them are read, #319, #320).
+ *   The members of an archive or patch the guard can't read, landing where
+ *   it is extracted or applied (`curl ... | tar xz`, `curl ... | patch -p1`,
+ *   `tar xzf a.tgz` at the project root: the folder is judged, the members
+ *   are not; a readable patch is read file by file, a -C or -d folder as a
+ *   write).
+ *   Paths an upstream command discovers for itself when none of its words
+ *   names a protected place (`git ls-files | xargs rm`; `git ls-files hooks
+ *   | xargs rm` is refused for the word, a find upstream for what it walks,
+ *   #258).
+ *   Modes a cp -p, rsync -a or tar copy preserves onto a protected holder.
+ *   The program a hook or an MCP server starts by name off PATH. An MCP
+ *   server that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
@@ -155,6 +187,7 @@ import {
   SHELLS, SUBSTITUTION_DEPTH, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
+import { projectRoot } from "./lib.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
 // broken leaves this guard refusing exactly as before, never crashed
@@ -417,18 +450,24 @@ const INIT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const CLAUDE_MCP_WRITES = ["add", "add-json", "add-from-claude-desktop", "remove", "reset-project-choices"];
 
 // The `claude plugin` subcommands that change which plugins load (#308),
-// aliases too: what each writes is in claudeTargets. list, details,
-// validate, eval, tag, test and help change nothing.
+// aliases too: what each writes is in claudeTargets. The read-only ones
+// are CLAUDE_PLUGIN_READS below; help changes nothing either.
 const CLAUDE_PLUGIN_INSTALLS = ["install", "i", "uninstall", "remove", "update", "prune", "autoremove"];
 const CLAUDE_PLUGIN_TOGGLES = ["enable", "disable"];
 const CLAUDE_PLUGIN_INITS = ["init", "new"];
 const CLAUDE_MARKET_WRITES = ["add", "remove", "rm", "update"];
 
+// The plugin subcommands that only read: list, details, validate, and the
+// authoring group eval (whose own `init` scaffolds), tag and test. Command
+// words too (#350), so `claude plugin eval init --help` is help, not a
+// scaffold described "--help".
+const CLAUDE_PLUGIN_READS = ["eval", "list", "details", "validate", "tag", "test"];
+
 // The words that name a claude subcommand; a help flag right after a run
-// of only these is help, never a value some option swallowed (#308).
+// of only these is help, never a value some option swallowed (#308, #350).
 const CLAUDE_COMMAND_WORDS = ["mcp", "plugin", "plugins", "marketplace", "import", "configure",
   ...CLAUDE_MCP_WRITES, ...CLAUDE_PLUGIN_INSTALLS, ...CLAUDE_PLUGIN_TOGGLES, ...CLAUDE_PLUGIN_INITS,
-  ...CLAUDE_MARKET_WRITES];
+  ...CLAUDE_MARKET_WRITES, ...CLAUDE_PLUGIN_READS];
 
 // The settings file each `--scope` writes.
 const SCOPE_SETTINGS = { user: "~/.claude/settings.json", project: ".claude/settings.json",
@@ -579,9 +618,39 @@ function expandHome(raw) {
   return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
 }
 
-/** expandHome, and $CAIRN_HOME too -- the run guard's own cairn home (#263, #299). */
+/** expandHome, and $CAIRN_HOME (the run guard's own cairn home, #263, #299) and $CLAUDE_CONFIG_DIR (#304) too. */
 function expandVars(raw) {
-  return expandHome(raw).replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
+  return expandHome(raw)
+    .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "")
+    .replace(/^(?:\$CLAUDE_CONFIG_DIR|\$\{CLAUDE_CONFIG_DIR\})(?=\/|$)/, () => configDir() ?? "");
+}
+
+/**
+ * The folder Claude Code keeps its user config in when CLAUDE_CONFIG_DIR
+ * is set (#304): settings.json, settings.local.json, .claude.json and the
+ * plugins, skills, agents, commands and hooks folders live there instead
+ * of ~/.claude (dated claim, 2026-11-04, per the Claude Code settings
+ * reference). Absolute, ~ and $HOME spelled out; null when unset or
+ * relative -- where Claude Code would read a relative one from is not
+ * this guard's to guess.
+ */
+function configDir() {
+  const raw = process.env.CLAUDE_CONFIG_DIR;
+  if (!raw) return null;
+  const abs = expandHome(raw);
+  return isAbsolute(abs) ? resolve(abs) : null;
+}
+
+/**
+ * The config dir's spellings as a zone (#304), or none: unset, relative,
+ * the home or project folder or one holding them (every file there would
+ * become the harness), or ~/.claude itself, which the home rules cover.
+ */
+function configDirs() {
+  const dir = configDir();
+  if (dir === null) return [];
+  const anchors = [...ROOTS, ...HOMES];
+  return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)) && !HOMES.some((h) => same(d, join(h, ".claude"))));
 }
 
 /**
@@ -609,6 +678,12 @@ function expandVars(raw) {
  * And ~/.claude/hooks (#312), where your settings keep the scripts their
  * hooks run: a script swapped there runs at the next hook event, outside
  * any tool call, where no guard sees what it does.
+ *
+ * And the same files and folders under CLAUDE_CONFIG_DIR when it is set
+ * (#304): its *.json files -- the settings and .claude.json -- as a zone
+ * like the run manifests', and its plugins, skills, agents, commands and
+ * hooks as trees. ~/.claude stays protected beside it: another session on
+ * the machine may run without the variable.
  */
 function outsideZones() {
   const zones = [];
@@ -628,6 +703,14 @@ function outsideZones() {
     add(join(home, ".claude", "agents"), "your machine-wide agent definitions", true);
     add(join(home, ".claude", "commands"), "your machine-wide slash commands", true);
     add(join(home, ".claude", "hooks"), "your machine-wide Claude hooks", true);
+  }
+  for (const cfg of configDirs()) {
+    add(cfg, "your machine-wide Claude settings", false);
+    add(join(cfg, "plugins"), "the installed plugins and their registry", true);
+    add(join(cfg, "skills"), "your machine-wide skills", true);
+    add(join(cfg, "agents"), "your machine-wide agent definitions", true);
+    add(join(cfg, "commands"), "your machine-wide slash commands", true);
+    add(join(cfg, "hooks"), "your machine-wide Claude hooks", true);
   }
   const pluginRoot = livePluginRoot();
   const plugin = spellings(pluginRoot);
@@ -810,9 +893,12 @@ function settingsScripts() {
   const home = resolve(homedir());
   const project = ROOTS[0];
   const plugin = livePluginRoot();
-  // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means
+  // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means; the user
+  // settings under CLAUDE_CONFIG_DIR too when it is set (#304)
+  const cfg = configDir();
   const sources = [
     ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin]),
+    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin]) : []),
     ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin]),
     [join(project, "hooks", "hooks.json"), project],
     [join(plugin, "hooks", "hooks.json"), plugin],
@@ -879,11 +965,15 @@ function mcpScripts() {
     const list = json?.mcpServers;
     if (list && typeof list === "object") for (const s of Object.values(list)) servers.push([s, dir]);
   };
-  const claude = parse(join(home, ".claude.json"));
-  take(claude, project);
-  const projects = claude?.projects;
-  if (projects && typeof projects === "object") {
-    for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
+  // ~/.claude.json, and the one under CLAUDE_CONFIG_DIR when it is set (#304)
+  const cfg = configDir();
+  for (const file of new Set([join(home, ".claude.json"), ...(cfg ? [join(cfg, ".claude.json")] : [])])) {
+    const claude = parse(file);
+    take(claude, project);
+    const projects = claude?.projects;
+    if (projects && typeof projects === "object") {
+      for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
+    }
   }
   take(parse(join(project, ".mcp.json")), project);
   take(parse(join(project, ".cursor", "mcp.json")), project);
@@ -1881,7 +1971,8 @@ function gitTargets(args, seg, ctx, add) {
  * marketplaces plugins install from; import brings another agent's config
  * in. A dry run (prune, import) and help pass -- help only as the last
  * word, right after the subcommand words, where no option can have
- * swallowed it as a value.
+ * swallowed it as a value; the read-only plugin words count as subcommand
+ * words there (#350), so `claude plugin eval init --help` is help.
  */
 function claudeTargets(args, ctx, add) {
   // a nested shell's "$1" is whatever its caller's xargs or find handed it
@@ -2444,7 +2535,9 @@ try {
   const mcpLines = mcpCommandLines.map((line) => ({ line, cwd: mcpDir }));
   if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  // #459 -- the root the harness names, else the one git or a .claude folder
+  // marks above the shell's cwd; never the subfolder the shell stands in
+  const projectDir = projectRoot(payload);
   ROOTS = spellings(projectDir);
   HOMES = spellings(homedir());
   ZONES = outsideZones();
