@@ -93,21 +93,16 @@ function fixture(manifest?: Record<string, unknown>, stamped = true): { proj: st
     mkdirSync(join(home, "runs"), { recursive: true });
     writeFileSync(join(home, "runs", `${projKey(proj)}-run-x.json`),
       JSON.stringify({ version: 1, runId: "run-x", ...manifest }));
-    breakerOff(proj);
   }
   if (stamped) stamp(proj, home);
   return { proj, home };
 }
 
-/**
- * These tests judge one rule per command, many commands to a fixture; the
- * circuit breaker (#358) would freeze a live run three refusals in and
- * every later mid-run check would read a stopped run. Its own tests are in
- * hooks.test.ts ("circuit breaker").
- */
-function breakerOff(proj: string): void {
-  writeFileSync(join(proj, "cairn.json"), JSON.stringify({ auto: { breaker: 0 } }));
-}
+// These tests judge one rule per command, many commands to a fixture. The
+// circuit breaker (#358) counts only the session a manifest names (#431) at
+// the limit staged into that manifest (#433); the manifests here name no
+// session, so nothing in this file ever freezes, and cairn.json has no say
+// in it. The breaker's own tests are in hooks.test.ts ("circuit breaker").
 
 describe("run guard: hard reset refused in every session (#249)", () => {
   it("refuses git reset --hard with no run, naming the owner's ways to approve (#262)", () => {
@@ -1863,7 +1858,6 @@ describe("run guard: each git command is judged in the repository it acts on (#3
       mkdirSync(join(home, "runs"), { recursive: true });
       writeFileSync(join(home, "runs", `${projKey(proj)}-run-x.json`),
         JSON.stringify({ version: 1, runId: "run-x", ...manifest }));
-      breakerOff(proj);
     }
     stamp(proj, home);
     return { root, proj, other, wt, wt2, home };

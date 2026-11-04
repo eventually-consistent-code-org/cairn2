@@ -153,8 +153,10 @@ batch-specific loop.
    guard refusal — run guard, harness guard, leak guard — from the run's
    own session (the manifest's `sessionId`) is logged and counted against
    this run; another session's refusal is logged and never counted
-   (#431). At `auto.breaker` refusals (cairn.json,
-   default 3, `0` turns it off) the guard freezes the run: the manifest
+   (#431). At the limit staged into the manifest — `auto.breaker` as
+   cairn.json read it at `create` (default 3, `0` turns it off); an edit
+   mid-run governs the next run only, so a running batch cannot switch its
+   own breaker off (#433) — the guard freezes the run: the manifest
    moves to `stopped` with a `stop` block (reason `breaker`, the last
    three refusals). From then on the run's pushes are refused, and claim,
    close and `run_manifest` moves return `RUN_FROZEN` — the first of them

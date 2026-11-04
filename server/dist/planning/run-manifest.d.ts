@@ -40,6 +40,14 @@
  *   until the run guard stamps it from the first hook event of a session
  *   whose working directory is `checkout`; a null id counts nothing.
  *
+ *   The staged limit (#433): `breakerLimit` is cairn.json's `auto.breaker`
+ *   as it read when the run was staged, and the breaker reads it from
+ *   here, never from cairn.json -- that file is the agent's own
+ *   configuration surface, unprotected on purpose, and a running batch
+ *   could write the limit to zero mid-run and never freeze. The runs
+ *   folder is already a protected zone (harness guard). The cairn.json
+ *   value is the owner's default for the next run, never the live one.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -195,6 +203,11 @@ export interface RunManifestState {
     /** The checkout the run was staged from, resolved (#431): what the run
      * guard's stamp compares a session's working directory against. */
     checkout?: string;
+    /** cairn.json's `auto.breaker` as it read at staging (#433): the refusals
+     * that freeze this run, 0 off. The breaker reads it here, never from
+     * cairn.json mid-run. Absent on manifests written before it existed,
+     * which the breaker reads as its default, 3. */
+    breakerLimit?: number;
 }
 /** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
  * digest, never the raw command or path. */
@@ -248,6 +261,8 @@ export declare function createRunManifest(projectDir: string, opts: {
     effort?: RunManifestState["effort"];
     /** The staging shell's session id (#431); blank or absent reads null. */
     sessionId?: string | null;
+    /** cairn.json's auto.breaker at staging (#433); absent leaves the field out. */
+    breakerLimit?: number;
     createdAt?: string;
     baseDir?: string;
 }): RunManifestState;

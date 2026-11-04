@@ -22,18 +22,26 @@
  *   run's own session -- the manifest's `sessionId` (#431) -- carries its
  *   run_id and the breaker counts those rows; a refusal from any other
  *   session is logged with no run id and counts nothing, and so is every
- *   refusal while the manifest has no id yet. At `auto.breaker` of them
- *   (cairn.json, default 3, 0 off) it writes the manifest itself: status
- *   `stopped`, stop.reason `breaker`, the last three rows, and the sessions
- *   they came from. The counter is per run id, so a new run starts at zero.
+ *   refusal while the manifest has no id yet. At the manifest's
+ *   `breakerLimit` of them (#433: cairn.json's `auto.breaker` as it read
+ *   when the run was staged; default 3, 0 off) it writes the manifest
+ *   itself: status `stopped`, stop.reason `breaker`, the last three rows,
+ *   and the sessions they came from. The counter is per run id, so a new
+ *   run starts at zero.
  *
  * Seams -- hooks import only node: and relative files, never server/:
  *   - a live run is read straight from the manifests the server writes
  *     (server/src/planning/run-manifest.ts): <cairn home>/runs/<project>-
  *     <hash>-<runId>.json, status `running`. The cairn home is CAIRN_HOME,
  *     else ~/.cairn -- the run guard's rule.
- *   - `auto.breaker` is read raw from cairn.json; anything but a whole
- *     number >= 0 reads as the default.
+ *   - the limit is the manifest's `breakerLimit` (#433), never cairn.json
+ *     mid-run: cairn.json is the agent's own configuration surface, which
+ *     the harness guard leaves unprotected on purpose, so a run that kept
+ *     being refused could write `auto.breaker` to 0 and never freeze. The
+ *     server copies the value into the manifest at staging, where the runs
+ *     folder is a protected zone; anything there but a whole number >= 0
+ *     (a manifest from before the field) reads as the default. The
+ *     cairn.json value governs the next run only.
  *   - the run's session is the manifest's `sessionId` (#431): written at
  *     staging from the auto verb's $CLAUDE_CODE_SESSION_ID or, when the verb
  *     had none, stamped here (stampRunSession, which the run guard calls
@@ -197,16 +205,17 @@ function currentRun(live) {
   return [...live].sort((a, b) => String(b.state?.created ?? "").localeCompare(String(a.state?.created ?? "")))[0];
 }
 
-// Config
+// The staged limit (#433)
 
-/** `auto.breaker` from cairn.json, read raw: a whole number >= 0, else the default. */
-export function breakerLimit(projectDir) {
-  try {
-    const v = JSON.parse(readFileSync(join(projectDir, "cairn.json"), "utf8"))?.auto?.breaker;
-    return Number.isInteger(v) && v >= 0 ? v : DEFAULT_LIMIT;
-  } catch {
-    return DEFAULT_LIMIT;
-  }
+/**
+ * The run's limit as its manifest staged it (`breakerLimit`): a whole
+ * number >= 0, else the default -- a manifest from before the field, or a
+ * hand-edited one. Never cairn.json: the live run could edit that.
+ * Asserted: hooks.test.ts, "a running batch cannot switch its own breaker off".
+ */
+export function stagedLimit(state) {
+  const v = state?.breakerLimit;
+  return Number.isInteger(v) && v >= 0 ? v : DEFAULT_LIMIT;
 }
 
 // The log
@@ -419,7 +428,7 @@ export function recordRefusal({ guard, payload, effect, reason, projectDir }) {
 
     // No live run, or not the run's own session: the row is the audit, and nothing counts
     if (!owned) return [];
-    const limit = breakerLimit(projectDir);
+    const limit = stagedLimit(run.state);
     if (limit === 0) return [];
     if (!appended) return offOnce(projectDir, home, run.runId, why);
 

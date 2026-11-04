@@ -1586,6 +1586,9 @@ export function buildServer(deps) {
                     answers: a.answers,
                     effort: a.effort,
                     sessionId: a.sessionId, // #431 -- the one session whose refusals count
+                    // #433 -- the breaker's limit is staged here, where the runs folder
+                    // is protected; a mid-run edit to cairn.json governs the next run only
+                    breakerLimit: loadConfig(d).auto.breaker,
                 });
             }
             case "read":

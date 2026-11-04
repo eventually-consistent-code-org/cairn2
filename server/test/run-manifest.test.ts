@@ -530,3 +530,34 @@ describe("the run's session (#431)", () => {
     expect(old.checkout).toBeUndefined();
   });
 });
+
+// #433 -- the breaker's limit is staged into the manifest, where the runs
+// folder is protected, and read from there; cairn.json is the owner's default
+// for the next run, never the live one.
+describe("the staged breaker limit (#433)", () => {
+  it("records auto.breaker as it read at staging, and leaves the field out when none was given", () => {
+    const { projectDir, baseDir } = setup();
+    const staged = createRunManifest(projectDir, {
+      runId: "run-limit", phases: PHASES, breakerLimit: 5, createdAt: CREATED, baseDir,
+    });
+    expect(staged.breakerLimit).toBe(5);
+    expect(readRunManifest(projectDir, "run-limit", baseDir).breakerLimit).toBe(5);
+    const off = createRunManifest(projectDir, { runId: "run-off", phases: PHASES, breakerLimit: 0, createdAt: CREATED, baseDir });
+    expect(readRunManifest(projectDir, "run-off", baseDir).breakerLimit).toBe(0);
+    const none = createRunManifest(projectDir, { runId: "run-none", phases: PHASES, createdAt: CREATED, baseDir });
+    expect("breakerLimit" in none).toBe(false);
+    expect(readRunManifest(projectDir, "run-none", baseDir).breakerLimit).toBeUndefined();
+  });
+
+  it("a hand-edited limit that is negative or fractional fails the schema instead of passing as a limit", () => {
+    const { projectDir, baseDir } = setup();
+    createRunManifest(projectDir, { runId: "run-bad", phases: PHASES, breakerLimit: 3, createdAt: CREATED, baseDir });
+    const path = runManifestPath(projectDir, "run-bad", baseDir);
+    for (const bad of [-1, 2.5]) {
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      onDisk.breakerLimit = bad;
+      writeFileSync(path, JSON.stringify(onDisk));
+      expect(() => readRunManifest(projectDir, "run-bad", baseDir)).toThrow(/breakerLimit/);
+    }
+  });
+});

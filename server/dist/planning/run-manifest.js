@@ -40,6 +40,14 @@
  *   until the run guard stamps it from the first hook event of a session
  *   whose working directory is `checkout`; a null id counts nothing.
  *
+ *   The staged limit (#433): `breakerLimit` is cairn.json's `auto.breaker`
+ *   as it read when the run was staged, and the breaker reads it from
+ *   here, never from cairn.json -- that file is the agent's own
+ *   configuration surface, unprotected on purpose, and a running batch
+ *   could write the limit to zero mid-run and never freeze. The runs
+ *   folder is already a protected zone (harness guard). The cairn.json
+ *   value is the owner's default for the next run, never the live one.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -387,6 +395,7 @@ export const RunManifestSchema = z.object({
     stop: RunStopSchema.optional(),
     sessionId: z.string().nullable().optional(),
     checkout: z.string().optional(),
+    breakerLimit: z.number().int().min(0).optional(),
 });
 // Internals
 /** Reads and validates the manifest file at `path`; null when absent. */
@@ -502,6 +511,9 @@ export function createRunManifest(projectDir, opts) {
         // checkout is what the stamp compares a session's working directory against
         sessionId: typeof opts.sessionId === "string" && opts.sessionId.trim() ? opts.sessionId : null,
         checkout: resolve(projectDir),
+        // #433 -- the limit the breaker reads for this run, snapshotted here where
+        // the runs folder is protected; cairn.json governs the next run only
+        ...(opts.breakerLimit !== undefined ? { breakerLimit: opts.breakerLimit } : {}),
     };
     writeManifestFile(path, state);
     return state;

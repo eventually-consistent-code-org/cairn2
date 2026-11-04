@@ -134,6 +134,7 @@ describe("a frozen run's claims and closes refuse RUN_FROZEN (#358)", () => {
     const read = await call(run, "run_manifest", { action: "read", runId: RUN });
     expect(read.json.stop.refusals).toHaveLength(3); // what the run report lists
     expect(read.json.sessionId).toBe("sess-run"); // the session staging named (#431), as the tool carried it
+    expect(read.json.breakerLimit).toBe(3); // cairn.json's auto.breaker (its default) staged into the manifest (#433)
 
     const emit = await call(run, "outlook_emit");
     expect(emit.json).toMatchObject({ emitted: true, frozen: { runId: RUN, refusals: 3 } });
