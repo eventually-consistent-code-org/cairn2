@@ -1561,11 +1561,14 @@ describe("run guard: short destinations and the push settings meet the ship gate
       ["git branch -u origin/main && git push", "git branch -v && git push"],
       ["git branch --set-upstream-to=origin/main && git push origin feature", "git branch --list && git push origin feature"],
       ["git remote rename backup origin && git push", "git remote -v && git push"],
-      ["git -c include.path=elsewhere.cfg push", "git -c user.name=x push"],
+      // (`git -c include.path=F push` sat here until #467: an include is now refused outright in every
+      // session, before the gate -- its rows are in the #467 block)
       // HOME and XDG_CONFIG_HOME move the user config git reads
       ["HOME=/tmp/elsewhere git push origin feature", "LANG=C git push origin feature"],
       ["export XDG_CONFIG_HOME=/tmp/elsewhere; git push", "export PAGER=cat; git push"],
-      ["E=upstream git --config-env=push.default=E push origin feature", "git --config-env=core.pager=E push origin feature"],
+      // a --config-env variable the guard can't read (#467 reads one the prefix sets: `E=upstream git
+      // --config-env=push.default=E push` is judged by its value, in the #467 block)
+      ["git --config-env=push.default=CAIRN_T302_UNSET push origin feature", "git --config-env=core.pager=E push origin feature"],
     ];
     for (const [unknown, neighbour] of rows) {
       const r = push(proj, home, unknown);
@@ -2950,5 +2953,186 @@ describe("run guard: ref and reflog destruction refused in every session (#288)"
       expect(guard(proj, home, refused, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status, refused).toBe(0);
       if (!refused.startsWith("echo")) expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${refused}`).status, refused).toBe(0);
     }
+  });
+});
+
+describe("run guard: a git alias is resolved from every channel the command line can define it on (#467)", () => {
+  // git takes an alias from three more channels than #430 read: --config-env
+  // (a variable holding the value), GIT_CONFIG_COUNT / KEY_n / VALUE_n on the
+  // command's own prefix, and an inline include of a config file. Measured
+  // against git 2.56, 2026-11-04: the numbered entries are read first, then
+  // -c and --config-env in command-line order, the last one winning on a
+  // key; a missing variable, key or value is git's own fatal error. Before
+  // #467 every refused row here exited 0 and git reset the dirty tree.
+  const HARD = "reset --hard";
+  const RESET = "`git reset --hard` is refused in every session";
+  const UNREAD = "a git setting from a value the guard can't read";
+  const INCLUDE = "a `-c include.path` include is refused in every session";
+
+  /** The host's own config stays out of it; the variables a row names are never the host's. */
+  const at = (proj: string, home: string, command: string, cwd = proj, env: Record<string, string> = {}) =>
+    guard(proj, home, command, { GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", ...env }, cwd);
+
+  /** Each refused row exits 2 with its lead and effect line; its twin exits 0 silently. */
+  function expectPair(proj: string, home: string, rows: Array<[refused: string, twin: string, lead: string, effect: string]>,
+    cwd = proj): void {
+    for (const [refused, twin, lead, effect] of rows) {
+      const r = at(proj, home, refused, cwd);
+      expect(r.status, `${refused}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, refused).toContain(lead);
+      expect(r.stderr, refused).toContain(effect);
+      expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      const t = at(proj, home, twin, cwd);
+      expect(t.status, `${twin}\n${t.stderr}`).toBe(0);
+      expect(t.stderr, twin).toBe("");
+    }
+  }
+
+  // Each row: [refused, its harmless twin on the same channel, the refusal's lead, the effect line].
+  const configEnv: Array<[string, string, string, string]> = [
+    [`HR='${HARD}' git --config-env=alias.hr=HR hr`, "ST=status git --config-env=alias.st=ST st",
+      RESET, "effect: discards-work, from `--hard`, via alias `hr`"],
+    [`HR='${HARD}' git --config-env alias.hr=HR hr HEAD~1`, "LG='log --oneline' git --config-env alias.lg=LG lg -3",
+      RESET, "effect: discards-work, from `--hard`, via alias `hr`"],
+    // nested: one channel names the next
+    [`A=b HR='${HARD}' git --config-env=alias.a=A --config-env=alias.b=HR a`,
+      "A=b ST=status git --config-env=alias.a=A --config-env=alias.b=ST a",
+      RESET, "effect: discards-work, from `--hard`, via alias `a`"],
+    // the hostile order: -c and --config-env on one key, the last one winning as in git
+    [`X=status git --config-env=alias.x=X -c 'alias.x=${HARD}' x`, `X=status git -c 'alias.x=${HARD}' --config-env=alias.x=X x`,
+      RESET, "effect: discards-work, from `--hard`, via alias `x`"],
+    // a wrapper's prefix reaches the git inside it
+    [`HR='${HARD}' bash -c 'git --config-env=alias.hr=HR hr'`, "ST=status bash -c 'git --config-env=alias.st=ST st'",
+      RESET, "effect: discards-work, from `--hard`, via alias `hr`"],
+    // a push setting or a mirror through the same channel is judged by its value (the #287 residual)
+    ["M=true git --config-env=remote.origin.mirror=M push origin", "M=false git --config-env=remote.origin.mirror=M push origin feature",
+      "`git push --mirror` is refused in every session", "effect: discards-work, from `-c remote.origin.mirror`"],
+    ["P=now git --config-env=gc.pruneExpire=P gc", "P=never git --config-env=gc.pruneExpire=P gc",
+      "`git gc --prune=<date>` is refused in every session", "effect: discards-work, from `-c gc.pruneExpire`"],
+  ];
+
+  const numbered: Array<[string, string, string, string]> = [
+    [`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.hr GIT_CONFIG_VALUE_0='${HARD}' git hr`,
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=status git st",
+      RESET, "effect: discards-work, from `--hard`, via alias `hr`"],
+    [`GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=b GIT_CONFIG_KEY_1=alias.b GIT_CONFIG_VALUE_1='${HARD}' git a`,
+      "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=b GIT_CONFIG_KEY_1=alias.b GIT_CONFIG_VALUE_1=status git a",
+      RESET, "effect: discards-work, from `--hard`, via alias `a`"],
+    // -c wins over a numbered entry on the same key (measured, git 2.56)
+    [`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0=status git -c 'alias.x=${HARD}' x`,
+      `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='${HARD}' git -c alias.x=status x`,
+      RESET, "effect: discards-work, from `--hard`, via alias `x`"],
+    // the twin fetches: a push beside GIT_CONFIG_* on the line still meets the ship gate's can't-read rule (#297)
+    ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin",
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=false git fetch origin",
+      "`git push --mirror` is refused in every session", "effect: discards-work, from `-c remote.origin.mirror`"],
+  ];
+
+  it("--config-env: the value is read from the command's own prefix and resolved like a -c alias; a harmless alias passes", () => {
+    const { proj, home } = fixture();
+    expectPair(proj, home, configEnv);
+  });
+
+  it("GIT_CONFIG_COUNT: numbered entries on the command's own prefix are read as config, ahead of -c", () => {
+    const { proj, home } = fixture();
+    expectPair(proj, home, numbered);
+  });
+
+  it("a value the guard can't read refuses outright when the setting is one it reads; a setting it never reads is left to git", () => {
+    const { proj, home } = fixture();
+    // Each row: [refused, the word the effect line names]
+    const rows: Array<[string, string]> = [
+      ["git --config-env=alias.hr=CAIRN_T467_UNSET hr", "--config-env=alias.hr=CAIRN_T467_UNSET"],
+      ['HR="$X" git --config-env=alias.hr=HR hr', "--config-env=alias.hr=HR"],
+      ["git --config-env=remote.origin.mirror=CAIRN_T467_UNSET push origin", "--config-env=remote.origin.mirror=CAIRN_T467_UNSET"],
+      ['GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.hr GIT_CONFIG_VALUE_0="$V" git hr', "GIT_CONFIG_VALUE_0"],
+      ["GIT_CONFIG_COUNT=$N GIT_CONFIG_KEY_0=alias.hr GIT_CONFIG_VALUE_0=x git hr", "GIT_CONFIG_COUNT"],
+      ["GIT_CONFIG_COUNT=1 git hr", "GIT_CONFIG_KEY_0"],
+      ['GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$K" GIT_CONFIG_VALUE_0=x git hr', "GIT_CONFIG_KEY_0"],
+      // git's own carrier for -c values, set by hand: refused unread, dated in the header
+      [`GIT_CONFIG_PARAMETERS="'alias.hr=${HARD}'" git hr`, "GIT_CONFIG_PARAMETERS"],
+    ];
+    for (const [c, word] of rows) {
+      const r = at(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain(`${UNREAD} is refused in every session`);
+      expect(r.stderr, c).toContain(`effect: discards-work, from \`${word}\``);
+      expect(r.stderr, c).toContain("set it on the line itself");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+    // a setting the guard never reads, from a value it can't: git's business (the #301 twin stays)
+    for (const c of ["git --config-env=core.editor=CAIRN_T467_UNSET status", "git --config-env core.editor=E status",
+      "git --config-env=user.name=CAIRN_T467_UNSET commit --allow-empty -m wip",
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git status",
+      "GIT_CONFIG_COUNT=0 git status", "GIT_CONFIG_NOSYSTEM=1 git status", "GIT_CONFIG_GLOBAL=/dev/null git status"]) {
+      const r = at(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("an include is refused outright in every session, like a `!` alias, whatever the subcommand and whichever channel names it", () => {
+    const { proj, home } = fixture();
+    const inc = join(proj, "inc.cfg");
+    writeFileSync(inc, "[alias]\n\thr = reset --hard\n");
+    for (const c of [
+      `git -c include.path=${inc} hr`,
+      `git -c include.path=${inc} status`,
+      `git -c includeIf.gitdir:${proj}/.path=${inc} hr`,
+      `git -c 'include.path=${inc}' push origin feature`,
+      `P=${inc} git --config-env=include.path=P hr`,
+      "git --config-env=include.path=CAIRN_T467_UNSET hr",
+      `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=${inc} git hr`,
+      // an alias whose expansion carries the include
+      `git -c 'alias.x=-c include.path=${inc} hr' x`,
+    ]) {
+      const r = at(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      // the include read, or the variable that would name it unread: one of the two leads
+      expect([INCLUDE, `${UNREAD} is refused in every session`].some((lead) => r.stderr.includes(lead)), `${c}\n${r.stderr}`).toBe(true);
+      expect(r.stderr, c).toContain("effect: discards-work, from `");
+      expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    }
+    // the same characters on another key, or an alias that reads no file, pass
+    for (const c of ["git -c user.name=x status", "git -c 'alias.inc=status' inc", `git -c core.excludesFile=${inc} status`]) {
+      const r = at(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("a push setting read through a channel is judged by its value at the ship gate, not refused as unreadable", () => {
+    const f = fixture(undefined, false);
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    git(f.proj, "commit", "-q", "--allow-empty", "-m", "feature", "--no-gpg-sign");
+    git(f.proj, "remote", "add", "origin", join(f.proj, "no-such-remote.git"));
+    // matching pushes main, unstamped: the gate refuses by what the value says
+    const r = at(f.proj, f.home, "E=matching git --config-env=push.default=E push");
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("/cairn:ship");
+    expect(r.stderr).not.toContain("takes them from --config-env");
+    // current pushes feature: nothing lands on main
+    expect(at(f.proj, f.home, "E=current git --config-env=push.default=E push").status).toBe(0);
+    // ...while a value the guard can't read still refuses the push as #302 did
+    const u = at(f.proj, f.home, "git --config-env=push.default=CAIRN_T467_UNSET push");
+    expect(u.status, u.stderr).toBe(2);
+    expect(u.stderr).toContain("takes them from --config-env or an include");
+  });
+
+  it("from a nested working directory the same rows hold", () => {
+    const { proj, home } = fixture();
+    mkdirSync(join(proj, "sub"));
+    expectPair(proj, home, [configEnv[0], numbered[0]], join(proj, "sub"));
+    const r = at(proj, home, `git -c include.path=${join(proj, "inc.cfg")} hr`, join(proj, "sub"));
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain(INCLUDE);
+  });
+
+  it("the owner's escape lifts every one", () => {
+    const { proj, home } = fixture();
+    // both escapes: a push beside GIT_CONFIG_* on the line still meets the ship gate's can't-read rule (#297)
+    const lifted = { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1", CAIRN_ALLOW_UNSHIPPED_PUSH: "1" };
+    for (const [refused] of [...configEnv, ...numbered]) {
+      expect(at(proj, home, refused, proj, lifted).status, refused).toBe(0);
+    }
+    expect(at(proj, home, `git -c include.path=${join(proj, "inc.cfg")} status`, proj, lifted).status).toBe(0);
   });
 });

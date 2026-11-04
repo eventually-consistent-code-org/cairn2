@@ -16,7 +16,12 @@
  *   and resolveAlias's `lookup`, which the guard fills in per target and a
  *   test can stub. An alias is what it runs (#430): the inline `-c
  *   alias.<name>=<value>` ones are expanded as the words are parsed, so
- *   every reader of parseInvocation classifies the real subcommand.
+ *   every reader of parseInvocation classifies the real subcommand. The
+ *   other channels a command line defines config on (#467) -- --config-env,
+ *   GIT_CONFIG_COUNT / KEY_n / VALUE_n -- are read through the `env` lookup
+ *   the guard passes (the line's own prefix, then its environment) and
+ *   folded into `configs` in git's order, so the same rows and the same
+ *   alias walk see them; what the lookup can't read lands in `unread`.
  *
  * removeWhen: the run guard meets its own removeWhen -- it is this
  *   module's only reader.
@@ -213,6 +218,20 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  * discarded work, in every session, under the same owner's escape as the
  * other discards-work rows. Asserted by runguard-effects.test.ts and
  * runguard-guards.test.ts (#430).
+ *
+ * Two more rows read the same way (#467), and apply to every subcommand
+ * (no `sub`): an include set on the line (`-c include.path=F`, or the
+ * same key through --config-env or GIT_CONFIG_KEY_n) pulls a file's every
+ * setting in -- an alias, a mirror, a prune date -- unread here, so the
+ * command is refused outright; and a setting this table reads (an alias,
+ * `remote.<r>.mirror`, `gc.pruneExpire`, an include) whose value sits
+ * where the guard can't read it -- a variable neither the prefix nor the
+ * environment holds, a `$` expansion, GIT_CONFIG_PARAMETERS set by hand,
+ * a numbered entry with no key or value -- is refused the same way
+ * (`inv.unread`, filled by parseInvocation's `env` lookup and envConfig).
+ * A setting the table never reads is left to git whatever its value:
+ * `--config-env=core.editor=E status` passes. Asserted by
+ * runguard-guards.test.ts (#467).
  */
 export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: "reset", when: "flag", names: ["--hard"],
@@ -275,6 +294,18 @@ export const EFFECT_TABLE = Object.freeze([
   { effect: DISCARDS_WORK, sub: SHELL_ALIAS, when: "always", what: "a `!` shell alias",
     why: "git hands what follows the `!` to the shell as it stands, so whether it discards work can't be " +
       "read off the effect table; it is refused as if it did." },
+  // #467 -- an include on the line: a file's every setting, unread here; any subcommand
+  { effect: DISCARDS_WORK, when: "config", key: /^include(?:if\.[^=]*)?\.path(?:=(.*))?$/i,
+    what: "a `-c include.path` include",
+    why: "git reads every setting in the included file -- an alias, a mirror, a prune date -- and this guard reads " +
+      "none of them before the line runs, so what the command does can't be told; it is refused as if it discarded " +
+      "work. Put the setting on the line itself (`-c key=value`) and the guard can judge it." },
+  // #467 -- a setting this table reads, from a value the guard can't; any subcommand
+  { effect: DISCARDS_WORK, when: "unread", key: /^(?:alias\.|include(?:if\.[^=]*)?\.path$|remote\..+\.mirror$|gc\.pruneexpire$)/i,
+    what: "a git setting from a value the guard can't read",
+    why: "the value sits in an environment variable or a shell expansion the guard can't see, and the setting " +
+      "decides what the command does (an alias, a mirror, a prune date); set it on the line itself " +
+      "(`VAR=value git ...`, or `-c key=value`) so the guard can read it, or run the plain command." },
   { effect: MOVES_SHARED_REF, sub: "push", when: "pushTo",
     what: "`git push`", why: "it changes refs other clones fetch." },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout", when: "always", what: "`git checkout`", why: REWRITES },
@@ -326,8 +357,9 @@ export const EFFECT_TABLE = Object.freeze([
 
 // The subcommands the table knows (#430). In git a builtin wins over an
 // alias of its own name, so none of these is ever resolved as one -- an
-// alias can't disguise a hard reset as something else.
-const TABLED = new Set(EFFECT_TABLE.map((row) => row.sub));
+// alias can't disguise a hard reset as something else. A row with no
+// `sub` applies to every subcommand (#467) and names none here.
+const TABLED = new Set(EFFECT_TABLE.map((row) => row.sub).filter((sub) => sub !== undefined));
 
 /**
  * An alias value split into words the way git does it (#430, split_cmdline):
@@ -386,8 +418,10 @@ export function inlineAlias(inv, name) {
  * (git refuses the loop; the words stay as last expanded). A `!` value
  * ends the walk with `sub` SHELL_ALIAS. An empty value, which git fails,
  * leaves the words as typed. `alias` on the result is the name first
- * typed, for the refusal to name; the dirs, configs and opts gathered so
- * far are kept, the expansion's own coming after them.
+ * typed, for the refusal to name; the dirs, configs, opts and unread
+ * settings gathered so far are kept, the expansion's own coming after
+ * them -- read through the same `env` lookup the invocation was parsed
+ * with (#467), so a --config-env inside an alias value is folded too.
  */
 export function resolveAlias(inv, lookup = () => undefined) {
   const seen = new Set();
@@ -402,16 +436,58 @@ export function resolveAlias(inv, lookup = () => undefined) {
       return inv;
     }
     const tail = inv.paths.length ? ["--", ...inv.paths] : [];
-    const next = parseInvocation(["git", ...aliasWords(value), ...inv.args, ...tail], { aliases: false });
+    const next = parseInvocation(["git", ...aliasWords(value), ...inv.args, ...tail], { aliases: false, env: inv.readEnv });
     Object.assign(inv, {
       dirs: [...inv.dirs, ...next.dirs],
       configs: [...inv.configs, ...next.configs],
       configEnvs: [...inv.configEnvs, ...next.configEnvs],
+      unread: [...inv.unread, ...next.unread],
       opts: { ...inv.opts, ...next.opts },
       sub: next.sub, args: next.args, paths: next.paths,
     });
   }
   return inv;
+}
+
+/**
+ * True for a value the shell would still work out (#467): a `$` or a
+ * backtick anywhere in it. Quotes are gone by the time a prefix assignment
+ * reaches here, so `HR="$X"` and `HR='$X'` both read as `$X` -- the literal
+ * is refused along with the expansion, which nobody types as an alias.
+ */
+const expands = (value) => /[$`]/.test(value);
+
+/**
+ * The config a command's own prefix defines through the environment (#467),
+ * as { configs, unread }: GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_n and
+ * GIT_CONFIG_VALUE_n entries as `key=value` strings, in order, and a
+ * GIT_CONFIG_PARAMETERS set by hand (git's own carrier for -c values,
+ * sq-quoted) as unread -- key `*`, every setting at once. `env(name)` gives
+ * a variable's value, or undefined when the guard can't read it. A count
+ * that isn't a plain number, or past ENV_CONFIG_MAX, a key or value the
+ * lookup can't give, or one the shell would expand: unread, named by the
+ * variable. git reads these entries before the -c ones (measured, git
+ * 2.56, 2026-11-04), so the caller puts them first.
+ */
+export const ENV_CONFIG_MAX = 64;
+export function envConfig(env) {
+  const configs = [];
+  const unread = [];
+  if (env("GIT_CONFIG_PARAMETERS") !== undefined) unread.push({ key: "*", from: "GIT_CONFIG_PARAMETERS" });
+  const count = env("GIT_CONFIG_COUNT");
+  if (count === undefined) return { configs, unread };
+  if (!/^\d+$/.test(count) || Number(count) > ENV_CONFIG_MAX) {
+    unread.push({ key: "*", from: "GIT_CONFIG_COUNT" });
+    return { configs, unread };
+  }
+  for (let n = 0; n < Number(count); n++) {
+    const key = env(`GIT_CONFIG_KEY_${n}`);
+    const value = env(`GIT_CONFIG_VALUE_${n}`);
+    if (key === undefined || expands(key)) unread.push({ key: "*", from: `GIT_CONFIG_KEY_${n}` });
+    else if (value === undefined || expands(value)) unread.push({ key, from: `GIT_CONFIG_VALUE_${n}` });
+    else configs.push(`${key}=${value}`);
+  }
+  return { configs, unread };
 }
 
 /**
@@ -520,20 +596,37 @@ export const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.pat
  * -- `git checkout -- .` (#264). An inline `-c alias.<name>=<value>` naming
  * the subcommand is expanded in place (#430, resolveAlias), so `sub` is
  * what git runs and `alias` the name typed; `aliases: false` leaves it,
- * for the expansion's own re-parse.
+ * for the expansion's own re-parse. With `env`, a lookup from a variable's
+ * name to its value (undefined: can't read), each --config-env is folded
+ * into `configs` at its place in line order as `key=value` (#467) -- the
+ * last on a key wins, as in git -- or into `unread` as { key, from } when
+ * the variable can't be read or the shell would still expand it; the
+ * lookup is kept as `readEnv` for the alias walk. Without `env` the
+ * --config-env values stay unread to this module (`configEnvs` only).
  */
-export function parseInvocation(words, { aliases = true } = {}) {
+export function parseInvocation(words, { aliases = true, env } = {}) {
   let i = 1;
   const dirs = [];
   const configs = [];
   const configEnvs = [];
+  const unread = [];
   const opts = {};
   while (i < words.length && words[i].startsWith("-")) {
     const w = words[i];
     if (w === "-C") dirs.push(words[i + 1] ?? "");
     if (w === "-c") configs.push(words[i + 1] ?? "");
-    if (w === "--config-env") configEnvs.push(words[i + 1] ?? "");
-    if (w.startsWith("--config-env=")) configEnvs.push(w.slice(13));
+    const spec = w === "--config-env" ? words[i + 1] ?? "" : w.startsWith("--config-env=") ? w.slice(13) : undefined;
+    if (spec !== undefined) {
+      configEnvs.push(spec);
+      if (env) {
+        // `key=VAR`: the setting, and the variable git reads it from
+        const eq = spec.lastIndexOf("=");
+        const key = eq < 0 ? spec : spec.slice(0, eq);
+        const value = eq < 0 ? undefined : env(spec.slice(eq + 1));
+        if (value === undefined || expands(value)) unread.push({ key, from: w === "--config-env" ? `--config-env ${spec}` : w });
+        else configs.push(`${key}=${value}`);
+      }
+    }
     // --git-dir and --work-tree, either form; the last one wins, as in git
     const where = /^--(git-dir|work-tree)(?:=(.*))?$/.exec(w);
     if (where) opts[where[1] === "git-dir" ? "GIT_DIR" : "GIT_WORK_TREE"] = where[2] ?? words[i + 1] ?? "";
@@ -543,11 +636,12 @@ export function parseInvocation(words, { aliases = true } = {}) {
   const rest = words.slice(i + 1);
   const dashes = rest.indexOf("--");
   const inv = {
-    dirs, configs, configEnvs, opts,
+    dirs, configs, configEnvs, unread, opts,
     sub: words[i] ?? "",
     args: dashes < 0 ? rest : rest.slice(0, dashes),
     paths: dashes < 0 ? [] : rest.slice(dashes + 1),
   };
+  if (env) inv.readEnv = env;
   return aliases ? resolveAlias(inv) : inv;
 }
 
@@ -556,7 +650,8 @@ export function parseInvocation(words, { aliases = true } = {}) {
  * one place the table's `when` kinds are read.
  */
 function rowCause(row, inv, probe) {
-  if (row.sub !== inv.sub) return null;
+  // a row with no `sub` applies to every subcommand (#467: the include and unread rows)
+  if (row.sub !== undefined && row.sub !== inv.sub) return null;
   // the action word: the first arg, or "" when there is none or it is an
   // option -- git's default action, as in a bare `git stash` (#435)
   const first = inv.args[0] === undefined || inv.args[0].startsWith("-") ? "" : inv.args[0];
@@ -611,6 +706,11 @@ function rowCause(row, inv, probe) {
     case "config": {
       const hit = (inv.configs ?? []).find((c) => { const m = row.key.exec(c); return m && truthy(m[2] ?? "true"); });
       return hit === undefined ? null : `-c ${hit.split("=")[0]}`;
+    }
+    case "unread": {
+      // a setting the guard couldn't read (#467): the row's keys, or `*` -- a channel whose keys it can't even list
+      const hit = (inv.unread ?? []).find((u) => u.key === "*" || row.key.test(u.key));
+      return hit === undefined ? null : hit.from;
     }
     case "probe":
       return typeof probe?.[row.name] === "function" && probe[row.name](inv) ? row.cause : null;

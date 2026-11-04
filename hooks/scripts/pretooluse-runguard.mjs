@@ -126,6 +126,30 @@
  *   refusal names the alias beside the flag it expanded to. Asserted by
  *   runguard-effects.test.ts and runguard-guards.test.ts (#430).
  *
+ *   The other channels a line defines config on are read the same way
+ *   (#467), never handed to git: a --config-env's variable, from the
+ *   command's own prefix (`HR='reset --hard' git --config-env=alias.hr=HR
+ *   hr`), a wrapper's, or the session's; GIT_CONFIG_COUNT with its KEY_n
+ *   and VALUE_n on that prefix, read before the -c ones as git reads them
+ *   (measured, git 2.56, 2026-11-04); the session's own GIT_CONFIG_*
+ *   through the probe, which runs git under it. Both feed the alias walk
+ *   and the push-setting rows alike (`remote.<r>.mirror`, push.default --
+ *   the #287 residual). Refused outright in every session, like the `!`
+ *   alias: an include set on the line (`-c include.path=F`, or the key
+ *   through either channel) -- the file's settings are unread at
+ *   judgment time -- and a setting this guard reads from a value it
+ *   can't (a variable neither the line nor the environment holds, a `$`
+ *   expansion, a numbered entry with no key or value, GIT_CONFIG_PARAMETERS
+ *   set by hand). A setting the guard never reads is left to git whatever
+ *   its value: `--config-env=core.editor=E status` passes. Asserted by
+ *   runguard-guards.test.ts (#467). Not seen, dated 2026-11-04: those
+ *   variables exported earlier on the line rather than set on the
+ *   command's own prefix (the push gate still counts them, linePushConfig;
+ *   an alias through them does not), and a user or system config moved by
+ *   GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, HOME or XDG_CONFIG_HOME on the
+ *   prefix, which the alias probe reads from the session's files, not the
+ *   line's (the push gate counts those too).
+ *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
  *   on the line that could make a commit or move a ref refuses it: a git
@@ -141,9 +165,13 @@
  *   fail, so all of them, as the harness guard counts them), then its env
  *   -C and -C, under every GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR the
  *   session, the line or its own --git-dir / --work-tree give it. A push
- *   from another repository needs that repository's own stamp, and a
- *   checkout writing the owner's work tree, or moving their HEAD, is the
- *   owner's checkout. A folder or path only the shell can work out (cd
+ *   from another repository needs that repository's own stamp -- a
+ *   plan-less repository (no plan, so no stamp) is refused, not skipped,
+ *   because a plan-less clone of the same remote is the hostile twin of
+ *   the project (#326, decided phase 31, 2026-11-04; asserted by
+ *   runguard-guards.test.ts #306, "a push leaving another repository") --
+ *   and a checkout writing the owner's work tree, or moving their HEAD,
+ *   is the owner's checkout. A folder or path only the shell can work out (cd
  *   "$X", cd -, GIT_DIR=$(...)) refuses any push -- what it lands can't be
  *   told -- unless the ship gate's escape is set, and mid-run, any
  *   command that touches the owner's checkout (#435).
@@ -218,7 +246,7 @@ import {
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
-  longNames, parseInvocation, pushArgs, readArgs, resolveAlias, truthy,
+  envConfig, longNames, parseInvocation, pushArgs, readArgs, resolveAlias, truthy,
 } from "./git-effects.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -378,8 +406,10 @@ function readLine(line) {
       // git's own env -C applies to it alone (see invTargets); anything
       // else's -- a `bash -c` -- is where its commands run
       noteFolders(out, seg, words, assigns, cmd === "git" ? [] : wrapDirs);
+      // every prefix assignment rides along (#467: a `HR=... bash -c 'git
+      // --config-env=alias.hr=HR hr'` reads HR); envChoices picks the GIT_ENV ones
       const env = {
-        assigns: [...inherit.assigns, ...assigns.filter((a) => GIT_ENV.some((k) => a.startsWith(`${k}=`)))],
+        assigns: [...inherit.assigns, ...assigns],
         cleared: inherit.cleared || wrappers.some(clearsEnv),
       };
       if (depth < 3) for (const line of pagerCommands(assigns, words)) pagers.push([line, env]);
@@ -414,14 +444,24 @@ function readLine(line) {
       }
 
       // #301 -- top-level options and their values come off, `--` splits paths off (git-effects.mjs)
+      // #467 -- the config the line defines through the environment is read
+      // here, never handed to git: --config-env values and GIT_CONFIG_COUNT
+      // entries through readEnv, the numbered ones first as git reads them,
+      // then the inline aliases are walked over the whole of it
+      const readEnv = envLookup(assigns, env);
+      const parsed = parseInvocation(words, { aliases: false, env: readEnv });
+      const fromEnv = envConfig(readEnv);
       const inv = {
         assigns,
-        ...parseInvocation(words),
+        ...parsed,
+        configs: [...fromEnv.configs, ...parsed.configs],
+        unread: [...fromEnv.unread, ...parsed.unread],
         step: out.steps.length,
         wrapDirs,
         envAssigns: env.assigns,
         envCleared: env.cleared,
       };
+      resolveAlias(inv);
       out.steps.push(movesRefs(inv) || writesFile(words));
       out.invs.push(inv);
     }
@@ -453,6 +493,26 @@ function noteFolders(out, seg, words, assigns, wrapDirs) {
     const name = eq < 0 ? a : a.slice(0, eq);
     if (GIT_ENV.includes(name)) out.envSets[name].push(eq < 0 || words[0] === "unset" ? undefined : a.slice(eq + 1));
   }
+}
+
+/**
+ * A variable's value as the git command would see it (#467), for the
+ * config it defines through the environment (--config-env, GIT_CONFIG_COUNT
+ * and its entries): the command's own leading assignment, last one winning,
+ * else a wrapper's around it (`HR=x bash -c 'git ...'`), else the
+ * session's -- the guard runs in the environment the tool's shell starts
+ * from -- unless a wrapper may clear it (env -i, sudo). Undefined when none
+ * holds it: the guard reads nothing it can't see, and a variable the
+ * tool's shell alone sets (a profile export) is refused, never guessed.
+ */
+function envLookup(assigns, env) {
+  return (name) => {
+    for (const list of [assigns, env.assigns]) {
+      const own = list.filter((a) => a.startsWith(`${name}=`)).pop();
+      if (own !== undefined) return own.slice(name.length + 1);
+    }
+    return env.cleared ? undefined : process.env[name];
+  };
 }
 
 /** True for a wrapper that may run its command without the session's environment: env -i or -u, sudo, doas. */
@@ -884,18 +944,18 @@ function configKey(key) {
 
 /**
  * This command's own config as [key, value] pairs (#302): each `-c` (a bare
- * `-c x.y` is true), then each --config-env, whose value sits in an
- * environment variable the guard can't see -- undefined.
+ * `-c x.y` is true) and, since #467, each --config-env and GIT_CONFIG_COUNT
+ * entry the guard could read, folded into `configs` as the line was read;
+ * then each setting it couldn't (`unread`) -- a variable it can't see, a
+ * `$` expansion -- as undefined, the way the push gate has always read a
+ * --config-env it can't see.
  */
 function ownConfig(inv) {
   const pairs = inv.configs.map((c) => {
     const eq = c.indexOf("=");
     return eq < 0 ? [configKey(c), "true"] : [configKey(c.slice(0, eq)), c.slice(eq + 1)];
   });
-  for (const c of inv.configEnvs) {
-    const eq = c.lastIndexOf("=");
-    pairs.push([configKey(eq < 0 ? c : c.slice(0, eq)), undefined]);
-  }
+  for (const u of inv.unread ?? []) pairs.push([u.key === "*" ? "*" : configKey(u.key), undefined]);
   return pairs;
 }
 
@@ -905,14 +965,18 @@ const PUSH_SETTING = /^(push\.default|remote\.pushdefault|remote\..+\.push|branc
 /**
  * True when the guard can't read the settings a push follows (#297, #302):
  * the line changes them before it pushes (see linePushConfig), the command
- * pulls in an include (`-c include.path=F` can set anything), or a
- * --config-env sets one from an environment variable the guard can't see.
- * The guard never hands a command's own `-c` values to git -- they are
- * read here, so nothing the agent typed runs before the guard says yes.
+ * pulls in an include (`-c include.path=F` can set anything), a
+ * --config-env or numbered entry sets one from a value the guard can't
+ * see, or a channel whose keys it can't even list is on the line (`*`,
+ * GIT_CONFIG_PARAMETERS). The guard never hands a command's own `-c`
+ * values to git -- they are read here, so nothing the agent typed runs
+ * before the guard says yes. The include and the unread-setting rows
+ * refuse these outright in every session (#467); this is what the push
+ * gate still sees of them under the owner's destructive-git escape.
  */
 function configUnknown(inv) {
   return inv.lineConfig || ownConfig(inv).some(([k, v]) =>
-    /^include(if)?\./.test(k) || (v === undefined && PUSH_SETTING.test(k)));
+    k === "*" || /^include(if)?\./.test(k) || (v === undefined && PUSH_SETTING.test(k)));
 }
 
 /**
@@ -1273,9 +1337,10 @@ function gitBuiltin(sub) {
  * once per name, at the first place the command may run; a probe that
  * fails or finds nothing leaves the words as typed, so an unknown
  * subcommand stays what it was (fail open on the guard's own error, ADR
- * 0016). An alias this guard can't see -- one a `-c include.path` or a
- * --config-env pulls in -- takes that same path. Asserted by
- * runguard-guards.test.ts (#430).
+ * 0016). The line's own --config-env and GIT_CONFIG_COUNT aliases were
+ * folded in and walked as the line was read (#467, readLine); an include
+ * on the line never reaches here -- its row refused the command first.
+ * Asserted by runguard-guards.test.ts (#430, #467).
  */
 function configAlias(inv, at) {
   resolveAlias(inv, (name) => (gitBuiltin(name) ? undefined
@@ -1698,4 +1763,19 @@ try {
  *         recoverable with the header saying why. The absolute-root
  *         checkout spelling landed with #464; the mid-run restore, clean
  *         and forced rm of the owner's checkout with #468.
+ *   #467  an alias is resolved from every channel the command line can
+ *         define it on: --config-env (its variable read from the prefix,
+ *         a wrapper's or the session's) and GIT_CONFIG_COUNT / KEY_n /
+ *         VALUE_n on the prefix are folded into the invocation's configs
+ *         in git's order (git-effects.mjs parseInvocation `env`,
+ *         envConfig) and walked by resolveAlias like a -c alias; the push
+ *         rows read the same fold (the #287 residual, closed with it). An
+ *         include on the line, and a setting the table reads from a value
+ *         the guard can't (GIT_CONFIG_PARAMETERS among them), are
+ *         discards-work rows with no `sub`: refused in every session.
+ *   #326  a push leaving another repository is judged by that repository's
+ *         stamp (the wrong-stamp half, fixed by #306); the "no plan, no
+ *         guard" half is refused on purpose -- a plan-less clone of the
+ *         same remote is the hostile twin. Closed as decided (phase 31),
+ *         one sentence in the rules above; the #306 test is the proof.
  */
