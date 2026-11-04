@@ -772,8 +772,9 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
     expect(readPlanApproval(d, phaseDir)).toEqual(stamp);
     // the stamp lives in local state, never in git: whoever can commit the
     // plan cannot commit its own approval alongside
-    expect(gitIn(d, "status", "--porcelain", "--ignored", "--", ".cairn/state")).toMatch(/^!! /m);
-    expect(gitIn(d, "status", "--porcelain", "--", ".cairn/state")).toBe("");
+    const state = join(".cairn", "state");
+    expect(gitIn(d, "status", "--porcelain", "--ignored", "--", state)).toMatch(/^!! /m);
+    expect(gitIn(d, "status", "--porcelain", "--", state)).toBe("");
     // a re-approval replaces the stamp: the latest human act wins
     writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "echo replanned"));
     const again = approvePlan(d, phaseDir);
