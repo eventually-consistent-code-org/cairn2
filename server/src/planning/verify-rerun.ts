@@ -7,19 +7,20 @@
 //
 // The trust boundary, stated once: the server runs ONLY the declared line
 // read out of a git-tracked PLAN.md, never the worker-supplied string, and
-// never a declared line that differs from the one at the claim's base
-// commit -- the base the SERVER stamped at claim time, never one the
-// append call supplies (a caller who could pick the base could pick a
-// commit carrying its own edit of the plan). Server-side execution
-// bypasses every PreToolUse hook, so the tracked plan file is the whole of
-// the trust; an untracked plan has no provenance and is reported, not run.
-// The line runs with a minimal environment: the server's own env carries
-// tracker tokens, and a verify line has no business reading them.
-// Residual, on purpose: the claim is the agent's act, so an agent that
-// commits a plan edit and THEN claims passes this check. An owner-approval
-// stamp for the plan and an effect classification of the declared line
-// (the run guard's, hooks/scripts/git-effects.mjs) belong to the follow-up
-// filed at #357's close, phase 30.
+// only a declared line that is the same as the one in the plan the OWNER
+// approved (#423) -- the blob `plan_meta_set approve` stamped, read back
+// out of git's object store. The claim's base commit was the provenance
+// before #423 and is not any more: the claim is the agent's act, so an
+// agent that committed a plan edit and then claimed passed that check.
+// Server-side execution bypasses every PreToolUse hook, so the tracked
+// plan file and the owner's stamp are the whole of the trust; an untracked
+// plan has no provenance, an unapproved one no owner behind it, and both
+// are reported, not run. The line runs with a minimal environment: the
+// server's own env carries tracker tokens, and a verify line has no
+// business reading them.
+//
+// Asserted by ledger.test.ts ("verify.rerun" block) and the folded-close
+// case in measured-duration.test.ts.
 //
 // removeWhen: never for the observation itself -- a side effect the server
 // saw is the only evidence a self-graded close cannot narrate around.
@@ -32,7 +33,8 @@ import { join, relative, sep } from "node:path";
 import { loadConfig } from "../config.js";
 import { plansRoot } from "./artifacts.js";
 import { declaredVerifyIn, isPlainShellLine } from "./check.js";
-import { readClaimRecord, type Observation } from "./close-receipt.js";
+import { type Observation } from "./close-receipt.js";
+import { readPlanApproval } from "./plan-approval.js";
 
 // Constants
 /** Lines of combined output kept as the observed tail. */
@@ -64,10 +66,6 @@ function git(projectDir: string, args: string[]): string {
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
 }
 
-// A ref that starts with "-" would read as an option; anything outside a
-// commit-ish alphabet is not a ref the claim could have recorded.
-const SAFE_REF = /^[0-9A-Za-z][0-9A-Za-z._/~^-]*$/;
-
 // What the declared line may see of the server's environment: enough to
 // find node, npm and a cache, and nothing that authenticates anything.
 // The server holds GITHUB_TOKEN and the other tracker tokens for its own
@@ -83,36 +81,40 @@ export function minimalEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.Proces
 
 /**
  * Whether the declared line has the provenance the server needs before it
- * runs it: PLAN.md is tracked, and the task's declared line at the claim's
- * base commit is the same line the plan declares now. Content comparison
- * at the base commit is the precise form of "`git log -S` since planning":
- * it catches a committed edit after the base AND an uncommitted one in the
- * working tree, which `log -S` cannot see.
+ * runs it: PLAN.md is tracked, the owner stamped an approval of it (#423),
+ * the approved blob is still in git's object store, and the task's declared
+ * line in that approved plan is the same line the plan declares now. A
+ * content comparison against the approved text catches a committed edit
+ * AND an uncommitted one in the working tree, whoever made it and however
+ * long before the claim.
  *
  * :returns null when the line may run, or the named skip reason
  */
-function provenance(projectDir: string, planPath: string, issueId: string,
-  declared: string, baseRef: string): Observation | null {
+function provenance(projectDir: string, phaseDir: string, planPath: string, issueId: string,
+  declared: string): Observation | null {
   const rel = `./${relative(projectDir, planPath).split(sep).join("/")}`;
   try {
     git(projectDir, ["ls-files", "--error-unmatch", "--", rel]);
   } catch {
     return { skipped: "plan-untracked" };
   }
-  if (!SAFE_REF.test(baseRef)) return { skipped: "base-unreadable", detail: `base '${baseRef}' is not a commit ref` };
-  let then: string;
-  try {
-    then = git(projectDir, ["show", `${baseRef}:${rel}`]);
-  } catch {
-    return { skipped: "base-unreadable", detail: `PLAN.md does not exist at ${baseRef.slice(0, 12)}` };
+  const approval = readPlanApproval(projectDir, phaseDir);
+  if (!approval) {
+    return { skipped: "plan-unapproved", detail: "no owner-approval stamp for this phase's PLAN.md (plan_meta_set approve)" };
   }
-  const was = declaredVerifyIn(then.split("\n"), issueId);
+  let approved: string;
+  try {
+    approved = git(projectDir, ["cat-file", "-p", approval.blob]);
+  } catch {
+    return { skipped: "approval-unreadable", detail: `the approved plan (blob ${approval.blob.slice(0, 12)}) is not in git's object store` };
+  }
+  const was = declaredVerifyIn(approved.split("\n"), issueId);
   if (was !== declared) {
     return {
       skipped: "declared-changed",
       detail: was === null
-        ? `the task declared no verify at ${baseRef.slice(0, 12)}`
-        : `the declared line at ${baseRef.slice(0, 12)} was: ${was}`,
+        ? `the plan approved at ${approval.at} declared no verify for this task`
+        : `the plan approved at ${approval.at} declared: ${was}`,
     };
   }
   return null;
@@ -171,20 +173,16 @@ export function runDeclared(projectDir: string, command: string,
  * Every way of NOT running is a named skip, checked in this order:
  * evidence waived, no declared verify, the evidence command differs from
  * the declaration (character for character), the declaration is not a
- * plain shell line, PLAN.md is untracked, the server holds no claim stamp
- * with a base for this issue, the declared line changed since that base.
- * Only then does the declared line run.
+ * plain shell line, PLAN.md is untracked, no owner approval is stamped on
+ * it, the approved blob is unreadable, the declared line differs from the
+ * approved one. Only then does the declared line run.
  *
  * :param o.declared: the task's declared verify, already read off PLAN.md
- * :param o.claimBase: the base the server stamped at claim time, when the
- *   caller already read (and consumed) the claim record -- the folded close
- *   does; a standalone append leaves it unset and the record is read here.
- *   The ledger entry's own baseCommit is never consulted: it is the caller's.
  * :returns the observation, or null when rerun is off
  */
 export function observeDeclaredVerify(o: {
   projectDir: string; phaseDir: string; issueId: string;
-  evidence?: { command: string }; declared: string | null; claimBase?: string;
+  evidence?: { command: string }; declared: string | null;
   settings?: RerunSettings; now?: () => Date;
 }): Observation | null {
   const settings = o.settings ?? rerunSettings(o.projectDir);
@@ -196,11 +194,7 @@ export function observeDeclaredVerify(o: {
   if (o.evidence.command !== o.declared) return { skipped: "command-differs" };
   if (!isPlainShellLine(o.declared)) return { skipped: "not-plain-shell" };
   const planPath = join(plansRoot(o.projectDir), "phases", o.phaseDir, "PLAN.md");
-  const baseRef = o.claimBase?.trim() || readClaimRecord(o.projectDir, o.issueId)?.baseCommit;
-  if (!baseRef) {
-    return { skipped: "no-claim-record", detail: "no server-stamped claim with a base commit for this issue" };
-  }
-  const refused = provenance(o.projectDir, planPath, o.issueId, o.declared, baseRef);
+  const refused = provenance(o.projectDir, o.phaseDir, planPath, o.issueId, o.declared);
   if (refused) return refused;
   return runDeclared(o.projectDir, o.declared, settings.timeoutSeconds, o.now);
 }

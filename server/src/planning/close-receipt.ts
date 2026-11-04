@@ -233,19 +233,27 @@ export interface Observed {
  * Why a close with `verify.rerun` on ran nothing. Every reason is a named
  * string the tool result and the ledger line carry -- never silence.
  * `plan-untracked`: PLAN.md is not tracked by git, so the declared line has
- * no provenance to check. `no-claim-record`: the server never stamped a
- * claim with a base commit for this issue, and a base supplied on the
- * append call is the caller's word, never provenance. `base-unreadable`:
- * PLAN.md could not be read at the claim's base commit. `declared-changed`:
- * the declared line differs from the one at that commit. `spawn-failed`:
+ * no provenance to check. `plan-unapproved` (#423): no owner-approval
+ * stamp for the phase's PLAN.md (`plan_meta_set approve`); the claim's
+ * base commit is the agent's own act and stopped being provenance.
+ * `approval-unreadable`: the approved blob is not in git's object store any
+ * more. `declared-changed`: the declared line differs from the one in the
+ * approved plan. `classifier-unavailable` (#423): the run guard's shell
+ * reader and effect classifier (hooks/scripts) are not beside this server,
+ * so the line could not be classified -- fail closed, unlike the hooks.
+ * `unclassifiable`: the line nests or hides a command the classifier
+ * cannot read (a script file, stdin, too deep a substitution). `effect-refused`:
+ * a git invocation in the line carries an effect the server never runs
+ * (`discards-work`, `moves-shared-ref`); `effect` names it. `spawn-failed`:
  * the server's own error running the line (fail-open: the close still lands).
  */
 export type ObservedSkip =
   | "evidence-waived" | "no-declared-verify" | "command-differs" | "not-plain-shell"
-  | "plan-untracked" | "no-claim-record" | "base-unreadable" | "declared-changed"
+  | "plan-untracked" | "plan-unapproved" | "approval-unreadable" | "declared-changed"
+  | "classifier-unavailable" | "unclassifiable" | "effect-refused"
   | "spawn-failed";
 
-export type Observation = Observed | { skipped: ObservedSkip; detail?: string };
+export type Observation = Observed | { skipped: ObservedSkip; detail?: string; effect?: string };
 
 /**
  * A close is the claim that the declared run passed, so an observed
@@ -264,7 +272,8 @@ export function isObservedMismatch(o: Observation): boolean {
  * marker that plan_check and distill_manifest read back.
  */
 export function observedSegment(o: Observation): string {
-  if (!("exit" in o)) return `observed skipped=${o.skipped} — `;
+  // a refused effect is named on the line too: `skipped=effect-refused effect=discards-work`
+  if (!("exit" in o)) return `observed skipped=${o.skipped}${o.effect ? ` effect=${o.effect}` : ""} — `;
   return `observed exit=${o.exit} at=${o.at}${isObservedMismatch(o) ? " observed-mismatch" : ""} — `;
 }
 

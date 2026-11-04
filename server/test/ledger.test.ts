@@ -12,6 +12,7 @@ import {
   actualsSegment, receiptsDir, recordClaim, takeReceipt, writeReceipt, type CloseReceipt,
 } from "../src/planning/close-receipt.js";
 import { minimalEnv } from "../src/planning/verify-rerun.js";
+import { approvalsDir, approvePlan, readPlanApproval } from "../src/planning/plan-approval.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "cairn-ledger-"));
 
@@ -607,10 +608,12 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
   /**
    * A project whose PLAN.md declares `declared` for PROJ-105, committed
    * (tracked) unless `track` is false, with cairn.json's verify block as
-   * given. Returns the commit the plan landed in -- the claim's base.
+   * given, and the owner's approval stamped on the plan (#423) unless
+   * `approve` is false. Returns the commit the plan landed in.
    */
   function rerunProject(declared: string, verify: Record<string, unknown> | undefined,
-    opts: { track?: boolean; claim?: boolean } = {}): { d: string; phaseDir: string; base: string } {
+    opts: { track?: boolean; claim?: boolean; approve?: boolean } = {}):
+    { d: string; phaseDir: string; base: string } {
     const d = dir();
     writeFileSync(join(d, "cairn.json"), JSON.stringify({
       tracker: { type: "local", config: {} }, ...(verify ? { verify } : {}),
@@ -628,9 +631,13 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
       gitIn(d, "add", "-A");
       gitIn(d, "commit", "-qm", "plan", "--no-gpg-sign");
       base = gitIn(d, "rev-parse", "HEAD");
+      // The owner's approval of the plan as it reads now (#423): the only
+      // provenance the re-run keys on. Tests that want it absent pass
+      // approve: false; an untracked project has no git to stamp against.
+      if (opts.approve !== false) approvePlan(d, phaseDir);
     }
-    // The server's own claim stamp (#369) is the only provenance the re-run
-    // keys on; the tests that want it absent pass claim: false.
+    // The server's claim stamp (#369) is still the close's duration clock,
+    // but since #423 it is no longer the re-run's provenance.
     if (opts.claim !== false) recordClaim(d, "PROJ-105", "2026-07-14T10:00:00.000Z", base);
     return { d, phaseDir, base };
   }
@@ -744,44 +751,79 @@ describe("verify.rerun: the server re-runs the declared verify at close (#357)",
     expect(existsSync(join(d, "ran.marker"))).toBe(false);
   });
 
-  it("a declared line edited since the claim's base is reported, not run", () => {
+  it("an unapproved plan never runs: no owner stamp, the line is reported, not run (#423)", () => {
+    const { d, phaseDir, base } = rerunProject("touch ran.marker", { rerun: true }, { approve: false });
+    expect(readPlanApproval(d, phaseDir)).toBeNull();
+    const r = appendLedger(d, phaseDir, closeOn(base, "touch ran.marker"));
+    expect(r.observed).toMatchObject({ skipped: "plan-unapproved" });
+    expect(r.line).toContain(" — observed skipped=plan-unapproved — ");
+    expect(existsSync(join(d, "ran.marker"))).toBe(false);
+  });
+
+  it("the approval stamp is the server's record: blob of the plan as approved, when, and by whom", () => {
+    const { d, phaseDir } = rerunProject("echo planned", { rerun: true }, { approve: false });
+    const stamp = approvePlan(d, phaseDir, () => new Date("2026-11-03T09:00:00.000Z"));
+    const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
+    expect(stamp).toEqual({
+      version: 1, phaseDir, blob: gitIn(d, "hash-object", "--", plan),
+      at: "2026-11-03T09:00:00.000Z", by: "t <t@t>",
+    });
+    expect(readPlanApproval(d, phaseDir)).toEqual(stamp);
+    // the stamp lives in local state, never in git: whoever can commit the
+    // plan cannot commit its own approval alongside
+    expect(gitIn(d, "status", "--porcelain", "--ignored", "--", ".cairn/state")).toMatch(/^!! /m);
+    expect(gitIn(d, "status", "--porcelain", "--", ".cairn/state")).toBe("");
+    // a re-approval replaces the stamp: the latest human act wins
+    writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "echo replanned"));
+    const again = approvePlan(d, phaseDir);
+    expect(again.blob).not.toBe(stamp.blob);
+    expect(readPlanApproval(d, phaseDir)?.blob).toBe(again.blob);
+    // no PLAN.md, no stamp
+    expect(() => approvePlan(d, "99-missing")).toThrow(CairnError);
+  });
+
+  it("an approved blob that differs from the current declared line never runs", () => {
     const { d, phaseDir, base } = rerunProject("echo planned", { rerun: true });
     const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
     writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
     const r = appendLedger(d, phaseDir, closeOn(base, "touch hostile.marker"));
-    expect(r.observed).toMatchObject({ skipped: "declared-changed" });
+    expect(r.observed).toMatchObject({ skipped: "declared-changed", detail: expect.stringContaining("echo planned") });
     expect(existsSync(join(d, "hostile.marker"))).toBe(false);
-    // committed after the base, the same edit is still refused
+    // committed after the approval, the same edit is still refused
     gitIn(d, "commit", "-qam", "edit", "--no-gpg-sign");
     expect(appendLedger(d, phaseDir, closeOn(base, "touch hostile.marker")).observed)
       .toMatchObject({ skipped: "declared-changed" });
     expect(existsSync(join(d, "hostile.marker"))).toBe(false);
   });
 
-  it("the base on the append call is never provenance: no server claim stamp, nothing runs", () => {
-    // A caller who could name the base could name a commit carrying its own
-    // edit of the plan. Without the server's stamp the line is reported, not run.
+  it("the claim's base is no longer provenance: a plan edit committed before the claim is still refused", () => {
+    // The gap #357 left open (ADR 0017): an agent commits its edit of the
+    // plan and THEN claims, so the line is unchanged since the claim's base.
+    // The approval stamp predates the edit, so the line is reported, not run.
     const { d, phaseDir } = rerunProject("echo planned", { rerun: true }, { claim: false });
     const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
     writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
     gitIn(d, "commit", "-qam", "hostile", "--no-gpg-sign");
     const hostile = gitIn(d, "rev-parse", "HEAD");
-    const r = appendLedger(d, phaseDir, closeOn(hostile, "touch hostile.marker"));
-    expect(r.observed).toMatchObject({ skipped: "no-claim-record" });
-    expect(r.line).toContain(" — observed skipped=no-claim-record — ");
-    expect(existsSync(join(d, "hostile.marker"))).toBe(false);
-  });
-
-  it("with a server claim stamp, a hostile base on the append call is ignored", () => {
-    const { d, phaseDir } = rerunProject("echo planned", { rerun: true });
-    const plan = join(d, ".cairn", "plans", "phases", phaseDir, "PLAN.md");
-    writeFileSync(plan, readFileSync(plan, "utf8").replace("echo planned", "touch hostile.marker"));
-    gitIn(d, "commit", "-qam", "hostile", "--no-gpg-sign");
-    const hostile = gitIn(d, "rev-parse", "HEAD");
-    // the entry names the hostile commit as its base; the stamp still says the planned one
+    recordClaim(d, "PROJ-105", "2026-07-14T10:00:00.000Z", hostile);
     const r = appendLedger(d, phaseDir, closeOn(hostile, "touch hostile.marker"));
     expect(r.observed).toMatchObject({ skipped: "declared-changed" });
     expect(existsSync(join(d, "hostile.marker"))).toBe(false);
+  });
+
+  it("an approval whose blob git no longer holds is reported, not run", () => {
+    const { d, phaseDir, base } = rerunProject("touch ran.marker", { rerun: true });
+    const path = join(approvalsDir(d), `${phaseDir}.json`);
+    const stamp = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...stamp, blob: "0".repeat(40) }));
+    const r = appendLedger(d, phaseDir, closeOn(base, "touch ran.marker"));
+    expect(r.observed).toMatchObject({ skipped: "approval-unreadable" });
+    expect(existsSync(join(d, "ran.marker"))).toBe(false);
+    // a stamp that is not a stamp reads as no approval at all
+    writeFileSync(path, "{ corrupt");
+    expect(appendLedger(d, phaseDir, closeOn(base, "touch ran.marker")).observed)
+      .toMatchObject({ skipped: "plan-unapproved" });
+    expect(existsSync(join(d, "ran.marker"))).toBe(false);
   });
 
   it("the declared line runs under a minimal environment: no token the server holds reaches it", () => {

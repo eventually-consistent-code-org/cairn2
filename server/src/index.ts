@@ -152,6 +152,7 @@ import {
   startSession,
 } from "./sessions/store.js";
 import { planCheck } from "./planning/check.js";
+import { approvePlan } from "./planning/plan-approval.js";
 import { SWEEP_SCOPE_RE, writeAuditRecord, type AuditFinding, type SweepLeg } from "./audit/record.js";
 import { dedupIntake, fileSurvivors, filedCost } from "./audit/closing.js";
 import {
@@ -1258,10 +1259,11 @@ export function buildServer(deps: {
       let ledgerError: string | undefined;
       if (fold) {
         try {
-          // The claim record was cleared by the close above; its base is
-          // passed on as the server read it, so the re-run (#357) keys on
-          // the stamp, not on the entry the caller could have shaped.
-          ledger = appendLedger(d, fold.phaseDir, fold.entry, { claimBase: claimRecord?.baseCommit });
+          // The re-run (#357) inside the append keys on the owner's
+          // approval stamp (#423), which the server reads itself -- nothing
+          // on the entry the caller could have shaped, and no longer the
+          // claim's base, which is the agent's own act.
+          ledger = appendLedger(d, fold.phaseDir, fold.entry);
         } catch (e) {
           ledgerError = e instanceof Error ? e.message : String(e);
         }
@@ -2281,14 +2283,16 @@ export function buildServer(deps: {
     {
       annotations: { title: titleOf("plan_meta_set"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Set wave grouping (wave_N frontmatter) and/or the TDD-eligible task list on a phase's PLAN.md",
+        "Set waves (wave_N frontmatter) and/or the TDD task list on a phase's PLAN.md; "
+        + "approve stamps the owner's approval",
       inputSchema: z.object({
         phaseDir: z.string(),
         waves: z.array(z.array(z.string())).optional(),
         tdd: z.array(z.string()).optional(),
+        approve: z.boolean().optional(),
       }),
     },
-    wrap((a: { phaseDir: string; waves?: string[][]; tdd?: string[] }) => {
+    wrap((a: { phaseDir: string; waves?: string[][]; tdd?: string[]; approve?: boolean }) => {
       const parsed = parsePhaseDirName(a.phaseDir);
       if (!parsed) {
         throw new CairnError(
@@ -2298,6 +2302,11 @@ export function buildServer(deps: {
       }
       const d = dir();
       writePlanMeta(d, a.phaseDir, { waves: a.waves, tdd: a.tdd });
+      // The approval stamp (#423) is written AFTER the meta edit, so what it
+      // approves is the plan as it reads once this call is done. It is a
+      // human act: the plan verb asks before passing approve, and the
+      // close-time re-run runs nothing until the stamp exists.
+      const approval = a.approve ? approvePlan(d, a.phaseDir, now) : undefined;
       refreshHandoff(
         {
           source: "tool",
@@ -2305,7 +2314,7 @@ export function buildServer(deps: {
         },
         d,
       );
-      return { ok: true, ...readPlanMeta(d, a.phaseDir) };
+      return { ok: true, ...readPlanMeta(d, a.phaseDir), ...(approval ? { approval } : {}) };
     }),
   );
 

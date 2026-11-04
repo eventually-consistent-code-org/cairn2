@@ -168,8 +168,9 @@ export function isObservedMismatch(o) {
  * marker that plan_check and distill_manifest read back.
  */
 export function observedSegment(o) {
+    // a refused effect is named on the line too: `skipped=effect-refused effect=discards-work`
     if (!("exit" in o))
-        return `observed skipped=${o.skipped} — `;
+        return `observed skipped=${o.skipped}${o.effect ? ` effect=${o.effect}` : ""} — `;
     return `observed exit=${o.exit} at=${o.at}${isObservedMismatch(o) ? " observed-mismatch" : ""} — `;
 }
 /**
