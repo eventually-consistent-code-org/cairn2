@@ -40,6 +40,12 @@
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
+ *
+ *   One running manifest per project (#466): while any manifest of the
+ *   project reads `running`, create refuses RUN_LIVE -- the breaker judges
+ *   every running manifest the refusing session owns, and a running batch
+ *   gets no second manifest to move the count onto. Asserted:
+ *   run-manifest.test.ts, "one running manifest per project".
  * Author(s): John Reed
  */
 import { z } from "zod";
@@ -231,9 +237,24 @@ export declare function isFrozenByBreaker(state: RunManifestState | null | undef
 /** The typed refusal every move on a frozen run gets (#358), with the way it ends. */
 export declare function runFrozenError(state: RunManifestState): CairnError;
 /**
+ * The project's manifests that read `running` (#466), newest first. A file
+ * that fails to read or validate is not a running run: the runs folder is a
+ * protected zone (the harness guard, #263), so a manifest only the agent
+ * could have corrupted blocks nothing, the same rule the breaker's own
+ * listing applies (breaker.mjs, runManifests).
+ */
+export declare function liveRunManifests(projectDir: string, baseDir?: string): RunManifestState[];
+/**
  * Writes a fresh manifest at staging time. One manifest per run — an
  * existing manifest for this runId throws instead of being overwritten
  * (re-staging a run means a new runId; history never gets clobbered).
+ * One running manifest per project (#466) — while another manifest of the
+ * project reads `running`, create is RUN_LIVE and nothing is written: the
+ * breaker counts a session's refusals toward every run it has live, so a
+ * running batch that could stage a second run could not move the count,
+ * but the route is closed at the door too. A staged, complete or stopped
+ * run blocks nothing; a run that died `running` is ended by the owner with
+ * set_status, which the refusal names.
  * pushAuth always starts granted:false — only grantPushAuth() can flip it.
  *
  * :param projectDir: the project the run belongs to

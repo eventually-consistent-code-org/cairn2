@@ -19,15 +19,22 @@
  *   owner sees is unchanged.
  *
  * The freeze: while a run manifest reads `running`, each refusal from the
- *   run's own session -- the manifest's `sessionId` (#431) -- carries its
+ *   run's own session -- the manifest's `sessionId` (#431) -- carries a
  *   run_id and the breaker counts those rows; a refusal from any other
  *   session is logged with no run id and counts nothing, and so is every
  *   refusal while the manifest has no id yet. At the manifest's
  *   `breakerLimit` of them (#433: cairn.json's `auto.breaker` as it read
  *   when the run was staged; default 3, 0 off) it writes the manifest
  *   itself: status `stopped`, stop.reason `breaker`, the last three rows,
- *   and the sessions they came from. The counter is per run id, so a new
- *   run starts at zero.
+ *   and the sessions they came from. The count is the session's rows that
+ *   name any run it has live, so a run that follows a finished one starts
+ *   at zero -- and every running manifest the refusing session owns is
+ *   judged, never the newest alone (#466): a second manifest beside the
+ *   run, at any limit and staged in any order, shields nothing, and one
+ *   with a limit of its own freezes with the first. The server refuses that
+ *   second manifest at the door (RUN_LIVE, run-manifest.ts); this is the
+ *   hook's half, for a manifest written by hand. Asserted: hooks.test.ts,
+ *   "cannot move the breaker's count by staging a second run".
  *
  * Seams -- hooks import only node: and relative files, never server/:
  *   - a live run is read straight from the manifests the server writes
@@ -200,9 +207,16 @@ export function runManifests(projectDir, home = cairnHome()) {
   return { live, frozen, unreadable: null };
 }
 
-/** The live run a refusal belongs to: the newest one staged, when two are ever live at once. */
-function currentRun(live) {
-  return [...live].sort((a, b) => String(b.state?.created ?? "").localeCompare(String(a.state?.created ?? "")))[0];
+/**
+ * The live runs a refusal belongs to: every one the refusing session staged
+ * (#466), oldest first -- never the newest alone, which a second manifest
+ * could have been staged to become. The first is the run the session staged
+ * first, whose id the row carries; the count is shared by all of them.
+ */
+function ownedRuns(live, sessionId) {
+  return live
+    .filter((run) => ownsRun(run.state, sessionId))
+    .sort((a, b) => String(a.state?.created ?? "").localeCompare(String(b.state?.created ?? "")));
 }
 
 // The staged limit (#433)
@@ -409,11 +423,13 @@ export function recordRefusal({ guard, payload, effect, reason, projectDir }) {
     } catch {
       live = []; // a run list the breaker can't read has no live run to count against
     }
-    const run = currentRun(live);
-    // #431 -- the refusal is the run's only when it comes from the run's own
-    // session; any other session's row carries no run id and counts nothing
-    const owned = run !== undefined && ownsRun(run.state, sessionOf(payload));
-    const row = refusalRow({ guard, payload, effect, reason, runId: owned ? run.runId : undefined });
+    // #431 -- the refusal is a run's only when it comes from the run's own
+    // session; any other session's row carries no run id and counts nothing.
+    // #466 -- every live run that session staged is judged, not the newest;
+    // the row names the one staged first
+    const owned = ownedRuns(live, sessionOf(payload));
+    const first = owned[0];
+    const row = refusalRow({ guard, payload, effect, reason, runId: first?.runId });
     const path = refusalLogPath(projectDir, home);
 
     let appended = true;
@@ -426,35 +442,46 @@ export function recordRefusal({ guard, payload, effect, reason, projectDir }) {
       why = e?.code ?? String(e);
     }
 
-    // No live run, or not the run's own session: the row is the audit, and nothing counts
-    if (!owned) return [];
-    const limit = stagedLimit(run.state);
-    if (limit === 0) return [];
-    if (!appended) return offOnce(projectDir, home, run.runId, why);
+    // No live run of this session's: the row is the audit, and nothing counts
+    if (!first) return [];
+    // a run staged at a limit of 0 is off; a decoy at 0 beside a live run switches nothing off but itself
+    const judged = owned.filter((run) => stagedLimit(run.state) > 0);
+    if (!judged.length) return [];
+    if (!appended) return offOnce(projectDir, home, first.runId, why);
 
+    // the count is the session's: its rows naming any run it has live. A row
+    // names the run staged first, so a run that follows a finished one starts at zero
     let rows;
     try {
-      rows = readTail(path).filter((r) => r?.run_id === run.runId);
+      const ids = new Set(owned.map((run) => run.runId));
+      rows = readTail(path).filter((r) => ids.has(r?.run_id));
     } catch (e) {
-      return offOnce(projectDir, home, run.runId, e?.code ?? String(e));
+      return offOnce(projectDir, home, first.runId, e?.code ?? String(e));
     }
     // the row just written isn't there: the log went missing under us
-    if (!rows.length) return offOnce(projectDir, home, run.runId, "the log went missing");
+    if (!rows.length) return offOnce(projectDir, home, first.runId, "the log went missing");
 
-    if (rows.length < limit) {
-      return [`cairn circuit breaker: refusal ${rows.length} of ${limit} for batch run ${run.runId} — ` +
-        `at ${limit} the run freezes.`];
+    const lines = [];
+    for (const run of judged) {
+      const limit = stagedLimit(run.state);
+      if (rows.length < limit) {
+        lines.push(`cairn circuit breaker: refusal ${rows.length} of ${limit} for batch run ${run.runId} — ` +
+          `at ${limit} the run freezes.`);
+        continue;
+      }
+      let state;
+      try {
+        state = freeze(run, rows, limit, row.ts);
+      } catch (e) {
+        lines.push(`cairn circuit breaker: batch run ${run.runId} reached ${rows.length} refusals, but its ` +
+          `manifest can't be written (${e?.code ?? e}) — the run is NOT frozen.`,
+        "  the owner should stop it by hand.");
+        continue;
+      }
+      if (!isFrozen(state)) continue; // the run ended between the listing and the freeze
+      lines.push(...frozenLines(run.runId, state.stop?.count ?? rows.length, state.stop?.limit ?? limit));
     }
-    let state;
-    try {
-      state = freeze(run, rows, limit, row.ts);
-    } catch (e) {
-      return [`cairn circuit breaker: batch run ${run.runId} reached ${rows.length} refusals, but its ` +
-        `manifest can't be written (${e?.code ?? e}) — the run is NOT frozen.`,
-      "  the owner should stop it by hand."];
-    }
-    if (!isFrozen(state)) return []; // the run ended between the listing and the freeze
-    return frozenLines(run.runId, state.stop?.count ?? rows.length, state.stop?.limit ?? limit);
+    return lines;
   } catch {
     return []; // a broken breaker never changes what the guard decided
   }

@@ -40,6 +40,12 @@
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
+ *
+ *   One running manifest per project (#466): while any manifest of the
+ *   project reads `running`, create refuses RUN_LIVE -- the breaker judges
+ *   every running manifest the refusing session owns, and a running batch
+ *   gets no second manifest to move the count onto. Asserted:
+ *   run-manifest.test.ts, "one running manifest per project".
  * Author(s): John Reed
  */
 // Imports
@@ -464,9 +470,26 @@ function loadManifest(projectDir, runId, baseDir) {
 }
 // API
 /**
+ * The project's manifests that read `running` (#466), newest first. A file
+ * that fails to read or validate is not a running run: the runs folder is a
+ * protected zone (the harness guard, #263), so a manifest only the agent
+ * could have corrupted blocks nothing, the same rule the breaker's own
+ * listing applies (breaker.mjs, runManifests).
+ */
+export function liveRunManifests(projectDir, baseDir) {
+    return listRunManifests(projectDir, baseDir).filter((m) => m.status === "running");
+}
+/**
  * Writes a fresh manifest at staging time. One manifest per run — an
  * existing manifest for this runId throws instead of being overwritten
  * (re-staging a run means a new runId; history never gets clobbered).
+ * One running manifest per project (#466) — while another manifest of the
+ * project reads `running`, create is RUN_LIVE and nothing is written: the
+ * breaker counts a session's refusals toward every run it has live, so a
+ * running batch that could stage a second run could not move the count,
+ * but the route is closed at the door too. A staged, complete or stopped
+ * run blocks nothing; a run that died `running` is ended by the owner with
+ * set_status, which the refusal names.
  * pushAuth always starts granted:false — only grantPushAuth() can flip it.
  *
  * :param projectDir: the project the run belongs to
@@ -484,6 +507,14 @@ export function createRunManifest(projectDir, opts) {
     const existing = readManifestFile(path);
     if (existing) {
         throw new CairnError("PRECONDITION_FAILED", `a manifest for run '${existing.runId}' already exists at ${path}`, "one manifest per run — pick a new runId to re-stage");
+    }
+    // #466 -- one running manifest per project: a second one is the run the
+    // breaker would be asked to count against instead
+    const live = liveRunManifests(projectDir, baseDir);
+    if (live.length > 0) {
+        const ids = live.map((m) => `'${m.runId}'`).join(", ");
+        throw new CairnError("RUN_LIVE", `cannot stage run '${opts.runId}': batch run ${ids} of this project is still running`, `one running batch per project — let it finish, or end it first with run_manifest set_status ` +
+            `(complete|stopped) on ${ids}; a run the breaker froze is already stopped and blocks nothing`);
     }
     const state = {
         version: 1,

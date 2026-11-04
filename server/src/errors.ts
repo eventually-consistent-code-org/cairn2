@@ -5,7 +5,11 @@ export type ErrorCode =
   | "UNSUPPORTED" | "PRECONDITION_FAILED" | "NATIVE_MODULE_BROKEN"
   // #358: a headless batch run the circuit breaker froze -- its claim, close
   // and manifest moves are refused, and nextAction says how it ends
-  | "RUN_FROZEN";
+  | "RUN_FROZEN"
+  // #466: a run manifest of the project already reads running, so a second
+  // one is refused -- a running batch cannot stage the run the breaker would
+  // count against instead; nextAction names the live run and how it ends
+  | "RUN_LIVE";
 
 export class CairnError extends Error {
   constructor(
