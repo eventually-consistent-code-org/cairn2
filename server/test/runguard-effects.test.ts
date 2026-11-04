@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT, READ_ONLY, EFFECTS, EFFECT_TABLE,
-  classify, effectsOf, parseInvocation, wholeTree,
+  classify, effectsOf, envConfig, parseInvocation, wholeTree,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/git-effects.mjs";
 
@@ -686,5 +686,59 @@ describe("git effects: ref and reflog destruction discards work (#288)", () => {
     for (const c of ["git -c gc.pruneExpire=never gc", "git -c gc.pruneExpire=false gc", "git -c gc.auto=0 gc"]) {
       expect(causes(c, DISCARDS_WORK), c).toEqual([]);
     }
+  });
+});
+
+describe("git effects: config from the environment channels is folded in git's order (#467)", () => {
+  /** An environment of plain values; anything else is unreadable. */
+  const env = (vars: Record<string, string>) => (name: string) => vars[name];
+  /** A git command given as words, parsed under `vars`. */
+  const under = (vars: Record<string, string>, ...w: string[]) => parseInvocation(["git", ...w], { env: env(vars) });
+
+  it("a --config-env is read from the lookup at its place in line order, the last on a key winning as in git", () => {
+    const hr = under({ HR: "reset --hard" }, "--config-env=alias.hr=HR", "hr", "HEAD~1");
+    expect([hr.sub, hr.args, hr.alias, hr.configs, hr.unread]).toEqual(["reset", ["--hard", "HEAD~1"], "hr", ["alias.hr=reset --hard"], []]);
+    // the separate-word spelling, and the hostile order: -c after --config-env wins, before it loses
+    expect(under({ HR: "reset --hard" }, "--config-env", "alias.hr=HR", "hr").sub).toBe("reset");
+    expect(under({ X: "status" }, "--config-env=alias.x=X", "-c", "alias.x=reset --hard", "x").sub).toBe("reset");
+    expect(under({ X: "status" }, "-c", "alias.x=reset --hard", "--config-env=alias.x=X", "x").sub).toBe("status");
+    // an alias value carrying a --config-env of its own is read under the same lookup
+    const nested = under({ HR: "reset --hard" }, "-c", "alias.a=--config-env=alias.b=HR b", "a");
+    expect([nested.sub, nested.alias]).toEqual(["reset", "a"]);
+    // without a lookup the module reads none of it: the --config-env stays in configEnvs alone, as before #467
+    const blind = parseInvocation(["git", "--config-env=alias.hr=HR", "hr"]);
+    expect([blind.sub, blind.configs, blind.configEnvs, blind.unread]).toEqual(["hr", [], ["alias.hr=HR"], []]);
+  });
+
+  it("a value the lookup can't give, or the shell would still expand, is unread by key and named by its word", () => {
+    expect(under({}, "--config-env=alias.hr=HR", "hr").unread).toEqual([{ key: "alias.hr", from: "--config-env=alias.hr=HR" }]);
+    expect(under({ HR: "$X" }, "--config-env", "alias.hr=HR", "hr").unread).toEqual([{ key: "alias.hr", from: "--config-env alias.hr=HR" }]);
+    // the rows: a setting the table reads refuses; one it never reads carries no effect
+    expect(effectsOf(under({}, "--config-env=alias.hr=HR", "hr"))).toEqual([DISCARDS_WORK]);
+    expect(effectsOf(under({}, "--config-env=remote.origin.mirror=M", "push", "origin"))).toContain(DISCARDS_WORK);
+    expect(effectsOf(under({}, "--config-env=core.editor=E", "status"))).toEqual([READ_ONLY]);
+    expect(classify(under({}, "--config-env=alias.hr=HR", "hr"), {}, { only: DISCARDS_WORK })[0].flag).toBe("--config-env=alias.hr=HR");
+  });
+
+  it("envConfig: GIT_CONFIG_COUNT entries become key=value in order; a bogus count, a missing or expanding entry, or GIT_CONFIG_PARAMETERS is unread", () => {
+    expect(envConfig(env({}))).toEqual({ configs: [], unread: [] });
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "0" }))).toEqual({ configs: [], unread: [] });
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "alias.a", GIT_CONFIG_VALUE_0: "b",
+      GIT_CONFIG_KEY_1: "alias.b", GIT_CONFIG_VALUE_1: "reset --hard" })))
+      .toEqual({ configs: ["alias.a=b", "alias.b=reset --hard"], unread: [] });
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "abc" })).unread).toEqual([{ key: "*", from: "GIT_CONFIG_COUNT" }]);
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "1000" })).unread).toEqual([{ key: "*", from: "GIT_CONFIG_COUNT" }]);
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "1" })).unread).toEqual([{ key: "*", from: "GIT_CONFIG_KEY_0" }]);
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.hr" })).unread)
+      .toEqual([{ key: "alias.hr", from: "GIT_CONFIG_VALUE_0" }]);
+    expect(envConfig(env({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.hr", GIT_CONFIG_VALUE_0: "$V" })).unread)
+      .toEqual([{ key: "alias.hr", from: "GIT_CONFIG_VALUE_0" }]);
+    expect(envConfig(env({ GIT_CONFIG_PARAMETERS: "'alias.hr=reset --hard'" })).unread).toEqual([{ key: "*", from: "GIT_CONFIG_PARAMETERS" }]);
+    // the include row and the unread row apply to every subcommand: no `sub`, and so not on the builtin list
+    const anySub = EFFECT_TABLE.filter((r: { sub?: string }) => r.sub === undefined);
+    expect(anySub.map((r: { when: string }) => r.when).sort()).toEqual(["config", "unread"]);
+    expect(effectsOf(parseInvocation(["git", "-c", "include.path=/tmp/x.cfg", "status"]))).toEqual([DISCARDS_WORK]);
+    expect(effectsOf(parseInvocation(["git", "-c", "includeIf.gitdir:/r/.path=/tmp/x.cfg", "hr"]))).toEqual([DISCARDS_WORK]);
+    expect(effectsOf(parseInvocation(["git", "-c", "core.excludesFile=/tmp/x.cfg", "status"]))).toEqual([READ_ONLY]);
   });
 });
