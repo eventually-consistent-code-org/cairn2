@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   composeFreezeComment,
   createRunManifest,
@@ -488,5 +488,45 @@ describe("the circuit breaker's freeze (#358)", () => {
     expect(text).toContain("re-stage the remaining phases with /cairn:auto --batch");
     expect(text).not.toContain(projectDir);
     expect(text).not.toContain(baseDir);
+  });
+});
+
+// #431 -- the manifest names the run's session, so the breaker counts only
+// that session's refusals and the run guard freezes only it. The verb passes
+// the staging shell's id; a blank or absent one is null for the run guard to
+// stamp from the first call of a session working in `checkout`.
+describe("the run's session (#431)", () => {
+  it("records the staging session's id and the checkout it was staged from; blank or absent reads null", () => {
+    const { projectDir, baseDir } = setup();
+    const named = createRunManifest(projectDir, {
+      runId: "run-named", phases: PHASES, sessionId: "sess-1", createdAt: CREATED, baseDir,
+    });
+    expect(named.sessionId).toBe("sess-1");
+    expect(named.checkout).toBe(resolve(projectDir));
+    expect(readRunManifest(projectDir, "run-named", baseDir)).toMatchObject({ sessionId: "sess-1", checkout: resolve(projectDir) });
+
+    const bare = createRunManifest(projectDir, { runId: "run-bare", phases: PHASES, createdAt: CREATED, baseDir });
+    expect(bare.sessionId).toBeNull();
+    expect(readRunManifest(projectDir, "run-bare", baseDir).sessionId).toBeNull();
+    const blank = createRunManifest(projectDir, { runId: "run-blank", phases: PHASES, sessionId: "  ", createdAt: CREATED, baseDir });
+    expect(blank.sessionId).toBeNull();
+  });
+
+  it("the stamp the run guard writes survives the schema, and a manifest from before the field still reads", () => {
+    const { projectDir, baseDir } = setup();
+    createRunManifest(projectDir, { runId: "run-stamp", phases: PHASES, createdAt: CREATED, baseDir });
+    const path = runManifestPath(projectDir, "run-stamp", baseDir);
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    onDisk.sessionId = "sess-first"; // as breaker.mjs stampRunSession writes it
+    writeFileSync(path, JSON.stringify(onDisk));
+    expect(readRunManifest(projectDir, "run-stamp", baseDir).sessionId).toBe("sess-first");
+
+    delete onDisk.sessionId;
+    delete onDisk.checkout;
+    onDisk.runId = "run-old";
+    writeFileSync(runManifestPath(projectDir, "run-old", baseDir), JSON.stringify(onDisk));
+    const old = readRunManifest(projectDir, "run-old", baseDir);
+    expect(old.sessionId).toBeUndefined();
+    expect(old.checkout).toBeUndefined();
   });
 });

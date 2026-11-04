@@ -18,12 +18,14 @@
  *   row's shape, Prince Jain, dev.to, read 2026-10-14). The refusal text the
  *   owner sees is unchanged.
  *
- * The freeze: while a run manifest reads `running`, each row carries its
- *   run_id and the breaker counts that run's rows. At `auto.breaker` of
- *   them (cairn.json, default 3, 0 off) it writes the manifest itself:
- *   status `stopped`, stop.reason `breaker`, the last three rows, and the
- *   sessions they came from. The counter is per run id, so a new run starts
- *   at zero.
+ * The freeze: while a run manifest reads `running`, each refusal from the
+ *   run's own session -- the manifest's `sessionId` (#431) -- carries its
+ *   run_id and the breaker counts those rows; a refusal from any other
+ *   session is logged with no run id and counts nothing, and so is every
+ *   refusal while the manifest has no id yet. At `auto.breaker` of them
+ *   (cairn.json, default 3, 0 off) it writes the manifest itself: status
+ *   `stopped`, stop.reason `breaker`, the last three rows, and the sessions
+ *   they came from. The counter is per run id, so a new run starts at zero.
  *
  * Seams -- hooks import only node: and relative files, never server/:
  *   - a live run is read straight from the manifests the server writes
@@ -32,16 +34,23 @@
  *     else ~/.cairn -- the run guard's rule.
  *   - `auto.breaker` is read raw from cairn.json; anything but a whole
  *     number >= 0 reads as the default.
+ *   - the run's session is the manifest's `sessionId` (#431): written at
+ *     staging from the auto verb's $CLAUDE_CODE_SESSION_ID or, when the verb
+ *     had none, stamped here (stampRunSession, which the run guard calls
+ *     before judging any call) from the first hook event of a session whose
+ *     working directory is the manifest's `checkout` -- exactly that folder,
+ *     never one under it, so a session in a sibling worktree never becomes
+ *     the run's. A workflow's subagents share the dispatching session's id
+ *     (observed in this repo's observation log on 2026-10-22, a claim about
+ *     the harness that can expire), so the one id covers the whole run.
  *   - hooks have no tracker access, so the one plain-language comment on a
  *     freeze is the server's: posted by the next claim or close the frozen
  *     run makes -- the call that returns RUN_FROZEN -- once, flagged in the
  *     manifest (stop.commentedAt).
  *   - what a frozen run may no longer do is enforced elsewhere: the run
- *     guard refuses a push from the frozen run's own sessions (stop.sessions,
- *     the session_id of its counted rows -- a workflow's subagents share the
- *     dispatching session's id, observed in this repo's observation log on
- *     2026-10-22, a claim about the harness that can expire), and the
- *     server refuses claim and close with RUN_FROZEN.
+ *     guard refuses a push from the frozen run's session (the manifest's
+ *     sessionId, never another), and the server refuses claim and close
+ *     with RUN_FROZEN.
  *
  * Fail-open, both ways: a breaker that breaks never blocks a call, and never
  *   un-blocks one. recordRefusal is written never to throw, but the guards
@@ -63,12 +72,15 @@
  *     Ordering: file order is append order; nothing depends on it but "the
  *       last three", which is append order by definition.
  *   the manifest -- read-modify-write, never atomic: the server mutates it
- *     too (set_phase, set_status). The write is tmp (pid + random suffix)
- *     then rename, so a reader never sees half a file. A freeze landing
- *     between a server read and its write could be lost; the server
- *     re-reads before it renames and refuses to clobber a freeze, and a
- *     freeze that is still lost is re-made by the next refusal, whose count
- *     is still past the limit.
+ *     too (set_phase, set_status), and so does the session stamp (#431).
+ *     The write is tmp (pid + random suffix) then rename, so a reader never
+ *     sees half a file. A freeze landing between a server read and its
+ *     write could be lost; the server re-reads before it renames and
+ *     refuses to clobber a freeze, and a freeze that is still lost is
+ *     re-made by the next refusal, whose count is still past the limit. A
+ *     stamp a server write lands over is re-made by the next hook event,
+ *     since the id is null again; a server write the stamp lands over sits
+ *     in the same read-to-rename instant the freeze accepts, once per run.
  *
  * removeWhen: the platform halts an unattended session on repeated
  *   permission denials itself, with the denials recorded where the owner
@@ -81,11 +93,11 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import {
-  appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
-  renameSync, unlinkSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync,
+  readdirSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { migrateRepositoryState, projectKey, repositoryPath, worktreeKey } from "./lib.mjs";
 
 // Constants
@@ -308,14 +320,69 @@ function offOnce(projectDir, home, runId, why) {
   ];
 }
 
+// The run's session (#431)
+
+/** The payload's session id, or null when the harness sent none. */
+function sessionOf(payload) {
+  return typeof payload?.session_id === "string" && payload.session_id ? payload.session_id : null;
+}
+
+/** True when `sessionId` is the session that staged `state`. A manifest with no id owns no refusal. */
+export function ownsRun(state, sessionId) {
+  return typeof state?.sessionId === "string" && state.sessionId !== "" && sessionId === state.sessionId;
+}
+
+/** A running manifest staged from `cwd` -- exactly that folder -- whose session id is still null. */
+function unstamped(state, cwd) {
+  return state?.sessionId == null && typeof state?.checkout === "string" && resolve(state.checkout) === cwd;
+}
+
+/**
+ * Stamps a running manifest that has no session id yet with this call's
+ * session, when the call's working directory is the manifest's `checkout`:
+ * the auto verb staged the run from a shell with no $CLAUDE_CODE_SESSION_ID,
+ * so the first session seen working in the run's own checkout is the run's.
+ * Exactly that folder -- a folder under it is another worktree, and a
+ * session in a sibling worktree never becomes the run's. Read fresh, then
+ * tmp-and-rename; a manifest that stopped or got its id in between is left
+ * as it is. Never throws; false when nothing was stamped. Asserted:
+ * hooks.test.ts, "the run guard stamps the first session".
+ *
+ * :param payload: the hook's stdin payload (cwd, session_id)
+ * :param projectDir: the project the guard judged
+ * :returns true when a manifest was stamped
+ */
+export function stampRunSession({ payload, projectDir }) {
+  try {
+    const sessionId = sessionOf(payload);
+    if (!sessionId || typeof payload?.cwd !== "string" || !payload.cwd) return false;
+    const home = cairnHome();
+    // no runs folder: this machine never staged a batch run, and the call pays one stat to learn it
+    if (!existsSync(join(home, "runs"))) return false;
+    const cwd = resolve(payload.cwd);
+    let stamped = false;
+    for (const run of runManifests(projectDir, home).live) {
+      if (!unstamped(run.state, cwd)) continue;
+      const fresh = JSON.parse(readFileSync(run.path, "utf8"));
+      if (fresh?.status !== "running" || !unstamped(fresh, cwd)) continue;
+      fresh.sessionId = sessionId;
+      writeJsonAtomic(run.path, fresh);
+      stamped = true;
+    }
+    return stamped;
+  } catch {
+    return false; // a stamp that can't land is tried again on the next call
+  }
+}
+
 // Main entry
 
 /**
  * Records one guard refusal and runs the breaker. Returns the lines the
  * guard prints after its own refusal: the count toward the limit, the
  * freeze when this refusal trips it, the breaker being off -- or nothing
- * when no run is live. Never throws: the guard exits 2 whatever happens
- * here.
+ * when no run is live or the refusal is not the run's own session's (#431).
+ * Never throws: the guard exits 2 whatever happens here.
  *
  * :param guard: "run" | "harness" | "leak"
  * :param payload: the hook's stdin payload (tool_name, tool_input, session_id)
@@ -334,7 +401,10 @@ export function recordRefusal({ guard, payload, effect, reason, projectDir }) {
       live = []; // a run list the breaker can't read has no live run to count against
     }
     const run = currentRun(live);
-    const row = refusalRow({ guard, payload, effect, reason, runId: run?.runId });
+    // #431 -- the refusal is the run's only when it comes from the run's own
+    // session; any other session's row carries no run id and counts nothing
+    const owned = run !== undefined && ownsRun(run.state, sessionOf(payload));
+    const row = refusalRow({ guard, payload, effect, reason, runId: owned ? run.runId : undefined });
     const path = refusalLogPath(projectDir, home);
 
     let appended = true;
@@ -347,8 +417,8 @@ export function recordRefusal({ guard, payload, effect, reason, projectDir }) {
       why = e?.code ?? String(e);
     }
 
-    // No live run: the row is the audit, and nothing counts
-    if (!run) return [];
+    // No live run, or not the run's own session: the row is the audit, and nothing counts
+    if (!owned) return [];
     const limit = breakerLimit(projectDir);
     if (limit === 0) return [];
     if (!appended) return offOnce(projectDir, home, run.runId, why);

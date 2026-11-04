@@ -33,6 +33,13 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
+ *   The run's session (#431): `sessionId` names the session that staged
+ *   the run -- the auto verb's $CLAUDE_CODE_SESSION_ID -- and only that
+ *   session's refusals count toward its freeze; the run guard refuses a
+ *   frozen run's pushes by that id alone. Null when the verb had none,
+ *   until the run guard stamps it from the first hook event of a session
+ *   whose working directory is `checkout`; a null id counts nothing.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -378,6 +385,8 @@ export const RunManifestSchema = z.object({
     effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
     currentPhase: z.number().optional(),
     stop: RunStopSchema.optional(),
+    sessionId: z.string().nullable().optional(),
+    checkout: z.string().optional(),
 });
 // Internals
 /** Reads and validates the manifest file at `path`; null when absent. */
@@ -489,6 +498,10 @@ export function createRunManifest(projectDir, opts) {
         ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
         ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
         status: "staged",
+        // #431 -- the run's session, or null for the run guard to stamp; the
+        // checkout is what the stamp compares a session's working directory against
+        sessionId: typeof opts.sessionId === "string" && opts.sessionId.trim() ? opts.sessionId : null,
+        checkout: resolve(projectDir),
     };
     writeManifestFile(path, state);
     return state;

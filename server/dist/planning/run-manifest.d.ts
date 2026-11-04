@@ -33,6 +33,13 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
+ *   The run's session (#431): `sessionId` names the session that staged
+ *   the run -- the auto verb's $CLAUDE_CODE_SESSION_ID -- and only that
+ *   session's refusals count toward its freeze; the run guard refuses a
+ *   frozen run's pushes by that id alone. Null when the verb had none,
+ *   until the run guard stamps it from the first hook event of a session
+ *   whose working directory is `checkout`; a null id counts nothing.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -179,6 +186,15 @@ export interface RunManifestState {
     /** Why the run stopped, when something other than the executor stopped
      * it (#358): today only the circuit breaker, written by the guards. */
     stop?: RunStop;
+    /** The session that staged the run (#431): the auto verb's
+     * $CLAUDE_CODE_SESSION_ID, else null until the run guard stamps the
+     * first session whose working directory is `checkout`. The breaker
+     * counts only this session's refusals; null counts nothing. Absent on
+     * manifests written before it existed, which read the same as null. */
+    sessionId?: string | null;
+    /** The checkout the run was staged from, resolved (#431): what the run
+     * guard's stamp compares a session's working directory against. */
+    checkout?: string;
 }
 /** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
  * digest, never the raw command or path. */
@@ -230,6 +246,8 @@ export declare function createRunManifest(projectDir: string, opts: {
     } | null;
     answers?: StagedAnswer[];
     effort?: RunManifestState["effort"];
+    /** The staging shell's session id (#431); blank or absent reads null. */
+    sessionId?: string | null;
     createdAt?: string;
     baseDir?: string;
 }): RunManifestState;

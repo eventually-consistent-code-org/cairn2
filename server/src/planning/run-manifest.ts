@@ -33,6 +33,13 @@
  *   is the one hook that posts to the tracker itself -- #379 -- because
  *   the stalled run it narrates makes no tool call at all.)
  *
+ *   The run's session (#431): `sessionId` names the session that staged
+ *   the run -- the auto verb's $CLAUDE_CODE_SESSION_ID -- and only that
+ *   session's refusals count toward its freeze; the run guard refuses a
+ *   frozen run's pushes by that id alone. Null when the verb had none,
+ *   until the run guard stamps it from the first hook event of a session
+ *   whose working directory is `checkout`; a null id counts nothing.
+ *
  * removeWhen: never — push authority is an owner-decided policy gate, not
  *   a workaround for a model limit; a stronger agent does not change who
  *   decides what leaves the machine (ADR 0007).
@@ -381,6 +388,15 @@ export interface RunManifestState {
   /** Why the run stopped, when something other than the executor stopped
    * it (#358): today only the circuit breaker, written by the guards. */
   stop?: RunStop;
+  /** The session that staged the run (#431): the auto verb's
+   * $CLAUDE_CODE_SESSION_ID, else null until the run guard stamps the
+   * first session whose working directory is `checkout`. The breaker
+   * counts only this session's refusals; null counts nothing. Absent on
+   * manifests written before it existed, which read the same as null. */
+  sessionId?: string | null;
+  /** The checkout the run was staged from, resolved (#431): what the run
+   * guard's stamp compares a session's working directory against. */
+  checkout?: string;
 }
 
 /** One guard refusal as breaker.mjs logs it (#358) -- fixed text and a
@@ -470,6 +486,8 @@ export const RunManifestSchema: z.ZodType<RunManifestState> = z.object({
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
   currentPhase: z.number().optional(),
   stop: RunStopSchema.optional(),
+  sessionId: z.string().nullable().optional(),
+  checkout: z.string().optional(),
 });
 
 // Internals
@@ -581,6 +599,8 @@ export function createRunManifest(
     ceiling?: { tokens?: number; usd?: number } | null;
     answers?: StagedAnswer[];
     effort?: RunManifestState["effort"];
+    /** The staging shell's session id (#431); blank or absent reads null. */
+    sessionId?: string | null;
     createdAt?: string; // injectable for tests; wall clock otherwise
     baseDir?: string;
   },
@@ -614,6 +634,10 @@ export function createRunManifest(
     ...(opts.answers !== undefined ? { answers: opts.answers } : {}),
     ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
     status: "staged",
+    // #431 -- the run's session, or null for the run guard to stamp; the
+    // checkout is what the stamp compares a session's working directory against
+    sessionId: typeof opts.sessionId === "string" && opts.sessionId.trim() ? opts.sessionId : null,
+    checkout: resolve(projectDir),
   };
   writeManifestFile(path, state);
   return state;

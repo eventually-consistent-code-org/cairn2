@@ -128,13 +128,14 @@ Every refusal from the run, harness and leak guards appends one row to
 a refusal log under the cairn home — when, which guard and tool, the
 effect refused, fixed reason text, the session, the live run, and a
 sha256 of the tool input, never the command or path itself. While a
-batch run is live, its rows are counted; at `auto.breaker` (default 3,
+batch run is live, the rows from the session its manifest names -- the
+one that staged it (#431) -- are counted; at `auto.breaker` (default 3,
 `0` off) the guard freezes the run by writing its manifest: `stopped`,
 with the reason and the last three rows. The breaker is the only freeze
 authority cairn has, and it is scoped to headless runs: a session with
-no live run, or one that never named the run, is never frozen. A frozen
-run's own sessions are refused pushes by the run guard, and its claims
-and closes return `RUN_FROZEN` from the server.
+no live run, or one the manifest does not name, is never counted and
+never frozen. A frozen run's own session is refused pushes by the run
+guard, and its claims and closes return `RUN_FROZEN` from the server.
 
 The seam, stated because it is not obvious: the hooks import no server
 code and have no tracker access, so they read the run manifest straight

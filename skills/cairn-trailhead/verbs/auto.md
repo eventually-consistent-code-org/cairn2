@@ -90,8 +90,15 @@ Staging sequence, in order:
    verify, but nothing pushes; the report lists what's ready to ship by
    hand. "Adjust" loops back to step 1 with the user's changes.
 5. **Write the run's authority.** On approval: `run_manifest(action:
-   "create")` with the phases, estimates, ceiling, and staged answers;
-   `run_manifest(action: "grant_push")` only if the user authorized
+   "create")` with the phases, estimates, ceiling, staged answers and
+   `sessionId` — this shell's `$CLAUDE_CODE_SESSION_ID` (read it with
+   `echo "$CLAUDE_CODE_SESSION_ID"`; present in the agent's shell on
+   Claude Code as of 2026-11-03, a dated claim about the harness). It
+   names the run's session: only its refusals count toward the breaker,
+   and only it is frozen (#431). When the variable is empty leave
+   `sessionId` out — the run guard stamps it from the first call of a
+   session working in this checkout; `run_manifest(action: "grant_push")`
+   only if the user authorized
    pushes; then `budget_check` with the ceiling to open the spend ledger
    (hard at boundaries — no new phase/wave starts past the ceiling, an
    in-flight wave finishes; bounded overshoot ≤ one wave). Then
@@ -143,8 +150,10 @@ batch-specific loop.
    override.
 
    **The circuit breaker.** While the manifest reads `running`, every
-   guard refusal — run guard, harness guard, leak guard — is logged and
-   counted against this run. At `auto.breaker` refusals (cairn.json,
+   guard refusal — run guard, harness guard, leak guard — from the run's
+   own session (the manifest's `sessionId`) is logged and counted against
+   this run; another session's refusal is logged and never counted
+   (#431). At `auto.breaker` refusals (cairn.json,
    default 3, `0` turns it off) the guard freezes the run: the manifest
    moves to `stopped` with a `stop` block (reason `breaker`, the last
    three refusals). From then on the run's pushes are refused, and claim,

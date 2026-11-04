@@ -3922,7 +3922,8 @@ describe("circuit breaker (#358)", () => {
   const manifestPath = (home: string, proj: string, runId: string) =>
     join(home, "runs", `${projectKey(proj)}-${runId}.json`);
 
-  /** A full manifest, as the server writes one: push authority granted, phase 1 in flight. */
+  /** A full manifest, as the server writes one: push authority granted, phase 1 in flight,
+   *  staged by session "sess-run" (#431 -- only that session's refusals count). */
   function writeManifest(home: string, proj: string, runId: string, status: string, created = "2026-10-22T00:00:00.000Z") {
     mkdirSync(join(home, "runs"), { recursive: true });
     writeFileSync(manifestPath(home, proj, runId), JSON.stringify({
@@ -3930,7 +3931,7 @@ describe("circuit breaker (#358)", () => {
       phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
       ceiling: null,
       pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
-      status, currentPhase: 1,
+      status, currentPhase: 1, sessionId: "sess-run", checkout: proj,
     }, null, 2));
   }
 
@@ -5320,5 +5321,112 @@ syncBuiltinESMExports();
     // and the live file is back, empty, ready for the next append
     expect(existsSync(live)).toBe(true);
     expect(readFileSync(live, "utf8")).toBe("");
+  });
+});
+
+// #431: the breaker attributed every refusal on the project to the newest
+// live run, whoever refused it. An interactive session in the main checkout
+// that tried to switch branches while a run was live was refused BECAUSE a
+// run was live, and three of those froze the run and then refused that
+// session's own pushes as "the run's". The manifest now records the staging
+// session's id; the breaker counts only that session's refusals; the run
+// guard's frozen-session rule compares against the recorded id; a manifest
+// with no id yet counts nothing. Where the staging shell had no session id,
+// the run guard stamps it from the first hook event of a session whose
+// working directory is the run's checkout.
+describe("the breaker counts only the run's own session (#431)", () => {
+  const RUN = "run-own";
+
+  /** A committed project, an isolated cairn home, and one running manifest staged by `sessionId`. */
+  function fixture(sessionId: string | null, checkout?: string) {
+    const proj = tmpProj();
+    gitInit(proj);
+    stageFile(proj, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj });
+    writeFileSync(join(proj, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    const home = freshDir("cairn-hooks-own-session-home-");
+    mkdirSync(join(home, "runs"), { recursive: true });
+    const created = "2026-11-03T00:00:00.000Z";
+    writeFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), JSON.stringify({
+      version: 1, runId: RUN, project: basename(proj), created,
+      phases: [{ number: 1, name: "one", estimate: { low: 1, high: 2, estUsd: { low: 0, high: 0 } } }],
+      ceiling: null,
+      pushAuth: { granted: true, scope: "manifest-phases", grantedAt: created },
+      status: "running", currentPhase: 1, sessionId, checkout: checkout ?? proj,
+    }, null, 2));
+    return { proj, home };
+  }
+
+  const manifest = (home: string, proj: string) =>
+    JSON.parse(readFileSync(join(home, "runs", `${projectKey(proj)}-${RUN}.json`), "utf8"));
+
+  const rows = (home: string, proj: string): Array<Record<string, unknown>> => {
+    const path = join(home, "refusals", `${projectKey(proj)}.jsonl`);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
+
+  /** One run-guard call from `session`, standing in `cwd`. */
+  const guard = (proj: string, home: string, command: string, session: string, cwd = proj) =>
+    runHookRaw(RUNGUARD, proj, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd, session_id: session }),
+      { CAIRN_HOME: home });
+
+  it("another session's refusals leave the run running and that session pushing; the run's own three freeze it", () => {
+    const { proj, home } = fixture("sess-run");
+    // the owner's session, in the chair: refused each time, counted never
+    for (let i = 0; i < 3; i++) {
+      const r = guard(proj, home, "git reset --hard", "sess-owner");
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(home, proj).status).toBe("running");
+    expect(rows(home, proj)).toHaveLength(3);
+    expect(rows(home, proj).every((r) => !("run_id" in r))).toBe(true);
+    // and it still pushes its feature branch
+    expect(guard(proj, home, "git push origin feature", "sess-owner").status).toBe(0);
+
+    // the run's own session: three refusals freeze it, and only its rows carry the run id
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain("refusal 2 of 3");
+    expect(guard(proj, home, "git reset --hard", "sess-run").stderr).toContain(`batch run ${RUN} is frozen`);
+    const m = manifest(home, proj);
+    expect(m.status).toBe("stopped");
+    expect(m.stop).toMatchObject({ reason: "breaker", count: 3, sessions: ["sess-run"] });
+    expect(rows(home, proj).filter((r) => r.run_id === RUN).map((r) => r.session_id)).toEqual(["sess-run", "sess-run", "sess-run"]);
+
+    // frozen: the run's session pushes nothing; the other session is untouched
+    const own = guard(proj, home, "git push origin feature", "sess-run");
+    expect(own.status).toBe(2);
+    expect(own.stderr).toContain("this session is the run's");
+    expect(guard(proj, home, "git push origin feature", "sess-owner").status).toBe(0);
+  });
+
+  it("a manifest with no session id yet counts nothing, from any session", () => {
+    const { proj, home } = fixture(null, join(tmpdir(), "somewhere-else"));
+    for (const session of ["sess-a", "sess-b", "sess-a", "sess-a"]) {
+      const r = guard(proj, home, "git reset --hard", session);
+      expect(r.status).toBe(2);
+      expect(r.stderr).not.toContain("circuit breaker");
+    }
+    expect(manifest(home, proj).status).toBe("running");
+    expect(manifest(home, proj).sessionId).toBeNull();
+    expect(rows(home, proj).every((r) => !("run_id" in r))).toBe(true);
+  });
+
+  it("with no id staged, the run guard stamps the first session whose working directory is the run's checkout", () => {
+    const { proj, home } = fixture(null);
+    // a session elsewhere -- another checkout -- is not the run's, allowed or refused
+    const elsewhere = freshDir("cairn-hooks-own-session-elsewhere-");
+    expect(guard(proj, home, "git status", "sess-elsewhere", elsewhere).status).toBe(0);
+    expect(manifest(home, proj).sessionId).toBeNull();
+    // the first event from the checkout itself stamps the run -- an allowed call, no refusal needed
+    expect(guard(proj, home, "git status", "sess-first").status).toBe(0);
+    expect(manifest(home, proj)).toMatchObject({ status: "running", sessionId: "sess-first", currentPhase: 1 });
+    // stamped once: a later session from the same folder does not take it over
+    expect(guard(proj, home, "git status", "sess-later").status).toBe(0);
+    expect(manifest(home, proj).sessionId).toBe("sess-first");
+    // from here the stamped session's refusals count and no other's do
+    expect(guard(proj, home, "git reset --hard", "sess-later").stderr).not.toContain("circuit breaker");
+    expect(guard(proj, home, "git reset --hard", "sess-first").stderr).toContain(`refusal 1 of 3 for batch run ${RUN}`);
   });
 });

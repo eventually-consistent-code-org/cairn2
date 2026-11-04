@@ -2117,12 +2117,17 @@ refusal log (`~/.cairn/refusals/<project>.jsonl`): when, which guard and
 tool, the effect refused, a fixed reason, the session, the run if one is
 live, and a sha256 of the tool input. Never the command or the path
 itself: a command line can carry a credential, and the log outlives the
-session. While a batch run is live its rows carry its run id, and at
-`auto.breaker` of them (default 3) the breaker freezes the run — the
+session. While a batch run is live, the rows from the run's own session
+— the one its manifest names, recorded at staging from the shell's
+`$CLAUDE_CODE_SESSION_ID`, else stamped by the run guard from the first
+call of a session working in the run's checkout — carry its run id, and
+at `auto.breaker` of them (default 3) the breaker freezes the run — the
 manifest moves to `stopped` with a `stop` block naming the reason, the
-last three refusals and the sessions they came from. From then on:
+last three refusals and the sessions they came from. A refusal from any
+other session is logged and never counted, so no session can freeze a
+run it never touched (#431). From then on:
 
-- the run's own sessions are refused any `git push` (a stopped manifest
+- the run's own session is refused any `git push` (a stopped manifest
   would otherwise lift the mid-run push rule). A workflow's subagents
   share their dispatching session's id, so they count as the run's —
   observed 2026-10-22, a claim about the harness that can expire. Your
