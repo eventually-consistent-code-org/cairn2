@@ -6,11 +6,14 @@
 // merges by union (.gitattributes, #361), so lines from two branches land
 // in merge order. Readers never let file position decide between two
 // lines for one task: a closure and its evidence fix-up resolve by commit
-// ancestry, then the date on the line, then file order (#445, the rule
-// lives in distill-manifest.ts). Asserted by test/ledger.test.ts "ledger
+// ancestry, then the stamp on the line, then the head hash (#445, #472;
+// the rule lives in distill-manifest.ts). The close fold writes the full
+// ISO timestamp as the stamp so two same-day lines on independent
+// branches do not tie on the day. Asserted by test/ledger.test.ts "ledger
 // ordering is a merge artifact" (closures of different tasks) and
 // "closure-plus-evidence across a union merge reads the same answer in
-// both directions" (a real union merge, both ways).
+// both directions" (a real union merge, both ways, one head descending
+// from the other and two independent same-day branches).
 //
 // removeWhen: never for the record -- a commit range and its evidence are
 // the audit trail, not a model workaround. The refusal on missing evidence

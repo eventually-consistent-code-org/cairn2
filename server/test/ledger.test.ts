@@ -183,32 +183,114 @@ describe("closure-plus-evidence across a union merge reads the same answer in bo
     }
   });
 
-  it("no ancestry to read: the dates on the lines decide, and file order only breaks a dated tie", () => {
+  /**
+   * The shape a rejected ship push produces (#472): two branches off the
+   * same root, neither head descending from the other, the close on one and
+   * the evidence fix-up for the same task on the other, both the SAME day.
+   * Ancestry cannot answer, so only the stamps and the hashes are left.
+   */
+  function independent(d: string, phaseDir: string, root: string, closeStamp: string, fixStamp: string) {
+    git(d, "checkout", "-q", "-b", "close");
+    const closeHead = work(d, "feature");
+    appendLedger(d, phaseDir, { ...entry, baseCommit: root, headCommit: closeHead, closedDate: closeStamp });
+    commitLedger(d, "ledger: close");
+    git(d, "checkout", "-q", "-b", "fixup", root);
+    const fixHead = work(d, "fix");
+    appendLedger(d, phaseDir, {
+      ...entry, baseCommit: root, headCommit: fixHead, closedDate: fixStamp,
+      kind: "evidence", note: "the suite did not show the pass",
+    });
+    commitLedger(d, "ledger: evidence");
+    return { closeHead, fixHead };
+  }
+
+  it("independent branches, same day, the fix-up stamped later: retracted on both sides (#472)", () => {
+    const { d, phaseDir, base, root } = repo();
+    const { fixHead } = independent(d, phaseDir, root, "2026-07-14T09:00:00.000Z", "2026-07-14T16:30:00.000Z");
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual([]);
+      expect(side.superseded).toEqual(["PROJ-105"]);
+      expect(side.retracted).toBe(true);
+      expect(side.distillClosed).toEqual([]);
+      expect(side.range).toEqual({ base: short(root), head: short(fixHead) });
+    }
+  });
+
+  it("independent branches, same day, the close stamped later: closed on both sides, range head is the close's (#472)", () => {
+    const { d, phaseDir, base, root } = repo();
+    const { closeHead } = independent(d, phaseDir, root, "2026-07-14T16:30:00.000Z", "2026-07-14T09:00:00.000Z");
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual(["PROJ-105"]);
+      expect(side.superseded).toEqual([]);
+      expect(side.retracted).toBe(false);
+      expect(side.distillClosed).toEqual(["PROJ-105"]);
+      expect(side.range).toEqual({ base: short(root), head: short(closeHead) });
+    }
+  });
+
+  it("independent branches, bare day dates that tie: the head hash decides, the same way on both sides (#472)", () => {
+    // Lines written before the stamp carried a time. Nothing merge-invariant
+    // is left but the hashes, so the lexically greater head speaks later --
+    // an arbitrary order, but one both merge directions share. File order
+    // is never read: the two sides carry the lines reversed and agree.
+    const { d, phaseDir, base, root } = repo();
+    const { closeHead, fixHead } = independent(d, phaseDir, root, "2026-07-14", "2026-07-14");
+    const closeWins = short(closeHead) > short(fixHead);
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual(closeWins ? ["PROJ-105"] : []);
+      expect(side.superseded).toEqual(closeWins ? [] : ["PROJ-105"]);
+      expect(side.retracted).toBe(!closeWins);
+      expect(side.distillClosed).toEqual(closeWins ? ["PROJ-105"] : []);
+      expect(side.range).toEqual({ base: short(root), head: short(closeWins ? closeHead : fixHead) });
+    }
+  });
+
+  it("no ancestry to read: the stamps on the lines decide, and a full tie goes to the fix-up, never to file order", () => {
     // Fake shas, no repository: git cannot place the heads, so the rule
-    // falls through to closedDate, then to position in the file.
+    // falls through to the stamp, then to the head hash -- and here the
+    // heads are the same, so a same-day pair is a full tie.
     const d = dir();
     scaffoldProject(d, "P");
     const { dir: phaseDir } = scaffoldPhase(d, 3, "Ledger Phase");
     const base = join(d, ".cairn", "plans", "phases", phaseDir);
     const read = () => parseLedger(base);
+    const fresh = () => rmSync(ledgerPath(d, phaseDir), { force: true });
     // Evidence FIRST in the file but dated later than the close: retracted.
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-15" });
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     expect(read().entries).toEqual([]);
     expect(read().superseded.map((e) => [e.line, e.supersededBy])).toEqual([[6, 5]]);
     // Evidence LAST in the file but dated earlier than the close: the close stands.
-    rmSync(ledgerPath(d, phaseDir), { force: true });
+    fresh();
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-13" });
     expect(read().entries.map((e) => e.line)).toEqual([5]);
     expect(read().superseded).toEqual([]);
-    // Same date: file order, as before -- the later line speaks.
-    rmSync(ledgerPath(d, phaseDir), { force: true });
+    // Same day, same head: a closure stands only when it speaks strictly
+    // after every fix-up for its task, so the tie retracts it -- in BOTH
+    // file orders (#472). The writer stamps to the millisecond, so a tie
+    // is a hand-written or pre-stamp pair, and the conservative read wins.
+    fresh();
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14" });
     expect(read().entries).toEqual([]);
     expect(read().superseded.map((e) => e.supersededBy)).toEqual([6]);
-    // The range is dated the same way: earliest base to latest head.
+    fresh();
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14" });
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
+    expect(read().entries).toEqual([]);
+    expect(read().superseded.map((e) => e.supersededBy)).toEqual([5]);
+    // A time inside the day breaks the tie the way the clock says: the
+    // close stamped two hours after the fix-up stands, though it sits first.
+    fresh();
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14T12:00:00.000Z" });
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14T10:00:00.000Z" });
+    expect(read().entries.map((e) => [e.line, e.closedDate])).toEqual([[5, "2026-07-14T12:00:00.000Z"]]);
+    expect(read().superseded).toEqual([]);
+    // The range is ranked the same way: earliest base to latest head.
     expect(read().range).toEqual({ base: "a1b2c3d", head: "d4e5f6a" });
   });
 });

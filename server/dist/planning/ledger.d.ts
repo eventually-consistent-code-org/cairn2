@@ -12,6 +12,9 @@ export interface LedgerEntryInput {
     baseCommit: string;
     headCommit: string;
     issueId: string;
+    /** The stamp on the line: the full ISO timestamp (the close fold passes
+     *  `Date.toISOString()`, #472) or a bare YYYY-MM-DD day. Typed on the way
+     *  in (#469); the readers rank two lines for one task by it. */
     closedDate: string;
     redCommit?: string;
     greenCommit?: string;
@@ -29,9 +32,10 @@ export interface LedgerEntryInput {
      * line that claimed an issue still open. It renders `- [ ] … evidence for
      * <issueId> <date>` (closedDate is then the logged date), consumes no
      * close receipt, and every ledger reader treats it as not-a-closure. An
-     * evidence line that speaks AFTER a closure line for the same taskRef
-     * (by commit ancestry, then date, then file order -- #445) supersedes
-     * that closure: readers report the issue not closed.
+     * evidence line that does not speak strictly BEFORE a closure line for
+     * the same taskRef (by commit ancestry, then the stamp, then the head
+     * hash -- #445, #472; never file order) supersedes that closure: readers
+     * report the issue not closed.
      */
     kind?: LedgerKind;
     /** Free-text note on an evidence line (e.g. "supersedes the closure line"). Evidence kind only. */

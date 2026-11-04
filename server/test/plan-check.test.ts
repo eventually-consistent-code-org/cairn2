@@ -274,12 +274,12 @@ describe("planCheck — ledger gates (#366)", () => {
   const LEDGER_PLAN = `---\nissues: [7, 8]\ntdd: [7]\n---\n# Phase 28\n\n## Tasks\n`
     + "- #7 red first `verify: npm test`\n- #8 docs `verify: npm test`\n";
   const HEAD = ["# Phase 28 — Ledger", "", "<!-- append-only -->", ""]; // entries start at line 5
-  const close = (id: string, seg: { tdd?: boolean; ev?: boolean; waived?: boolean } = {}) =>
+  const close = (id: string, seg: { tdd?: boolean; ev?: boolean; waived?: boolean } = {}, at = "2026-10-18") =>
     `- [x] T${id} — did ${id} — commits aaaaaaa..bbbbbbb — `
     + (seg.tdd ? "tdd ccccccc..ddddddd — " : "")
     + (seg.ev ? "evidence npm test => 3 passed — " : "")
     + (seg.waived ? "waived docs only — " : "")
-    + `${id} closed 2026-10-18`;
+    + `${id} closed ${at}`;
   const fixUp = (id: string) => `- [ ] T${id} — wrong close — commits aaaaaaa..bbbbbbb — evidence for ${id} 2026-10-18`;
   const setup = (phaseDir: string, entries: string[], verified = false) => {
     const dir = fresh();
@@ -338,7 +338,23 @@ describe("planCheck — ledger gates (#366)", () => {
     });
     expect(findings[0].plan).toContain("28-x/LEDGER.md");
     expect(findings[0].detail).toContain("#8");
-    expect(planCheck(setup("28-x", [...lines, close("8", { waived: true })]), 28).findings).toEqual([]);
+    // The fresh close carries the full timestamp the close fold writes now
+    // (#472); a bare same-day date would tie the fix-up and lose to it.
+    const fresh = close("8", { waived: true }, "2026-10-18T15:00:00.000Z");
+    expect(planCheck(setup("28-x", [...lines, fresh]), 28).findings).toEqual([]);
+  });
+
+  it("closure-superseded: a same-day tie reads the same in either file order -- the fix-up wins both (#472)", () => {
+    // Fake shas, no ancestry, same day on both lines: nothing but file order
+    // could tell them apart, and file order is never read. The closure
+    // stands only when it speaks strictly after the fix-up, so the tie goes
+    // to the fix-up whichever way a union merge laid the lines down.
+    const closeThenFix = planCheck(setup("28-x", [close("7", { tdd: true, ev: true }), close("8", { waived: true }), fixUp("8")]), 28);
+    const fixThenClose = planCheck(setup("28-x", [close("7", { tdd: true, ev: true }), fixUp("8"), close("8", { waived: true })]), 28);
+    expect(closeThenFix.findings.map((f) => f.type)).toEqual(["closure-superseded"]);
+    expect(fixThenClose.findings.map((f) => f.type)).toEqual(["closure-superseded"]);
+    expect(closeThenFix.findings[0]).toMatchObject({ line: 6, counterpart: { line: 7 } });
+    expect(fixThenClose.findings[0]).toMatchObject({ line: 7, counterpart: { line: 6 } });
   });
 
   it("an id with no closing line is reported on the PLAN.md frontmatter that declared it; no ledger yet reports nothing", () => {

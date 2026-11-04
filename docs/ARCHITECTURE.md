@@ -247,11 +247,14 @@ reason.
   store the tracker keeps, not a text file a tool parses. When two lines
   speak for one task — a closure and a later evidence fix-up — the
   readers rank them by commit ancestry (the line whose head descends
-  from the other's wins), then by the date on the line, then by file
-  order, and derive the phase's commit range the same way, so the merged
-  order of independent branches decides only when both the ancestry and
-  the day tie; that same-day independent case is the one the closing
-  audit reproduced and filed (#472). ADR 0028 — removeWhen: the tracker
+  from the other's wins), then by the stamp on the line (the close fold
+  writes the full ISO timestamp; the parser also reads the bare day of an
+  older line), then by the lexically greater head hash, and derive the
+  phase's commit range the same way; file order is never consulted, so
+  the merged order of two independent same-day branches cannot change
+  the answer (#472; asserted by ledger.test.ts "closure-plus-evidence
+  across a union merge reads the same answer in both directions", the
+  independent same-day cases). ADR 0028 — removeWhen: the tracker
   alone is the record of closures and no ledger file is ever merged.
 - `memory/` — disposable FTS index + git-committed memory cards with
   provenance, staleness checking, and phase/issue/role scopes. A first
