@@ -420,6 +420,60 @@ export function readCairnConfig(projectDir) {
   }
 }
 
+// The ship gate's two shared readers (#251, #456). The run guard and the
+// pre-push git hook judge the same push by the same rule: these are the
+// rule's one home, so neither carries a copy. A guard that cannot see its
+// stamp refuses, never skips (#299); the words are the ones ship points at.
+
+/** The branch names a default-branch push can land on: main, master, and
+ *  the remote's HEAD branch when the checkout knows it. `git` runs one
+ *  argv list at the checkout and answers trimmed stdout or null. */
+export const DEFAULT_BRANCHES = ["main", "master"];
+export function defaultBranches(remote, git) {
+  const defaults = new Set(DEFAULT_BRANCHES);
+  if (/^[\w.-]+$/.test(remote)) {
+    const head = git(["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
+    if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
+  }
+  return defaults;
+}
+
+/**
+ * The ship-gate stamp plan_drift left for the repository holding `from`
+ * -- { head, clean, at } under <baseDir>/ship-gate, keyed by projectKey,
+ * the pre-#362 worktree key read when only it survived -- as { stamp }
+ * when it is there, readable and clean, else { why: [line, hint?] } in
+ * the words the refusal carries. `elsewhere` names the push as leaving
+ * from another repository than the project's (#306), which changes the
+ * missing-stamp line only.
+ */
+export function readShipGateStamp(from, baseDir, { elsewhere = false } = {}) {
+  const keyed = join(baseDir, "ship-gate", `${projectKey(from)}.json`);
+  const legacy = join(baseDir, "ship-gate", `${worktreeKey(from)}.json`);
+  const path = existsSync(keyed) || !existsSync(legacy) ? keyed : legacy;
+  let stamp;
+  try {
+    stamp = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") {
+      return { why: [elsewhere ? `it leaves from ${from}, another repository, and no drift check has been recorded there`
+        : "no drift check has been recorded for this project"] };
+    }
+    if (e instanceof SyntaxError) return { why: ["the last drift check's record is unreadable"] };
+    return { why: [`the last drift check's record can't be read (${e?.code ?? e})`,
+      `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`] };
+  }
+  if (stamp?.clean !== true) return { why: ["the last drift check flagged drift that ship stops on"] };
+  return { stamp };
+}
+
+/** Why a clean `stamp` doesn't cover a push of commit `sha`, as [line], or null when it does. */
+export function shipGateMismatch(stamp, sha) {
+  if (sha === stamp.head) return null;
+  return [`the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
+    `not the commit being pushed (${String(sha).slice(0, 7)})`];
+}
+
 /** `continuity.resume`, defaulting to "prompt" when cairn.json, continuity, or resume is absent/invalid. */
 export function resumeMode(projectDir) {
   const resume = readCairnConfig(projectDir)?.continuity?.resume;
