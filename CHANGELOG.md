@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased — the second hardening (phase 30, 2026-11-03)
+## v2.9.3 — the second hardening (2026-11-04)
+
+Two phases ship in this release. The second hardening (phase 30) is
+this entry; the parallel path (phase 29), unreleased until now, follows
+under its own heading below.
 
 The hooks-directory hardenings filed in mid-October land together with
 the eighteen findings the two preceding security audits confirmed. The
@@ -158,7 +162,7 @@ merge direction; setup erases the spine when the agents file links to
 the Claude file or the two are hard-linked; the merge-overlap helper is
 unreachable on six of the seven other harnesses.
 
-## Unreleased — the parallel path (phase 29, 2026-10-29)
+### the parallel path (phase 29, 2026-10-29)
 
 Two agents on one repository, in two worktrees, possibly two vendors,
 become a path cairn handles by construction rather than by luck. State
@@ -178,7 +182,7 @@ never a failed run. Three follow-ups from the previous phase ride along.
 Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
 13145 pin. No new tool, no new config key.
 
-### state
+#### state
 
 - One `projectKey` — the hash of the resolved `git rev-parse
   --git-common-dir` — defined once in the server and mirrored in the
@@ -197,7 +201,7 @@ Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
   writer's pid and a random suffix instead of a fixed name. Five new
   tests, each red against the old code first.
 
-### guards
+#### guards
 
 - Stash is the destructive half: with more than one worktree, `stash
   pop`, `apply` and `drop` are refused as discarding work under a new
@@ -210,7 +214,7 @@ Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
   behind an opt-in for a quiet CI runner. The tests keep proving the hooks
   are cheap and stop proving the machine is idle.
 
-### planning
+#### planning
 
 - Project and phase scaffolds write `**/LEDGER.md merge=union` into the
   planning root's git attributes, idempotently; the plan-quality scan
@@ -223,7 +227,7 @@ Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
   and tracker note lead with `overlap: N files — …` or `overlap: none`,
   so a collision is read where it lives, before the conflict markers.
 
-### review and peers
+#### review and peers
 
 - The default review target is the working diff, the staged changes and
   every untracked file git does not ignore, each rendered as a new-file
@@ -243,7 +247,7 @@ Tool count holds at 87. Suite 2358 → 2420. Footprint 13142 → 13131 of a
   opening step is one call. The tool's description was trimmed to pay for
   the new text, taking the footprint from 13142 to 13131.
 
-### known and filed
+#### known and filed
 
 The phase's closing security audit (three read-only auditors over the
 diff, a two-seat refutation panel per important finding, nothing refuted)
