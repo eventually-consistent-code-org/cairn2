@@ -75,6 +75,40 @@ export function gitCommonDir(projectDir) {
   return common;
 }
 
+/**
+ * The project root a guard judges against (#459), in this order:
+ * CLAUDE_PROJECT_DIR when the harness hands it over (Claude Code and
+ * Cursor do; the other harnesses are a dated claim, 2026-11-04); else the
+ * repository top level from the payload's cwd (`git rev-parse --show-toplevel`,
+ * the probe the run guard's checks ask); else the
+ * nearest folder at or above that cwd holding the harness settings folder
+ * (.claude), else the cwd itself, as every guard read it before #459. A
+ * shell standing in a package folder of a project with no variable set
+ * used to make that folder the root, and a hook settings file or a
+ * planning-folder path two folders up fell outside what the leak and
+ * harness guards considered the project. Asserted: hooks.test.ts, the
+ * #383 twin table's nested rows run once more with the variable stripped.
+ * Never throws: a guard that cannot find its root fails open on the cwd.
+ */
+export function projectRoot(payload) {
+  if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
+  const cwd = resolve(payload?.cwd || process.cwd());
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+  for (const k of GIT_LOCATION_ENV) delete env[k];
+  try {
+    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1500,
+    }).trim();
+    if (top) return top;
+  } catch {
+    // not a repository, no git on PATH, or git hung: the folder walk below
+  }
+  for (let d = cwd; ; d = dirname(d)) {
+    if (existsSync(join(d, ".claude"))) return d;
+    if (dirname(d) === d) return cwd;
+  }
+}
+
 /** The repository's key; outside a repository, worktreeKey. */
 export function projectKey(projectDir) {
   const abs = resolve(projectDir);

@@ -40,6 +40,14 @@
  *   only its own command, #265), never taught by a refusal (#286). What
  *   each tool is read for, and what it can't see, is under Coverage below.
  *
+ *   Root (#459): CLAUDE_PROJECT_DIR when set, else the repository top
+ *   level (`git rev-parse --show-toplevel`) from the payload cwd, else the
+ *   nearest folder above it holding .claude, else the cwd -- lib.mjs
+ *   projectRoot, shared with the leak guard, so a shell standing in a
+ *   package folder of a project whose harness set no variable is still
+ *   judged against the project (asserted: hooks.test.ts, the #383 nested
+ *   rows run once more with the variable stripped).
+ *
  *   Breaker (#358): each refusal is handed to breaker.mjs, which appends
  *   its audit row (a digest of the input, never the path) and, while a
  *   batch run is live, counts it toward freezing the run -- a run that
@@ -155,6 +163,7 @@ import {
   SHELLS, SUBSTITUTION_DEPTH, braceExpand, pagerCommands, quoteWord, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
+import { projectRoot } from "./lib.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
 // broken leaves this guard refusing exactly as before, never crashed
@@ -2444,7 +2453,9 @@ try {
   const mcpLines = mcpCommandLines.map((line) => ({ line, cwd: mcpDir }));
   if (!core && !mcpPaths.length && !mcpLines.length) process.exit(0);
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  // #459 -- the root the harness names, else the one git or a .claude folder
+  // marks above the shell's cwd; never the subfolder the shell stands in
+  const projectDir = projectRoot(payload);
   ROOTS = spellings(projectDir);
   HOMES = spellings(homedir());
   ZONES = outsideZones();

@@ -4703,13 +4703,16 @@ describe("pause recorder hook (#379)", () => {
 // code comment the guard already exempts" -- does not exist: leak-patterns
 // exempts by PATH (markdown, docs/, server/src and server/dist), never by
 // comment syntax, so the leak twins here use those exemptions. One
-// under-match the subfolder runs surfaced is out of this issue's scope and
-// reported with it, not fixed here: with CLAUDE_PROJECT_DIR unset, the leak
-// and harness guards take the payload cwd as the project root, so from a
-// subfolder the leak guard finds no cairn.json and the harness guard sees
-// `../../hooks/hooks.json` as outside the project. Claude Code sets the
-// variable for every hook (dated claim, 2026-11, per the hooks reference),
-// so every row here runs with it set, as the platform does.
+// under-match the subfolder runs surfaced was filed as #459 and is closed
+// here: with CLAUDE_PROJECT_DIR unset, the leak and harness guards used to
+// take the payload cwd as the project root, so from a subfolder the leak
+// guard found no cairn.json and the harness guard saw `../../hooks/hooks.json`
+// as outside the project. Claude Code sets the variable for every hook
+// (dated claim, 2026-11, per the hooks reference); the other harnesses are
+// a claim too, so every nested row runs twice -- once with the variable set,
+// as the platform does, and once with it stripped, so the guards' own root
+// lookup (lib.mjs projectRoot: git top level, else the nearest folder
+// holding .claude, else the cwd) is what that run judges against.
 describe("every refused shape has an allowed twin, and holds from a subfolder (#383)", () => {
   type Guard = "run" | "harness" | "leak";
   type Cwd = "root" | "nested";
@@ -5049,19 +5052,21 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
 
   /**
    * One guard, one call, from where the shell stands. CLAUDE_PROJECT_DIR is
-   * the project root whatever the cwd, as the platform sets it; the payload's
-   * cwd and the child's cwd are the shell's folder. Every owner escape, the
-   * real plugin root and any git env the runner carries are stripped, so the
-   * only thing a row can lean on is what the row itself set up.
+   * the project root whatever the cwd, as the platform sets it -- or, with
+   * `withVar` false (#459), absent, as a harness that sets nothing leaves it;
+   * the payload's cwd and the child's cwd are the shell's folder. Every owner
+   * escape, the real plugin root and any git env the runner carries are
+   * stripped, so the only thing a row can lean on is what the row itself set up.
    */
-  function judge(guard: Guard, c: Ctx, side: Side): { status: number | null; stderr: string } {
+  function judge(guard: Guard, c: Ctx, side: Side, withVar = true): { status: number | null; stderr: string } {
     const env: Record<string, string | undefined> = {
       ...process.env, HOME: c.home, CLAUDE_PROJECT_DIR: c.root, CAIRN_HOME: c.cairnHome,
       CLAUDE_PLUGIN_ROOT: c.plugin, GIT_CONFIG_NOSYSTEM: "1", ...side.env,
     };
     for (const k of Object.keys(env)) {
       const strip = (k.startsWith("CAIRN_") && k !== "CAIRN_HOME") || k === "CDPATH"
-        || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL";
+        || k === "GIT_DIR" || k === "GIT_WORK_TREE" || k === "GIT_CONFIG_GLOBAL"
+        || (k === "CLAUDE_PROJECT_DIR" && !withVar);
       if (strip && !(k in (side.env ?? {}))) delete env[k];
     }
     const r = spawnSync(process.execPath, [GUARD[guard]], {
@@ -5085,6 +5090,12 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
         if (!staged) { row.refused.setup?.(c); staged = true; }
         const r = judge(row.guard, c, row.refused);
         expect(r.status, `${row.shape}: refused payload from ${where} (${where === "nested" ? "pkg/lib" : "project root"}) -- ${r.stderr.split("\n")[0]}`).toBe(2);
+        // #459 -- the nested row once more with no CLAUDE_PROJECT_DIR: the
+        // guard has to find the root above pkg/lib by itself
+        if (where === "nested") {
+          const bare = judge(row.guard, c, row.refused, false);
+          expect(bare.status, `${row.shape}: refused payload from pkg/lib with CLAUDE_PROJECT_DIR unset -- ${bare.stderr.split("\n")[0]}`).toBe(2);
+        }
       }
       if (!shared) { f = fixture(); staged = false; }
       for (const where of row.cwds) {
@@ -5092,6 +5103,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
         if (!staged) { row.twin.setup?.(c); staged = true; }
         const r = judge(row.guard, c, row.twin);
         expect(r.status, `${row.shape}: allowed twin from ${where} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+        if (where === "nested") {
+          const bare = judge(row.guard, c, row.twin, false);
+          expect(bare.status, `${row.shape}: allowed twin from pkg/lib with CLAUDE_PROJECT_DIR unset -- ${bare.stderr.split("\n")[0]}`).toBe(0);
+        }
       }
     });
   }
@@ -5508,5 +5523,75 @@ describe("a running batch cannot switch its own breaker off (#433)", () => {
     expect(refuse(proj, home).stderr).toContain("refusal 2 of 3");
     expect(refuse(proj, home).stderr).toContain(`batch run ${RUN} is frozen`);
     expect(manifest(home, proj).stop).toMatchObject({ limit: 3, count: 3 });
+  });
+});
+
+// #459 -- with no CLAUDE_PROJECT_DIR the leak and harness guards took the
+// shell's folder as the project root, so from a package folder a write onto
+// `../../hooks/hooks.json` fell outside the project and passed. The twin
+// table above now runs every nested row once more with the variable
+// stripped (the fix's own assertion). This block pins the fallback order
+// lib.mjs projectRoot promises -- git top level, then the nearest folder
+// holding .claude, then the cwd -- and the hostile spelling the issue never
+// named: a GIT_DIR inherited from a git hook, which would make rev-parse
+// answer for another repository.
+describe("the guards find the project root without CLAUDE_PROJECT_DIR (#459)", () => {
+  /** One guard call from `cwd` with no project directory, override, plugin root or CAIRN_* in its env. */
+  function judge(guard: string, cwd: string, payload: Record<string, unknown>, extra: Record<string, string> = {}) {
+    const env: Record<string, string | undefined> = {
+      ...process.env, HOME: freshDir("cairn-hooks-root-home-"), GIT_CONFIG_NOSYSTEM: "1", ...extra,
+    };
+    for (const k of Object.keys(env)) {
+      const strip = k === "CLAUDE_PROJECT_DIR" || k.startsWith("CAIRN_") || k === "CDPATH" || k === "CLAUDE_PLUGIN_ROOT"
+        || k === "GIT_DIR" || k === "GIT_WORK_TREE";
+      if (strip && !(k in extra)) delete env[k];
+    }
+    const r = spawnSync(process.execPath, [guard], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ ...payload, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
+
+  /** A repository with one commit, a cairn.json and a nested pkg/lib. */
+  function repo() {
+    const root = freshDir("cairn-hooks-root-");
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: root });
+    stageFile(root, "seed.txt", "seed\n");
+    execFileSync("git", ["commit", "-q", "-m", "init", "--no-gpg-sign"], { cwd: root });
+    writeFileSync(join(root, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    return root;
+  }
+
+  it("a .claude folder marks the root when the folder is no repository", () => {
+    const root = freshDir("cairn-hooks-root-");
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    mkdirSync(join(root, "pkg", "lib"), { recursive: true });
+    const nested = join(root, "pkg", "lib");
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks/hooks.json")).status).toBe(2);
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks-notes.json")).status).toBe(0);
+  });
+
+  it("hostile: a GIT_DIR inherited from a git hook can't move the root to another repository", () => {
+    const root = repo();
+    const other = repo();
+    const nested = join(root, "pkg", "lib");
+    const extra = { GIT_DIR: join(other, ".git"), GIT_WORK_TREE: other };
+    const r = judge(HARNESSGUARD, nested, bash("echo x > ../../hooks/hooks.json"), extra);
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("the hook directory");
+    expect(judge(HARNESSGUARD, nested, bash("echo x > ../../hooks-notes.json"), extra).status).toBe(0);
+  });
+
+  it("outside any repository and any .claude holder the cwd is the root -- the fail-open floor the headers date", () => {
+    const dir = freshDir("cairn-hooks-root-");
+    mkdirSync(join(dir, "pkg", "lib"), { recursive: true });
+    expect(judge(HARNESSGUARD, dir, bash("echo x > hooks/hooks.json")).status).toBe(2);
+    // nothing above pkg/lib says where the project is: the guard judges the
+    // folder it stands in, as every guard did before #459, and this passes
+    expect(judge(HARNESSGUARD, join(dir, "pkg", "lib"), bash("echo x > ../../hooks/hooks.json")).status).toBe(0);
   });
 });
