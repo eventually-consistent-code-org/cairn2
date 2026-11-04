@@ -92,11 +92,38 @@ export class LinearTracker implements Tracker {
       { teamId: this.cfg.teamId }, "probe"));
   }
 
+  // Workflow state names Linear has shown this instance, lowercased, with
+  // the category their type buckets to -- filled by every issue read and by
+  // the team states fetch, so the pre-write question below answers from
+  // data already fetched and never fetches for itself (#471).
+  private readonly seenStates = new Map<string, StateCategory>();
+
+  /** Linear's state.type → the semantic bucket: completed and canceled are
+   *  closed, started is in progress, unstarted/backlog/triage are open. */
+  private static categoryOfType(type: string): StateCategory {
+    return type === "completed" || type === "canceled" ? "closed"
+      : type === "started" ? "in_progress" : "open";
+  }
+
+  private learnState(name: string | undefined, type: string): void {
+    if (name) this.seenStates.set(name.toLowerCase(), LinearTracker.categoryOfType(type));
+  }
+
+  /** The SPI's pre-write question (#427, #471): the canonical three by name;
+   *  any other name only once Linear has shown it with its type, on an
+   *  issue read or the team states fetch. undefined otherwise: the freeze
+   *  gate then falls closed rather than letting the name through. Case-
+   *  insensitive, as stateId matches. Asserted by linear.unit.test.ts and
+   *  tracker-contract.test.ts. */
+  stateCategory(state: IssueState): StateCategory | undefined {
+    if (state === "open" || state === "in_progress" || state === "closed") return state;
+    return this.seenStates.get(state.toLowerCase());
+  }
+
   private normalize(raw: LinearIssueNode): Issue {
     const type = raw.state.type;
-    const category: StateCategory =
-      type === "completed" || type === "canceled" ? "closed"
-        : type === "started" ? "in_progress" : "open";
+    const category = LinearTracker.categoryOfType(type);
+    this.learnState(raw.state.name, type);
     return {
       id: raw.identifier, title: raw.title, body: raw.description ?? "",
       state: raw.state.name ?? category,
@@ -116,6 +143,7 @@ export class LinearTracker implements Tracker {
         `query States($teamId: String!) { team(id: $teamId) { states { nodes { id name type position } } } }`,
         { teamId: this.cfg.teamId }, "states");
       this.statesCache = data.team.states.nodes;
+      for (const s of this.statesCache) this.learnState(s.name, s.type);
     }
     return this.statesCache;
   }

@@ -367,3 +367,41 @@ describe("ClickUpTracker re-phase degradation (#142)", () => {
     expect(issue.phase).toBe("900"); // unchanged: still the fixture's list
   });
 });
+
+describe("ClickUpTracker.stateCategory -- the pre-write question, from the statuses map and data already fetched (#471)", () => {
+  // `finish` is the alias a hostile config adds to spell the close another
+  // way; `backlog` its harmless twin pointing at the open status
+  const aliased = { ...cfg, statuses: { ...cfg.statuses, finish: "complete", backlog: "to do", review: "code review" } };
+
+  it("answers the canonical three, the configured statuses by native name and an alias by its target's category, with no fetch", () => {
+    const { f, calls } = fixtureFetch([]);
+    const t = new ClickUpTracker(aliased, f, () => "tok");
+    expect(t.stateCategory("open")).toBe("open");
+    expect(t.stateCategory("in_progress")).toBe("in_progress");
+    expect(t.stateCategory("closed")).toBe("closed");
+    expect(t.stateCategory("complete")).toBe("closed");
+    expect(t.stateCategory("COMPLETE")).toBe("closed");
+    expect(t.stateCategory("in progress")).toBe("in_progress");
+    expect(t.stateCategory("to do")).toBe("open");
+    expect(t.stateCategory("finish")).toBe("closed");
+    expect(t.stateCategory("backlog")).toBe("open");
+    expect(calls.length).toBe(0);
+  });
+
+  it("an alias whose target ClickUp has not shown is undefined until a task read carries that status with its type", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: cuTask({ status: { status: "code review", type: "custom" } }) },
+      { status: 200, body: cuTask({ status: { status: "archived", type: "done" } }) },
+    ]);
+    const t = new ClickUpTracker(aliased, f, () => "tok");
+    expect(t.stateCategory("review")).toBeUndefined();
+    expect(t.stateCategory("Finito")).toBeUndefined();
+    await t.getIssue("abc123");
+    await t.getIssue("abc124");
+    // a custom-type status that is not the configured in_progress buckets to open, as normalize does
+    expect(t.stateCategory("review")).toBe("open");
+    expect(t.stateCategory("code review")).toBe("open");
+    expect(t.stateCategory("archived")).toBe("closed");
+    expect(t.stateCategory("Finito")).toBeUndefined();
+  });
+});

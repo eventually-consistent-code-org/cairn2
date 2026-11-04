@@ -446,3 +446,45 @@ describe("LinearTracker re-phase (#142)", () => {
     expect(t(f).capabilities.hasPhaseReassign).toBe(true);
   });
 });
+
+describe("LinearTracker.stateCategory -- the pre-write question, from data already fetched (#471)", () => {
+  it("answers the canonical three by name with no fetch, and nothing else before a read", () => {
+    const { f, calls } = gqlFetch([]);
+    const tr = t(f);
+    expect(tr.stateCategory("open")).toBe("open");
+    expect(tr.stateCategory("in_progress")).toBe("in_progress");
+    expect(tr.stateCategory("closed")).toBe("closed");
+    expect(tr.stateCategory("Done")).toBeUndefined();
+    expect(calls.length).toBe(0);
+  });
+
+  it("an issue read teaches its state's name with the category its type buckets to", async () => {
+    const { f } = gqlFetch([
+      { data: { issue: node({ state: { name: "Done", type: "completed" } }) } },
+      { data: { issue: node({ state: { name: "Won't do", type: "canceled" } }) } },
+      { data: { issue: node({ state: { name: "In Progress", type: "started" } }) } },
+    ]);
+    const tr = t(f);
+    await tr.getIssue("ENG-1");
+    await tr.getIssue("ENG-2");
+    await tr.getIssue("ENG-3");
+    expect(tr.stateCategory("Done")).toBe("closed");
+    expect(tr.stateCategory("done")).toBe("closed");
+    expect(tr.stateCategory("Won't do")).toBe("closed");
+    expect(tr.stateCategory("In Progress")).toBe("in_progress");
+    expect(tr.stateCategory("Finito")).toBeUndefined();
+  });
+
+  it("the team states fetch teaches every workflow state at once", async () => {
+    const { f } = gqlFetch([
+      statesFixture, // stateId -> states()
+      { data: { issueUpdate: { issue: node({ state: { name: "Todo", type: "unstarted" } }) } } },
+    ]);
+    const tr = t(f);
+    await tr.updateIssue("ENG-1", { state: "Todo" });
+    expect(tr.stateCategory("Backlog")).toBe("open");
+    expect(tr.stateCategory("Todo")).toBe("open");
+    expect(tr.stateCategory("In Progress")).toBe("in_progress");
+    expect(tr.stateCategory("Done")).toBe("closed");
+  });
+});

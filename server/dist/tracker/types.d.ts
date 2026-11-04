@@ -37,8 +37,10 @@ export declare function assertCanonicalState(state: string | undefined, backend:
  *  before any write (#427): the adapter's own vocabulary when it has one,
  *  else the canonical three by name (always writable on every backend);
  *  undefined for a name neither knows, which the adapter's own refusal
- *  then speaks to on the write. The freeze check keys on this, never on
- *  the literal name -- asserted by run-breaker.test.ts (#427). */
+ *  then speaks to on the write -- and which the freeze check treats as a
+ *  close while a run is frozen (#471), never as a reason to skip. The
+ *  freeze check keys on this, never on the literal name -- asserted by
+ *  run-breaker.test.ts (#427, #471) and tracker-contract.test.ts. */
 export declare function requestedCategory(tracker: Tracker, state: IssueState): StateCategory | undefined;
 export interface Phase {
     id: string;
@@ -142,8 +144,11 @@ export interface Tracker {
     probe?(): Promise<ProbeResult>;
     /** The category a state NAME would resolve to here, with no write and
      *  no network (#427) -- present on adapters with a custom-state
-     *  vocabulary. undefined: not a name this backend knows. The canonical
-     *  three resolve by name everywhere; see requestedCategory. */
+     *  vocabulary: local and the fake from their config, jira, linear,
+     *  clickup and azure-boards from their state maps and whatever the
+     *  wire has already shown them (#471). undefined: not a name this
+     *  backend can place yet -- the freeze gate falls closed on it. The
+     *  canonical three resolve by name everywhere; see requestedCategory. */
     stateCategory?(state: IssueState): StateCategory | undefined;
     /** Issue links. Present only on adapters with hasDependencies. */
     linkIssues?(from: string, type: LinkType, to: string): Promise<void>;

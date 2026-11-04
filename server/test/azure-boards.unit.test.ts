@@ -485,3 +485,39 @@ describe("AzureBoardsTracker re-phase (#142)", () => {
       .rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
+
+describe("AzureBoardsTracker.stateCategory -- the pre-write question, from the states map and data already fetched (#471)", () => {
+  // `finish` is the alias a hostile config adds to spell the close another
+  // way; `backlog` its harmless twin pointing at the open state
+  const aliased = { ...cfg, states: { ...cfg.states, finish: "Done", backlog: "To Do", review: "In Review" } };
+
+  it("answers the canonical three, the configured states by native name and an alias by its target's category, with no fetch", () => {
+    const { f, calls } = fixtureFetch([]);
+    const t = new AzureBoardsTracker(aliased, f, () => "pat123");
+    expect(t.stateCategory("open")).toBe("open");
+    expect(t.stateCategory("in_progress")).toBe("in_progress");
+    expect(t.stateCategory("closed")).toBe("closed");
+    expect(t.stateCategory("Done")).toBe("closed");
+    expect(t.stateCategory("Doing")).toBe("in_progress");
+    expect(t.stateCategory("To Do")).toBe("open");
+    expect(t.stateCategory("finish")).toBe("closed");
+    expect(t.stateCategory("backlog")).toBe("open");
+    expect(calls.length).toBe(0);
+  });
+
+  it("an alias whose target Azure has not shown is undefined until a work item read carries that state with its category", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: wi({ fields: { "System.State": "In Review", "System.StateCategory": "InProgress" } }) },
+      { status: 200, body: wi({ fields: { "System.State": "Removed", "System.StateCategory": "Removed" } }) },
+    ]);
+    const t = new AzureBoardsTracker(aliased, f, () => "pat123");
+    expect(t.stateCategory("review")).toBeUndefined();
+    expect(t.stateCategory("Finito")).toBeUndefined();
+    await t.getIssue("7");
+    await t.getIssue("8");
+    expect(t.stateCategory("review")).toBe("in_progress");
+    expect(t.stateCategory("In Review")).toBe("in_progress");
+    expect(t.stateCategory("Removed")).toBe("closed");
+    expect(t.stateCategory("Finito")).toBeUndefined();
+  });
+});

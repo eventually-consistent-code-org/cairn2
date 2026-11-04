@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type FetchLike } from "../http.js";
-import type { Capability, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
+import type { Capability, StateCategory, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
 export declare const configSchema: z.ZodObject<{
     orgUrl: z.ZodString;
     project: z.ZodString;
@@ -34,6 +34,15 @@ export declare class AzureBoardsTracker implements Tracker {
     probe(): Promise<ProbeResult>;
     private get projectPath();
     private normalizeState;
+    private readonly seenStates;
+    /** The SPI's pre-write question (#427, #471): the canonical three by
+     *  name; a states-map key by the native state it writes, and a native
+     *  state by itself -- the three required entries carry their category,
+     *  any other only once Azure has shown it on a work item read. undefined
+     *  otherwise: the freeze gate then falls closed rather than letting the
+     *  name through. Exact-case, as normalizeState compares. Asserted by
+     *  azure-boards.unit.test.ts and tracker-contract.test.ts. */
+    stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     /** Escapes single quotes in a WIQL string literal by doubling them. */
     private escapeWiql;

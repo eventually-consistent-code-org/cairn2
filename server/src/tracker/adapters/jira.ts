@@ -322,11 +322,39 @@ export class JiraTracker implements Tracker {
     }
   }
 
+  // Status names Jira has shown this instance, lowercased, with the
+  // category Jira itself gave them -- filled by every issue read and every
+  // transition list, so the pre-write question below answers from data
+  // already fetched and never fetches for itself (#471).
+  private readonly seenStatuses = new Map<string, StateCategory>();
+
+  private learnStatus(name: string | undefined, categoryKey: string | undefined): void {
+    if (!name) return;
+    this.seenStatuses.set(name.toLowerCase(), STATUS_CATEGORY_MAP[categoryKey ?? "new"] ?? "open");
+  }
+
+  /** The SPI's pre-write question (#427, #471): the category a requested
+   *  state name would land in. The canonical three by name; the two
+   *  required transitions-map targets by the category they stand for; any
+   *  other name -- or the target a transitions-map alias points at -- only
+   *  once Jira has shown it with its statusCategory. undefined otherwise:
+   *  the freeze gate then falls closed rather than letting the name
+   *  through. Case-insensitive, as transitionByName matches. Asserted by
+   *  jira.unit.test.ts and tracker-contract.test.ts. */
+  stateCategory(state: IssueState): StateCategory | undefined {
+    if (state === "open" || state === "in_progress" || state === "closed") return state;
+    const target = (this.cfg.transitions[state] ?? state).toLowerCase();
+    if (target === this.cfg.transitions.in_progress!.toLowerCase()) return "in_progress";
+    if (target === this.cfg.transitions.closed!.toLowerCase()) return "closed";
+    return this.seenStatuses.get(target);
+  }
+
   private normalize(raw: JiraIssue): Issue {
     const f = raw.fields;
     const category =
       STATUS_CATEGORY_MAP[f.status?.statusCategory?.key ?? "new"] ?? "open";
     const state = f.status?.name ?? category;
+    this.learnStatus(f.status?.name, f.status?.statusCategory?.key);
     const seconds = f.timetracking?.originalEstimateSeconds;
     const points = this.storyPointField
       ? (f as unknown as Record<string, unknown>)[this.storyPointField]
@@ -366,6 +394,7 @@ export class JiraTracker implements Tracker {
       undefined,
       "jira transition_list",
     )) as { transitions: JiraTransition[] };
+    this.learnTransitions(resp.transitions);
     const target = targetName.toLowerCase();
     const match = resp.transitions.find(
       (t) =>
@@ -386,6 +415,16 @@ export class JiraTracker implements Tracker {
     );
   }
 
+  /** A transition list names each target status with its category; both the
+   *  status name and the transition name reach it through transitionByName,
+   *  so both are learned (#471). */
+  private learnTransitions(transitions: JiraTransition[]): void {
+    for (const t of transitions) {
+      this.learnStatus(t.to?.name, t.to?.statusCategory?.key);
+      this.learnStatus(t.name, t.to?.statusCategory?.key);
+    }
+  }
+
   /** in_progress -> open has no fixed target name; find any transition whose target category is 'new'. */
   private async transitionToOpenCategory(key: string): Promise<void> {
     const resp = (await this.api(
@@ -394,6 +433,7 @@ export class JiraTracker implements Tracker {
       undefined,
       "jira transition_list",
     )) as { transitions: JiraTransition[] };
+    this.learnTransitions(resp.transitions);
     const match = resp.transitions.find(
       (t) => t.to?.statusCategory?.key === "new",
     );

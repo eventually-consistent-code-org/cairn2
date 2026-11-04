@@ -223,3 +223,72 @@ describe("a frozen run cannot close an issue through issue_update (#427)", () =>
     expect((await call("issue_update", { id: issue.id, state: "open" })).isError).toBe(false);
   });
 });
+
+describe("a name the adapter cannot place falls closed while a run is frozen (#471)", () => {
+  // The fake has no custom vocabulary here, so "Done" is a name it cannot
+  // place: the gate must refuse it on a frozen run rather than skip the
+  // check, and must let it reach the adapter when no run is frozen --
+  // fall closed, never a blanket refusal.
+  const RUN3 = "run-frz-unknown";
+  let savedHome: string | undefined;
+  let home: string;
+  let projectDir: string;
+  let tracker: FakeTracker;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { isError: res.isError === true, json: JSON.parse(text) };
+  };
+
+  /** One run-guard refusal from the run's session, judged against this block's cairn home. */
+  const refuse = () => spawnSync(process.execPath, [RUNGUARD], {
+    cwd: projectDir, encoding: "utf8", timeout: 5000,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir, CAIRN_HOME: join(home, ".cairn") },
+    input: JSON.stringify({
+      tool_name: "Bash", tool_input: { command: "git reset --hard" }, cwd: projectDir, session_id: "sess-run-unknown",
+    }),
+  });
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "cairn-breaker-unknown-home-"));
+    process.env.HOME = home;
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-breaker-unknown-proj-"));
+    writeFileSync(join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    tracker = new FakeTracker();
+    const server = buildServer({ projectDir, tracker });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-breaker-unknown", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    expect((await call("run_manifest", {
+      action: "create", runId: RUN3, phases: [{ number: 1, name: "one", estimate }], sessionId: "sess-run-unknown",
+    })).isError).toBe(false);
+    await call("run_manifest", { action: "set_status", runId: RUN3, status: "running" });
+    await call("run_manifest", { action: "set_phase", runId: RUN3, phase: 1 });
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("before the freeze, an unknown name reaches the adapter; after it, the same name is RUN_FROZEN", async () => {
+    const issue = (await call("issue_create", { title: "spelling" })).json;
+    expect(tracker.stateCategory("Done")).toBeUndefined();
+    const before = await call("issue_update", { id: issue.id, state: "Done" });
+    expect(before.json.code).not.toBe("RUN_FROZEN");
+
+    for (let i = 0; i < 3; i++) expect(refuse().status).toBe(2);
+    const after = await call("issue_update", { id: issue.id, state: "Done" });
+    expect(after.isError).toBe(true);
+    expect(after.json.code).toBe("RUN_FROZEN");
+    // the harmless twins: a label edit and the canonical open still pass
+    expect((await call("issue_update", { id: issue.id, labels: ["later"] })).isError).toBe(false);
+    expect((await call("issue_update", { id: issue.id, state: "open" })).isError).toBe(false);
+  });
+});

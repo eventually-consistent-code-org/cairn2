@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type FetchLike } from "../http.js";
-import type { Capability, Issue, IssueCreate, IssueLink, IssuePatch, IssueState, LinkType, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
+import type { Capability, StateCategory, Issue, IssueCreate, IssueLink, IssuePatch, IssueState, LinkType, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
 export declare const configSchema: z.ZodObject<{
     teamId: z.ZodString;
     apiKeyEnv: z.ZodDefault<z.ZodString>;
@@ -23,6 +23,18 @@ export declare class LinearTracker implements Tracker {
      *  teamId now comes back as a GraphQL not-found error (-> bad_host)
      *  instead of reading "ok". */
     probe(): Promise<ProbeResult>;
+    private readonly seenStates;
+    /** Linear's state.type → the semantic bucket: completed and canceled are
+     *  closed, started is in progress, unstarted/backlog/triage are open. */
+    private static categoryOfType;
+    private learnState;
+    /** The SPI's pre-write question (#427, #471): the canonical three by name;
+     *  any other name only once Linear has shown it with its type, on an
+     *  issue read or the team states fetch. undefined otherwise: the freeze
+     *  gate then falls closed rather than letting the name through. Case-
+     *  insensitive, as stateId matches. Asserted by linear.unit.test.ts and
+     *  tracker-contract.test.ts. */
+    stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     /** Team workflow states, fetched once. */
     private states;
