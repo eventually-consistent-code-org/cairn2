@@ -572,7 +572,23 @@ distinction matters more than the count.
   header and pinned by `server/test/cursor-adapter.test.ts` (#293). The
   user-level hooks file Cursor reads in every session on the machine, and
   the scripts folder beside it, are protected beside the project pair
-  (asserted: `server/test/hooks.test.ts`, "(#293)"). The
+  (asserted: `server/test/hooks.test.ts`, "(#293)"). The harness guard
+  also holds the owner-only keys of cairn.json — the leak guard's off
+  switch, ship's confirmation, the breaker's limit, a peer's
+  `execCapable`, the write authority table — to the owner (#281): the
+  server exports the list (`config.ts OWNER_ONLY_KEYS`, each with the one
+  safe value it may be set to without the owner) and `config_set` refuses
+  a patch that sets one away from that value with `OWNER_ONLY` unless
+  the session carries `CAIRN_HARNESS_EDIT=1`; the guard reads a generated
+  copy of the list (`hooks/scripts/owner-keys.mjs`, written by
+  `scripts/gen-owner-keys.mjs`, because hooks import no server code),
+  applies an Edit or Write to the file in its head and compares each
+  key, and refuses a shell line or MCP input that writes the file and
+  spells a key's last word, whatever value it sets (asserted:
+  `server/test/config.test.ts` "owner-only keys", the parity test that
+  holds the copy to the source byte for byte, and
+  `server/test/hooks.test.ts` "(#281)"); a key arriving in content the
+  line does not spell is in the guard's dated "Not seen" block. The
   write guard, the fourth since 2026-11-04 (#454), keeps a subagent
   inside the write authority its type was given: it reads the hook
   payload's `agent_type` (present inside subagents per the Claude Code

@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { loadConfig, writeConfigPatch } from "../src/config.js";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  OWNER_ONLY_KEYS, OWNER_ONLY_SAFE, assertOwnerOnly, loadConfig, ownerOnlyKeysIn, writeConfigPatch,
+} from "../src/config.js";
 import { CairnError } from "../src/errors.js";
 import { labOfModel, peerLab } from "../src/peers/run.js";
 
@@ -414,5 +418,80 @@ describe("peers model pin (#338)", () => {
     expect(() => loadConfig(writeTmpConfig({ ...base, peers: { copilot: { model: "" } } })))
       .toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
     expect(loadConfig(writeTmpConfig({ ...base, peers: { copilot: {} } })).peers).toEqual({ copilot: {} });
+  });
+});
+
+// #281 -- the switches that widen what the agent may do live in cairn.json,
+// which the agent can reach through config_set or a plain file write, so a
+// steered agent could grant itself the thing a guard refuses. The server
+// owns the list (OWNER_ONLY_KEYS, with the one safe value each key may be
+// set to without the owner), config_set refuses a patch that sets one
+// away from that value unless the session carries CAIRN_HARNESS_EDIT=1,
+// and the harness guard reads a generated copy of the list -- hooks import
+// no server code (#391) -- which the parity test here holds to the source
+// byte for byte. The hook's half is hooks.test.ts "(#281)".
+describe("owner-only keys are one list the server exports and the hook reads (#281)", () => {
+  const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const base = { tracker: { type: "github", config: { repo: "o/r" } } };
+
+  it("the list is the five keys the plan names, with a safe value for each but the write table", () => {
+    expect([...OWNER_ONLY_KEYS]).toEqual([
+      "leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers",
+    ]);
+    expect({ ...OWNER_ONLY_SAFE }).toEqual({
+      "leakGuard.enabled": true, "ship.confirm": true, "auto.breaker": 3, "peers.*.execCapable": false,
+    });
+  });
+
+  it("ownerOnlyKeysIn names each key a patch sets away from its safe value, any provider's execCapable included, and nothing else", () => {
+    expect(ownerOnlyKeysIn({ leakGuard: { enabled: false } })).toEqual(["leakGuard.enabled"]);
+    expect(ownerOnlyKeysIn({ ship: { confirm: false } })).toEqual(["ship.confirm"]);
+    expect(ownerOnlyKeysIn({ auto: { breaker: 0 } })).toEqual(["auto.breaker"]);
+    expect(ownerOnlyKeysIn({ auto: { breaker: 99 } })).toEqual(["auto.breaker"]);
+    expect(ownerOnlyKeysIn({ peers: { codex: { execCapable: true }, grok: { enabled: true } } })).toEqual(["peers.codex.execCapable"]);
+    expect(ownerOnlyKeysIn({ guards: { writers: { readOnly: [] } } })).toEqual(["guards.writers"]);
+    expect(ownerOnlyKeysIn({ guards: { writers: {} } })).toEqual(["guards.writers"]);
+    // two at once, named in list order
+    expect(ownerOnlyKeysIn({ ship: { confirm: false }, leakGuard: { enabled: false } })).toEqual(["leakGuard.enabled", "ship.confirm"]);
+    // the hostile spellings: a string where the boolean goes, and a provider the schema would refuse anyway
+    expect(ownerOnlyKeysIn({ peers: { codex: { execCapable: "true" } } })).toEqual(["peers.codex.execCapable"]);
+    expect(ownerOnlyKeysIn({ peers: { bogus: { execCapable: true } } })).toEqual(["peers.bogus.execCapable"]);
+    // the safe value, a delete, a sibling key and a same-named key elsewhere need no owner
+    for (const patch of [
+      { leakGuard: { enabled: true } }, { ship: { confirm: true } }, { auto: { breaker: 3 } },
+      { peers: { codex: { execCapable: false } } }, { leakGuard: { enabled: null } }, { guards: { writers: null } },
+      { guards: null }, { leakGuard: { allow: ["x"] } }, { peers: { codex: { enabled: false, maxInputChars: 5 } } },
+      { continuity: { recallIndex: { enabled: false } } }, { user: { mode: "engineer" } }, {},
+    ]) expect(ownerOnlyKeysIn(patch), JSON.stringify(patch)).toEqual([]);
+  });
+
+  it("assertOwnerOnly refuses with OWNER_ONLY, naming the key and the owner's way in, unless the session carries CAIRN_HARNESS_EDIT=1 exactly", () => {
+    let err: CairnError | undefined;
+    try { assertOwnerOnly({ auto: { breaker: 0 } }, {}); } catch (e) { err = e as CairnError; }
+    expect(err?.code).toBe("OWNER_ONLY");
+    expect(err?.message).toContain("auto.breaker");
+    expect(err?.nextAction).toContain("CAIRN_HARNESS_EDIT");
+    expect(() => assertOwnerOnly({ auto: { breaker: 0 } }, { CAIRN_HARNESS_EDIT: "1" })).not.toThrow();
+    expect(() => assertOwnerOnly({ auto: { breaker: 0 } }, { CAIRN_HARNESS_EDIT: "true" })).toThrow();
+    expect(() => assertOwnerOnly({ auto: { breaker: 3 } }, {})).not.toThrow();
+    expect(() => assertOwnerOnly({ leakGuard: { allow: ["x"] } }, {})).not.toThrow();
+  });
+
+  it("writeConfigPatch stays the mechanism underneath: the owner's patch, past the gate, lands", () => {
+    const dir = writeTmpConfig(base);
+    expect(writeConfigPatch(dir, { auto: { breaker: 0 } }).auto.breaker).toBe(0);
+  });
+
+  it("the hook's generated copy matches the server's list byte for byte, and the generator's --check agrees", async () => {
+    const gen = await import("../../scripts/gen-owner-keys.mjs");
+    const hook = await import("../../hooks/scripts/owner-keys.mjs");
+    expect([...hook.OWNER_ONLY_KEYS]).toEqual([...OWNER_ONLY_KEYS]);
+    expect({ ...hook.OWNER_ONLY_SAFE }).toEqual({ ...OWNER_ONLY_SAFE });
+    const file = readFileSync(join(REPO, "hooks", "scripts", "owner-keys.mjs"), "utf8");
+    expect(file).toBe(gen.render([...OWNER_ONLY_KEYS], { ...OWNER_ONLY_SAFE }));
+    // the rendering is never empty: an empty list would be a copy that protects nothing
+    expect(() => gen.render([], {})).toThrow(/empty/);
+    const r = spawnSync(process.execPath, [join(REPO, "scripts", "gen-owner-keys.mjs"), "--check"], { encoding: "utf8", timeout: 30000 });
+    expect(r.status, r.stderr).toBe(0);
   });
 });

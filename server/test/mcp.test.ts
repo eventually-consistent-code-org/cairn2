@@ -2968,3 +2968,43 @@ describe("workspace: a member launch is never redirected by another session's fo
     expect(got.json).toEqual({ phase: 3 });
   });
 });
+
+// #281: the tool route onto an owner-only key. config.test.ts holds the
+// list and the gate function; this is the typed code reaching the caller
+// through the tool, and the owner's escape letting the same patch land.
+describe("config_set refuses an owner-only key with OWNER_ONLY unless the owner's escape is set (#281)", () => {
+  async function serverIn(dir: string) {
+    const server = buildServer({ projectDir: dir });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "owner-test", version: "0.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    return async (args: Record<string, unknown>) => {
+      const res = await c.callTool({ name: "config_set", arguments: args });
+      const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+      return { ...res, json: JSON.parse(text) };
+    };
+  }
+
+  it("refuses the patch with the typed code and leaves cairn.json untouched; a sibling key and the safe value pass; the escape lets it land", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-owner-"));
+    const before = JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } });
+    writeFileSync(join(dir, "cairn.json"), before);
+    vi.stubEnv("CAIRN_HARNESS_EDIT", "");
+    try {
+      const set = await serverIn(dir);
+      const refused = await set({ patch: { leakGuard: { enabled: false } } });
+      expect(refused.isError).toBe(true);
+      expect(refused.json.code).toBe("OWNER_ONLY");
+      expect(refused.json.message).toContain("leakGuard.enabled");
+      expect(readFileSync(join(dir, "cairn.json"), "utf8")).toBe(before);
+      expect((await set({ patch: { leakGuard: { allow: ["x"] } } })).isError).toBeFalsy();
+      expect((await set({ patch: { ship: { confirm: true } } })).isError).toBeFalsy();
+      vi.stubEnv("CAIRN_HARNESS_EDIT", "1");
+      const landed = await set({ patch: { leakGuard: { enabled: false } } });
+      expect(landed.isError).toBeFalsy();
+      expect(landed.json.leakGuard.enabled).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

@@ -77,7 +77,20 @@
  * Coverage: hooks/hooks.json sends this guard Edit, Write, NotebookEdit,
  *   Bash and every MCP tool (mcp__*, #310).
  *
- *   Edit, Write, NotebookEdit: the file they name.
+ *   Edit, Write, NotebookEdit: the file they name. And cairn.json (#281):
+ *   ordinary work as a file, but the keys only the owner sets -- the list
+ *   the server exports (config.ts OWNER_ONLY_KEYS: the leak guard's off
+ *   switch, ship's confirmation, the breaker's limit, a peer's
+ *   execCapable, the write table), read here from the generated
+ *   owner-keys.mjs -- are the harness: an Edit or Write is applied to the
+ *   file in the guard's head and each key's value compared, so one set
+ *   away from its safe value is refused, naming the key, while the safe
+ *   value, a sibling key and a removal land; a shell line or an MCP input
+ *   that writes cairn.json and spells a key's last word (`enabled`,
+ *   `confirm`, `breaker`, `execCapable`, `writers`, in any case, a JSON
+ *   \u escape decoded) is refused as typed, whatever value it sets -- the
+ *   guard cannot run it. Asserted: hooks.test.ts "(#281)"; config_set
+ *   refuses the same keys with OWNER_ONLY (config.test.ts "owner-only").
  *
  *   Bash: read as a shell reads it (shell-words.mjs, #270) for what it
  *   WRITES -- redirects and the operands of commands that change files,
@@ -237,6 +250,10 @@
  *   hooks.test.ts "(#291)"; one the line assigns is spelled out before
  *   judgment, and one it assigns from a substitution is refused as a
  *   write the guard can't place.
+ *   An owner-only cairn.json key (#281) arriving in content the line
+ *   doesn't spell (`cp evil.json cairn.json`, `mv`, `cat evil.json >
+ *   cairn.json`, a patch): the file lands with the key set and the server
+ *   reads it -- measured by hooks.test.ts "(#281)".
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
  *   2.1.299 the platform fails closed when it cannot reach the guard or
@@ -256,6 +273,7 @@ import {
   shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 import { projectRoot } from "./lib.mjs";
+import { OWNER_ONLY_KEYS, OWNER_ONLY_SAFE } from "./owner-keys.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
 // broken leaves this guard refusing exactly as before, never crashed
@@ -580,6 +598,14 @@ const CLAUDE_PKG = /@anthropic-ai\/claude-code(?![\w-])/i;
 
 // The harness's own tools; every other tool name is an MCP tool (#310).
 const CORE_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash"]);
+
+// The cairn.json keys only the owner sets (#281), from the generated copy
+// of the server's list imported above (hooks import no server code, #391;
+// config.test.ts holds the copy to server/src/config.ts byte for byte).
+// What a refusal calls one, and each key's last word, folded -- what a
+// line or a fragment the guard can't evaluate spells when it sets one.
+const OWNER_WHAT = (key) => `an owner-only key in cairn.json (${key})`;
+const OWNER_LEAVES = OWNER_ONLY_KEYS.map((k) => [k, fold(k.split(".").pop())]);
 
 // The one MCP input that is a harness write by itself (#460): cairn's
 // plan_meta_set, under whatever server name the plugin is installed as,
@@ -1535,6 +1561,82 @@ function judge(abs, mode, literal = false) {
     if (what) return what;
   }
   return null;
+}
+
+// Owner-only keys (#281)
+
+/** True when `abs` is the project's cairn.json, in any spelling, letter case aside (#295). */
+function isProjectConfig(abs) {
+  return spellings(abs).some((p) => ROOTS.some((root) => same(p, join(root, "cairn.json"))));
+}
+
+/**
+ * The owner-only key a text spells (#281) -- the last word of one as a
+ * whole word, letter case aside, a JSON \u escape decoded first -- or
+ * null. For a line or a fragment the guard can't evaluate: it says what
+ * it sets, never which value, so the word is the judgment.
+ */
+function ownerKeyInText(text) {
+  const t = fold(String(text ?? "").replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))));
+  for (const [key, leaf] of OWNER_LEAVES) if (new RegExp(`(?<![a-z0-9_])${leaf}(?![a-z0-9_])`).test(t)) return key;
+  return null;
+}
+
+/** Every value a config holds at a dotted key, `*` matching one segment, as [path, value] (#281); a null or absent key is none. */
+function valuesAt(obj, segs, path = []) {
+  if (!segs.length) return obj === null || obj === undefined ? [] : [[path.join("."), obj]];
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+  const names = segs[0] === "*" ? Object.keys(obj) : (Object.hasOwn(obj, segs[0]) ? [segs[0]] : []);
+  return names.flatMap((k) => valuesAt(obj[k], segs.slice(1), [...path, k]));
+}
+
+/**
+ * The owner-only key an Edit or Write of cairn.json would set away from
+ * its safe value (#281), found by applying the tool to the file in the
+ * guard's head and comparing each key's values: null when none changes
+ * that way (the template's `enabled: true`, a sibling key), undefined
+ * when the result can't be read (the edit's old text isn't there, the new
+ * text isn't JSON) -- then the text is judged by the word it spells.
+ */
+function ownerKeyChanged(abs, tool, input) {
+  let current = null;
+  try { current = readFileSync(abs, "utf8"); } catch { /* a new file: every key starts absent */ }
+  let text;
+  if (tool === "Write") text = input?.content;
+  else if (tool === "Edit") {
+    const { old_string: o, new_string: n } = input ?? {};
+    if (current === null || typeof o !== "string" || typeof n !== "string" || !o || !current.includes(o)) return undefined;
+    text = input.replace_all ? current.split(o).join(n) : current.replace(o, () => n);
+  }
+  if (typeof text !== "string") return undefined;
+  let before = {};
+  let after;
+  try { before = JSON.parse(current ?? "{}"); } catch { before = {}; }
+  try { after = JSON.parse(text); } catch { return undefined; }
+  if (!after || typeof after !== "object") return undefined;
+  for (const key of OWNER_ONLY_KEYS) {
+    const segs = key.split(".");
+    const safe = Object.hasOwn(OWNER_ONLY_SAFE, key) ? JSON.stringify(OWNER_ONLY_SAFE[key]) : undefined;
+    const was = new Map(valuesAt(before, segs).map(([p, v]) => [p, JSON.stringify(v)]));
+    for (const [p, v] of valuesAt(after, segs)) {
+      const now = JSON.stringify(v);
+      if (now === was.get(p) || now === safe) continue;
+      return p;
+    }
+  }
+  return null;
+}
+
+/** The hit for a write onto cairn.json (#281): the key the applied change set, else the one the text spells; null for neither. */
+function ownerHit(raw, changed, text) {
+  const key = changed === undefined ? ownerKeyInText(text) : changed;
+  return key ? { path: raw, what: OWNER_WHAT(key) } : null;
+}
+
+/** The hit for a shell line that writes cairn.json and spells an owner-only key (#281), or null -- a removal restores the defaults. */
+function ownerLineHit(targets, text) {
+  const t = targets.find((x) => x.abs && x.mode === "write" && !HAS_STANDIN.test(x.abs) && isProjectConfig(x.abs));
+  return t ? ownerHit(t.raw, undefined, text) : null;
 }
 
 // Reading commands
@@ -2928,27 +3030,41 @@ try {
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
     // ordinary work and must stay frictionless (#240).
-    for (const t of lineTargets(payload?.tool_input?.command ?? "", cwd, 0)) {
+    const command = payload?.tool_input?.command ?? "";
+    const targets = lineTargets(command, cwd, 0);
+    for (const t of targets) {
       hit = judgeTarget(t);
       if (hit) break;
     }
+    // #281 -- a write onto cairn.json the guard can't run: judged by the key word it spells
+    if (!hit) hit = ownerLineHit(targets, command);
   } else if (core) {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-    const what = p ? judge(resolveIn(cwd, expandHome(String(p))), "write", true) : null;
+    const abs = p ? resolveIn(cwd, expandHome(String(p))) : null;
+    const what = abs ? judge(abs, "write", true) : null;
     if (what) hit = { path: p, what };
+    // #281 -- cairn.json is ordinary work but for the owner-only keys: the
+    // edit is applied in the guard's head and each key compared
+    else if (abs && isProjectConfig(abs)) hit = ownerHit(p, ownerKeyChanged(abs, tool, toolInput), JSON.stringify(withoutPaths(toolInput)));
   } else {
     // a path field is taken as written, never globbed: no shell expands it
     for (const { raw, mode } of mcpPaths) {
-      const what = judge(resolveIn(cwd, expandHome(raw)), mode, true);
+      const abs = resolveIn(cwd, expandHome(raw));
+      const what = judge(abs, mode, true);
       if (what) { hit = { path: raw, what }; break; }
+      // #281 -- an MCP write onto cairn.json, judged by what its input spells
+      if (mode === "write" && isProjectConfig(abs)) hit = ownerHit(raw, undefined, JSON.stringify(withoutPaths(toolInput)));
+      if (hit) break;
     }
     // a command line is read like Bash, from the folder the input names for it
     for (const { line, cwd: at } of hit ? [] : mcpLines) {
       const dir = at ? resolveIn(cwd, expandHome(at)) : cwd;
-      for (const t of lineTargets(line, dir, 0)) {
+      const targets = lineTargets(line, dir, 0);
+      for (const t of targets) {
         hit = judgeTarget(t);
         if (hit) break;
       }
+      if (!hit) hit = ownerLineHit(targets, line); // #281
       if (hit) break;
     }
   }

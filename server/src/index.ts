@@ -14,7 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { CairnError } from "./errors.js";
-import { loadConfig, writeConfigPatch } from "./config.js";
+import { assertOwnerOnly, loadConfig, writeConfigPatch } from "./config.js";
 import { auditMemory } from "./memory/audit.js";
 import { observationBacklog } from "./memory/observations.js";
 import { compactCards, proposeCompaction } from "./memory/compaction.js";
@@ -2367,12 +2367,16 @@ export function buildServer(deps: {
     {
       annotations: { title: titleOf("config_set"), readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       description:
-        "Merge-patch cairn.json (null deletes a key). Validates the merged result before " +
-        "writing; refuses secret-looking keys/values — credentials live in env vars",
+        "Merge-patch cairn.json (null deletes a key). Validates the merged result; refuses " +
+        "secret-looking keys/values and the owner-only keys (OWNER_ONLY)",
       inputSchema: z.object({ patch: z.record(z.string(), z.unknown()) }),
     },
     wrap((a: { patch: Record<string, unknown> }) => {
       const d = dir();
+      // #281 -- the keys that widen what the agent may do are the owner's:
+      // refused with a typed code before anything is written, unless the
+      // session carries the owner's escape (the harness guard's)
+      assertOwnerOnly(a.patch);
       const result = writeConfigPatch(d, a.patch);
       // The tracker memo binds an adapter to the config it was built from --
       // a config write may change backend or baseUrl, so drop it and let the

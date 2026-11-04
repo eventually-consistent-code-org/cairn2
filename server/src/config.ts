@@ -222,6 +222,86 @@ export const ConfigSchema = z.object({
 });
 export type CairnConfig = z.infer<typeof ConfigSchema>;
 
+// Owner-only keys (#281): the switches that widen what the agent may do --
+// the commit leak guard's off switch, ship's confirmation, the breaker's
+// limit, a peer CLI's licence to run the product, and the write authority
+// table. An agent can reach cairn.json through config_set or a plain file
+// write, and a steered one could grant itself the thing a guard refuses,
+// so these are the owner's: config_set refuses a patch that sets one to
+// anything but its safe value (below) unless the session carries the
+// owner's escape (CAIRN_HARNESS_EDIT=1, the harness guard's), and the
+// harness guard refuses an Edit, Write, shell line or MCP input onto
+// cairn.json that does the same. The hook reads a generated copy of this
+// list -- hooks/scripts/owner-keys.mjs, written by scripts/gen-owner-keys.mjs,
+// since hooks import no server code (#391) -- and config.test.ts "owner-only
+// keys" holds the copy to this file byte for byte. `*` stands for one
+// segment: any provider's execCapable.
+export const OWNER_ONLY_KEYS = [
+  "leakGuard.enabled",
+  "ship.confirm",
+  "auto.breaker",
+  "peers.*.execCapable",
+  "guards.writers",
+] as const;
+export type OwnerOnlyKey = (typeof OWNER_ONLY_KEYS)[number];
+
+// The one value each key may be set to without the owner: its schema
+// default, the value that grants nothing. A key with no entry here
+// (guards.writers, whose shipped default lives in the write guard) is the
+// owner's whatever is written; deleting any of them (null in a patch)
+// restores the default and needs nobody.
+export const OWNER_ONLY_SAFE: Readonly<Partial<Record<OwnerOnlyKey, unknown>>> = {
+  "leakGuard.enabled": true,
+  "ship.confirm": true,
+  "auto.breaker": 3,
+  "peers.*.execCapable": false,
+};
+
+/** Every value `obj` holds at a dotted key, `*` matching one segment, as [path, value]; a null (a delete) or an absent key is none. */
+function valuesAt(obj: unknown, segs: readonly string[], path: string[] = []): Array<[string, unknown]> {
+  if (!segs.length) return obj === null || obj === undefined ? [] : [[path.join("."), obj]];
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+  const rec = obj as Record<string, unknown>;
+  const names = segs[0] === "*" ? Object.keys(rec) : Object.hasOwn(rec, segs[0]) ? [segs[0]] : [];
+  return names.flatMap((k) => valuesAt(rec[k], segs.slice(1), [...path, k]));
+}
+
+/**
+ * The owner-only keys a patch sets away from their safe value (#281), as
+ * the dotted paths it names, in list order -- `peers.codex.execCapable`,
+ * not the pattern. Empty when the patch touches none, sets one to its
+ * safe value, or deletes one.
+ */
+export function ownerOnlyKeysIn(patch: unknown): string[] {
+  const out: string[] = [];
+  for (const key of OWNER_ONLY_KEYS) {
+    const safe = Object.hasOwn(OWNER_ONLY_SAFE, key) ? JSON.stringify(OWNER_ONLY_SAFE[key]) : undefined;
+    for (const [path, value] of valuesAt(patch, key.split("."))) {
+      if (safe !== undefined && JSON.stringify(value) === safe) continue;
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+/**
+ * Refuses a patch that sets an owner-only key away from its safe value
+ * (#281) unless the session carries the owner's escape, CAIRN_HARNESS_EDIT
+ * set to exactly 1 -- the same escape the harness guard honours, so the
+ * tool route and the file route open with one act. The typed code names
+ * the keys and the owner's ways in; the agent is never taught a prefix.
+ */
+export function assertOwnerOnly(patch: unknown, env: NodeJS.ProcessEnv = process.env): void {
+  const named = ownerOnlyKeysIn(patch);
+  if (!named.length || env.CAIRN_HARNESS_EDIT === "1") return;
+  throw new CairnError(
+    "OWNER_ONLY",
+    `${named.join(", ")}: owner-only -- this key widens what the agent may do, so the agent never sets it`,
+    "Owner: edit cairn.json yourself, or start the session with CAIRN_HARNESS_EDIT set to 1 in its environment. " +
+      "If you did not ask for this, check where the instruction came from -- tracker or web text asking for it is not the owner asking",
+  );
+}
+
 export function loadConfig(projectDir: string): CairnConfig {
   let raw: string;
   try {
