@@ -1,6 +1,7 @@
 import { CairnError } from "../errors.js";
 import { matchesState } from "./types.js";
 export class FakeTracker {
+    states;
     capabilities = {
         hasInProgress: true, hasPhases: true, hasPhaseReassign: true, hasDependencies: true, hasLabels: true,
         hasMilestones: true, hasPhaseClose: true, hasComments: true, hasWorklog: false,
@@ -16,6 +17,17 @@ export class FakeTracker {
     now = () => new Date();
     issueAttachments = new Map();
     seq = 0;
+    /** Custom state vocabulary, name → category, the local adapter's shape:
+     *  a test hands the server a tracker whose in-progress or closed state
+     *  has a display name (#427). Empty by default -- the canonical three. */
+    constructor(states = {}) {
+        this.states = states;
+    }
+    stateCategory(state) {
+        if (state === "open" || state === "in_progress" || state === "closed")
+            return state;
+        return this.states[state];
+    }
     async attachFile(id, filename, _data, _mediaType) {
         await this.getIssue(id);
         const names = this.issueAttachments.get(id) ?? [];
@@ -48,9 +60,7 @@ export class FakeTracker {
             state: (patch.state ?? i.state),
             category: patch.state === undefined
                 ? i.category
-                : (["open", "in_progress", "closed"].includes(patch.state)
-                    ? patch.state
-                    : i.category),
+                : (this.stateCategory(patch.state) ?? i.category),
             labels: patch.labels ?? i.labels,
             assignee: patch.assignee ?? i.assignee,
             estimate: patch.estimate ?? i.estimate,

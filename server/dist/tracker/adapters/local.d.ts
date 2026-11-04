@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState, LinkType, Milestone, Phase, ProbeResult, Tracker, WorklogEntry } from "../types.js";
+import type { Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState, LinkType, Milestone, Phase, ProbeResult, Tracker, StateCategory, WorklogEntry } from "../types.js";
 export declare const configSchema: z.ZodObject<{
     dir: z.ZodDefault<z.ZodString>;
     prefix: z.ZodDefault<z.ZodString>;
@@ -40,6 +40,10 @@ export declare class LocalTracker implements Tracker {
     /** Stored name → semantic category: canonical passes through, the config
      *  vocab maps custom names, anything unrecognized buckets to in_progress. */
     private categoryOf;
+    /** The SPI's pre-write question (#427): a known name's category, and
+     *  undefined for one the vocab lacks -- that name never buckets here,
+     *  because updateIssue refuses it rather than storing it. */
+    stateCategory(state: string): StateCategory | undefined;
     listIssues(filter?: {
         phase?: string;
         state?: IssueState;

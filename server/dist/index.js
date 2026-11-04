@@ -17,6 +17,7 @@ import { emitOutlook, outlookAggregate, waveCheckpoint } from "./core/outlook.js
 import { makeTracker } from "./tracker/registry.js";
 import { CachedTracker } from "./tracker/cached.js";
 import { probeVerdictForError } from "./tracker/probe.js";
+import { requestedCategory } from "./tracker/types.js";
 import { danglingEdges, effectivePriorities, lineage, readyFrontier, } from "./tracker/graph.js";
 import { finalizeMigration, migrateTracker } from "./tracker/migrate.js";
 import { makeDocsConnector } from "./docs/registry.js";
@@ -561,8 +562,14 @@ export function buildServer(deps) {
     }, wrap(async (a) => {
         const d = dir();
         const { id, phase: phaseParam, estimatePoints, estimateMinutes, claim, ...rest } = a;
-        // #358 -- a frozen run claims nothing: refused before any tracker write
-        if (claim || rest.state === "in_progress")
+        const tracker = await getTracker(d);
+        // #358/#427 -- a frozen run claims nothing and closes nothing. The
+        // check keys on the category the requested state resolves to on
+        // this backend, never on the literal name: `state: "closed"` is a
+        // close however it is spelled, and a custom in-progress display
+        // name is a claim. Refused before any tracker write.
+        const requested = rest.state === undefined ? undefined : requestedCategory(tracker, rest.state);
+        if (claim || requested === "in_progress" || requested === "closed")
             await assertNotFrozen(d, id);
         // A claim IS the in_progress transition (#343): the state may be
         // left off, but naming any other state alongside it is a
@@ -577,7 +584,6 @@ export function buildServer(deps) {
         // Base commit settled before any tracker write (#369).
         const resolved = claim ? resolveClaim(d, claim) : undefined;
         const wantsEstimate = estimatePoints !== undefined || estimateMinutes !== undefined;
-        const tracker = await getTracker(d);
         const canRephase = tracker.capabilities.hasPhaseReassign;
         // phase is a cairn phase number (by title) or a raw id (#138, #271) —
         // resolved only where the backend can actually re-parent; elsewhere

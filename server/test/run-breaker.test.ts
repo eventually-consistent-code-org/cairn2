@@ -139,3 +139,84 @@ describe("a frozen run's claims and closes refuse RUN_FROZEN (#358)", () => {
     expect(snapshot.frozen).toMatchObject({ runId: RUN, refusals: 3 });
   });
 });
+
+describe("a frozen run cannot close an issue through issue_update (#427)", () => {
+  // Its own home, project and run: the block above tears its freeze down,
+  // and this one needs a live frozen run of its own to try to walk around.
+  const RUN2 = "run-frz-close";
+  let savedHome: string | undefined;
+  let home: string;
+  let projectDir: string;
+  let tracker: FakeTracker;
+  let client: Client;
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+    return { isError: res.isError === true, json: JSON.parse(text) };
+  };
+
+  /** One run-guard refusal from the run's session, judged against this block's cairn home. */
+  const refuse = () => spawnSync(process.execPath, [RUNGUARD], {
+    cwd: projectDir, encoding: "utf8", timeout: 5000,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir, CAIRN_HOME: join(home, ".cairn") },
+    input: JSON.stringify({
+      tool_name: "Bash", tool_input: { command: "git reset --hard" }, cwd: projectDir, session_id: "sess-run-close",
+    }),
+  });
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "cairn-breaker-close-home-"));
+    process.env.HOME = home;
+    projectDir = mkdtempSync(join(tmpdir(), "cairn-breaker-close-proj-"));
+    writeFileSync(join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    // a custom display name for in-progress and for closed beside the
+    // canonical three -- the smaller gap #427 names
+    tracker = new FakeTracker({ Doing: "in_progress", Done: "closed" });
+    const server = buildServer({ projectDir, tracker });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-breaker-close", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    expect((await call("run_manifest", {
+      action: "create", runId: RUN2, phases: [{ number: 1, name: "one", estimate }],
+    })).isError).toBe(false);
+    await call("run_manifest", { action: "set_status", runId: RUN2, status: "running" });
+    await call("run_manifest", { action: "set_phase", runId: RUN2, phase: 1 });
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("state: \"closed\" on a frozen run returns RUN_FROZEN, posts only the one freeze comment, and the issue stays open", async () => {
+    const issue = (await call("issue_create", { title: "walk-around" })).json;
+    expect((await call("issue_update", { id: issue.id, claim: { baseCommit: "abc1234" } })).isError).toBe(false);
+    for (let i = 0; i < 3; i++) expect(refuse().status).toBe(2);
+    const before = tracker.comments(issue.id).length;
+
+    const closed = await call("issue_update", { id: issue.id, state: "closed" });
+    expect(closed.isError).toBe(true);
+    expect(closed.json.code).toBe("RUN_FROZEN");
+    expect((await tracker.getIssue(issue.id)).category).toBe("in_progress");
+    const added = tracker.comments(issue.id).slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0].text).toMatch(/^Batch run run-frz-close was frozen by cairn's circuit breaker/);
+    // again: refused, and the comment is not repeated
+    expect((await call("issue_update", { id: issue.id, state: "closed" })).json.code).toBe("RUN_FROZEN");
+    expect(tracker.comments(issue.id).slice(before)).toHaveLength(1);
+  });
+
+  it("a display name that resolves to in_progress or closed is refused the same way; a label edit and a move to open are not", async () => {
+    const issue = (await call("issue_create", { title: "custom names" })).json;
+    expect((await call("issue_update", { id: issue.id, state: "Doing" })).json.code).toBe("RUN_FROZEN");
+    expect((await call("issue_update", { id: issue.id, state: "Done" })).json.code).toBe("RUN_FROZEN");
+    expect((await tracker.getIssue(issue.id)).category).toBe("open");
+    expect((await call("issue_update", { id: issue.id, labels: ["later"] })).isError).toBe(false);
+    expect((await call("issue_update", { id: issue.id, state: "open" })).isError).toBe(false);
+  });
+});
