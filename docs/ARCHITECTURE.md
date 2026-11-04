@@ -240,16 +240,21 @@ reason.
   segment sanitizer so a field cannot spell a field separator; the
   parser binds the last segment run on the line, so a forged passing
   tail cannot hide the server's own observed result. The issue id and
-  close date do not yet pass the same sanitizer, which the closing audit
-  found and filed (#469). ADR 0034 — removeWhen: the ledger is a typed
+  close date pass the same sanitizer and are typed on the way in — the
+  tracker id shape, an ISO date or timestamp — as are the red and green
+  refs of a test-driven line (#469; asserted by ledger.test.ts "the issue
+  id and close date are typed at the writer too"). ADR 0034 — removeWhen: the ledger is a typed
   store the tracker keeps, not a text file a tool parses. When two lines
   speak for one task — a closure and a later evidence fix-up — the
   readers rank them by commit ancestry (the line whose head descends
-  from the other's wins), then by the date on the line, then by file
-  order, and derive the phase's commit range the same way, so the merged
-  order of independent branches decides only when both the ancestry and
-  the day tie; that same-day independent case is the one the closing
-  audit reproduced and filed (#472). ADR 0028 — removeWhen: the tracker
+  from the other's wins), then by the stamp on the line (the close fold
+  writes the full ISO timestamp; the parser also reads the bare day of an
+  older line), then by the lexically greater head hash, and derive the
+  phase's commit range the same way; file order is never consulted, so
+  the merged order of two independent same-day branches cannot change
+  the answer (#472; asserted by ledger.test.ts "closure-plus-evidence
+  across a union merge reads the same answer in both directions", the
+  independent same-day cases). ADR 0028 — removeWhen: the tracker
   alone is the record of closures and no ledger file is ever merged.
 - `memory/` — disposable FTS index + git-committed memory cards with
   provenance, staleness checking, and phase/issue/role scopes. A first

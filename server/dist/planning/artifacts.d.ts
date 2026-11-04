@@ -16,11 +16,13 @@ export declare const RESEARCH_TEMPLATE: (number: number, name: string) => string
 /**
  * The ledger is append-only, so git's union merge driver is correct by
  * construction: two branches that each appended a line keep both, and the
- * readers rank two lines for one task by commit ancestry, date, then file
- * order (#445), so the merge direction cannot change the answer. Asserted
- * by test/ledger.test.ts "closure-plus-evidence across a union merge reads
- * the same answer in both directions". The attribute lives at the planning
- * root, where `**` reaches every phase.
+ * readers rank two lines for one task by commit ancestry, the stamp on the
+ * line, then the head hash (#445, #472) -- never file order -- so the merge
+ * direction cannot change the answer. Asserted by test/ledger.test.ts
+ * "closure-plus-evidence across a union merge reads the same answer in
+ * both directions": one head descending from the other, and two
+ * independent same-day branches merged both ways. The attribute lives at
+ * the planning root, where `**` reaches every phase.
  */
 export declare const LEDGER_UNION_LINE = "**/LEDGER.md merge=union";
 /** Whether the planning root's .gitattributes already carries the ledger union line. */

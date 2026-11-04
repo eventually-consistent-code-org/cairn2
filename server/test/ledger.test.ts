@@ -183,32 +183,114 @@ describe("closure-plus-evidence across a union merge reads the same answer in bo
     }
   });
 
-  it("no ancestry to read: the dates on the lines decide, and file order only breaks a dated tie", () => {
+  /**
+   * The shape a rejected ship push produces (#472): two branches off the
+   * same root, neither head descending from the other, the close on one and
+   * the evidence fix-up for the same task on the other, both the SAME day.
+   * Ancestry cannot answer, so only the stamps and the hashes are left.
+   */
+  function independent(d: string, phaseDir: string, root: string, closeStamp: string, fixStamp: string) {
+    git(d, "checkout", "-q", "-b", "close");
+    const closeHead = work(d, "feature");
+    appendLedger(d, phaseDir, { ...entry, baseCommit: root, headCommit: closeHead, closedDate: closeStamp });
+    commitLedger(d, "ledger: close");
+    git(d, "checkout", "-q", "-b", "fixup", root);
+    const fixHead = work(d, "fix");
+    appendLedger(d, phaseDir, {
+      ...entry, baseCommit: root, headCommit: fixHead, closedDate: fixStamp,
+      kind: "evidence", note: "the suite did not show the pass",
+    });
+    commitLedger(d, "ledger: evidence");
+    return { closeHead, fixHead };
+  }
+
+  it("independent branches, same day, the fix-up stamped later: retracted on both sides (#472)", () => {
+    const { d, phaseDir, base, root } = repo();
+    const { fixHead } = independent(d, phaseDir, root, "2026-07-14T09:00:00.000Z", "2026-07-14T16:30:00.000Z");
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual([]);
+      expect(side.superseded).toEqual(["PROJ-105"]);
+      expect(side.retracted).toBe(true);
+      expect(side.distillClosed).toEqual([]);
+      expect(side.range).toEqual({ base: short(root), head: short(fixHead) });
+    }
+  });
+
+  it("independent branches, same day, the close stamped later: closed on both sides, range head is the close's (#472)", () => {
+    const { d, phaseDir, base, root } = repo();
+    const { closeHead } = independent(d, phaseDir, root, "2026-07-14T16:30:00.000Z", "2026-07-14T09:00:00.000Z");
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual(["PROJ-105"]);
+      expect(side.superseded).toEqual([]);
+      expect(side.retracted).toBe(false);
+      expect(side.distillClosed).toEqual(["PROJ-105"]);
+      expect(side.range).toEqual({ base: short(root), head: short(closeHead) });
+    }
+  });
+
+  it("independent branches, bare day dates that tie: the head hash decides, the same way on both sides (#472)", () => {
+    // Lines written before the stamp carried a time. Nothing merge-invariant
+    // is left but the hashes, so the lexically greater head speaks later --
+    // an arbitrary order, but one both merge directions share. File order
+    // is never read: the two sides carry the lines reversed and agree.
+    const { d, phaseDir, base, root } = repo();
+    const { closeHead, fixHead } = independent(d, phaseDir, root, "2026-07-14", "2026-07-14");
+    const closeWins = short(closeHead) > short(fixHead);
+    const { first, second } = bothWays(d, base);
+    for (const side of [first, second]) {
+      expect(side.standing).toEqual(closeWins ? ["PROJ-105"] : []);
+      expect(side.superseded).toEqual(closeWins ? [] : ["PROJ-105"]);
+      expect(side.retracted).toBe(!closeWins);
+      expect(side.distillClosed).toEqual(closeWins ? ["PROJ-105"] : []);
+      expect(side.range).toEqual({ base: short(root), head: short(closeWins ? closeHead : fixHead) });
+    }
+  });
+
+  it("no ancestry to read: the stamps on the lines decide, and a full tie goes to the fix-up, never to file order", () => {
     // Fake shas, no repository: git cannot place the heads, so the rule
-    // falls through to closedDate, then to position in the file.
+    // falls through to the stamp, then to the head hash -- and here the
+    // heads are the same, so a same-day pair is a full tie.
     const d = dir();
     scaffoldProject(d, "P");
     const { dir: phaseDir } = scaffoldPhase(d, 3, "Ledger Phase");
     const base = join(d, ".cairn", "plans", "phases", phaseDir);
     const read = () => parseLedger(base);
+    const fresh = () => rmSync(ledgerPath(d, phaseDir), { force: true });
     // Evidence FIRST in the file but dated later than the close: retracted.
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-15" });
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     expect(read().entries).toEqual([]);
     expect(read().superseded.map((e) => [e.line, e.supersededBy])).toEqual([[6, 5]]);
     // Evidence LAST in the file but dated earlier than the close: the close stands.
-    rmSync(ledgerPath(d, phaseDir), { force: true });
+    fresh();
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-13" });
     expect(read().entries.map((e) => e.line)).toEqual([5]);
     expect(read().superseded).toEqual([]);
-    // Same date: file order, as before -- the later line speaks.
-    rmSync(ledgerPath(d, phaseDir), { force: true });
+    // Same day, same head: a closure stands only when it speaks strictly
+    // after every fix-up for its task, so the tie retracts it -- in BOTH
+    // file orders (#472). The writer stamps to the millisecond, so a tie
+    // is a hand-written or pre-stamp pair, and the conservative read wins.
+    fresh();
     appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
     appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14" });
     expect(read().entries).toEqual([]);
     expect(read().superseded.map((e) => e.supersededBy)).toEqual([6]);
-    // The range is dated the same way: earliest base to latest head.
+    fresh();
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14" });
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14" });
+    expect(read().entries).toEqual([]);
+    expect(read().superseded.map((e) => e.supersededBy)).toEqual([5]);
+    // A time inside the day breaks the tie the way the clock says: the
+    // close stamped two hours after the fix-up stands, though it sits first.
+    fresh();
+    appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14T12:00:00.000Z" });
+    appendLedger(d, phaseDir, { ...entry, kind: "evidence", closedDate: "2026-07-14T10:00:00.000Z" });
+    expect(read().entries.map((e) => [e.line, e.closedDate])).toEqual([[5, "2026-07-14T12:00:00.000Z"]]);
+    expect(read().superseded).toEqual([]);
+    // The range is ranked the same way: earliest base to latest head.
     expect(read().range).toEqual({ base: "a1b2c3d", head: "d4e5f6a" });
   });
 });
@@ -1000,5 +1082,105 @@ describe("a commit reference is a hash, nothing else (#428)", () => {
       ...entry, baseCommit: "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2", headCommit: " d4e5f6a ",
     });
     expect(res.line).toContain("commits A1B2C3D..d4e5f6a —");
+  });
+});
+
+describe("the issue id and close date are typed at the writer too (#469)", () => {
+  // The closing audit of phase 30 forged a passing observation through the
+  // two fields the segment sanitizer never touched. An honest summary, honest
+  // FAILING evidence, and an id (or date) that spells the separator run
+  // followed by a fake passing tail and a different issue number: every
+  // reader anchored on the last run that parsed, so the forgery won.
+  const TAIL = " — commits aaaaaaa..bbbbbbb — evidence npm test => passed — "
+    + "observed exit=0 at=2026-07-14T10:00:00.000Z — actuals wall=none degraded=no_receipt — ";
+  const forgedId = `PROJ-105 closed 2026-07-14${TAIL}PROJ-999`;
+  const forgedDate = `2026-07-14${TAIL}PROJ-999 closed 2026-07-14`;
+  const failing = { command: "npm test", result: "exit 1, 3 failed" };
+  const receipt = (issueId: string): CloseReceipt => ({
+    version: 1, issueId, closedAt: "2026-10-01T12:00:00.000Z", claimedAt: null, claimedMinutes: 10,
+    estimate: { points: null, pointsSource: "none", minutes: null, minutesSource: "none" },
+    worklog: "unsupported",
+  });
+  const phase = () => {
+    const d = dir();
+    scaffoldProject(d, "P");
+    const { dir: phaseDir } = scaffoldPhase(d, 5, "Typed Phase");
+    return { d, phaseDir };
+  };
+  const refusal = (fn: () => unknown): { code: string; message: string } | "accepted" => {
+    try { fn(); } catch (e) { return { code: (e as CairnError).code, message: (e as CairnError).message }; }
+    return "accepted";
+  };
+
+  it("the audit's crafted id is refused with a typed error before anything is written or consumed", () => {
+    const { d, phaseDir } = phase();
+    writeReceipt(d, receipt("PROJ-105"));
+    const r = refusal(() => appendLedger(d, phaseDir, { ...entry, issueId: forgedId, evidence: failing }));
+    expect(r).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("issueId") });
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+    expect(existsSync(join(receiptsDir(d), "PROJ-105.close.json"))).toBe(true);
+    // The honest line, written next, is the only thing any reader sees.
+    const honest = appendLedger(d, phaseDir, { ...entry, evidence: failing });
+    expect(honest.line.endsWith("— PROJ-105 closed 2026-07-14")).toBe(true);
+    const parsed = parseLedger(join(d, ".cairn", "plans", "phases", phaseDir));
+    expect(parsed.entries.map((e) => [e.issueId, e.closedDate, e.observedExit]))
+      .toEqual([["PROJ-105", "2026-07-14", undefined]]);
+    expect(parsed.entries[0].summary).toBe("wire adapter retries");
+  });
+
+  it("the same forgery through the close date is refused the same way; the date is an ISO date or timestamp", () => {
+    const { d, phaseDir } = phase();
+    for (const bad of [forgedDate, "yesterday", "14/07/2026", "2026-07-14 10:00", "2026-7-4", ""]) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, closedDate: bad }));
+      expect(r, JSON.stringify(bad))
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("closedDate") });
+    }
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
+  });
+
+  it("the hostile spellings the audit did not name: a path climb, an option, whitespace, a bare hash sign", () => {
+    const { d, phaseDir } = phase();
+    // A receipt is keyed by the id (close-receipt.ts), so a climbing id would
+    // otherwise name a file outside the receipts folder.
+    for (const bad of ["../../etc/passwd", "--force", "PROJ 105", "#", "-1", ".hidden", "", "PROJ-105—closed"]) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, { ...entry, issueId: bad }));
+      expect(r, JSON.stringify(bad))
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("issueId") });
+    }
+  });
+
+  it("the harmless twins pass and render exactly as before: the id shapes every tracker mints, a date, a timestamp", () => {
+    const { d, phaseDir } = phase();
+    const ids = ["#469", "469", "PROJ-105", "ENG-12.3", "abc_def-1", "66f1a2b3c4d5e6f7a8b9c0d1", " GH-7 "];
+    for (const id of ids) {
+      const r = appendLedger(d, phaseDir, { ...entry, issueId: id });
+      expect(r.line.endsWith(`${EV}${id.trim()} closed 2026-07-14`), id).toBe(true);
+    }
+    const stamped = appendLedger(d, phaseDir, { ...entry, closedDate: "2026-07-14T10:00:00.000Z" });
+    expect(stamped.line.endsWith(`${EV}PROJ-105 closed 2026-07-14T10:00:00.000Z`)).toBe(true);
+    const offset = appendLedger(d, phaseDir, {
+      ...entry, taskRef: "task-9", kind: "evidence", closedDate: "2026-07-14T12:00:00+02:00",
+    });
+    expect(offset.line.endsWith("evidence for PROJ-105 2026-07-14T12:00:00+02:00")).toBe(true);
+    const parsed = parseLedger(join(d, ".cairn", "plans", "phases", phaseDir));
+    expect(parsed.skipped).toEqual([]);
+    expect(parsed.entries.map((e) => e.issueId)).toEqual([...ids.map((i) => i.trim()), "PROJ-105"]);
+    expect(parsed.entries[ids.length].closedDate).toBe("2026-07-14T10:00:00.000Z");
+    expect(parsed.evidence.map((e) => e.loggedDate)).toEqual(["2026-07-14T12:00:00+02:00"]);
+  });
+
+  it("the tdd red and green refs are hashes too: a symbolic or option-shaped ref is refused naming the field", () => {
+    const { d, phaseDir } = phase();
+    const cases = [
+      ["redCommit", "HEAD"], ["greenCommit", "--output=x"], ["redCommit", "abc12"], ["greenCommit", "main"],
+    ] as const;
+    for (const [field, value] of cases) {
+      const r = refusal(() => checkLedgerEntry(d, phaseDir, {
+        ...entry, redCommit: "c".repeat(40), greenCommit: "d".repeat(40), [field]: value,
+      }));
+      expect(r, `${field}=${value}`)
+        .toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(field) });
+    }
+    expect(existsSync(ledgerPath(d, phaseDir))).toBe(false);
   });
 });

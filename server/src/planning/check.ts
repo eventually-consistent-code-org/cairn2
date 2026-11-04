@@ -352,9 +352,11 @@ function judgeLedgerGates(projectDir: string, p: ScannedPlan): PlanFinding[] {
   const declaredAt = (key: string): number => p.lines.findIndex((l) => l.startsWith(`${key}:`)) + 1 || 1;
 
   // Last standing closure per issue, and last superseded one -- "last" by
-  // the parser's line order (commit ancestry, then the line's date, then
-  // file order; #445), never by file position alone, which a union merge
-  // decides.
+  // the parser's line order (commit ancestry, then the line's stamp, then
+  // the head hash; #445, #472), never by file position, which a union merge
+  // decides. Two closures of one issue that tie on all three keep the one
+  // met first, which only moves the finding's anchor line between two
+  // lines the stamping writer never produces as a pair (claim, 2026-11-04).
   const { entries, superseded, order } = parseLedger(p.phaseDir);
   const byIssue = (rows: ParsedClosure[]): Map<string, ParsedClosure> => {
     const out = new Map<string, ParsedClosure>();

@@ -1114,9 +1114,12 @@ export function buildServer(deps: {
         "the project dir has no git HEAD to close the ledger range on",
         "run cairn inside the repository, or close without summary and ledger_append by hand");
     }
+    // The full stamp, not the day (#472): two independent branches that
+    // close and correct one task on the same day tie on the day, and the
+    // readers would be left ranking them by hash.
     const entry: LedgerEntryInput = {
       taskRef: id, summary, baseCommit, headCommit: head, issueId: id,
-      closedDate: closedAt.slice(0, 10), evidence,
+      closedDate: closedAt, evidence,
       ...(block?.redCommit !== undefined ? { redCommit: block.redCommit } : {}),
       ...(block?.greenCommit !== undefined ? { greenCommit: block.greenCommit } : {}),
     };

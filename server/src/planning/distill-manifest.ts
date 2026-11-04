@@ -178,12 +178,12 @@ export interface ParsedLedger {
   entries: ParsedClosure[]; evidence: ParsedEvidence[];
   superseded: ParsedClosure[]; skipped: string[];
   range: { base: string; head: string } | null;
-  /** The line order this parse resolved by (#445), git answers cached, for
-   *  readers that still have lines of their own to rank. */
+  /** The line order this parse resolved by (#445, #472), git answers cached,
+   *  for readers that still have lines of their own to rank. */
   order: LedgerLineOrder;
 }
 
-// Which ledger line speaks last (#445)
+// Which ledger line speaks last (#445, #472)
 //
 // The ledger merges by union, so the order two branches' lines land in is
 // the merge direction, not time. Readers that resolve "a closure and its
@@ -193,30 +193,39 @@ export interface ParsedLedger {
 //   1. commit ancestry -- the line whose head commit descends from the
 //      other's head is later (git is asked; a sha git cannot place, no
 //      repository, or no git at all, is "cannot say" and falls through);
-//   2. the date written on the line (closedDate / loggedDate);
-//   3. file order, last -- the single-branch case this used to be.
-// Asserted by test/ledger.test.ts "closure-plus-evidence across a union
-// merge reads the same answer in both directions (#445)". Fail-open: git
+//   2. the stamp written on the line (closedDate / loggedDate) -- the full
+//      ISO timestamp the close fold writes since #472, or the bare day on
+//      an older or hand-called line; both compare lexically as time;
+//   3. the lexically greater head hash -- an arbitrary order, but one the
+//      two merge directions share.
+// File order is never consulted: LedgerLineRef carries no line number, so
+// the comparator cannot read one. Two lines that tie on all three are
+// indistinguishable to every reader; the supersede step below resolves
+// that tie to the fix-up (the conservative read), and the range step to
+// the same head either way. Asserted by test/ledger.test.ts
+// "closure-plus-evidence across a union merge reads the same answer in
+// both directions": one head descending from the other (#445), and two
+// independent same-day branches merged both ways (#472). Fail-open: git
 // trouble never fails a parse, it only loses the first step.
 
-/** The three fields the rule reads, present on closure and evidence lines alike. */
+/** The fields the rule reads, present on closure and evidence lines alike.
+ *  Deliberately no `line`: file position is the merge artifact (#472). */
 export interface LedgerLineRef {
   headCommit: string;
-  /** 1-indexed LEDGER.md line. */
-  line: number;
   /** `closedDate` on a closure line, `loggedDate` on an evidence line. */
   closedDate?: string;
   loggedDate?: string;
 }
 
-const dateOf = (r: LedgerLineRef): string => r.closedDate ?? r.loggedDate ?? "";
+const stampOf = (r: LedgerLineRef): string => r.closedDate ?? r.loggedDate ?? "";
 
 /** Two sha spellings name one commit when one is a prefix of the other (7 vs 40 chars). */
 const sameCommit = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
 
-/** Steps 2 and 3 of the rule alone: the date on the line, then file order. */
-const laterDated = (x: LedgerLineRef, y: LedgerLineRef): boolean =>
-  dateOf(x) !== dateOf(y) ? dateOf(x) > dateOf(y) : x.line > y.line;
+/** Steps 2 and 3 of the rule alone: the stamp on the line, then the head
+ *  hash. Strict: a full tie is "not later" either way round. */
+const laterStamped = (x: LedgerLineRef, y: LedgerLineRef): boolean =>
+  stampOf(x) !== stampOf(y) ? stampOf(x) > stampOf(y) : x.headCommit > y.headCommit;
 
 /** Ancestry questions for one ledger's repository, answered by git and cached per parse. */
 export interface LedgerLineOrder {
@@ -265,7 +274,7 @@ export function ledgerLineOrder(cwd: string): LedgerLineOrder {
       if (isAncestor(y.headCommit, x.headCommit) === true) return true;
       if (isAncestor(x.headCommit, y.headCommit) === true) return false;
     }
-    return laterDated(x, y);
+    return laterStamped(x, y);
   };
   // One git call each for the whole set: the heads no other head descends
   // from, and the commit every base descends from. Null when git cannot say.
@@ -273,23 +282,31 @@ export function ledgerLineOrder(cwd: string): LedgerLineOrder {
     const { status, out } = git(args);
     return status === 0 ? out.split("\n").map((l) => l.trim()).filter(Boolean) : null;
   };
+  // The span tie-breaks, total over the fields a span carries so the pick
+  // never depends on which span the reduce met first: stamp, head, base.
+  const laterSpan = (x: LedgerSpan, y: LedgerSpan): boolean =>
+    stampOf(x) !== stampOf(y) ? stampOf(x) > stampOf(y)
+      : x.headCommit !== y.headCommit ? x.headCommit > y.headCommit : x.baseCommit > y.baseCommit;
+  const earlierSpan = (x: LedgerSpan, y: LedgerSpan): boolean =>
+    stampOf(x) !== stampOf(y) ? stampOf(x) < stampOf(y)
+      : x.baseCommit !== y.baseCommit ? x.baseCommit < y.baseCommit : x.headCommit < y.headCommit;
   const range = (spans: LedgerSpan[]): { base: string; head: string } | null => {
     if (spans.length === 0) return null;
     const heads = [...new Set(spans.map((s) => s.headCommit))];
     const bases = [...new Set(spans.map((s) => s.baseCommit))];
     // Head: among the independent tips (no ancestry between them, by git's
-    // own answer -- or all spans when it cannot say), the latest-dated,
-    // then the last in the file.
+    // own answer -- or all spans when it cannot say), the latest-stamped,
+    // then the lexically greater head.
     const tips = heads.length > 1 ? gitLines(["merge-base", "--independent", ...heads]) : null;
     let headPool = tips ? spans.filter((s) => tips.some((t) => sameCommit(t, s.headCommit))) : spans;
     if (headPool.length === 0) headPool = spans;
-    const head = headPool.reduce((w, s) => (laterDated(s, w) ? s : w));
+    const head = headPool.reduce((w, s) => (laterSpan(s, w) ? s : w));
     // Base: the one base the others descend from when there is one, else
-    // the earliest-dated, then the first in the file.
+    // the earliest-stamped, then the lexically smaller base.
     const common = bases.length > 1 ? gitLines(["merge-base", "--octopus", ...bases])?.[0] : undefined;
     let basePool = common ? spans.filter((s) => sameCommit(common, s.baseCommit)) : [];
     if (basePool.length === 0) basePool = spans;
-    const base = basePool.reduce((w, s) => (laterDated(w, s) ? s : w));
+    const base = basePool.reduce((w, s) => (earlierSpan(s, w) ? s : w));
     return { base: base.baseCommit, head: head.headCommit };
   };
   return { later, range };
@@ -343,13 +360,16 @@ export function parseLedger(base: string): ParsedLedger {
     spans.push(entries[entries.length - 1]);
   }
   // A closure for a task was wrong when an evidence line for the SAME task
-  // speaks after it (by the rule, not by position): the evidence line is the
-  // correction, so that closure stops standing. A closure that speaks after
-  // every such evidence line is a real later close and stays. Git is only
-  // asked when a task carries both kinds of line.
+  // does not speak strictly before it (by the rule, not by position): the
+  // evidence line is the correction, so that closure stops standing. A
+  // closure that speaks strictly after every such evidence line is a real
+  // later close and stays; a full tie -- same stamp, same head, which the
+  // stamping writer never produces for two lines -- goes to the fix-up, the
+  // conservative read, in both merge orders (#472). Git is only asked when
+  // a task carries both kinds of line.
   for (let j = entries.length - 1; j >= 0; j--) {
     const c = entries[j];
-    const fix = evidence.find((e) => e.taskRef === c.taskRef && order.later(e, c));
+    const fix = evidence.find((e) => e.taskRef === c.taskRef && !order.later(c, e));
     if (!fix) continue;
     entries.splice(j, 1);
     superseded.unshift({ ...c, supersededBy: fix.line });

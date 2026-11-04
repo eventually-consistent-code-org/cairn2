@@ -443,7 +443,7 @@ describe("issue_close measures, ledger_append records (through the tools)", () =
       const line = `- [x] ${id} — Close fold shipped — commits ${base.slice(0, 7)}..${head.slice(0, 7)} — `
         + "evidence npm test => 1 passed — "
         + "actuals wall=12m:claim_comment claimed=none est=none worklog=not_requested — "
-        + `${id} closed 2026-10-01`;
+        + `${id} closed 2026-10-01T10:12:00.000Z`; // the full stamp (#472), not the day
       expect(closed.json.ledger.line).toBe(line);
       expect(closed.json.ledger.line).not.toContain("degraded");
       expect(closed.json.ledger.degraded).toBeUndefined();

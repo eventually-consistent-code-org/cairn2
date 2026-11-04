@@ -48,3 +48,28 @@ references on a test-driven line are not hash-checked (recorded). The
 rule generalizes — every field on the line goes through the sanitizer,
 every reference is a hash — and the follow-up is to finish applying it
 rather than to re-decide it.
+
+## Amendment 2026-11-04
+
+The rule is applied to the rest of the line (#469). The issue id and the
+close date pass through the same segment sanitizer as every other field,
+and both are typed before anything is read or written: the id must match
+the tracker id shape every adapter mints — an optional leading `#`, one
+alphanumeric, then alphanumerics, dots, underscores and hyphens — and the
+date must be an ISO calendar date or an ISO timestamp. The red and green
+commit references on a test-driven line are hash-checked like the base
+and head. Each refusal is a typed configuration error that names the
+field, raised at `checkLedgerEntry` so the folded close refuses while the
+issue is still open and the close receipt is left in place.
+
+The id shape rules out whitespace, slashes and separators, so the crafted
+id the closing audit used can neither spell a field run nor name a file
+outside the receipts folder it keys. The date shape is what makes the
+readers' lexical ranking of two lines for one task a ranking by time (ADR
+0028's amendment of the same date). Asserted by `test/ledger.test.ts`
+"the issue id and close date are typed at the writer too": the audit's
+crafted id and crafted date are refused with nothing written, the hostile
+spellings the audit did not name (a path climb, an option, a bare `#`)
+are refused, and the harmless twins — every tracker's id shape, a day, a
+timestamp — render byte-for-byte as before. The test was red against the
+writer this record described before the change landed.

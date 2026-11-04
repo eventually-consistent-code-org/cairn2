@@ -6,11 +6,14 @@
 // merges by union (.gitattributes, #361), so lines from two branches land
 // in merge order. Readers never let file position decide between two
 // lines for one task: a closure and its evidence fix-up resolve by commit
-// ancestry, then the date on the line, then file order (#445, the rule
-// lives in distill-manifest.ts). Asserted by test/ledger.test.ts "ledger
+// ancestry, then the stamp on the line, then the head hash (#445, #472;
+// the rule lives in distill-manifest.ts). The close fold writes the full
+// ISO timestamp as the stamp so two same-day lines on independent
+// branches do not tie on the day. Asserted by test/ledger.test.ts "ledger
 // ordering is a merge artifact" (closures of different tasks) and
 // "closure-plus-evidence across a union merge reads the same answer in
-// both directions" (a real union merge, both ways).
+// both directions" (a real union merge, both ways, one head descending
+// from the other and two independent same-day branches).
 //
 // removeWhen: never for the record -- a commit range and its evidence are
 // the audit trail, not a model workaround. The refusal on missing evidence
@@ -54,20 +57,68 @@ export function assertCommitHash(value, field) {
     }
     return v;
 }
+/** The shape a tracker id takes on the way in (#469): an optional leading
+ *  "#", then one alphanumeric, then alphanumerics, dots, underscores and
+ *  hyphens -- GitHub's `#469`/`469`, Jira's `PROJ-105`, Linear's `ENG-12`,
+ *  Trello's 24-hex card id, a Notion uuid. No whitespace, no slash, no
+ *  separator, so the id can neither spell a field run nor climb out of the
+ *  receipts folder it keys (close-receipt.ts). */
+const ISSUE_ID = /^#?[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** The shape the close date takes (#469, #472): an ISO calendar date, or
+ *  that date with a `T` time -- hours and minutes, optional seconds and
+ *  fraction, optional `Z` or offset. The close fold writes the full
+ *  timestamp (Date.toISOString()); a hand-called ledger_append may still
+ *  pass the bare day. Anything else -- prose, a slash date, a space before
+ *  the time -- is refused: the readers compare this field lexically to rank
+ *  two lines for one task, and only an ISO string compares as time. */
+const CLOSED_DATE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+/**
+ * Refuses an issue id outside ISSUE_ID, with the field named. The closing
+ * audit of phase 30 forged a passing observation through this field: an
+ * honest summary, honest failing evidence, and an id that spelled the
+ * separator run followed by a fake tail and another issue number (#469).
+ * The sanitizer below would now collapse that run to plain text; the shape
+ * check refuses it outright, before any receipt is read or a line written
+ * (asserted: ledger.test.ts "the issue id and close date are typed at the
+ * writer too").
+ *
+ * :param value: the string the caller supplied
+ * :param field: its name in the caller's input ("issueId")
+ * :returns the trimmed id
+ */
+function assertIssueId(value, field) {
+    const v = (value ?? "").trim();
+    if (!ISSUE_ID.test(v)) {
+        throw new CairnError("CONFIG_INVALID", `${field} is not a tracker issue id (#?alnum then alnum . _ -): ${JSON.stringify(v.slice(0, 60))}`, "pass the id as the tracker spells it (#469, PROJ-105, ENG-12) -- no spaces, slashes or separators");
+    }
+    return v;
+}
+/** Refuses a close date outside CLOSED_DATE, with the field named (#469). */
+function assertClosedDate(value, field) {
+    const v = (value ?? "").trim();
+    if (!CLOSED_DATE.test(v)) {
+        throw new CairnError("CONFIG_INVALID", `${field} is not an ISO date or timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS[.sss]][Z|+HH:MM]): `
+            + JSON.stringify(v.slice(0, 60)), "pass new Date().toISOString() (the close fold's shape), or the bare YYYY-MM-DD day");
+    }
+    return v;
+}
 /** Collapses embedded newlines (and the whitespace around them) to a single space, so a
  *  multi-line field (e.g. a pasted commit-message summary) can never break the ledger's
  *  one-line-per-entry invariant. */
 function sanitize(field) {
     return field.replace(/\s*\n\s*/g, " ").trim();
 }
-/** Free-text slots additionally lose em dashes — " — " is the ledger line's
+/** Every slot on the line loses em dashes — " — " is the ledger line's
  *  field separator, so one inside a command, result, task reference or
  *  summary would shift every field after it for the readers
  *  (distill-manifest, resync). The task reference and summary go through
  *  it too (#426): a summary carrying its own "commits .. — observed exit=0
  *  — closed" run would otherwise sit ahead of the server's real
  *  observation on the line. Asserted by test/ledger.test.ts "a summary
- *  shaped like a passing ledger tail cannot forge the observation". */
+ *  shaped like a passing ledger tail cannot forge the observation". The
+ *  issue id and close date go through it as well (#469), behind the shape
+ *  checks above that already refuse a separator -- the second layer costs
+ *  nothing and the verify line for #469 greps for it. */
 function sanitizeSegment(field) {
     return sanitize(field).replace(/—/g, "-");
 }
@@ -115,9 +166,19 @@ function validateEntry(entry) {
         throw new CairnError("CONFIG_INVALID", "redCommit/greenCommit: both or neither", "pass the failing-test commit AND the passing commit, or omit both");
     }
     // Both ends of the range are hashes (#428) -- checked here, before any
-    // git call, so the close fold refuses while the issue is still open.
+    // git call, so the close fold refuses while the issue is still open. The
+    // tdd pair is held to the same shape (#469): a symbolic or option-shaped
+    // ref on the line would be read back as a range by resync.
     assertCommitHash(entry.baseCommit, "baseCommit");
     assertCommitHash(entry.headCommit, "headCommit");
+    if (entry.redCommit !== undefined) {
+        assertCommitHash(entry.redCommit, "redCommit");
+        assertCommitHash(entry.greenCommit, "greenCommit");
+    }
+    // The two fields beside the server's own segments are typed too (#469):
+    // the id the readers key on and the date they rank by.
+    assertIssueId(entry.issueId, "issueId");
+    assertClosedDate(entry.closedDate, "closedDate");
     evidenceSegment(entry);
 }
 function formatEntry(entry, actuals, observed = "") {
@@ -133,11 +194,11 @@ function formatEntry(entry, actuals, observed = "") {
             ? `note ${sanitizeSegment(entry.note)} — ` : "";
         return `- [ ] ${sanitizeSegment(entry.taskRef)} — ${sanitizeSegment(entry.summary)} — commits `
             + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
-            + `${tdd}${evidence}${note}evidence for ${sanitize(entry.issueId)} ${sanitize(entry.closedDate)}\n`;
+            + `${tdd}${evidence}${note}evidence for ${sanitizeSegment(entry.issueId)} ${sanitizeSegment(entry.closedDate)}\n`;
     }
     return `- [x] ${sanitizeSegment(entry.taskRef)} — ${sanitizeSegment(entry.summary)} — commits `
         + `${shortSha(sanitize(entry.baseCommit))}..${shortSha(sanitize(entry.headCommit))} — `
-        + `${tdd}${evidence}${observed}${actuals}${sanitize(entry.issueId)} closed ${sanitize(entry.closedDate)}\n`;
+        + `${tdd}${evidence}${observed}${actuals}${sanitizeSegment(entry.issueId)} closed ${sanitizeSegment(entry.closedDate)}\n`;
 }
 /**
  * The `verify:` command a phase's PLAN.md declared for one issue (#206),

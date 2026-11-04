@@ -59,3 +59,35 @@ same `closure-superseded` finding and the same commit range from each —
 `test/ledger.test.ts`, "closure-plus-evidence across a union merge reads
 the same answer in both directions". It was red against the file-order
 parser before the rule landed.
+
+## Amendment 2026-11-04
+
+The 2026-11-03 rule met the locked decision and missed the goal (#472).
+Its last step was file order, and its second step compared a day: when
+two branches are independent — neither head descends from the other,
+the shape a rejected ship push produces — and both lines carry the same
+day, ancestry cannot answer, the dates tie, and file order decides, which
+is merge order. The same two lines read closed one way and superseded the
+other. The test above could not go red on it: it built only branches
+where one head descended from the other and the dates differed.
+
+The rule now ranks by commit ancestry, then by the stamp on the line,
+then by the lexically greater head hash, and file order is never
+consulted — the comparator's input type carries no line number, so it
+cannot be. The close fold writes the full ISO timestamp as the stamp
+(`Date.toISOString()`), so two same-day lines no longer tie on the day;
+the parser accepts the bare day too, for lines written before this and
+for a hand-called append, and both spellings compare lexically as time.
+A closure stands only when it speaks strictly after every fix-up for its
+task: a full tie — same stamp, same head, which the stamping writer never
+produces for two lines — goes to the fix-up, the conservative read, in
+both merge orders. The phase's commit range picks its head and base by
+the same stamp-then-hash order.
+
+Asserted by the same test block, which gains the independent same-day
+case merged both ways three times over — the fix-up stamped later, the
+close stamped later, and bare days that tie so the hash decides — and by
+`test/plan-check.test.ts` "a same-day tie reads the same in either file
+order". The tie case was red against the 2026-11-03 rule: the two merge
+directions disagreed. The "correct by construction" sentence in the
+scaffold now stands on this test.

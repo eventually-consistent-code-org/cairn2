@@ -88,11 +88,12 @@ function planIssuesAt(base) {
         return [];
     return parsePlanDoc(readFileSync(path, "utf8")).frontmatter.issues;
 }
-const dateOf = (r) => r.closedDate ?? r.loggedDate ?? "";
+const stampOf = (r) => r.closedDate ?? r.loggedDate ?? "";
 /** Two sha spellings name one commit when one is a prefix of the other (7 vs 40 chars). */
 const sameCommit = (a, b) => a.startsWith(b) || b.startsWith(a);
-/** Steps 2 and 3 of the rule alone: the date on the line, then file order. */
-const laterDated = (x, y) => dateOf(x) !== dateOf(y) ? dateOf(x) > dateOf(y) : x.line > y.line;
+/** Steps 2 and 3 of the rule alone: the stamp on the line, then the head
+ *  hash. Strict: a full tie is "not later" either way round. */
+const laterStamped = (x, y) => stampOf(x) !== stampOf(y) ? stampOf(x) > stampOf(y) : x.headCommit > y.headCommit;
 /**
  * Build the line order for the repository that holds `cwd` (the phase dir;
  * git discovers the repository upward, exactly as a hook run there would).
@@ -132,7 +133,7 @@ export function ledgerLineOrder(cwd) {
             if (isAncestor(x.headCommit, y.headCommit) === true)
                 return false;
         }
-        return laterDated(x, y);
+        return laterStamped(x, y);
     };
     // One git call each for the whole set: the heads no other head descends
     // from, and the commit every base descends from. Null when git cannot say.
@@ -140,26 +141,32 @@ export function ledgerLineOrder(cwd) {
         const { status, out } = git(args);
         return status === 0 ? out.split("\n").map((l) => l.trim()).filter(Boolean) : null;
     };
+    // The span tie-breaks, total over the fields a span carries so the pick
+    // never depends on which span the reduce met first: stamp, head, base.
+    const laterSpan = (x, y) => stampOf(x) !== stampOf(y) ? stampOf(x) > stampOf(y)
+        : x.headCommit !== y.headCommit ? x.headCommit > y.headCommit : x.baseCommit > y.baseCommit;
+    const earlierSpan = (x, y) => stampOf(x) !== stampOf(y) ? stampOf(x) < stampOf(y)
+        : x.baseCommit !== y.baseCommit ? x.baseCommit < y.baseCommit : x.headCommit < y.headCommit;
     const range = (spans) => {
         if (spans.length === 0)
             return null;
         const heads = [...new Set(spans.map((s) => s.headCommit))];
         const bases = [...new Set(spans.map((s) => s.baseCommit))];
         // Head: among the independent tips (no ancestry between them, by git's
-        // own answer -- or all spans when it cannot say), the latest-dated,
-        // then the last in the file.
+        // own answer -- or all spans when it cannot say), the latest-stamped,
+        // then the lexically greater head.
         const tips = heads.length > 1 ? gitLines(["merge-base", "--independent", ...heads]) : null;
         let headPool = tips ? spans.filter((s) => tips.some((t) => sameCommit(t, s.headCommit))) : spans;
         if (headPool.length === 0)
             headPool = spans;
-        const head = headPool.reduce((w, s) => (laterDated(s, w) ? s : w));
+        const head = headPool.reduce((w, s) => (laterSpan(s, w) ? s : w));
         // Base: the one base the others descend from when there is one, else
-        // the earliest-dated, then the first in the file.
+        // the earliest-stamped, then the lexically smaller base.
         const common = bases.length > 1 ? gitLines(["merge-base", "--octopus", ...bases])?.[0] : undefined;
         let basePool = common ? spans.filter((s) => sameCommit(common, s.baseCommit)) : [];
         if (basePool.length === 0)
             basePool = spans;
-        const base = basePool.reduce((w, s) => (laterDated(w, s) ? s : w));
+        const base = basePool.reduce((w, s) => (earlierSpan(s, w) ? s : w));
         return { base: base.baseCommit, head: head.headCommit };
     };
     return { later, range };
@@ -214,13 +221,16 @@ export function parseLedger(base) {
         spans.push(entries[entries.length - 1]);
     }
     // A closure for a task was wrong when an evidence line for the SAME task
-    // speaks after it (by the rule, not by position): the evidence line is the
-    // correction, so that closure stops standing. A closure that speaks after
-    // every such evidence line is a real later close and stays. Git is only
-    // asked when a task carries both kinds of line.
+    // does not speak strictly before it (by the rule, not by position): the
+    // evidence line is the correction, so that closure stops standing. A
+    // closure that speaks strictly after every such evidence line is a real
+    // later close and stays; a full tie -- same stamp, same head, which the
+    // stamping writer never produces for two lines -- goes to the fix-up, the
+    // conservative read, in both merge orders (#472). Git is only asked when
+    // a task carries both kinds of line.
     for (let j = entries.length - 1; j >= 0; j--) {
         const c = entries[j];
-        const fix = evidence.find((e) => e.taskRef === c.taskRef && order.later(e, c));
+        const fix = evidence.find((e) => e.taskRef === c.taskRef && !order.later(c, e));
         if (!fix)
             continue;
         entries.splice(j, 1);

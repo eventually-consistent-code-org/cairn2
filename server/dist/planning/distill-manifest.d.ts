@@ -85,15 +85,14 @@ export interface ParsedLedger {
         base: string;
         head: string;
     } | null;
-    /** The line order this parse resolved by (#445), git answers cached, for
-     *  readers that still have lines of their own to rank. */
+    /** The line order this parse resolved by (#445, #472), git answers cached,
+     *  for readers that still have lines of their own to rank. */
     order: LedgerLineOrder;
 }
-/** The three fields the rule reads, present on closure and evidence lines alike. */
+/** The fields the rule reads, present on closure and evidence lines alike.
+ *  Deliberately no `line`: file position is the merge artifact (#472). */
 export interface LedgerLineRef {
     headCommit: string;
-    /** 1-indexed LEDGER.md line. */
-    line: number;
     /** `closedDate` on a closure line, `loggedDate` on an evidence line. */
     closedDate?: string;
     loggedDate?: string;
