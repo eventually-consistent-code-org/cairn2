@@ -4945,6 +4945,10 @@ describe("every refused shape has an allowed twin, and holds from a subfolder (#
       refused: sh(() => "echo x > $HOME/.claude/settings.json"), twin: sh(() => "echo x > $HOME/.claude/notes.md") },
     { guard: "harness", shape: "the machine-wide MCP config", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude.json"), twin: sh(() => "echo x > $HOME/.claude.json.bak") },
+    // #304: the same files under CLAUDE_CONFIG_DIR; the guard spells $HOME out in the variable's value
+    { guard: "harness", shape: "the settings under CLAUDE_CONFIG_DIR", cwds: BOTH,
+      refused: { ...sh(() => "echo x > $HOME/claude-config/settings.json"), env: { CLAUDE_CONFIG_DIR: "$HOME/claude-config" } },
+      twin: { ...sh(() => "echo x > $HOME/claude-config/notes.md"), env: { CLAUDE_CONFIG_DIR: "$HOME/claude-config" } } },
     { guard: "harness", shape: "the plugin registry", cwds: BOTH,
       refused: sh(() => "echo x > $HOME/.claude/plugins/installed_plugins.json"), twin: sh(() => "echo x > $HOME/.claude/todo.md") },
     { guard: "harness", shape: ".git/hooks", cwds: BOTH,
@@ -5642,5 +5646,109 @@ describe("harness guard reads help through the read-only claude plugin words (#3
       "claude plugin disable test"]) {
       expect(run(c).status, c).toBe(2);
     }
+  });
+});
+
+// #304 -- CLAUDE_CONFIG_DIR moves Claude Code's user config out of ~/.claude:
+// settings.json, settings.local.json, .claude.json and the plugins, skills,
+// agents, commands and hooks folders live under it instead (dated claim,
+// 2026-11-04, per the Claude Code settings reference). The guard followed
+// only the home spellings, so a session started with the variable set had
+// its live settings writable. Now the folder is a zone like the home ones:
+// its *.json files and those five trees, from any cwd, in the $VAR spelling
+// too; ~/.claude stays protected beside it. Hostile: a config dir that IS
+// the home or the project, or a relative one, protects nothing extra rather
+// than making every file there the harness.
+describe("harness guard follows CLAUDE_CONFIG_DIR (#304)", () => {
+  /** A project (with a nested pkg/lib), a home and a config dir laid out as Claude Code leaves it. */
+  function fixture(cfgInProject = false) {
+    const p = freshDir("cairn-hooks-cfgdir-proj-");
+    const home = freshDir("cairn-hooks-cfgdir-home-");
+    const cfg = cfgInProject ? join(p, "config") : freshDir("cairn-hooks-cfgdir-cfg-");
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    for (const d of ["plugins", "skills/s", "agents", "commands", "hooks"]) mkdirSync(join(cfg, d), { recursive: true });
+    writeFileSync(join(cfg, "settings.json"), "{}");
+    writeFileSync(join(cfg, ".claude.json"), "{}");
+    writeFileSync(join(cfg, "plugins", "installed_plugins.json"), "{}");
+    writeFileSync(join(cfg, "notes.md"), "notes\n");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), "{}");
+    return { p, home, cfg };
+  }
+
+  function run(f: { p: string; home: string; cfg: string }, tool: string, input: Record<string, unknown>, cwd = f.p, cfgValue = f.cfg) {
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CLAUDE_CONFIG_DIR: cfgValue,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: tool, tool_input: input, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+  const bash = (command: string) => ["Bash", { command }] as const;
+
+  it("the settings, the MCP config and the five folders under the config dir are refused for every tool; their neighbours pass", () => {
+    const f = fixture();
+    const refused: Array<[tool: string, input: Record<string, unknown>, what: string]> = [
+      ["Edit", { file_path: join(f.cfg, "settings.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, "settings.local.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, ".claude.json") }, "your machine-wide Claude settings"],
+      ["Write", { file_path: join(f.cfg, "skills", "s", "SKILL.md") }, "your machine-wide skills"],
+      ["Edit", { file_path: join(f.cfg, "plugins", "installed_plugins.json") }, "the installed plugins and their registry"],
+      [...bash(`echo x > ${f.cfg}/settings.json`), "your machine-wide Claude settings"],
+      [...bash("echo x > $CLAUDE_CONFIG_DIR/settings.json"), "your machine-wide Claude settings"],
+      [...bash("echo x > ${CLAUDE_CONFIG_DIR}/.claude.json"), "your machine-wide Claude settings"],
+      [...bash(`rm ${f.cfg}/*.json`), "your machine-wide Claude settings"],
+      [...bash(`rm -rf ${f.cfg}/skills`), "your machine-wide skills"],
+      [...bash(`mkdir -p ${f.cfg}/agents/new`), "your machine-wide agent definitions"],
+      [...bash(`cp /tmp/x ${f.cfg}/commands/c.md`), "your machine-wide slash commands"],
+      [...bash(`mv /tmp/x ${f.cfg}/hooks/run.sh`), "your machine-wide Claude hooks"],
+      [...bash(`rm -rf ${f.cfg}`), "your machine-wide Claude settings"],
+      [...bash(`chmod -R 777 ${f.cfg}`), "your machine-wide Claude settings"],
+      [...bash(`echo x > ${f.home}/.claude/settings.json`), "your machine-wide Claude settings"],
+    ];
+    for (const [tool, input, what] of refused) {
+      const r = run(f, tool, input);
+      expect(r.status, JSON.stringify(input)).toBe(2);
+      expect(r.stderr, JSON.stringify(input)).toContain(what);
+    }
+    const allowed: Array<[tool: string, input: Record<string, unknown>]> = [
+      ["Edit", { file_path: join(f.cfg, "notes.md") }],
+      ["Write", { file_path: join(f.cfg, "history.jsonl") }],
+      ["Write", { file_path: join(f.cfg, "projects", "x", "session.jsonl") }],
+      [...bash(`echo x > ${f.cfg}/todo.md`)],
+      [...bash("echo x > $CLAUDE_CONFIG_DIR/todo.md")],
+      [...bash(`cat ${f.cfg}/settings.json`)],
+      [...bash(`ls ${f.cfg}/skills`)],
+      [...bash(`mkdir -p ${f.cfg}/projects/new`)],
+    ];
+    for (const [tool, input] of allowed) {
+      const r = run(f, tool, input);
+      expect(r.status, `${JSON.stringify(input)} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("holds from a nested cwd, with the config dir spelled relative to the shell's folder", () => {
+    const f = fixture(true);
+    const nested = join(f.p, "pkg", "lib");
+    expect(run(f, ...bash("echo x > ../../config/settings.json"), nested).status).toBe(2);
+    expect(run(f, ...bash("echo x > ../../config/notes.md"), nested).status).toBe(0);
+    expect(run(f, "Edit", { file_path: join(f.cfg, "settings.json") }, nested).status).toBe(2);
+    expect(run(f, "Edit", { file_path: join(f.cfg, "notes.md") }, nested).status).toBe(0);
+  });
+
+  it("hostile: a config dir that is the home or the project, or a relative one, adds nothing; the home rules still hold", () => {
+    const f = fixture();
+    writeFileSync(join(f.p, "package.json"), "{}");
+    for (const cfgValue of [f.home, f.p, "config", ""]) {
+      expect(run(f, ...bash("echo x > package.json"), f.p, cfgValue).status, cfgValue).toBe(0);
+      expect(run(f, ...bash(`echo x > ${f.home}/notes.json`), f.p, cfgValue).status, cfgValue).toBe(0);
+      expect(run(f, ...bash(`echo x > ${f.home}/.claude/settings.json`), f.p, cfgValue).status, cfgValue).toBe(2);
+      expect(run(f, ...bash(`echo x > ${f.home}/.claude.json`), f.p, cfgValue).status, cfgValue).toBe(2);
+    }
+    // ~/.claude named as the config dir is the default spelled out: nothing doubles, nothing is lost
+    expect(run(f, ...bash(`echo x > ${f.home}/.claude/settings.json`), f.p, join(f.home, ".claude")).status).toBe(2);
+    expect(run(f, ...bash(`echo x > ${f.home}/.claude/notes.md`), f.p, join(f.home, ".claude")).status).toBe(0);
   });
 });

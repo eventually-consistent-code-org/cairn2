@@ -136,6 +136,16 @@
  *   PATH, only .git/hooks is known; a hooksPath holding the project or
  *   the home folder is skipped rather than made every write a hook.
  *
+ *   CLAUDE_CONFIG_DIR (#304): when set, Claude Code keeps its settings,
+ *   .claude.json and its plugins, skills, agents, commands and hooks
+ *   folders there instead of ~/.claude (dated claim, 2026-11-04, per the
+ *   Claude Code settings reference), so that folder is judged like the
+ *   home ones -- its *.json files and those five trees, `$CLAUDE_CONFIG_DIR`
+ *   spelled out -- and its settings and .claude.json are read for the
+ *   scripts they run (#312, #314). ~/.claude stays protected beside it. A
+ *   config dir that is the home or the project, or a relative one, adds
+ *   nothing. Asserted: hooks.test.ts "follows CLAUDE_CONFIG_DIR (#304)".
+ *
  *   Not seen: a write in an interpreter (python -c, an MCP tool running
  *   python or javascript), a write that only exists in a substitution's
  *   output (`$(cat script)` run as a command -- the body of a $(...), a
@@ -594,9 +604,39 @@ function expandHome(raw) {
   return raw.replace(/^(?:\$HOME|\$\{HOME\}|~)(?=\/|$)/, () => resolve(homedir()));
 }
 
-/** expandHome, and $CAIRN_HOME too -- the run guard's own cairn home (#263, #299). */
+/** expandHome, and $CAIRN_HOME (the run guard's own cairn home, #263, #299) and $CLAUDE_CONFIG_DIR (#304) too. */
 function expandVars(raw) {
-  return expandHome(raw).replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "");
+  return expandHome(raw)
+    .replace(/^(?:\$CAIRN_HOME|\$\{CAIRN_HOME\})(?=\/|$)/, () => process.env.CAIRN_HOME ?? "")
+    .replace(/^(?:\$CLAUDE_CONFIG_DIR|\$\{CLAUDE_CONFIG_DIR\})(?=\/|$)/, () => configDir() ?? "");
+}
+
+/**
+ * The folder Claude Code keeps its user config in when CLAUDE_CONFIG_DIR
+ * is set (#304): settings.json, settings.local.json, .claude.json and the
+ * plugins, skills, agents, commands and hooks folders live there instead
+ * of ~/.claude (dated claim, 2026-11-04, per the Claude Code settings
+ * reference). Absolute, ~ and $HOME spelled out; null when unset or
+ * relative -- where Claude Code would read a relative one from is not
+ * this guard's to guess.
+ */
+function configDir() {
+  const raw = process.env.CLAUDE_CONFIG_DIR;
+  if (!raw) return null;
+  const abs = expandHome(raw);
+  return isAbsolute(abs) ? resolve(abs) : null;
+}
+
+/**
+ * The config dir's spellings as a zone (#304), or none: unset, relative,
+ * the home or project folder or one holding them (every file there would
+ * become the harness), or ~/.claude itself, which the home rules cover.
+ */
+function configDirs() {
+  const dir = configDir();
+  if (dir === null) return [];
+  const anchors = [...ROOTS, ...HOMES];
+  return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)) && !HOMES.some((h) => same(d, join(h, ".claude"))));
 }
 
 /**
@@ -624,6 +664,12 @@ function expandVars(raw) {
  * And ~/.claude/hooks (#312), where your settings keep the scripts their
  * hooks run: a script swapped there runs at the next hook event, outside
  * any tool call, where no guard sees what it does.
+ *
+ * And the same files and folders under CLAUDE_CONFIG_DIR when it is set
+ * (#304): its *.json files -- the settings and .claude.json -- as a zone
+ * like the run manifests', and its plugins, skills, agents, commands and
+ * hooks as trees. ~/.claude stays protected beside it: another session on
+ * the machine may run without the variable.
  */
 function outsideZones() {
   const zones = [];
@@ -643,6 +689,14 @@ function outsideZones() {
     add(join(home, ".claude", "agents"), "your machine-wide agent definitions", true);
     add(join(home, ".claude", "commands"), "your machine-wide slash commands", true);
     add(join(home, ".claude", "hooks"), "your machine-wide Claude hooks", true);
+  }
+  for (const cfg of configDirs()) {
+    add(cfg, "your machine-wide Claude settings", false);
+    add(join(cfg, "plugins"), "the installed plugins and their registry", true);
+    add(join(cfg, "skills"), "your machine-wide skills", true);
+    add(join(cfg, "agents"), "your machine-wide agent definitions", true);
+    add(join(cfg, "commands"), "your machine-wide slash commands", true);
+    add(join(cfg, "hooks"), "your machine-wide Claude hooks", true);
   }
   const pluginRoot = livePluginRoot();
   const plugin = spellings(pluginRoot);
@@ -825,9 +879,12 @@ function settingsScripts() {
   const home = resolve(homedir());
   const project = ROOTS[0];
   const plugin = livePluginRoot();
-  // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means
+  // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means; the user
+  // settings under CLAUDE_CONFIG_DIR too when it is set (#304)
+  const cfg = configDir();
   const sources = [
     ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin]),
+    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin]) : []),
     ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin]),
     [join(project, "hooks", "hooks.json"), project],
     [join(plugin, "hooks", "hooks.json"), plugin],
@@ -894,11 +951,15 @@ function mcpScripts() {
     const list = json?.mcpServers;
     if (list && typeof list === "object") for (const s of Object.values(list)) servers.push([s, dir]);
   };
-  const claude = parse(join(home, ".claude.json"));
-  take(claude, project);
-  const projects = claude?.projects;
-  if (projects && typeof projects === "object") {
-    for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
+  // ~/.claude.json, and the one under CLAUDE_CONFIG_DIR when it is set (#304)
+  const cfg = configDir();
+  for (const file of new Set([join(home, ".claude.json"), ...(cfg ? [join(cfg, ".claude.json")] : [])])) {
+    const claude = parse(file);
+    take(claude, project);
+    const projects = claude?.projects;
+    if (projects && typeof projects === "object") {
+      for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
+    }
   }
   take(parse(join(project, ".mcp.json")), project);
   take(parse(join(project, ".cursor", "mcp.json")), project);
