@@ -22,6 +22,16 @@ export class FakeTracker implements Tracker {
   readonly issueAttachments = new Map<string, string[]>();
   private seq = 0;
 
+  /** Custom state vocabulary, name → category, the local adapter's shape:
+   *  a test hands the server a tracker whose in-progress or closed state
+   *  has a display name (#427). Empty by default -- the canonical three. */
+  constructor(private readonly states: Record<string, StateCategory> = {}) {}
+
+  stateCategory(state: IssueState): StateCategory | undefined {
+    if (state === "open" || state === "in_progress" || state === "closed") return state;
+    return this.states[state];
+  }
+
   async attachFile(id: string, filename: string, _data: Buffer,
     _mediaType?: string): Promise<{ id?: string; url?: string }> {
     await this.getIssue(id);
@@ -57,9 +67,7 @@ export class FakeTracker implements Tracker {
       state: (patch.state ?? i.state) as IssueState,
       category: patch.state === undefined
         ? i.category
-        : (["open", "in_progress", "closed"].includes(patch.state)
-          ? patch.state as StateCategory
-          : i.category),
+        : (this.stateCategory(patch.state) ?? i.category),
       labels: patch.labels ?? i.labels,
       assignee: patch.assignee ?? i.assignee,
       estimate: patch.estimate ?? i.estimate,

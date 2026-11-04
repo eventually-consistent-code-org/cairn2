@@ -13,6 +13,7 @@ export class CachedTracker {
     logWork;
     resolveSelf;
     probe;
+    stateCategory;
     linkIssues;
     unlinkIssues;
     listLinks;
@@ -34,6 +35,10 @@ export class CachedTracker {
         }
         if (inner.probe) {
             this.probe = () => this.inner.probe();
+        }
+        if (inner.stateCategory) {
+            // a pure lookup: nothing to cache, nothing to invalidate
+            this.stateCategory = (state) => this.inner.stateCategory(state);
         }
         if (inner.linkIssues) {
             this.linkIssues = async (f, ty, to) => {

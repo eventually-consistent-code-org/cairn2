@@ -1,5 +1,6 @@
-import type { Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState, LinkType, Milestone, Phase, ProbeResult, Tracker } from "./types.js";
+import type { Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState, StateCategory, LinkType, Milestone, Phase, ProbeResult, Tracker } from "./types.js";
 export declare class FakeTracker implements Tracker {
+    private readonly states;
     readonly capabilities: Capability;
     private issues;
     private phases;
@@ -10,6 +11,11 @@ export declare class FakeTracker implements Tracker {
     now: () => Date;
     readonly issueAttachments: Map<string, string[]>;
     private seq;
+    /** Custom state vocabulary, name → category, the local adapter's shape:
+     *  a test hands the server a tracker whose in-progress or closed state
+     *  has a display name (#427). Empty by default -- the canonical three. */
+    constructor(states?: Record<string, StateCategory>);
+    stateCategory(state: IssueState): StateCategory | undefined;
     attachFile(id: string, filename: string, _data: Buffer, _mediaType?: string): Promise<{
         id?: string;
         url?: string;

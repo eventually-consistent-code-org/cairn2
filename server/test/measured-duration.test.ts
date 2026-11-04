@@ -836,3 +836,68 @@ describe("composeCloseComment and issueCostUsd (#365)", () => {
     expect(issueCostUsd(live, "#7")).toBe(2.25);
   });
 });
+
+describe("a claim's base commit is a hash, nothing else (#428)", () => {
+  // The same shape as the ladder harness above, built here so this block
+  // appends cleanly: a bare project dir (no git -- the base is explicit), a
+  // fake tracker, one client.
+  const connect = async (tracker: FakeTracker) => {
+    const projectDir = mkdtempSync(join(tmpdir(), "cairn-claim-hash-"));
+    writeFileSync(join(projectDir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    const server = buildServer({ projectDir, tracker });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "claim-hash", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
+      const res = await client.callTool({ name, arguments: args });
+      const text = (res.content as Array<{ type: string; text: string }>)[0].text;
+      return { ...res, json: JSON.parse(text) };
+    };
+    return { call, projectDir };
+  };
+
+  it("HEAD as the claim stamp is refused with a typed error before any tracker write; a hash still claims", async () => {
+    const tracker = new FakeTracker();
+    const { call, projectDir } = await connect(tracker);
+    const made = await call("issue_create", { title: "moving ref" });
+    const res = await call("issue_update", { id: made.json.id, claim: { baseCommit: "HEAD" } });
+    expect(res.isError).toBe(true);
+    expect(res.json.code).toBe("CONFIG_INVALID");
+    expect(res.json.message).toMatch(/claim\.baseCommit/);
+    // nothing moved: still open, no claim comment, no stamp on disk
+    expect((await call("issue_get", { id: made.json.id })).json.category).toBe("open");
+    expect(tracker.comments(made.json.id)).toEqual([]);
+    expect(readClaimRecord(projectDir, made.json.id)).toBeNull();
+    // create-and-claim with a branch name: refused before the issue exists
+    const count = (await tracker.listIssues()).length;
+    const orphan = await call("issue_create", { title: "orphan", claim: { baseCommit: "main" } });
+    expect(orphan.json.code).toBe("CONFIG_INVALID");
+    expect(await tracker.listIssues()).toHaveLength(count);
+    // the hash form still claims, and the stamp carries it
+    const ok = await call("issue_update", { id: made.json.id, claim: { baseCommit: "a1b2c3d4e5f6" } });
+    expect(ok.isError).not.toBe(true);
+    expect(ok.json.baseCommit).toBe("a1b2c3d4e5f6");
+    expect(readClaimRecord(projectDir, made.json.id)?.baseCommit).toBe("a1b2c3d4e5f6");
+  });
+});
+
+describe("gitSpan never lets the range be read as an option (#428)", () => {
+  it("an option-shaped base reaches git behind --end-of-options: none, and the file it named is untouched", () => {
+    const d = mkdtempSync(join(tmpdir(), "cairn-span-opt-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: d, encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    writeFileSync(join(d, "a"), "a");
+    git("add", "a");
+    execFileSync("git", ["commit", "-qm", "a", "--no-gpg-sign"], { cwd: d });
+    mkdirSync(join(d, "keep"));
+    const victim = join(d, "keep", "scratch.txt");
+    writeFileSync(victim, "keepme\n");
+    // bare concatenation would read as --output=<d>/keep/../keep/scratch.txt
+    expect(gitSpan(d, `--output=${join(d, "keep")}/`, "/keep/scratch.txt"))
+      .toEqual({ minutes: null, source: "none" });
+    expect(readFileSync(victim, "utf8")).toBe("keepme\n");
+  });
+});

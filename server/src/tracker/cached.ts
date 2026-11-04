@@ -1,7 +1,7 @@
 import { ReadCache } from "../core/cache.js";
 import type {
   Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState,
-  LinkType, Milestone, Phase, ProbeResult, Tracker, WorklogEntry,
+  LinkType, Milestone, Phase, ProbeResult, StateCategory, Tracker, WorklogEntry,
 } from "./types.js";
 
 /**
@@ -18,6 +18,7 @@ export class CachedTracker implements Tracker {
   logWork?: (id: string, minutes: number) => Promise<void>;
   resolveSelf?: () => Promise<string | undefined>;
   probe?: () => Promise<ProbeResult>;
+  stateCategory?: (state: IssueState) => StateCategory | undefined;
   linkIssues?: (from: string, type: LinkType, to: string) => Promise<void>;
   unlinkIssues?: (from: string, type: LinkType, to: string) => Promise<void>;
   listLinks?: (id?: string) => Promise<IssueLink[]>;
@@ -43,6 +44,10 @@ export class CachedTracker implements Tracker {
     }
     if (inner.probe) {
       this.probe = () => this.inner.probe!();
+    }
+    if (inner.stateCategory) {
+      // a pure lookup: nothing to cache, nothing to invalidate
+      this.stateCategory = (state) => this.inner.stateCategory!(state);
     }
     if (inner.linkIssues) {
       this.linkIssues = async (f, ty, to) => {

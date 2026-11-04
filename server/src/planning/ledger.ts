@@ -77,6 +77,35 @@ function shortSha(commit: string): string {
   return commit.slice(0, 7);
 }
 
+/** The one shape a commit reference takes on the way in (#428): 7 to 40 hex
+ *  characters, the same pattern resync.ts and distill-manifest.ts read back
+ *  off the line. Anything else -- HEAD, a branch, a tag, an option -- is
+ *  refused before the string reaches a git argument or a stamp. */
+const COMMIT_HASH = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * Refuses a commit reference that is not a hash, with the field named so
+ * the caller knows which end of the range to fix. Shared by the ledger's
+ * own validation (base and head of the range) and the claim block in
+ * index.ts (the stamp the close fold will read the range from). A moving
+ * reference would make the range a different thing each time it is read;
+ * an option-shaped one would make `git log` do whatever the option says
+ * (asserted: ledger.test.ts "a commit reference is a hash, nothing else").
+ *
+ * :param value: the string the caller supplied
+ * :param field: its name in the caller's input ("baseCommit", "claim.baseCommit")
+ * :returns the trimmed hash
+ */
+export function assertCommitHash(value: string, field: string): string {
+  const v = value.trim();
+  if (!COMMIT_HASH.test(v)) {
+    throw new CairnError("CONFIG_INVALID",
+      `${field} is not a commit hash (7 to 40 hex characters): ${JSON.stringify(v.slice(0, 40))}`,
+      "pass the sha git reports (git rev-parse HEAD) -- a branch, tag or HEAD moves, so it is refused");
+  }
+  return v;
+}
+
 /** Collapses embedded newlines (and the whitespace around them) to a single space, so a
  *  multi-line field (e.g. a pasted commit-message summary) can never break the ledger's
  *  one-line-per-entry invariant. */
@@ -152,6 +181,10 @@ function validateEntry(entry: LedgerEntryInput): void {
       "redCommit/greenCommit: both or neither",
       "pass the failing-test commit AND the passing commit, or omit both");
   }
+  // Both ends of the range are hashes (#428) -- checked here, before any
+  // git call, so the close fold refuses while the issue is still open.
+  assertCommitHash(entry.baseCommit, "baseCommit");
+  assertCommitHash(entry.headCommit, "headCommit");
   evidenceSegment(entry);
 }
 

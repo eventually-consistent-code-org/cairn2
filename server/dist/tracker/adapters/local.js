@@ -242,6 +242,14 @@ export class LocalTracker {
             return state;
         return this.cfg.states[state] ?? "in_progress";
     }
+    /** The SPI's pre-write question (#427): a known name's category, and
+     *  undefined for one the vocab lacks -- that name never buckets here,
+     *  because updateIssue refuses it rather than storing it. */
+    stateCategory(state) {
+        if (state === "open" || state === "in_progress" || state === "closed")
+            return state;
+        return this.cfg.states[state];
+    }
     async listIssues(filter) {
         return [...this.ids()]
             .map((id) => this.readFields(id))
