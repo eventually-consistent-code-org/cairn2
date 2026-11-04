@@ -5186,3 +5186,78 @@ describe("plugin layer imports no server code (#391)", () => {
       .toEqual([]);
   });
 });
+
+// #439: two sessions can both see the live file past the cap. The close was
+// check-then-rename, and a rename REPLACES an existing name: when the loser's
+// existence check ran before the winner's rename, the loser then renamed the
+// winner's fresh, empty live file onto the segment the winner had just
+// closed -- a thousand rows gone, no error. The close is the no-clobber link
+// now (lib.mjs moveNoClobber, EEXIST instead of replacing), probing the
+// segment number upward on collision. The #351 race spawns real processes and
+// cannot aim at the window; this replay is exact: a preload patches fs so that
+// session A's close-and-reopen runs in the instant before session B's own
+// close lands -- the interleaving the audit reviewers walked by hand.
+describe("observation log rotation loses no segment to a racing session (#439)", () => {
+  const OBSERVE = join(scriptsDir, "posttooluse-observe.mjs");
+  const capMatch = /const MAX_LINES = (\d+);/.exec(readFileSync(OBSERVE, "utf8"));
+  const MAX_LINES = Number(capMatch?.[1]);
+
+  /** Session A, as a preload: on B's first attempt to close a segment (rename
+   *  or link onto a stamped name), A closes the live file under that very name
+   *  and reopens an empty one, then B's own call goes through. */
+  const FIRST_SESSION = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const { renameSync, linkSync, openSync, closeSync } = fs;
+const SEGMENT = /\\.\\d{8}-\\d{6}-\\d{2}\\.jsonl$/;
+let fired = false;
+function firstSessionCloses(from, to) {
+  if (fired || !SEGMENT.test(String(to))) return;
+  fired = true;
+  renameSync(from, to);
+  closeSync(openSync(from, "a"));
+}
+fs.renameSync = (from, to) => { firstSessionCloses(from, to); return renameSync(from, to); };
+fs.linkSync = (from, to) => { firstSessionCloses(from, to); return linkSync(from, to); };
+syncBuiltinESMExports();
+`;
+
+  function seedRows(n: number): string {
+    const base = Date.parse("2026-01-01T00:00:00.000Z");
+    return Array.from({ length: n }, (_, i) => JSON.stringify({
+      ts: new Date(base + i * 1000).toISOString(), session_id: "seed", tool: "Edit", target: `seed-${i}`, error: false,
+    })).join("\n") + "\n";
+  }
+
+  it("the second session's close lands beside the first's segment, never over it", () => {
+    expect(MAX_LINES).toBeGreaterThan(0); // an empty match is a failure, never a zero-row pass
+    const proj = freshDir("cairn-obs-race-");
+    mkdirSync(join(proj, ".cairn"), { recursive: true });
+    mkdirSync(obsDir(proj), { recursive: true });
+    const live = obsLive(proj);
+    writeFileSync(live, seedRows(MAX_LINES + 1));
+    const preload = join(freshDir("cairn-obs-race-preload-"), "first-session.mjs");
+    writeFileSync(preload, FIRST_SESSION);
+
+    const r = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, OBSERVE], {
+      cwd: proj,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: proj, HOME: obsHome(proj) },
+      input: JSON.stringify({ session_id: "s-B", tool_name: "Bash", tool_input: { command: "ls" }, tool_response: {} }),
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(r.status).toBe(0);
+
+    // Session A closed the seed plus B's row; B's close must not have replaced it.
+    const closed = readdirSync(obsDir(proj)).filter((n) => n !== basename(live)).sort();
+    expect(closed.length).toBeGreaterThan(0);
+    const closedRows = closed
+      .flatMap((n) => readFileSync(join(obsDir(proj), n), "utf8").split("\n").filter(Boolean))
+      .map((l) => JSON.parse(l) as { target: string; session_id: string });
+    expect(closedRows).toHaveLength(MAX_LINES + 2);
+    expect(closedRows[0].target).toBe("seed-0");
+    expect(closedRows[closedRows.length - 1].session_id).toBe("s-B");
+    // and the live file is back, empty, ready for the next append
+    expect(existsSync(live)).toBe(true);
+    expect(readFileSync(live, "utf8")).toBe("");
+  });
+});
