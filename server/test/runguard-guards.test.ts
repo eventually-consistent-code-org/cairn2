@@ -3349,3 +3349,59 @@ describe("run guard: the push action by another route meets the push gates (#483
     expect(run("gh pr view 1").status).toBe(0);
   });
 });
+
+// #283 -- eval was read only through the runner backstop (#311): each of its
+// words a candidate line on its own, never the join eval makes first. So
+// `eval 'git reset' '--hard'` passed, and `eval echo git reset --hard`, an
+// echo, was refused. The guard reads eval the way the shell runs it now --
+// the words joined by one space, the result read as a line of its own --
+// through the same shell-words.mjs function the harness guard reads it
+// with (evalCommandString), so the two guards can't drift apart on it.
+describe("run guard: eval runs its words joined, read as one line (#283)", () => {
+  function nested(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  /** Each refused spelling beside its harmless twin: the same words, split or quoted so that only eval's join makes the reset. */
+  const pairs: Array<[refused: string, twin: string]> = [
+    ["eval 'git reset' '--hard'", "eval 'git reset' '--soft' HEAD~1"],
+    ['eval "git reset --hard"', 'eval "git reset --soft HEAD~1"'],
+    ["eval git reset --hard", "eval echo git reset --hard"],
+    ["eval git 'reset --hard'", "eval git 'reset --soft'"],
+    // the hostile spellings: adjacent quotes make one word, a shortened option is the option,
+    // a prefix assignment rides along, a nested shell's eval is read too, and a quoted mention is text
+    ["eval 'git res''et --hard'", "eval 'git stat''us'"],
+    ['eval "git reset --har"', 'eval "git reset --sof" HEAD~1'],
+    ["X=1 eval 'git reset' '--hard'", "X=1 eval 'git status'"],
+    ["bash -c \"eval 'git reset' '--hard'\"", "bash -c \"eval 'git status'\""],
+    ['eval "git reset --hard" && echo done', "echo 'eval git reset --hard'"],
+  ];
+
+  it("each is refused from the repository root and from a nested folder, naming the escape; its twin passes in both", () => {
+    const { proj, home, sub } = nested();
+    for (const [refused, twin] of pairs) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, refused, {}, cwd);
+        expect(r.status, `${refused} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, refused).toContain("refused in every session");
+        expect(r.stderr, refused).toContain("effect: discards-work, from `");
+        expectOwnerTail(r.stderr, refused, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        const t = guard(proj, home, twin, {}, cwd);
+        expect(t.status, `${twin} from ${cwd === sub ? "sub" : "root"}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("an empty eval runs nothing; the owner's escape lifts the refusal for the session, or as the prefix of the git command inside eval's line -- a prefix on eval itself is eval's, as one on bash -c is bash's", () => {
+    const { proj, home } = nested();
+    expect(guard(proj, home, "eval").status).toBe(0);
+    expect(guard(proj, home, "eval ''").status).toBe(0);
+    expect(guard(proj, home, "eval 'git reset' '--hard'", { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status).toBe(0);
+    expect(guard(proj, home, "eval 'CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset' '--hard'").status).toBe(0);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 eval 'git reset' '--hard'").status).toBe(2);
+    expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 bash -c 'git reset --hard'").status).toBe(2);
+  });
+});

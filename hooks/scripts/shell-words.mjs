@@ -1000,6 +1000,19 @@ export function shellCommandString(args) {
 }
 
 /**
+ * The command line `eval` runs (#283): its words joined by one space, the
+ * way the shell joins them before it reads the result as a line -- so
+ * `eval 'git reset' '--hard'` is the reset and `eval echo git reset
+ * --hard` is an echo. Null with no words, or only blank ones. Both guards
+ * read eval through this one function, as they share shellCommandString,
+ * so neither drifts back to reading its words one at a time.
+ */
+export function evalCommandString(args) {
+  const line = args.join(" ").trim();
+  return line || null;
+}
+
+/**
  * True when a shell given these args reads its commands from stdin -- no
  * -c string and no script path, or an explicit -s -- so a heredoc or
  * here-string fed to it is a script, not data (#258).

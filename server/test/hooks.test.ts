@@ -5808,9 +5808,10 @@ describe("the harness guard's Not seen block is dated, pinned and measured (#289
       "starts by name off PATH",
       "runs arbitrary code",
       "the editor",
+      "a variable the line never assigns",
     ]) expect(block, phrase).toContain(phrase);
     // the line count is the pin: a shape added or removed moves it, on purpose, in the same change
-    expect(block.split("\n").length, block).toBe(25);
+    expect(block.split("\n").length, block).toBe(31);
   });
 
   it("the Coverage says find -exec, xargs and a heredoc fed to a shell are read, and cites this block", () => {
@@ -6412,6 +6413,300 @@ describe("the pauses log is the harness guard's: a forged pause row is refused (
       expectRefused(run(f, "Bash", { command: `echo '${ROW}' >> ${f.log}` }, { cwd: nested, bare }), `bare=${bare}`);
       expectRefused(run(f, "Write", { file_path: f.log, content: ROW }, { cwd: nested, bare }), `Write, bare=${bare}`);
       expect(run(f, "Bash", { command: `cat ${f.log}` }, { cwd: nested, bare }).status).toBe(0);
+    }
+  });
+});
+
+// #283 -- two reader switches were still off after both guards took the
+// shared reader (#270). The harness guard read `#` comments as word text,
+// so `echo x # > hooks/hooks.json` was refused for a write the shell never
+// makes; and the run guard read `eval` only through the runner backstop
+// (#311), one word at a time, so `eval 'git reset' '--hard'` -- the reset,
+// once eval joins its words -- passed while `eval echo git reset --hard`,
+// an echo, was refused (runguard-guards.test.ts carries that side). Both
+// guards read eval through one shared function now (shell-words.mjs
+// evalCommandString: the words joined by one space, the result read as a
+// line), and the harness guard drops comments through the reader's own
+// switch. The heredoc and substitution gaps the issue also named closed
+// earlier (#322, #319-#321).
+describe("the reader switches left off: # comments in the harness guard, eval in both guards (#283)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-283-proj-");
+    const home = freshDir("cairn-hooks-283-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    return { p, home };
+  }
+
+  function run(f: { p: string; home: string }, command: string, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /**
+   * Each refused shape beside its harmless twin: the same characters, with
+   * the write moved behind a comment, onto a source file, or out of the
+   * line eval joins. `rel` climbs from the shell's folder to the root.
+   */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    // a comment ends the line: the write before it is the write, the one after it is text
+    [`echo x > ${rel}hooks/hooks.json # note`, `echo x # > ${rel}hooks/hooks.json`],
+    [`rm ${rel}hooks/hooks.json # cleanup`, `rm ${rel}src/x.json # cleanup`],
+    [`echo x > ${rel}hooks/hooks.json\n# done`, `echo x > ${rel}src/x.json\n# > ${rel}hooks/hooks.json`],
+    [`# a comment\necho x > ${rel}hooks/hooks.json`, `# echo x > ${rel}hooks/hooks.json\necho x`],
+    // the hostile spellings: a quoted # is a word, a # inside a word is text, and a comment in a nested line ends at its newline
+    [`echo '#' > ${rel}hooks/hooks.json`, `echo '#' > ${rel}src/x.json`],
+    [`echo x#y > ${rel}hooks/hooks.json`, `echo x#y > ${rel}src/x.json`],
+    [`bash -c 'echo x > ${rel}hooks/hooks.json # c'`, `bash -c 'echo x # > ${rel}hooks/hooks.json'`],
+    // eval joins its words with one space, then the result is read as a line -- comments and all
+    [`eval 'rm' '${rel}hooks/hooks.json'`, `eval 'echo' 'rm' '${rel}hooks/hooks.json'`],
+    [`eval "echo x >" ${rel}hooks/hooks.json`, `eval "echo x > ${rel}src/x.json"`],
+    [`eval "echo x > ${rel}hooks/hooks.json # c"`, `eval "echo x # > ${rel}hooks/hooks.json"`],
+  ];
+
+  it("harness guard: a write before a # comment is the write and one behind it is text; eval's words are joined before the line is read", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("the hook directory");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the harness guard's reader has the comments switch on and the run guard reads eval, each said in its header", () => {
+    const harness = readFileSync(HARNESSGUARD, "utf8");
+    expect(harness).toMatch(/const READ = \{[^}]*comments: true/);
+    expect(harness).toContain("evalCommandString");
+    const runGuard = readFileSync(RUNGUARD, "utf8");
+    expect(runGuard).toContain("evalCommandString");
+    expect(runGuard.slice(0, runGuard.indexOf("\nimport "))).toContain("`eval`");
+  });
+});
+
+// #291 -- a protected path held in a shell variable was written past the
+// guard: a variable as a cd target was refused (a folder the guard can't
+// read is LOST, #258), but one in the write path itself was judged as
+// typed, so `D=hooks; echo x > $D/hooks.json` landed in the hook directory
+// unseen -- and so did the ship-gate stamp, a run manifest or the home
+// settings held the same way (#263, #267). An assignment earlier on the
+// line is spelled out before judgment now: a bare NAME=value, an export /
+// declare / local, a for header's words (each in turn), and a prefix on
+// the line a shell or eval nests. One assigned from a substitution leads
+// the write where the guard can't follow, refused like a cd it can't. A
+// variable the line never assigns -- the session's environment -- is left
+// as typed, by decision (phase 31): the header's Not seen block says so,
+// dated, and the last test here measures it.
+describe("a protected path held in a same-line variable is seen (#291)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib; a home; a cairn home holding a ship-gate stamp. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-291-proj-");
+    const home = freshDir("cairn-hooks-291-home-");
+    const cairnHome = freshDir("cairn-hooks-291-cairnhome-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    mkdirSync(join(cairnHome, "ship-gate"), { recursive: true });
+    writeFileSync(join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+    return { p, home, cairnHome };
+  }
+
+  function run(f: ReturnType<typeof fixture>, command: string,
+    opts: { cwd?: string; bare?: boolean; env?: Record<string, string> } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome, ...opts.env,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) if (!(k in (opts.env ?? {}))) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** Each refused shape beside its twin: the same variable, holding a harmless path. `rel` climbs from the shell's folder to the root. */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    [`D=${rel}hooks; echo x > $D/hooks.json`, `D=${rel}src; echo x > $D/x.json`],
+    [`D=${rel}hooks\necho x > $D/hooks.json`, `D=${rel}src\necho x > $D/x.json`],
+    [`export D=${rel}hooks; echo x > \${D}/hooks.json`, `export D=${rel}src; echo x > \${D}/x.json`],
+    [`declare D=${rel}hooks; rm $D/hooks.json`, `declare D=${rel}src; rm $D/x.json`],
+    [`F=${rel}hooks/hooks.json; cp /tmp/x $F`, `F=${rel}src/x.json; cp /tmp/x $F`],
+    // the line a shell or eval nests inherits the variable, and a prefix on it is that line's
+    [`D=${rel}hooks bash -c 'echo x > $D/hooks.json'`, `D=${rel}src bash -c 'echo x > $D/x.json'`],
+    [`D=${rel}hooks; eval 'echo x > $D/hooks.json'`, `D=${rel}src; eval 'echo x > $D/x.json'`],
+    // a for header gives its variable each word in turn, so the body is judged for every one
+    [`for f in ${rel}hooks/hooks.json; do rm $f; done`, `for f in ${rel}src/x.json; do rm $f; done`],
+    [`for f in ${rel}src/x.json ${rel}hooks/hooks.json; do echo x > $f; done`,
+      `for f in ${rel}src/x.json ${rel}src/y.json; do echo x > $f; done`],
+    // a variable built from an earlier one, and from the ones the guard already knows
+    [`R=${rel}.; D=$R/hooks; echo x > $D/hooks.json`, `R=${rel}.; D=$R/src; echo x > $D/x.json`],
+    [`C=$HOME/.claude; echo x > $C/settings.json`, `C=$HOME/notes; echo x > $C/settings.json`],
+    [`S=$CAIRN_HOME/ship-gate; echo '{}' > $S/proj-0123456789abcdef.json`, `S=$CAIRN_HOME/notes; echo '{}' > $S/proj.json`],
+  ];
+
+  it("harness guard: a variable assigned earlier on the line is spelled out before the write is judged; the same variable naming a harmless path passes", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("file:");
+      expect(r.stderr, JSON.stringify(refused)).not.toContain("couldn't tell");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+  });
+
+  it("a variable the line assigns from a substitution leads the write where the guard can't follow: refused, saying it couldn't tell; one that doesn't lead the path is judged under the folder before it", () => {
+    const f = fixture();
+    for (const c of ["D=$(cat x); echo y > $D/hooks.json", "D=`cat x`; echo y > $D/hooks.json",
+      "D=$(pwd)/..; echo y > $D/hooks.json", "R=$(cat x); D=$R/hooks; rm $D/hooks.json"]) {
+      const r = run(f, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("couldn't tell");
+    }
+    for (const c of ["F=$(mktemp); echo x > $F", "N=$(date +%s); echo x > /tmp/$N.log", "D=$(mktemp -d); echo x > $D",
+      "N=$(date +%s); echo x > src/$N.json"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the measured gap, as the Not seen block says: a variable the line never assigns -- the session's environment -- is judged as typed", () => {
+    const f = fixture();
+    for (const c of ["echo x > $D/hooks.json", "rm $F", "echo x > ${D}/hooks.json"]) {
+      expect(run(f, c, { env: { D: "hooks", F: join(f.p, "hooks", "hooks.json") } }).status, c).toBe(0);
+    }
+    const header = readFileSync(HARNESSGUARD, "utf8");
+    expect(header.slice(0, header.indexOf("*/"))).toContain("a variable the line never assigns");
+  });
+});
+
+// #292 -- a hard link gave a protected file a second name outside the
+// protected set: `ln hooks/hooks.json /tmp/h.json` passed (the destination
+// was judged, the source only read), and every later write through the
+// second name changed the hook file while the guard saw a write to /tmp.
+// A hard link's source is judged as a write to it now -- `ln` without -s,
+// `cp -l` / `--link` (an archive copy carrying -l too) and `link` -- and
+// a folder source counts, since every file under it gets the second name.
+// A symbolic link and a plain copy only read their source and pass as
+// before. The surface sweep lists the second names already there
+// (audit.md "Hard links"; sweep-surface.test.ts "(#292)").
+describe("a hard link to a protected file is a write to it (#292)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib; a home; a cairn home holding a ship-gate stamp. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-292-proj-");
+    const home = freshDir("cairn-hooks-292-home-");
+    const cairnHome = freshDir("cairn-hooks-292-cairnhome-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    mkdirSync(join(cairnHome, "ship-gate"), { recursive: true });
+    writeFileSync(join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+    return { p, home, cairnHome };
+  }
+
+  function run(f: ReturnType<typeof fixture>, command: string, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** Each refused shape beside its twin: the same source, linked symbolically or copied, which only reads it. `rel` climbs from the shell's folder to the root. */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    [`ln ${rel}hooks/hooks.json /tmp/h.json`, `ln -s ${rel}hooks/hooks.json /tmp/h.json`],
+    [`cp -l ${rel}hooks/hooks.json /tmp/h.json`, `cp ${rel}hooks/hooks.json /tmp/h.json`],
+    [`cp --link ${rel}hooks/hooks.json /tmp/h.json`, `cp --symbolic-link ${rel}hooks/hooks.json /tmp/h.json`],
+    // a folder source: every file under it gets the second name
+    [`cp -al ${rel}hooks /tmp/h`, `cp -a ${rel}hooks /tmp/h`],
+    [`cp -rl ${rel}hooks /tmp/h`, `cp -r ${rel}hooks /tmp/h`],
+    // the hostile spellings: link(1), the target-directory form, ln's -L and -P (hard either way),
+    // a link made beside the shell, a second name inside the project, and the forms xargs and a nested shell run
+    [`link ${rel}hooks/hooks.json /tmp/h.json`, `link ${rel}src/x.json /tmp/x.json`],
+    [`ln -t /tmp ${rel}hooks/hooks.json`, `ln -st /tmp ${rel}hooks/hooks.json`],
+    [`ln -L ${rel}hooks/hooks.json /tmp/h.json`, `ln -sL ${rel}hooks/hooks.json /tmp/h.json`],
+    [`ln -P ${rel}hooks/hooks.json /tmp/h.json`, `ln -sP ${rel}hooks/hooks.json /tmp/h.json`],
+    [`ln ${rel}hooks/hooks.json`, `ln -s ${rel}hooks/hooks.json`],
+    [`cp -l ${rel}hooks/hooks.json ${rel}src/`, `cp ${rel}hooks/hooks.json ${rel}src/`],
+    [`echo ${rel}hooks/hooks.json | xargs -I{} ln {} /tmp/h.json`, `echo ${rel}hooks/hooks.json | xargs -I{} ln -s {} /tmp/h.json`],
+    [`bash -c 'ln ${rel}hooks/hooks.json /tmp/h.json'`, `bash -c 'ln -s ${rel}hooks/hooks.json /tmp/h.json'`],
+    // the other protected places: the home settings and the ship-gate stamp
+    ["ln ~/.claude/settings.json /tmp/s.json", "ln -s ~/.claude/settings.json /tmp/s.json"],
+    ["ln $CAIRN_HOME/ship-gate/proj-0123456789abcdef.json /tmp/g.json",
+      "cp $CAIRN_HOME/ship-gate/proj-0123456789abcdef.json /tmp/g.json"],
+  ];
+
+  it("harness guard: ln without -s, cp -l/--link and link with a protected source are refused, naming the source; the symbolic link and the plain copy of it pass, and so does a hard link of a harmless file", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("file:");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+    // the refusal names the source -- the protected file -- not the harmless second name
+    const r = run(f, "ln hooks/hooks.json /tmp/h.json");
+    expect(r.stderr).toContain("the hook directory");
+    expect(r.stderr).toContain("file: hooks/hooks.json");
+    expect(r.stderr).not.toContain("/tmp/h.json");
+    for (const c of ["ln seed.txt /tmp/s.txt", "cp -l src/x.json /tmp/x.json", "cp -rl src /tmp/s", "link src/x.json /tmp/x.json",
+      "ln -t /tmp src/x.json", "cp -al src /tmp/s"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
     }
   });
 });
