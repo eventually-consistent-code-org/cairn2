@@ -53,6 +53,9 @@ Pre-ship gate, then ship:
    and lead the merge message and the tracker note with its line
    (`overlap: 3 files — a, b, c` or `overlap: none`); overlap names the
    files before the tree changes (asserted by sweep-surface.test.ts, #223).
+   On a pluginless harness the copied verb names the helper in the scripts
+   folder cairn-setup installs beside it, not the plugin root (asserted by
+   setup.test.ts, #474).
    `ship.confirm: false` in cairn.json skips the ask (silent flow).
    After the push: `outlook_emit(tracker: {open, inProgress, blocked,
    nextVerb, asOf})` FIRST — the snapshot outlives the handoff, so the

@@ -72,7 +72,10 @@ remembered count from an earlier session:
   session-cost totals rolled up by phase and issue from the Stop-hook
   metrics log, plus a `task reports` line when a session fanned out — how
   much of the coordinator's peak context was subagent reports. Say
-  "approximate" when rendering; no log yet → skip the line silently.
+  "approximate" when rendering; no log yet → skip the line silently. On a
+  pluginless harness the copied verb names the helper in the scripts folder
+  cairn-setup installs beside it, not the plugin root (asserted by
+  setup.test.ts, #474).
   `--reports` breaks the report bytes out per coordinator session.
 
 Render as a compact table, one line per source above. State plainly that

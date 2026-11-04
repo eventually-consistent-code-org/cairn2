@@ -824,20 +824,35 @@ describe("merge leads with file overlap (#223)", () => {
 
   // #443: the helper used to be named by a project-relative path that only
   // resolved inside cairn's own checkout, from a folder the npm package did
-  // not ship and setup did not copy. The path each verb names must go
-  // through the plugin root (as status.md does) into a directory that both
-  // package.json ships and cairn-setup copies to pluginless harnesses.
-  it("the command both verbs name resolves inside a directory the package ships and setup copies (#443)", () => {
+  // not ship. The path each verb names must go through the plugin root (as
+  // status.md does) into a directory package.json ships. #443's close said
+  // setup copied that folder everywhere; it copied it for Cursor alone, so
+  // the last leg here runs setup into a scratch project and looks for the
+  // named file beside the copied verbs (the per-harness matrix and the
+  // command actually running live in setup.test.ts, #474).
+  it("the command both verbs name resolves inside a directory the package ships, and setup copies that file (#443, #474)", () => {
     const shipped: string[] = JSON.parse(read("package.json")).files;
     expect(shipped).toContain("hooks");
-    for (const verb of ["work", "ship"]) {
-      const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
-      const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
-      expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
-      const rel = m![1];
-      expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
-      expect(rel.startsWith("hooks/scripts/"), `${rel} sits in the folder cairn-setup copies`).toBe(true);
-      expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), "cairn-443-"));
+    try {
+      mkdirSync(join(dir, "p"));
+      mkdirSync(join(dir, "h"));
+      const r = spawnSync(process.execPath, [join(ROOT, "setup", "cairn-setup.mjs"), "grok", "--project", join(dir, "p")], {
+        encoding: "utf8", env: { ...process.env, HOME: join(dir, "h"), USERPROFILE: join(dir, "h"), CAIRN_SETUP_OFFLINE: "1" },
+      });
+      expect(r.status).toBe(0);
+      for (const verb of ["work", "ship"]) {
+        const t = read(`skills/cairn-trailhead/verbs/${verb}.md`);
+        const m = /node "\$CLAUDE_PLUGIN_ROOT\/([^"]*merge-overlap\.mjs)"/.exec(t);
+        expect(m, `${verb}.md names the helper through $CLAUDE_PLUGIN_ROOT`).not.toBeNull();
+        const rel = m![1];
+        expect(shipped.some((d) => rel.startsWith(`${d}/`)), `${rel} sits under a package.json files entry`).toBe(true);
+        expect(rel.startsWith("hooks/scripts/"), `${rel} sits where cairn-setup picks the helpers it copies`).toBe(true);
+        expect(existsSync(join(ROOT, rel)), `${rel} exists in this checkout`).toBe(true);
+        expect(existsSync(join(dir, "p", ".cairn", "harness", "scripts", basename(rel))), `setup copied ${basename(rel)} beside the verbs`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

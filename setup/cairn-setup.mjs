@@ -14,7 +14,9 @@
 //      only when no CLAUDE.md is in scope -- a claim, as of 2026-10, per the
 //      Claude Code memory docs (#398)
 //   3. copies the verb subroutines to .cairn/harness/ so harnesses without
-//      the plugin can read them
+//      the plugin can read them, plus the helpers those verbs run
+//      (merge-overlap, cost-report and their imports) into a scripts/
+//      folder beside them, with the copied verbs re-pointed at it (#474)
 //   4. harness-specific wiring (Copilot mcp-config + instructions + prompts;
 //      Codex prints its config.toml block; Gemini merges settings + GEMINI.md)
 //
@@ -225,20 +227,55 @@ function installClaudeImport(path, { create }) {
   return "installed";
 }
 
-/** Copy the verb subroutines + registry into the project for pluginless harnesses. */
+// The helpers the verbs tell the agent to run (#474). They are copied beside
+// the verbs into harness/scripts/ under the cairn home folder, for EVERY
+// harness, together with every `./x.mjs` they import so the copy runs where
+// it lands (node builtins need nothing). The verbs name them through
+// $CLAUDE_PLUGIN_ROOT, a variable only Claude Code sets, so the copied verbs
+// are re-pointed at that folder on the way in; the claude target keeps the
+// plugin root (asserted: setup.test.ts, #474). Phase 30 copied the hook
+// scripts folder for Cursor alone and said setup copied it everywhere.
+const VERB_HELPERS = ["merge-overlap.mjs", "cost-report.mjs"];
+const SCRIPTS_REL = [".cairn", "harness", "scripts"].join("/");
+const PLUGIN_SCRIPTS = '"$CLAUDE_PLUGIN_ROOT/hooks/scripts/';
+
+/** The helper files plus every relative `./x.mjs` they import, transitively.
+ *  :returns sorted file names under dir */
+function helperClosure(dir, names) {
+  const seen = new Set();
+  const queue = [...names];
+  while (queue.length) {
+    const f = queue.shift();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const body = readFileSync(join(dir, f), "utf8");
+    for (const m of body.matchAll(/^import\b[^;]*?from\s+"\.\/([^"]+\.mjs)"/gm)) queue.push(m[1]);
+  }
+  return [...seen].sort();
+}
+
+/** Copy the verb subroutines + registry into the project for pluginless
+ *  harnesses, plus the helpers the verbs run (#474). */
 function installVerbs() {
   const srcDir = join(repoRoot, "skills", "cairn-trailhead");
   const outDir = join(projectDir, ".cairn", "harness");
   mkdirSync(join(outDir, "verbs"), { recursive: true });
-  copyFileSync(join(srcDir, "SKILL.md"), join(outDir, "SKILL.md"));
+  mkdirSync(join(outDir, "scripts"), { recursive: true });
+  // Verb text is re-pointed on the way in, never copied raw, so every
+  // harness but claude reads a path that exists in its own install.
+  const localize = (body) => (harness === "claude" ? body : body.replaceAll(PLUGIN_SCRIPTS, `"${SCRIPTS_REL}/`));
+  writeFileSync(join(outDir, "SKILL.md"), localize(readFileSync(join(srcDir, "SKILL.md"), "utf8")));
   let n = 0;
   for (const f of readdirSync(join(srcDir, "verbs"))) {
     if (!f.endsWith(".md")) continue;
-    copyFileSync(join(srcDir, "verbs", f), join(outDir, "verbs", f));
+    writeFileSync(join(outDir, "verbs", f), localize(readFileSync(join(srcDir, "verbs", f), "utf8")));
     n++;
   }
+  const helpers = helperClosure(join(repoRoot, "hooks", "scripts"), VERB_HELPERS);
+  for (const f of helpers) copyFileSync(join(repoRoot, "hooks", "scripts", f), join(outDir, "scripts", f));
   stampInstall(outDir, "verb subroutines");
   console.log(`  .cairn/harness/: registry + ${n} verb subroutines installed (stamped v${sourceVersion}).`);
+  console.log(`  ${SCRIPTS_REL}/: ${helpers.length} verb helpers installed (${helpers.join(", ")}); ${harness === "claude" ? "the verbs keep the plugin root" : "the copied verbs name them there"}.`);
 }
 
 /** Merge the [mcp_servers.cairn] block into ~/.codex/config.toml between
