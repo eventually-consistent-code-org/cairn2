@@ -6615,3 +6615,98 @@ describe("a protected path held in a same-line variable is seen (#291)", () => {
     expect(header.slice(0, header.indexOf("*/"))).toContain("a variable the line never assigns");
   });
 });
+
+// #292 -- a hard link gave a protected file a second name outside the
+// protected set: `ln hooks/hooks.json /tmp/h.json` passed (the destination
+// was judged, the source only read), and every later write through the
+// second name changed the hook file while the guard saw a write to /tmp.
+// A hard link's source is judged as a write to it now -- `ln` without -s,
+// `cp -l` / `--link` (an archive copy carrying -l too) and `link` -- and
+// a folder source counts, since every file under it gets the second name.
+// A symbolic link and a plain copy only read their source and pass as
+// before. The surface sweep lists the second names already there
+// (audit.md "Hard links"; sweep-surface.test.ts "(#292)").
+describe("a hard link to a protected file is a write to it (#292)", () => {
+  /** A project with a hook file, a source file and a nested pkg/lib; a home; a cairn home holding a ship-gate stamp. */
+  function fixture() {
+    const p = freshDir("cairn-hooks-292-proj-");
+    const home = freshDir("cairn-hooks-292-home-");
+    const cairnHome = freshDir("cairn-hooks-292-cairnhome-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    writeFileSync(join(p, "src", "x.json"), "{}");
+    mkdirSync(join(cairnHome, "ship-gate"), { recursive: true });
+    writeFileSync(join(cairnHome, "ship-gate", "proj-0123456789abcdef.json"), "{}");
+    return { p, home, cairnHome };
+  }
+
+  function run(f: ReturnType<typeof fixture>, command: string, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = {
+      ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome,
+    };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** Each refused shape beside its twin: the same source, linked symbolically or copied, which only reads it. `rel` climbs from the shell's folder to the root. */
+  const pairs = (rel: string): Array<[refused: string, twin: string]> => [
+    [`ln ${rel}hooks/hooks.json /tmp/h.json`, `ln -s ${rel}hooks/hooks.json /tmp/h.json`],
+    [`cp -l ${rel}hooks/hooks.json /tmp/h.json`, `cp ${rel}hooks/hooks.json /tmp/h.json`],
+    [`cp --link ${rel}hooks/hooks.json /tmp/h.json`, `cp --symbolic-link ${rel}hooks/hooks.json /tmp/h.json`],
+    // a folder source: every file under it gets the second name
+    [`cp -al ${rel}hooks /tmp/h`, `cp -a ${rel}hooks /tmp/h`],
+    [`cp -rl ${rel}hooks /tmp/h`, `cp -r ${rel}hooks /tmp/h`],
+    // the hostile spellings: link(1), the target-directory form, ln's -L and -P (hard either way),
+    // a link made beside the shell, a second name inside the project, and the forms xargs and a nested shell run
+    [`link ${rel}hooks/hooks.json /tmp/h.json`, `link ${rel}src/x.json /tmp/x.json`],
+    [`ln -t /tmp ${rel}hooks/hooks.json`, `ln -st /tmp ${rel}hooks/hooks.json`],
+    [`ln -L ${rel}hooks/hooks.json /tmp/h.json`, `ln -sL ${rel}hooks/hooks.json /tmp/h.json`],
+    [`ln -P ${rel}hooks/hooks.json /tmp/h.json`, `ln -sP ${rel}hooks/hooks.json /tmp/h.json`],
+    [`ln ${rel}hooks/hooks.json`, `ln -s ${rel}hooks/hooks.json`],
+    [`cp -l ${rel}hooks/hooks.json ${rel}src/`, `cp ${rel}hooks/hooks.json ${rel}src/`],
+    [`echo ${rel}hooks/hooks.json | xargs -I{} ln {} /tmp/h.json`, `echo ${rel}hooks/hooks.json | xargs -I{} ln -s {} /tmp/h.json`],
+    [`bash -c 'ln ${rel}hooks/hooks.json /tmp/h.json'`, `bash -c 'ln -s ${rel}hooks/hooks.json /tmp/h.json'`],
+    // the other protected places: the home settings and the ship-gate stamp
+    ["ln ~/.claude/settings.json /tmp/s.json", "ln -s ~/.claude/settings.json /tmp/s.json"],
+    ["ln $CAIRN_HOME/ship-gate/proj-0123456789abcdef.json /tmp/g.json",
+      "cp $CAIRN_HOME/ship-gate/proj-0123456789abcdef.json /tmp/g.json"],
+  ];
+
+  it("harness guard: ln without -s, cp -l/--link and link with a protected source are refused, naming the source; the symbolic link and the plain copy of it pass, and so does a hard link of a harmless file", () => {
+    const f = fixture();
+    for (const [refused, twin] of pairs("")) {
+      const r = run(f, refused);
+      expect(r.status, JSON.stringify(refused)).toBe(2);
+      expect(r.stderr, JSON.stringify(refused)).toContain("file:");
+      expect(run(f, twin).status, JSON.stringify(twin)).toBe(0);
+    }
+    // the refusal names the source -- the protected file -- not the harmless second name
+    const r = run(f, "ln hooks/hooks.json /tmp/h.json");
+    expect(r.stderr).toContain("the hook directory");
+    expect(r.stderr).toContain("file: hooks/hooks.json");
+    expect(r.stderr).not.toContain("/tmp/h.json");
+    for (const c of ["ln seed.txt /tmp/s.txt", "cp -l src/x.json /tmp/x.json", "cp -rl src /tmp/s", "link src/x.json /tmp/x.json",
+      "ln -t /tmp src/x.json", "cp -al src /tmp/s"]) {
+      expect(run(f, c).status, c).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const [refused, twin] of pairs("../../")) {
+        expect(run(f, refused, { cwd: nested, bare }).status, `${JSON.stringify(refused)} bare=${bare}`).toBe(2);
+        expect(run(f, twin, { cwd: nested, bare }).status, `${JSON.stringify(twin)} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+});

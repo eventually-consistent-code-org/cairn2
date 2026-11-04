@@ -117,7 +117,14 @@
  *   clone and fork --clone, npx degit, and the create-* initializers npm,
  *   pnpm, yarn, bun and npx run -- the repo's own name, here, when no
  *   folder is given, so a clone into .claude/skills plants a skill, or a
- *   plugin with hooks of its own, and is refused. Removing a
+ *   plugin with hooks of its own, and is refused. A hard link gives a
+ *   protected file a second name outside the protected set, so making one
+ *   is a write to the source (#292: `ln` without -s, `cp -l` / `--link`
+ *   and `link`; a folder source counts for every file under it; `ln -s`
+ *   and a plain cp only read it and pass; asserted: hooks.test.ts "a hard
+ *   link to a protected file is a write to it (#292)"; the second names
+ *   already there are the surface sweep's, audit.md "Hard links").
+ *   Removing a
  *   protected folder or one holding it counts, and so does changing its
  *   mode, owner, flags or ACL (chmod, chown, chflags, setfacl, xattr -w,
  *   #299), or claude writing its config itself: `claude mcp add` (#303),
@@ -451,6 +458,7 @@ const COPIES = new Map([
   ["cp", { short: "St", long: ["--target-directory", "--suffix"] }],
   ["mv", { short: "St", long: ["--target-directory", "--suffix"] }],
   ["ln", { short: "St", long: ["--target-directory", "--suffix"] }],
+  ["link", { short: "", long: [] }], // link(1): a hard link, two operands, no options (#292)
   ["install", { short: "Stmog", long: ["--target-directory", "--suffix", "--mode", "--owner",
     "--group", "--strip-program"] }],
   ["rsync", { short: "efBTM", long: RSYNC_VALUE }],
@@ -1939,6 +1947,15 @@ function copyTargets(cmd, args, add) {
   if (cmd === "mv" || (rsync && hasOpt(opts, "--remove-source-files"))) {
     for (const s of srcs) if (!remote(s)) add(s, "remove");
   }
+  // #292 -- a hard link gives its source a second name outside the
+  // protected set, and every later write through that name is a write to
+  // the source: `ln` without -s, `cp -l` / `--link` (an -a carrying -l
+  // too) and `link` judge each source as a write to it -- a folder source
+  // like a mode change (#299), since every file under it gets the second
+  // name. A symbolic link and a plain copy only read their source.
+  const hard = cmd === "link" || (cmd === "ln" && !hasOpt(opts, "-s", "--symbolic"))
+    || (cmd === "cp" && hasOpt(opts, "-l", "--link"));
+  if (hard) for (const s of srcs) add(s, "perm");
   if (remote(dest)) return;
   add(dest, rsync && opts.some((o) => o.name.startsWith("--delete")) ? "remove" : "write");
   // Where each source lands: dest/<its name>, or an unknown name when a
