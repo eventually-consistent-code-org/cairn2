@@ -210,8 +210,38 @@ export class AzureBoardsTracker implements Tracker {
     return "open";
   }
 
+  // State names Azure has shown this instance with the category they
+  // normalize to -- filled by every work item read, so the pre-write
+  // question below answers from data already fetched and never fetches
+  // for itself (#471). The work-item-type states call
+  // (GET {project}/_apis/wit/workitemtypes/{type}/states, name + category
+  // per state, as of 2026-11-04 per the Azure DevOps REST 7.0 reference)
+  // could warm this for never-seen states; it is not wired, because the
+  // question is answered with no network and a never-seen name falls
+  // closed at the gate anyway.
+  private readonly seenStates = new Map<string, StateCategory>();
+
+  /** The SPI's pre-write question (#427, #471): the canonical three by
+   *  name; a states-map key by the native state it writes, and a native
+   *  state by itself -- the three required entries carry their category,
+   *  any other only once Azure has shown it on a work item read. undefined
+   *  otherwise: the freeze gate then falls closed rather than letting the
+   *  name through. Exact-case, as normalizeState compares. Asserted by
+   *  azure-boards.unit.test.ts and tracker-contract.test.ts. */
+  stateCategory(state: IssueState): StateCategory | undefined {
+    if (state === "open" || state === "in_progress" || state === "closed") return state;
+    const { states } = this.cfg;
+    const native = states[state] ?? state;
+    if (native === states.closed) return "closed";
+    if (native === states.in_progress) return "in_progress";
+    if (native === states.open) return "open";
+    return this.seenStates.get(native);
+  }
+
   private normalize(raw: WorkItem): Issue {
     const f = raw.fields;
+    const category = this.normalizeState(f);
+    if (f["System.State"]) this.seenStates.set(f["System.State"], category);
     const tags = f["System.Tags"];
     const labels = tags ? tags.split("; ").filter(Boolean) : [];
     const assignedTo = f["System.AssignedTo"];
@@ -233,8 +263,8 @@ export class AzureBoardsTracker implements Tracker {
       id: String(raw.id),
       title: f["System.Title"] ?? "",
       body: f["System.Description"] ?? "",
-      state: f["System.State"] ?? this.normalizeState(f),
-      category: this.normalizeState(f),
+      state: f["System.State"] ?? category,
+      category,
       labels,
       phase,
       assignee,

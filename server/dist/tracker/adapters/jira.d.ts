@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type FetchLike } from "../http.js";
-import type { Capability, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
+import type { Capability, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, StateCategory, Tracker } from "../types.js";
 export declare const configSchema: z.ZodObject<{
     baseUrl: z.ZodString;
     projectKey: z.ZodString;
@@ -64,9 +64,24 @@ export declare class JiraTracker implements Tracker {
     private apiBase;
     private api;
     private assertId;
+    private readonly seenStatuses;
+    private learnStatus;
+    /** The SPI's pre-write question (#427, #471): the category a requested
+     *  state name would land in. The canonical three by name; the two
+     *  required transitions-map targets by the category they stand for; any
+     *  other name -- or the target a transitions-map alias points at -- only
+     *  once Jira has shown it with its statusCategory. undefined otherwise:
+     *  the freeze gate then falls closed rather than letting the name
+     *  through. Case-insensitive, as transitionByName matches. Asserted by
+     *  jira.unit.test.ts and tracker-contract.test.ts. */
+    stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     /** GET transitions for `key`, find one whose `to.name` or transition `name` matches (case-insensitive), POST it. */
     private transitionByName;
+    /** A transition list names each target status with its category; both the
+     *  status name and the transition name reach it through transitionByName,
+     *  so both are learned (#471). */
+    private learnTransitions;
     /** in_progress -> open has no fixed target name; find any transition whose target category is 'new'. */
     private transitionToOpenCategory;
     private boardCache;

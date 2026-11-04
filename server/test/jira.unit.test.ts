@@ -988,3 +988,59 @@ describe("JiraTracker re-phase (#142)", () => {
     expect(t.capabilities.hasPhaseReassign).toBe(true);
   });
 });
+
+describe("JiraTracker.stateCategory -- the pre-write question, from data already fetched (#471)", () => {
+  const transitions = {
+    transitions: [
+      { id: "11", name: "To Do", to: { name: "To Do", statusCategory: { key: "new" } } },
+      { id: "21", name: "Start review", to: { name: "In Review", statusCategory: { key: "indeterminate" } } },
+      { id: "31", name: "Done", to: { name: "Done", statusCategory: { key: "done" } } },
+    ],
+  };
+
+  it("answers the canonical three by name and the transitions-map targets by their category, case-insensitively, with no fetch", () => {
+    const { f, calls } = fixtureFetch([]);
+    const t = new JiraTracker(cfg, f, () => ({ email: "e", token: "t" }));
+    expect(t.stateCategory("open")).toBe("open");
+    expect(t.stateCategory("in_progress")).toBe("in_progress");
+    expect(t.stateCategory("closed")).toBe("closed");
+    expect(t.stateCategory("Done")).toBe("closed");
+    expect(t.stateCategory("done")).toBe("closed");
+    expect(t.stateCategory("DONE")).toBe("closed");
+    expect(t.stateCategory("In Progress")).toBe("in_progress");
+    expect(calls.length).toBe(0);
+  });
+
+  it("a transitions-map alias resolves through its target: `finish: \"Done\"` is closed", () => {
+    const { f } = fixtureFetch([]);
+    const t = new JiraTracker({ ...cfg, transitions: { ...cfg.transitions, finish: "Done" } }, f, () => ({ email: "e", token: "t" }));
+    expect(t.stateCategory("finish")).toBe("closed");
+  });
+
+  it("a name Jira has not shown is undefined -- never guessed -- until an issue read carries it with its statusCategory", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: jiraIssue({ status: { name: "In Review", statusCategory: { key: "indeterminate" } } }) },
+    ]);
+    const t = new JiraTracker(cfg, f, () => ({ email: "e", token: "t" }));
+    expect(t.stateCategory("In Review")).toBeUndefined();
+    expect(t.stateCategory("Finito")).toBeUndefined();
+    await t.getIssue("CHN-101");
+    expect(t.stateCategory("In Review")).toBe("in_progress");
+    expect(t.stateCategory("in review")).toBe("in_progress");
+    expect(t.stateCategory("Finito")).toBeUndefined();
+  });
+
+  it("a transitions list teaches every target it lists, by status name and by transition name", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: transitions }, // transitionByName GET
+      { status: 204, body: undefined }, // POST transition
+      { status: 200, body: jiraIssue({ status: { name: "To Do", statusCategory: { key: "new" } } }) }, // readback
+    ]);
+    const t = new JiraTracker(cfg, f, () => ({ email: "e", token: "t" }));
+    expect(t.stateCategory("To Do")).toBeUndefined();
+    await t.updateIssue("CHN-101", { state: "To Do" });
+    expect(t.stateCategory("To Do")).toBe("open");
+    expect(t.stateCategory("In Review")).toBe("in_progress");
+    expect(t.stateCategory("Start review")).toBe("in_progress");
+  });
+});

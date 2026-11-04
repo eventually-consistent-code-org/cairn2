@@ -181,13 +181,38 @@ export class ClickUpTracker implements Tracker {
       : "open";
   }
 
+  // Status names ClickUp has shown this instance, lowercased, with the
+  // category their type buckets to -- filled by every task read, so the
+  // pre-write question below answers from data already fetched and never
+  // fetches for itself (#471).
+  private readonly seenStatuses = new Map<string, StateCategory>();
+
+  /** The SPI's pre-write question (#427, #471): the canonical three by
+   *  name; a statuses-map key by the native status it writes, and a native
+   *  status by itself -- the three required entries carry their category,
+   *  any other only once ClickUp has shown it with its type. undefined
+   *  otherwise: the freeze gate then falls closed rather than letting the
+   *  name through. Case-insensitive, as normalizeState compares. Asserted
+   *  by clickup.unit.test.ts and tracker-contract.test.ts. */
+  stateCategory(state: IssueState): StateCategory | undefined {
+    if (state === "open" || state === "in_progress" || state === "closed") return state;
+    const { statuses } = this.cfg;
+    const native = (statuses[state] ?? state).toLowerCase();
+    if (native === statuses.closed.toLowerCase()) return "closed";
+    if (native === statuses.in_progress.toLowerCase()) return "in_progress";
+    if (native === statuses.open.toLowerCase()) return "open";
+    return this.seenStatuses.get(native);
+  }
+
   private normalize(raw: CuTask): Issue {
+    const category = this.normalizeState(raw.status);
+    if (raw.status?.status) this.seenStatuses.set(raw.status.status.toLowerCase(), category);
     return {
       id: raw.id,
       title: raw.name,
       body: raw.description ?? "",
-      state: raw.status?.status ?? this.normalizeState(raw.status),
-      category: this.normalizeState(raw.status),
+      state: raw.status?.status ?? category,
+      category,
       labels: raw.tags.map((t) => t.name),
       phase: raw.list?.id,
       assignee: raw.assignees[0]?.username ?? raw.assignees[0]?.email,

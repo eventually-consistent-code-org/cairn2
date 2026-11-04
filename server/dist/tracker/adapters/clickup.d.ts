@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type FetchLike } from "../http.js";
-import type { Capability, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
+import type { Capability, StateCategory, Issue, IssueCreate, IssuePatch, IssueState, Milestone, Phase, ProbeResult, Tracker } from "../types.js";
 export declare const configSchema: z.ZodObject<{
     defaultListId: z.ZodString;
     folderId: z.ZodOptional<z.ZodString>;
@@ -27,6 +27,15 @@ export declare class ClickUpTracker implements Tracker {
     /** Validates a caller-supplied phase (list) id before it reaches a URL. defaultListId is trusted config, not user input. */
     private assertPhaseId;
     private normalizeState;
+    private readonly seenStatuses;
+    /** The SPI's pre-write question (#427, #471): the canonical three by
+     *  name; a statuses-map key by the native status it writes, and a native
+     *  status by itself -- the three required entries carry their category,
+     *  any other only once ClickUp has shown it with its type. undefined
+     *  otherwise: the freeze gate then falls closed rather than letting the
+     *  name through. Case-insensitive, as normalizeState compares. Asserted
+     *  by clickup.unit.test.ts and tracker-contract.test.ts. */
+    stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     createIssue(input: IssueCreate): Promise<Issue>;
     getIssue(id: string): Promise<Issue>;

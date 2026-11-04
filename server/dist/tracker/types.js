@@ -17,8 +17,10 @@ export function assertCanonicalState(state, backend) {
  *  before any write (#427): the adapter's own vocabulary when it has one,
  *  else the canonical three by name (always writable on every backend);
  *  undefined for a name neither knows, which the adapter's own refusal
- *  then speaks to on the write. The freeze check keys on this, never on
- *  the literal name -- asserted by run-breaker.test.ts (#427). */
+ *  then speaks to on the write -- and which the freeze check treats as a
+ *  close while a run is frozen (#471), never as a reason to skip. The
+ *  freeze check keys on this, never on the literal name -- asserted by
+ *  run-breaker.test.ts (#427, #471) and tracker-contract.test.ts. */
 export function requestedCategory(tracker, state) {
     const own = tracker.stateCategory?.(state);
     if (own)

@@ -565,13 +565,17 @@ export function buildServer(deps) {
         const d = dir();
         const { id, phase: phaseParam, estimatePoints, estimateMinutes, claim, ...rest } = a;
         const tracker = await getTracker(d);
-        // #358/#427 -- a frozen run claims nothing and closes nothing. The
-        // check keys on the category the requested state resolves to on
+        // #358/#427/#471 -- a frozen run claims nothing and closes nothing.
+        // The check keys on the category the requested state resolves to on
         // this backend, never on the literal name: `state: "closed"` is a
         // close however it is spelled, and a custom in-progress display
-        // name is a claim. Refused before any tracker write.
+        // name is a claim. A name the adapter cannot place falls closed --
+        // gated like a close, so a frozen run never walks out through a
+        // spelling the backend knows and cairn does not; only a name that
+        // resolves to open passes ungated. Refused before any tracker
+        // write. Asserted by run-breaker.test.ts and tracker-contract.test.ts.
         const requested = rest.state === undefined ? undefined : requestedCategory(tracker, rest.state);
-        if (claim || requested === "in_progress" || requested === "closed")
+        if (claim || (rest.state !== undefined && requested !== "open"))
             await assertNotFrozen(d, id);
         // A claim IS the in_progress transition (#343): the state may be
         // left off, but naming any other state alongside it is a
