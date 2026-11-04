@@ -31,6 +31,13 @@ export interface ShipGateStamp {
 export declare function shipGateStampPath(projectDir: string, baseDir?: string): string;
 /** True when nothing flagged is something ship stops on. */
 export declare function driftIsClean(flagged: DriftItem[]): boolean;
+/** The git layer of the gate (#456): "present" when the pre-push hook git
+ *  runs from this checkout carries the cairn marker, "absent" when the folder
+ *  or the hook is not there, "unknown" when git can't be asked or the file
+ *  can't be read. A measurement plan_drift reports beside its flags, never
+ *  one of them: the stamp stays clean either way (asserted:
+ *  sweep-surface.test.ts "(#456)"). */
+export declare function gitLayerReach(projectDir: string): "present" | "absent" | "unknown";
 /**
  * Stamps the drift result against the project's current HEAD. Returns the
  * stamp written, or null when it couldn't be (no HEAD, unwritable home) --

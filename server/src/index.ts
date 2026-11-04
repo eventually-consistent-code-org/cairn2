@@ -68,7 +68,7 @@ import {
   ensurePhase,
   resolvePhaseParam,
 } from "./planning/mirror.js";
-import { writeShipGateStamp } from "./planning/ship-gate.js";
+import { gitLayerReach, writeShipGateStamp } from "./planning/ship-gate.js";
 import { unplannedReport } from "./planning/collab.js";
 import { importPhase } from "./planning/import.js";
 import {
@@ -1428,9 +1428,11 @@ export function buildServer(deps: {
       const d = dir();
       const report = await driftReport(await getTracker(d), d,
         { staleDays: loadConfig(d).drift.staleDays });
-      // Stamp the result for the run guard's default-branch push gate (#251)
+      // Stamp the result for the run guard's default-branch push gate (#251),
+      // and measure whether the gate's git layer is there (#456): a field
+      // beside the flags, never one of them, so the stamp is unchanged by it.
       writeShipGateStamp(d, report.flagged);
-      return report;
+      return { ...report, guardReach: { gitLayer: gitLayerReach(d) } };
     }),
   );
 

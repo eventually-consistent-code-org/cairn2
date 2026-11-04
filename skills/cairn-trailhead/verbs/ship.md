@@ -25,7 +25,10 @@ Pre-ship gate, then ship:
    The two exceptions are `stale-issue` and `stale-branch`, which are
    advisory: mention them in one line each with the rest of the summary and
    carry on. Forgotten work is worth seeing, never a reason to block a good
-   push.
+   push. `guardReach.gitLayer: absent` is advisory too: one line that the
+   ship gate holds only inside this harness (no pre-push hook runs in the
+   checkout; `cairn-setup <harness> --git-hooks` installs one, #456), then
+   carry on.
    A `stale-audit` flag means the latest security audit no longer
    describes HEAD (written over a dirty tree, or code commits landed
    since its stamp): lead with its `detail` line — "re-run

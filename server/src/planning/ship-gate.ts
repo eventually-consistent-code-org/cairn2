@@ -23,8 +23,8 @@
 // Imports
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { repositoryPath } from "./run-manifest.js";
 import type { DriftItem } from "./mirror.js";
 
@@ -51,6 +51,31 @@ export function shipGateStampPath(
 /** True when nothing flagged is something ship stops on. */
 export function driftIsClean(flagged: DriftItem[]): boolean {
   return flagged.every((f) => ADVISORY.has(f.reason));
+}
+
+/** The git layer of the gate (#456): "present" when the pre-push hook git
+ *  runs from this checkout carries the cairn marker, "absent" when the folder
+ *  or the hook is not there, "unknown" when git can't be asked or the file
+ *  can't be read. A measurement plan_drift reports beside its flags, never
+ *  one of them: the stamp stays clean either way (asserted:
+ *  sweep-surface.test.ts "(#456)"). */
+export function gitLayerReach(projectDir: string): "present" | "absent" | "unknown" {
+  let hooks: string;
+  try {
+    hooks = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
+      cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+    }).trim();
+  } catch {
+    return "unknown";
+  }
+  if (!hooks) return "unknown";
+  const dir = resolve(projectDir, hooks.replace(/^~(?=\/|$)/, homedir()));
+  try {
+    return readFileSync(join(dir, "pre-push"), "utf8").includes("# cairn:begin") ? "present" : "absent";
+  } catch (e) {
+    return (e as { code?: string })?.code === "ENOENT" ? "absent" : "unknown";
+  }
 }
 
 /**

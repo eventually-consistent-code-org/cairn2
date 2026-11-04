@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
-import { MAX_CANDIDATES, pairRule, type Control, type RuleLine } from "../src/audit/rule-coverage.js";
+import { MAX_CANDIDATES, enumerateControls, pairRule, type Control, type RuleLine } from "../src/audit/rule-coverage.js";
 import { ConfigSchema } from "../src/config.js";
 import { outlookMirrorPath } from "../src/core/outlook.js";
 import { buildServer } from "../src/index.js";
@@ -48,6 +48,7 @@ describe("sunset clauses (#210)", () => {
       "hooks/scripts/posttooluse-loopcheck.mjs",
       "hooks/scripts/stop-costtracker.mjs",
       "hooks/scripts/sessionstart-continuity.mjs",
+      "hooks/scripts/pre-push.mjs",
     ];
     const missing = gates.filter((g) => !existsSync(join(ROOT, g)) || !/removeWhen:/.test(read(g).split("\n").slice(0, 40).join("\n")));
     expect(missing).toEqual([]);
@@ -208,7 +209,7 @@ describe("axioms (#356)", () => {
   const hooks = [
     "pretooluse-runguard", "pretooluse-harnessguard", "pretooluse-leakguard",
     "posttooluse-loopcheck", "posttooluse-observe", "stop-costtracker",
-    "sessionstart-continuity", "posttooluse-breadcrumb",
+    "sessionstart-continuity", "posttooluse-breadcrumb", "pre-push",
   ].map((h) => `hooks/scripts/${h}.mjs`);
   /** The first block comment of a hook script -- its header. */
   const header = (rel: string) => /\/\*\*[\s\S]*?\*\//.exec(read(rel))?.[0] ?? "";
@@ -948,5 +949,111 @@ describe("one file by two names: sameFile (#473)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// #456: the ship gate's rule ("never push to the default branch unshipped")
+// paired with one control, the run guard, which one harness runs. The
+// opt-in pre-push hook is the second control, and the surface audit sees
+// it; drift measures whether the layer is there; the hook carries no rule
+// of its own -- the table and the stamp reader are the sources.
+describe("the git layer of the ship gate (#456)", () => {
+  const GIT_IDENT = {
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+  };
+  const git = (cwd: string, ...a: string[]) =>
+    spawnSync("git", a, { cwd, encoding: "utf8", env: { ...process.env, ...GIT_IDENT } }).stdout.trim();
+  /** A committed scratch repo on main, with cairn's default-branch rule in its CLAUDE.md. */
+  function scratchRepo(): { dir: string; home: string } {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-456-proj-"));
+    const home = mkdtempSync(join(tmpdir(), "cairn-456-home-"));
+    git(dir, "init", "-q", "-b", "main");
+    git(dir, "config", "user.email", "t@t");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    writeFileSync(join(dir, "CLAUDE.md"), "# rules\n\n- Never push to the default branch without a clean ship-gate stamp.\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "init", "--no-gpg-sign");
+    return { dir, home };
+  }
+  const setup = (dir: string, home: string, ...extra: string[]) => spawnSync(process.execPath,
+    [join(ROOT, "setup", "cairn-setup.mjs"), "codex", "--project", dir, ...extra],
+    { encoding: "utf8", env: { ...process.env, HOME: home, CAIRN_SETUP_OFFLINE: "1" } });
+
+  it("rule-coverage pairs the default-branch rule with the run guard AND the installed pre-push hook", () => {
+    const { dir, home } = scratchRepo();
+    try {
+      // the run guard as the plugin registers it, header and all
+      mkdirSync(join(dir, "hooks", "scripts"), { recursive: true });
+      writeFileSync(join(dir, "hooks", "hooks.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash",
+        hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pretooluse-runguard.mjs"' }] }] } }));
+      writeFileSync(join(dir, "hooks", "scripts", "pretooluse-runguard.mjs"), read("hooks/scripts/pretooluse-runguard.mjs"));
+      const before = enumerateControls(dir).map((c) => `${c.type} ${c.id}`);
+      expect(before).toContain("hook PreToolUse[Bash] pretooluse-runguard.mjs");
+      expect(before.filter((id) => id.startsWith("git-hook"))).toEqual([]);
+
+      const r = setup(dir, home, "--git-hooks");
+      expect(r.status, r.stderr).toBe(0);
+      const controls = enumerateControls(dir);
+      const after = controls.map((c) => `${c.type} ${c.id}`);
+      expect(after).toContain("git-hook cairn pre-push");
+      const rule: RuleLine = { file: "CLAUDE.md", line: 3, keyword: "never", polarity: "prohibition", sourceKind: "instructions",
+        text: "Never push to the default branch without a clean ship-gate stamp." };
+      const cov = pairRule(rule, controls);
+      expect(cov.status).toBe("candidate");
+      const types = cov.candidates.map((c) => `${c.type} ${c.controlId}`);
+      expect(types).toContain("hook PreToolUse[Bash] pretooluse-runguard.mjs");
+      expect(types).toContain("git-hook cairn pre-push");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("plan_drift measures the layer: guardReach.gitLayer is absent with no hook, present once --git-hooks installed it; never a flag", async () => {
+    const { dir, home } = scratchRepo();
+    const server = buildServer({ projectDir: dir, tracker: new FakeTracker(), fetchLatestVersion: async () => "9.9.9" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    try {
+      const drift = async () => JSON.parse(((await client.callTool({ name: "plan_drift", arguments: {} })).content as Array<{ text: string }>)[0].text);
+      const absent = await drift();
+      expect(absent.guardReach).toEqual({ gitLayer: "absent" });
+      expect(absent.flagged).toEqual([]);
+      expect(setup(dir, home, "--git-hooks").status).toBe(0);
+      const present = await drift();
+      expect(present.guardReach).toEqual({ gitLayer: "present" });
+      expect(present.flagged).toEqual([]);
+    } finally {
+      await client.close();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("the pre-push script is a thin caller: stamp and branch names from lib.mjs, the effect from git-effects.mjs, no branch name or table row of its own", () => {
+    const src = read("hooks/scripts/pre-push.mjs");
+    expect(src).toMatch(/from "\.\/lib\.mjs"/);
+    expect(src).toMatch(/from "\.\/git-effects\.mjs"/);
+    for (const name of ["readShipGateStamp", "shipGateMismatch", "defaultBranches", "classify", "effectLine"]) {
+      expect(src, name).toContain(name);
+    }
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toMatch(/["'`](main|master)["'`]/);
+    expect(code).not.toContain("EFFECT_TABLE");
+    expect(code).not.toContain("ship-gate");
+    // the run guard reads the same two helpers, so the rule has one home
+    const guard = read("hooks/scripts/pretooluse-runguard.mjs");
+    for (const name of ["readShipGateStamp", "shipGateMismatch", "defaultBranches"]) expect(guard, name).toContain(name);
+  });
+
+  it("the runbook carries the dated remote-ruleset paragraph and the readers of the hook; the ship verb reads the drift field", () => {
+    const runbook = read("docs/01-runbook.md");
+    expect(runbook).toContain("--git-hooks");
+    expect(runbook).toMatch(/--no-verify[\s\S]*ruleset/);
+    expect(runbook).toMatch(/GitLab[\s\S]*protected branch|protected branch[\s\S]*GitLab/);
+    expect(runbook).toMatch(/dated 2026-11-04[^.]*#456|#456[^.]*2026-11-04/);
+    expect(read("skills/cairn-trailhead/verbs/ship.md")).toContain("guardReach");
   });
 });
