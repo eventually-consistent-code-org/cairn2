@@ -332,6 +332,8 @@ export function tokenize(text: string): string[] {
 
 /** Settings-shaped files a project or plugin declares hooks/permissions in. */
 const SETTINGS_FILES = [".claude/settings.json", ".claude/settings.local.json"];
+/** Where cairn-setup --git-hooks puts the pre-push hook (#456), in the planning folder. */
+const CAIRN_GITHOOKS = [".cairn", "githooks"].join("/");
 const HOOK_MANIFESTS = ["hooks/hooks.json", ...SETTINGS_FILES];
 
 interface HookEntry { type?: unknown; command?: unknown }
@@ -460,6 +462,16 @@ function gitAndCiControls(root: string, skipped: SkippedPath[]): Control[] {
     const text = readUnderRoot(root, rel, skipped);
     if (text === null) continue;
     out.push({ type: "git-hook", id: rel, source: rel, detail: "git hook manager config", tokens: tokenize(text) });
+  }
+  // The hooks `cairn-setup --git-hooks` installs (#456): the git layer of
+  // the ship gate, so a default-branch "never" pairs with two controls on a
+  // project that installed it. Only a file carrying the cairn marker counts.
+  for (const name of listDir(root, CAIRN_GITHOOKS)) {
+    if (name.startsWith(".")) continue;
+    const rel = `${CAIRN_GITHOOKS}/${name}`;
+    const text = readUnderRoot(root, rel, skipped);
+    if (text === null || !text.includes("# cairn:begin")) continue;
+    out.push({ type: "git-hook", id: `cairn ${name}`, source: rel, detail: firstProseLine(text), tokens: tokenize(`${name} ${text}`) });
   }
   for (const name of listDir(root, ".github/workflows")) {
     if (!/\.ya?ml$/.test(name)) continue;

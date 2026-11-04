@@ -5,11 +5,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { projectKey } from "../src/planning/run-manifest.js";
 
 const SETUP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "setup", "cairn-setup.mjs");
 
@@ -568,5 +569,245 @@ describe("the helpers the verbs name reach every harness (#474)", () => {
     expect(existsSync(join(proj, SCRIPTS, "merge-overlap.mjs"))).toBe(true);
     expect(existsSync(join(proj, SCRIPTS, "cost-report.mjs"))).toBe(true);
     expect(existsSync(join(proj, SCRIPTS, "lib.mjs"))).toBe(true);
+  });
+});
+
+// #456: the run guard refuses an unshipped default-branch push only when the
+// push goes through the Bash tool of a harness that runs the hook. A human's
+// terminal, a harness wired for skills but not hooks, and any script that
+// shells out to git all pushed past it. `--git-hooks` (opt-in: the flag is
+// the owner's consent to a git-config write) installs a pre-push hook that
+// is a thin caller over the shared stamp reader and effect table, so the
+// same refusal holds for every process in the checkout. Every push below
+// runs from a plain shell: no CLAUDE_* or CAIRN_* variable reaches it.
+describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () => {
+  const GIT_IDENT = {
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+  };
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe", env: { ...process.env, ...GIT_IDENT } }).trim();
+  // Built, never spelled: the leak guard refuses the planning folder's path as a literal.
+  const GITHOOKS = join(".cairn", "githooks");
+
+  /** A committed repo on main with a bare remote, plus an empty home for the stamp. */
+  function repo(): { proj: string; home: string } {
+    const proj = fresh("cairn-githooks-proj-");
+    const home = fresh("cairn-githooks-home-");
+    const bare = fresh("cairn-githooks-remote-");
+    git(bare, "init", "-q", "--bare");
+    git(proj, "init", "-q", "-b", "main");
+    git(proj, "config", "user.email", "t@t");
+    git(proj, "config", "user.name", "t");
+    mkdirSync(join(proj, "src"));
+    writeFileSync(join(proj, "src", "a.txt"), "a\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "init", "--no-gpg-sign");
+    git(proj, "remote", "add", "origin", bare);
+    return { proj, home };
+  }
+
+  /** `git push` as a plain shell runs it: every harness and cairn variable stripped. */
+  function push(cwd: string, home: string, args: string[], extra: Record<string, string> = {}) {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !k.startsWith("CLAUDE_") && !k.startsWith("CAIRN_")) env[k] = v;
+    }
+    const r = spawnSync("git", ["push", ...args], {
+      cwd, encoding: "utf8", timeout: 20000, env: { ...env, ...GIT_IDENT, HOME: home, ...extra },
+    });
+    return { status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
+  }
+
+  /** The stamp plan_drift leaves, in the home the plain shell's hook reads. */
+  function stamp(proj: string, home: string, head: string, clean = true): void {
+    mkdirSync(join(home, ".cairn", "ship-gate"), { recursive: true });
+    writeFileSync(join(home, ".cairn", "ship-gate", `${projectKey(proj)}.json`),
+      JSON.stringify({ head, clean, at: "2026-11-04T00:00:00Z" }));
+  }
+
+  it("installs the hook, points core.hooksPath at it, copies the script beside the helpers; re-run byte-identical; --check reports it reached", () => {
+    const { proj, home } = repo();
+    const out = run("codex", proj, home, "--git-hooks");
+    expect(out).toContain("pre-push hook installed");
+    const hook = readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8");
+    expect(hook.startsWith("#!/bin/sh\n")).toBe(true);
+    expect(hook).toContain("# cairn:begin");
+    expect(hook).toContain("# cairn:end");
+    expect(hook).toContain("pre-push.mjs");
+    expect(git(proj, "config", "--get", "core.hooksPath")).toBe(join(proj, GITHOOKS));
+    expect(git(proj, "rev-parse", "--git-path", "hooks")).toBe(join(proj, GITHOOKS));
+    for (const f of ["pre-push.mjs", "lib.mjs", "git-effects.mjs"]) {
+      expect(existsSync(join(proj, ".cairn", "harness", "scripts", f)), f).toBe(true);
+    }
+
+    const again = run("codex", proj, home, "--git-hooks");
+    expect(readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+    expect(again).toContain("pre-push hook already current");
+
+    const check = run("codex", proj, home, "--check");
+    expect(check).toContain("git hooks (pre-push): installed");
+    expect(check).toContain("git runs hooks from there");
+    expect(check).toContain("all installed surfaces current.");
+  });
+
+  it("without the flag nothing touches git config, and --check says the layer is opt-in", () => {
+    const { proj, home } = repo();
+    run("codex", proj, home);
+    expect(existsSync(join(proj, GITHOOKS))).toBe(false);
+    expect(spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: proj }).status).not.toBe(0);
+    const check = run("codex", proj, home, "--check");
+    expect(check).toContain("git hooks (pre-push): not installed");
+    expect(check).toContain("all installed surfaces current.");
+  });
+
+  it("from a plain shell with no stamp, a push to main is refused with the run guard's lines; from a nested folder too; a feature push passes", () => {
+    const { proj, home } = repo();
+    run("codex", proj, home, "--git-hooks");
+
+    const r = push(proj, home, ["origin", "main"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("cairn run guard: this push lands on the default branch, but no drift check has been recorded for this project.");
+    expect(r.stderr).toContain("/cairn:ship");
+    expect(r.stderr).toContain("effect: moves-shared-ref");
+    expect(r.stderr).toContain("not the owner asking");
+    expect(r.stderr).toContain("git pre-push hook");
+    // the escape is honoured, never taught (#262)
+    expect(r.stderr).not.toMatch(/[A-Z_]+=1/);
+    expect(git(proj, "ls-remote", "--heads", "origin")).toBe("");
+
+    const nested = push(join(proj, "src"), home, ["origin", "main"]);
+    expect(nested.status).not.toBe(0);
+    expect(nested.stderr).toContain("cairn run guard: this push lands on the default branch");
+
+    // the harmless twin: the same commit to a branch nobody ships from
+    const twin = push(proj, home, ["origin", "main:feature"]);
+    expect(twin.stderr).not.toContain("cairn run guard");
+    expect(twin.status).toBe(0);
+    expect(git(proj, "ls-remote", "--heads", "origin")).toContain("refs/heads/feature");
+  });
+
+  it("the owner's escape lets it through and says so; a clean stamp at HEAD lets it through silently; a stamp for another commit refuses", () => {
+    const { proj, home } = repo();
+    run("codex", proj, home, "--git-hooks");
+
+    const allowed = push(proj, home, ["origin", "main"], { CAIRN_ALLOW_UNSHIPPED_PUSH: "1" });
+    expect(allowed.status).toBe(0);
+    expect(allowed.stderr).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH is set");
+    expect(allowed.stderr).not.toContain("refused");
+
+    writeFileSync(join(proj, "src", "b.txt"), "b\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "second", "--no-gpg-sign");
+    const head = git(proj, "rev-parse", "HEAD");
+    stamp(proj, home, head);
+    const clean = push(proj, home, ["origin", "main"]);
+    expect(clean.stderr).not.toMatch(/cairn (run guard|pre-push)/);
+    expect(clean.status).toBe(0);
+
+    writeFileSync(join(proj, "src", "c.txt"), "c\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "third", "--no-gpg-sign");
+    const stale = push(proj, home, ["origin", "main"]);
+    expect(stale.status).not.toBe(0);
+    expect(stale.stderr).toContain(`the last drift check was for ${head.slice(0, 7)}, not the commit being pushed`);
+
+    stamp(proj, home, git(proj, "rev-parse", "HEAD"), false);
+    const dirty = push(proj, home, ["origin", "main"]);
+    expect(dirty.status).not.toBe(0);
+    expect(dirty.stderr).toContain("the last drift check flagged drift that ship stops on");
+  });
+
+  it("the hostile spellings land on main too: HEAD:main and refs/heads/main are refused; --no-verify walks past, which the runbook says", () => {
+    const { proj, home } = repo();
+    run("codex", proj, home, "--git-hooks");
+    for (const spec of ["HEAD:main", "refs/heads/main", "main:refs/heads/main"]) {
+      const r = push(proj, home, ["origin", spec]);
+      expect(r.status, spec).not.toBe(0);
+      expect(r.stderr, spec).toContain("cairn run guard: this push lands on the default branch");
+    }
+    expect(git(proj, "ls-remote", "--heads", "origin")).toBe("");
+    // the measured limit of the layer: git skips every pre-push hook under --no-verify
+    const past = push(proj, home, ["--no-verify", "origin", "main"]);
+    expect(past.status).toBe(0);
+    expect(past.stderr).not.toMatch(/cairn (run guard|pre-push)/);
+    const runbook = readFileSync(join(dirname(SETUP), "..", "docs", "01-runbook.md"), "utf8");
+    expect(runbook).toContain("--no-verify");
+  });
+
+  it("a project's own pre-push survives under the markers, runs after the gate, and still reads the refs from stdin", () => {
+    const { proj, home } = repo();
+    mkdirSync(join(proj, GITHOOKS), { recursive: true });
+    const owner = '#!/bin/sh\ncat > "$PWD/owner-saw.txt"\n';
+    writeFileSync(join(proj, GITHOOKS, "pre-push"), owner);
+    chmodSync(join(proj, GITHOOKS, "pre-push"), 0o755);
+    run("codex", proj, home, "--git-hooks");
+    const hook = readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8");
+    expect(hook.startsWith("#!/bin/sh\n# cairn:begin")).toBe(true);
+    expect(hook.indexOf("# cairn:end")).toBeLessThan(hook.indexOf("owner-saw.txt"));
+
+    // refused by the gate: the owner's hook never ran
+    expect(push(proj, home, ["origin", "main"]).status).not.toBe(0);
+    expect(existsSync(join(proj, "owner-saw.txt"))).toBe(false);
+    // stamped: the gate passes and the owner's hook reads the refs it was always given
+    stamp(proj, home, git(proj, "rev-parse", "HEAD"));
+    expect(push(proj, home, ["origin", "main"]).status).toBe(0);
+    expect(readFileSync(join(proj, "owner-saw.txt"), "utf8")).toContain("refs/heads/main");
+
+    run("codex", proj, home, "--git-hooks");
+    expect(readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+  });
+
+  it("live hooks in the folder git runs today are refused in one line, nothing written, core.hooksPath left alone", () => {
+    const { proj, home } = repo();
+    const current = join(proj, git(proj, "rev-parse", "--git-path", "hooks"));
+    mkdirSync(current, { recursive: true });
+    writeFileSync(join(current, "pre-commit"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(current, "pre-commit"), 0o755);
+    let err = "";
+    try {
+      run("codex", proj, home, "--git-hooks");
+    } catch (e) {
+      err = String((e as { stderr?: string }).stderr ?? "");
+    }
+    expect(err).toContain("pre-commit");
+    expect(err).toContain("core.hooksPath");
+    expect(existsSync(join(proj, GITHOOKS))).toBe(false);
+    expect(spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: proj }).status).not.toBe(0);
+  });
+
+  it("a core.hooksPath already set elsewhere is respected: the hook goes into that folder, the setting stays", () => {
+    const { proj, home } = repo();
+    mkdirSync(join(proj, "scripts", "hooks"), { recursive: true });
+    git(proj, "config", "core.hooksPath", "scripts/hooks");
+    const out = run("codex", proj, home, "--git-hooks");
+    expect(out).toContain("pre-push hook installed");
+    expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+    expect(existsSync(join(proj, GITHOOKS))).toBe(false);
+    expect(git(proj, "config", "--get", "core.hooksPath")).toBe("scripts/hooks");
+    expect(push(proj, home, ["origin", "main"]).stderr).toContain("cairn run guard: this push lands on the default branch");
+  });
+
+  it("--check lags when the hook is installed but git no longer runs hooks from there", () => {
+    const { proj, home } = repo();
+    run("codex", proj, home, "--git-hooks");
+    git(proj, "config", "core.hooksPath", ".husky");
+    const out = runCheckFail("codex", proj, home);
+    expect(out).toContain("git hooks (pre-push): installed");
+    expect(out).toContain("not reached");
+    // read-only: the check repairs nothing
+    expect(git(proj, "config", "--get", "core.hooksPath")).toBe(".husky");
+  });
+
+  it("outside a repository the flag is one line and exit 1; the rest of the install still landed", () => {
+    const proj = fresh("cairn-githooks-plain-");
+    const home = fresh("cairn-githooks-home-");
+    let err = "";
+    try {
+      run("codex", proj, home, "--git-hooks");
+    } catch (e) {
+      err = String((e as { stderr?: string }).stderr ?? "");
+    }
+    expect(err).toContain("not a git repository");
+    expect(existsSync(join(proj, ".cairn", "harness", "SKILL.md"))).toBe(true);
   });
 });

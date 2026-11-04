@@ -284,7 +284,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { projectKey, worktreeKey } from "./lib.mjs";
+import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
   SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, pagerCommands, runnerCommands, shellCommandString,
   shellReadsStdin, shellSegments, toolCommandLines, unwrap,
@@ -331,7 +331,6 @@ const DESTRUCTIVE_ENV = "CAIRN_ALLOW_DESTRUCTIVE_GIT";
 const UNSHIPPED_ENV = "CAIRN_ALLOW_UNSHIPPED_PUSH";
 
 // Branch names that are always treated as the default branch.
-const DEFAULT_BRANCHES = ["main", "master"];
 
 // A folder or repository the guard can't work out (#306) -- `cd "$X"`,
 // `GIT_DIR=$(...)`. A gate that has to know where a command acts refuses.
@@ -1208,15 +1207,11 @@ const MOVED_BEFORE = "an earlier command on this line can make a commit or move 
 /**
  * The default branch names at `at` (#251, #483): main, master, and the
  * `remote`'s HEAD when the clone knows it. Shared by the push gate and the
- * side-door gate, so both land on the same set.
+ * side-door gate, so both land on the same set; the set itself comes from
+ * lib.mjs's reader, shared with the pre-push git hook (#456).
  */
-function defaultBranches(at, remote = "origin") {
-  const defaults = new Set(DEFAULT_BRANCHES);
-  if (/^[\w.-]+$/.test(remote)) {
-    const head = gitOut(at, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`]);
-    if (head?.startsWith(`${remote}/`)) defaults.add(head.slice(remote.length + 1));
-  }
-  return defaults;
+function defaultBranchesAt(at, remote = "origin") {
+  return defaultBranches(remote, (args) => gitOut(at, args));
 }
 
 /**
@@ -1245,9 +1240,11 @@ function branchSources(inv, at) {
   const del = flags.has("--delete");
   const tags = flags.has("--tags");
 
+  // Default branch names: main, master, and the remote's HEAD when known --
+  // lib.mjs's reader, shared with the pre-push git hook (#456)
   const current = gitOut(at, ["symbolic-ref", "--short", "-q", "HEAD"]);
   const remote = pushRemote(inv, at, positional, current);
-  const defaults = defaultBranches(at, remote);
+  const defaults = defaultBranchesAt(at, remote);
   const lands = (names) => names.some((n) => defaults.has(n));
 
   // Every local default branch, as the full ref -- a tag spelled the same
@@ -1462,19 +1459,17 @@ function shipGateRefusal(inv, at, ctx) {
     if (inv.movedBefore) return [MOVED_BEFORE, "  push as its own step, once the drift check has seen " +
       "the commit -- or run /cairn:ship."];
 
+    // the stamp and its words come from lib.mjs, shared with the pre-push git hook (#456)
     const got = readStamp(at, ctx);
     if (got.why) return got.why;
     const { stamp } = got;
-    if (stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
 
     for (const src of sources) {
       if (src === null) return ["it deletes the default branch"];
       const sha = gitOut(at, ["rev-parse", "--verify", "-q", `${src}^{commit}`]);
       if (sha === null) return null; // git can't resolve it -- the push will fail on its own
-      if (sha !== stamp.head) {
-        return [`the last drift check was for ${String(stamp.head).slice(0, 7)}, ` +
-          `not the commit being pushed (${sha.slice(0, 7)})`];
-      }
+      const why = shipGateMismatch(stamp, sha);
+      if (why) return why;
     }
     return null;
   } catch {
@@ -1490,21 +1485,10 @@ function shipGateRefusal(inv, at, ctx) {
  * gate and the side-door gate (#483), so a route reads the one record.
  */
 function readStamp(at, ctx) {
+  // the stamp, its clean check and its words come from lib.mjs, shared with
+  // the pre-push git hook (#456); { why } already covers a stamp that is not clean
   const from = stampDir(at, ctx);
-  const keyed = join(ctx.baseDir, "ship-gate", `${projectKey(from)}.json`);
-  const legacy = join(ctx.baseDir, "ship-gate", `${worktreeKey(from)}.json`);
-  const path = existsSync(keyed) || !existsSync(legacy) ? keyed : legacy;
-  try {
-    return { stamp: JSON.parse(readFileSync(path, "utf8")) };
-  } catch (e) {
-    if (e?.code === "ENOENT") {
-      return { why: [from === ctx.projectDir ? "no drift check has been recorded for this project"
-        : `it leaves from ${from}, another repository, and no drift check has been recorded there`] };
-    }
-    if (e instanceof SyntaxError) return { why: ["the last drift check's record is unreadable"] };
-    return { why: [`the last drift check's record can't be read (${e?.code ?? e})`,
-      `  the owner should restore read access to ${path} -- the gate won't skip a check it can't see.`] };
-  }
+  return readShipGateStamp(from, ctx.baseDir, { elsewhere: from !== ctx.projectDir });
 }
 
 /**
@@ -1522,13 +1506,12 @@ function readStamp(at, ctx) {
 function sideGateRefusal(inv, at, ctx) {
   try {
     const cause = inv.side;
-    if (cause.branch !== undefined && !defaultBranches(at).has(cause.branch)) return null;
+    if (cause.branch !== undefined && !defaultBranchesAt(at).has(cause.branch)) return null;
     if (cause.deletes) return [`it deletes ${cause.deletes}`];
     if (inv.movedBefore) return [MOVED_BEFORE, "  run it as its own step, once the drift check has seen " +
       "the commit -- or run /cairn:ship."];
     const got = readStamp(at, ctx);
     if (got.why) return got.why;
-    if (got.stamp?.clean !== true) return ["the last drift check flagged drift that ship stops on"];
     const sha = gitOut(at, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
     if (sha === null) return ["no commit can be read here to match the drift check against"];
     if (sha !== got.stamp.head) {
