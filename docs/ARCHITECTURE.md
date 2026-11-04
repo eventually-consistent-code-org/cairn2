@@ -180,11 +180,15 @@ reason.
   shared append; `issue_create` takes a claim, and the server resolves
   the base commit itself and keeps it as the stamp later checks key on.
   With `verify.rerun` on (off by default) that append also re-runs the
-  owner-declared `verify:` line it reads out of the tracked plan at the
-  claim's stamp — never the worker's string, never a line that changed
-  since, under a minimal environment and a timeout — and records
-  `observed` beside the claimed evidence; a mismatch is reported, never
-  refused (ADR 0017, amendment). The run manifest carries the circuit
+  owner-declared `verify:` line it reads out of the tracked plan the
+  owner approved (`plan_meta_set approve`, a stamp in local state) —
+  never the worker's string, never a line that changed since the
+  approval, never a line the run guard's effect classifier reads as
+  discarding work or moving a shared ref, and never a line it cannot
+  classify, the one fail-closed check in cairn (#423) — under a minimal
+  environment and a timeout — and records `observed` beside the claimed
+  evidence; a mismatch is reported, never refused (ADR 0017,
+  amendments). The run manifest carries the circuit
   breaker's stop as well: a run the hooks froze is refused its claims and
   closes with `RUN_FROZEN`, and the one plain-language comment the freeze
   owes is posted from here, once (ADR 0016, amendment). ADR 0026 —
