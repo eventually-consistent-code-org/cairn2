@@ -125,6 +125,29 @@ export const ConfigSchema = z.object({
   auto: z
     .strictObject({ breaker: z.number().int().min(0).default(3) })
     .prefault({}),
+  // Write authority by agent type (#454): the write guard hook reads this
+  // block raw from cairn.json (hooks import no server code, #391) and
+  // refuses Edit / Write / NotebookEdit and redirect-shaped shell writes
+  // under the project from a subagent whose payload `agent_type` is
+  // listed. `readOnly` names types, or globs over them (`seat-*`), that may
+  // write nothing under the project; `paths` maps a type (or glob) to the
+  // root-relative path globs it may write. A key given here REPLACES the
+  // hook's shipped default for that key (readOnly: cairn-uat; paths:
+  // cairn-designer -> its draft folder), the audit.debt.markers convention,
+  // never a merge. The main session carries no agent_type and is never
+  // limited; a harness that sends none is unchanged. The block is the
+  // owner's: #281 (phase 31) lists it among the owner-only keys at
+  // config_set. Strict like `verify`: an unknown key here is a typo, refused.
+  guards: z
+    .strictObject({
+      writers: z
+        .strictObject({
+          readOnly: z.array(z.string().min(1, "an agent type is a non-empty name or glob")).optional(),
+          paths: z.record(z.string().min(1), z.array(z.string().min(1, "a path glob is non-empty"))).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   // Per-provider peer CLI settings (Tier F2 #997) — absent provider or
   // absent field means enabled with defaults; unknown provider keys are
   // rejected by the enum-keyed record below.
