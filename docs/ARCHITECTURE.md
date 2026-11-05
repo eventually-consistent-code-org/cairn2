@@ -202,34 +202,47 @@ reason.
   closes, writes the receipt and appends the ledger line through the one
   shared append; `issue_create` takes a claim, and the server resolves
   the base commit itself and keeps it as the stamp later checks key on.
+  The ledger line is typed at the writer: the issue id must match the
+  tracker's id shape, the close date must be an ISO day or timestamp,
+  the test-driven refs are hash-checked, and a line that fails is a
+  typed error before anything is written; two lines for one task rank by
+  commit ancestry, then the stamp on the line, then the greater head
+  hash, never by file order, and a closure stands only when strictly
+  later than every fix-up (#469, #472; ADRs 0034 and 0028, amendments).
   Every comment the server composes for a claim or a close passes the
   same leak screen the hooks apply to a commit before it is posted: a
   planning-directory path becomes a kind-named placeholder, and a
-  residual hit is refused with a typed code rather than posted (ADR 0016,
-  amendment). With `verify.rerun` on (off by default) the append also
-  re-runs the owner-declared `verify:` line it reads out of the tracked
-  plan the owner approved (`plan_meta_set approve`, a stamp in local
-  state) — never the worker's string, never a line that changed since
-  the approval, never a line the run guard's effect classifier reads as
-  discarding work or moving a shared ref, and never a line it cannot
-  classify, the one fail-closed check in cairn (#423) — under a minimal
-  environment and a timeout — and records `observed` beside the claimed
-  evidence; a mismatch is reported, never refused (ADR 0017,
-  amendments). The run manifest carries the circuit breaker's stop as
-  well: a run the hooks froze is refused its claims and closes with
-  `RUN_FROZEN`, and the one plain-language comment the freeze owes is
-  posted from here, once; an update that asks for a state whose category
-  resolves to in progress or closed is refused the same way, whatever
-  the state is called (ADR 0016, amendment). The manifest also records,
-  at staging, which session the run is — the id the staging shell
-  carried — and the breaker limit the project configuration held at that
-  moment, so the hooks judge the run by what was staged and never by a
-  file the run can edit (ADR 0033, in the hook section); and while any
-  manifest of the project reads running, creating another is refused
-  with `RUN_LIVE`, so a running batch gets no second manifest to move
-  the breaker's count onto (ADR 0033, amendment). ADR 0026 —
-  removeWhen: every harness runs a skill-declared tool sequence
-  atomically, so a chain with one right order can live in the verb file.
+  residual hit is refused with a typed code rather than posted (ADR
+  0016, amendment). With `verify.rerun` on (off by default) the append
+  also re-runs the owner-declared `verify:` line it reads out of the
+  tracked plan the owner approved (`plan_meta_set approve`, a stamp in
+  local state, and a flag the harness guard refuses unless the session
+  carries the owner's escape, #460) — never the worker's string, never a
+  line that changed since the approval, never a line the run guard's
+  effect classifier reads as discarding work or moving a shared ref, and
+  never a line it cannot classify, the one fail-closed check in cairn
+  (#423) — under a minimal environment and a timeout — and records
+  `observed` beside the claimed evidence; a mismatch is reported, never
+  refused (ADR 0017, amendments). The run manifest carries the circuit
+  breaker's stop as well: a run the hooks froze is refused its claims
+  and closes with `RUN_FROZEN`, and the one plain-language comment the
+  freeze owes is posted from here, once; an update that asks for a state
+  whose category resolves to in progress or closed is refused the same
+  way, whatever the state is called (ADR 0016, amendment); Jira, Linear,
+  ClickUp and Azure Boards answer the category question from their
+  configured state maps and the statuses the wire has already shown
+  them, and a name an adapter cannot place falls closed at the gate
+  (#471; the Azure spelling the closing audit found learning an unplaced
+  state as open is filed, #496). The manifest also records, at staging,
+  which session the run is — the id the staging shell carried — and the
+  breaker limit the project configuration held at that moment, so the
+  hooks judge the run by what was staged and never by a file the run can
+  edit (ADR 0033, in the hook section); and while any manifest of the
+  project reads running, creating another is refused with `RUN_LIVE`, so
+  a running batch gets no second manifest to move the breaker's count
+  onto (ADR 0033, amendment). ADR 0026 — removeWhen: every harness runs
+  a skill-declared tool sequence atomically, so a chain with one right
+  order can live in the verb file.
 
   The phase ledger is append-only, so the project and phase scaffolds
   write a `merge=union` attribute for it into the planning root's git
@@ -555,32 +568,32 @@ distinction matters more than the count.
   measured duration subtracts those windows (ADR 0020, amendment).
 - **Refusers** block a tool call and say why. The leak guard stops a
   commit whose staged diff would carry internal references, or a
-  key-shaped secret, into source (#280).
-  The run guard keeps an unattended run out of the working directory a
-  human is using. The harness guard protects the configuration that
-  decides what the agent may do at all — the hook directory, the tool
-  server config, the settings cascade, the plugin manifests, and the
-  folder git runs its hooks from (`core.hooksPath` when set, else the
-  repository's own hooks folder; a planted hook runs under the owner's
-  identity at their next commit) — from the agent it configures. Cursor
-  runs the run guard and the harness guard through an adapter installed
-  under its project hooks folder: its shell payload and the two places
-  it reads a hooks file from are what Cursor's docs confirm (read
-  2026-11-04), and its file-tool payload is partial, unconfirmed as of
-  that date — the path field names are guesses, and a call the adapter
-  cannot read is denied rather than let through — dated in the adapter
-  header and pinned by `server/test/cursor-adapter.test.ts` (#293). The
-  user-level hooks file Cursor reads in every session on the machine, and
-  the scripts folder beside it, are protected beside the project pair
-  (asserted: `server/test/hooks.test.ts`, "(#293)"). The harness guard
-  also holds the owner-only keys of cairn.json — the leak guard's off
-  switch, ship's confirmation, the breaker's limit, a peer's
-  `execCapable`, the write authority table — to the owner (#281): the
-  server exports the list (`config.ts OWNER_ONLY_KEYS`, each with the one
-  safe value it may be set to without the owner) and `config_set` refuses
-  a patch that sets one away from that value with `OWNER_ONLY` unless
-  the session carries `CAIRN_HARNESS_EDIT=1`; the guard reads a generated
-  copy of the list (`hooks/scripts/owner-keys.mjs`, written by
+  key-shaped secret, into source (#280). The run guard keeps an
+  unattended run out of the working directory a human is using. The
+  harness guard protects the configuration that decides what the agent
+  may do at all — the hook directory, the tool server config, the
+  settings cascade, the plugin manifests, and the folder git runs its
+  hooks from (`core.hooksPath` when set, else the repository's own hooks
+  folder; a planted hook runs under the owner's identity at their next
+  commit) — from the agent it configures. Cursor runs the run guard and
+  the harness guard through an adapter installed under its project hooks
+  folder: its shell payload and the two places it reads a hooks file
+  from are what Cursor's docs confirm (read 2026-11-04), and its
+  file-tool payload is partial, unconfirmed as of that date — the path
+  field names are guesses, and a call the adapter cannot read is denied
+  rather than let through — dated in the adapter header and pinned by
+  `server/test/cursor-adapter.test.ts` (#293). The user-level hooks file
+  Cursor reads in every session on the machine, and the scripts folder
+  beside it, are protected beside the project pair (asserted:
+  `server/test/hooks.test.ts`, "(#293)"). The harness guard also holds
+  the owner-only keys of cairn.json — the leak guard's off switch,
+  ship's confirmation, the breaker's limit, a peer's `execCapable`, the
+  write authority table — to the owner (#281): the server exports the
+  list (`config.ts OWNER_ONLY_KEYS`, each with the one safe value it may
+  be set to without the owner) and `config_set` refuses a patch that
+  sets one away from that value with `OWNER_ONLY` unless the session
+  carries `CAIRN_HARNESS_EDIT=1`; the guard reads a generated copy of
+  the list (`hooks/scripts/owner-keys.mjs`, written by
   `scripts/gen-owner-keys.mjs`, because hooks import no server code),
   applies an Edit or Write to the file in its head and compares each
   key, and refuses a shell line or MCP input that writes the file and
@@ -610,34 +623,37 @@ distinction matters more than the count.
   Write, NotebookEdit and Bash call, about 90 ms on the development
   machine with start-up almost all of it (measured 2026-11-04, twenty
   calls each way; the other guards cost the same), and nothing resident
-  — no tool, no parameter, no description. Each
-  refuses in one plain line naming the file and the way to proceed
-  deliberately, and each fails open on its own error: an error inside a
-  guard exits zero rather than blocking work, and `hooks/hooks.json`
-  leaves the platform's `onFailure: "block"` unset so the harness does
-  not invert that. The delivery half is the platform's: since Claude
-  Code 2.1.299 it fails closed when it cannot reach the guard or read
-  its answer — an action the guard could have blocked is refused, not
-  let through (a dated claim about the harness, 2026-10-14; ADR 0016,
-  #371). Their refusals also add up: each appends an audit row (a digest
-  of the input, never the command) through one wrapped call that keeps
-  refusing even when the breaker library is missing or throws, and a
-  headless batch run is frozen by the circuit breaker after the limit
-  that was staged into its manifest, counting only refusals from the
-  session that staged the run — another session's refusal is logged and
-  never counted, and a manifest with no session yet counts nothing — and
-  judging every running manifest that session owns, never the newest
-  alone, so a running batch can neither be frozen by a bystander, nor
-  switch its own breaker off by editing the project configuration
-  mid-run, nor move the count onto a second run it stages beside the
-  first (ADR 0033, amendment); the
-  freeze is written into the manifest itself, and the server refuses the
-  frozen run's claims and closes and posts the comment the hooks can't
-  (ADR 0016, amendment). ADR 0033 — removeWhen: the harness gives a
-  batch run a session identity and a kill switch of its own that the
-  run cannot reach. The pointer that names the hooks folder, and a
-  second manifest staged by the running batch, are the two routes the
-  closing audit found still open and filed (#465, #466).
+  — no tool, no parameter, no description. Each refuses in one plain
+  line naming the file and the way to proceed deliberately, and each
+  fails open on its own error: an error inside a guard exits zero rather
+  than blocking work, and `hooks/hooks.json` leaves the platform's
+  `onFailure: "block"` unset so the harness does not invert that. The
+  delivery half is the platform's: since Claude Code 2.1.299 it fails
+  closed when it cannot reach the guard or read its answer — an action
+  the guard could have blocked is refused, not let through (a dated
+  claim about the harness, 2026-10-14; ADR 0016, #371). Their refusals
+  also add up: each appends an audit row (a digest of the input, never
+  the command) through one wrapped call that keeps refusing even when
+  the breaker library is missing or throws, and a headless batch run is
+  frozen by the circuit breaker after the limit that was staged into its
+  manifest, counting only refusals from the session that staged the run
+  — another session's refusal is logged and never counted, and a
+  manifest with no session yet counts nothing — and judging every
+  running manifest that session owns, never the newest alone, so a
+  running batch can neither be frozen by a bystander, nor switch its own
+  breaker off by editing the project configuration mid-run, nor move the
+  count onto a second run it stages beside the first (ADR 0033,
+  amendment); the freeze is written into the manifest itself, and the
+  server refuses the frozen run's claims and closes and posts the
+  comment the hooks can't (ADR 0016, amendment). ADR 0033 — removeWhen:
+  the harness gives a batch run a session identity and a kill switch of
+  its own that the run cannot reach. Both routes the phase 30 audit
+  found open are closed: setting git's hooks-path key in any scope and
+  by any route, and the include keys that could carry it, is refused by
+  the harness guard (#465; the inline-alias and init-template spellings
+  the next audit found are filed, #506, #507), and a second manifest
+  staged beside a live run neither moves the count nor is created —
+  `RUN_LIVE` (#466).
 - **Advisers** say something and block nothing. The loop check notices
   the same tool called with the same input three times running and
   offers one line, once per streak.
@@ -648,38 +664,85 @@ discards-work, moves-shared-ref, touches-owner-checkout — with read-only
 the default, and every refusal names the effect and the flag that caused
 it, so a reader can audit why it fired (ADR 0016, amendment). It judges
 a git alias by what it runs: an alias passed inline on the command line
-is expanded before the table lookup, a subcommand the table does not know
-is probed once against the repository's configuration, and an alias that
-runs a shell command is refused outright in every session; the channels
-that define an alias through the environment or an included file are not
-yet read and are filed (#467). ADR 0036 — removeWhen: git exposes the
-resolved command of an alias before running it, or the harness classifies
-commands from their effect rather than their text. A forced recursive
-remove of the whole tree is a discards-work row refused in every session,
-while the cached, dry-run and single-path forms stay allowed (the bare
-colon spelling of the whole tree was missed and is filed, #464). The
-owner-checkout effect carries its definition in the header — a command
-touches the checkout when it rewrites the working files or replaces the
-checked-out commit — and rows for checkout, switch, merge, pull, rebase,
-cherry-pick, revert, am, mv, the stash actions that write the tree, and
-reset in its hard, merge and keep forms, refused mid-run when aimed at
-the owner's checkout; eight more commands that meet the definition are
-filed (#468). Some rows hold only under a probe the guard answers once
-per invocation — a configured mirror, a deleted default branch, and
-linked worktrees: when the repository has more than one worktree,
-`stash pop`, `apply`, `drop` and `branch` are refused as discarding
-work, because one `.git` means one stash and the entry may be another
-worker's; `stash push` is advised and proceeds, since stashing is
-recoverable and popping is the destructive half; with a single worktree
-the guard is byte-identical to before. The wave brief carries the
-matching standing rule: never stash, park work in progress as a commit
-on your own branch. ADR 0029 — removeWhen: git gives each worktree its
-own stash. The breaker is the other shared library: the one call every
-refuser makes to append its row and, while a batch run is live, count
-toward the freeze. Each hook's header names the axiom it derives from,
-and a sweep test fails on a header that names none. ADR 0025 —
-removeWhen: never; the classification is what makes the next unseen
-case recognizable.
+is expanded before the table lookup, a subcommand the table does not
+know is probed once against the repository's configuration, and an alias
+that runs a shell command is refused outright in every session; the
+configuration a line defines through the config-env flag or the numbered
+config variables is folded into the invocation in git's own order before
+the alias is resolved and before the push-setting rows are read, and an
+include on the line, or a setting the guard cannot read, is refused
+outright like a shell alias (#467, #287). ADR 0036 — removeWhen: git
+exposes the resolved command of an alias before running it, or the
+harness classifies commands from their effect rather than their text. A
+forced recursive remove of the whole tree is a discards-work row refused
+in every session, while the cached, dry-run and single-path forms stay
+allowed (the lone colon, the empty-path magic forms and the absolute
+repository root are the whole tree too, #464; the one-character globs
+and relative-root spellings the closing audit found still passing are
+filed, #493). The owner-checkout effect carries its definition in the
+header — a command touches the checkout when it rewrites the working
+files or replaces the checked-out commit — and rows for checkout,
+switch, merge, pull, rebase, cherry-pick, revert, am, mv, the stash
+actions that write the tree, and reset in its hard, merge and keep
+forms, refused mid-run when aimed at the owner's checkout; apply, every
+HEAD-moving bisect action, restore, forced checkout-index,
+sparse-checkout, read-tree with update, submodule update and deinit, rm
+and clean complete the table, each with an index-only, dry-run or read
+twin, and a test pins the subcommand list against the header's
+definition (#468). Ref and reflog destruction — reflog delete,
+update-ref delete, a prune that is not a dry run, gc with an explicit
+prune date — joins discards-work, refused in every session; branch -D
+stays off the table as recoverable, and both headers say why (#288).
+Some rows hold only under a probe the guard answers once per invocation
+— a configured mirror, a deleted default branch, and linked worktrees:
+when the repository has more than one worktree, `stash pop`, `apply`,
+`drop` and `branch` are refused as discarding work, because one `.git`
+means one stash and the entry may be another worker's; `stash push` is
+advised and proceeds, since stashing is recoverable and popping is the
+destructive half; with a single worktree the guard is byte-identical to
+before. The wave brief carries the matching standing rule: never stash,
+park work in progress as a commit on your own branch. ADR 0029 —
+removeWhen: git gives each worktree its own stash. The push gate has a
+second table and a second layer since 2026-11-04. The side-door table
+lists the routes to the default branch that are not `git push` — a
+pull-request merge, a release, a repository delete through the GitHub
+CLI, and API writes to the merge, ref, merges, releases and GraphQL
+ref-mutation paths through `gh api`, curl or wget with a write method —
+and refuses each under the same two gates as a push, naming the route; a
+CLI builtin is never an alias, so an alias set on the line cannot
+unrefuse a merge, and a GraphQL body from a file or stdin is refused
+unread (#483). The routes no hook sees — a browser, a connected tool
+holding the owner's token, an alias or extension set outside the line, a
+token handed to a script — are named in the guard's header with the
+service-side control that covers each, and a matrix test runs every seen
+route under both refusal conditions from the root and a nested folder
+beside a passing read twin, sends every unseen route and asserts it is
+named, and pins the block's line count (#484; asserted:
+`server/test/runguard-sidedoors.test.ts`). The second layer is git's
+own: `cairn-setup <harness> --git-hooks` installs a `pre-push` hook
+under the project's cairn folder, points `core.hooksPath` at it and
+copies the hook's script beside the copied verb helpers, so a push from
+a plain terminal, from a harness without hooks or from a script meets
+the same stamp rule. The hook is a thin caller over the shared stamp
+reader and the shared effect table, honours the owner's escape and says
+so on stderr, respects an existing hooks path, refuses the install when
+live hooks would go silent, and is measured by `plan_drift` as
+`guardReach.gitLayer`, a field and never a flag (#456; asserted:
+`server/test/setup.test.ts`, `server/test/sweep-surface.test.ts`).
+Opt-in, because the hooks-path key is the owner's ground. ADR 0041 —
+removeWhen: the harness runs its hooks for every process that pushes
+from the checkout, or the service's ruleset can name the agent (ADR
+0037). What the closing audit found of this layer is filed: the script
+folder the hook runs from sits outside the harness guard's zones, the
+install is a command an agent may run, a shared hooks folder receives
+the hook for every repository on the machine, and a stamped force push
+passes (#492, #497, #503, #508).
+
+The breaker is the other shared library: the one call every refuser
+makes to append its row and, while a batch run is live, count toward the
+freeze. Each hook's header names the axiom it derives from, and a sweep
+test fails on a header that names none. ADR 0025 — removeWhen: never;
+the classification is what makes the next unseen case recognizable.
 
 Three properties hold across all three. They import no server code — the
 path schemes they need, including the repository key of the previous
@@ -695,12 +758,48 @@ guard. And every refused shape in the matrix test has an allowed twin
 that must pass and runs from the repository root and from a nested
 working directory alike, with a meta-test that fails when either column
 is empty — an over-match hides behind a refusal that was never paired
-with the harmless command beside it (asserted: `server/test/hooks.test.ts`,
-"every refused shape has an allowed twin, and holds from a subfolder";
-the matrix covers the shapes the audits named, not yet every table row,
-which is recorded). ADR 0035 — removeWhen: never; a guard that was never
-shown its harmless twin has only been tested for one of its two failure
-modes.
+with the harmless command beside it (asserted:
+`server/test/hooks.test.ts`, "every refused shape has an allowed twin,
+and holds from a subfolder"; the matrix covers the shapes the audits
+named, not yet every table row, which is recorded). ADR 0035 —
+removeWhen: never; a guard that was never shown its harmless twin has
+only been tested for one of its two failure modes.
+
+More is shared since the guard-gaps phase. The project root, when the
+harness sets no project-directory variable, is found one way by every
+guard — git's top level from the payload's working directory, else the
+nearest folder holding the harness settings folder, else the working
+directory itself — through one helper, so a nested working directory
+with the variable stripped refuses what it refuses with the variable set
+(#459; the nested-repository spelling is filed, #510). An `eval` is read
+the way the shell runs it, words joined and read as one line, through
+one reader function the run and harness guards both call (#283). ADR
+0039 — removeWhen: never; a fix that lands in one guard's own matching
+is a fix the other guards did not inherit, and the closing audit found
+exactly that: the same-line variable expansion landed in the harness
+guard alone, so a variable in a flag, a path or a refspec still passes
+the run guard (#494, #501, #509). The harness guard spells out a
+variable the line assigned before it judges a write path, treats one
+assigned from a substitution as unplaceable and refuses, and leaves an
+environment variable as typed, written into its header's dated block
+(#291); it judges a hard link to a protected file as a write to it
+(#292), zones the configured Claude config directory beside the home
+ones (#304), counts the read-only plugin words so a trailing help flag
+reads as a read (#350), refuses the plan-metadata tool's approve flag
+unless the session carries the owner's escape (#460; the plain-file
+route to the stamp is filed, #500), and zones the pauses folder under
+every cairn home (#470). The leak guard's secret shapes are the list in
+the server readme, held equal to the peer screen's copy by a parity test
+(#280). Every shape a guard cannot see is written into that guard's
+header's dated "Not seen" block, one sentence per shape with the control
+that covers it where one exists, and a test pins the block phrase by
+phrase and by line count, so a deleted line is red and the unseen shapes
+are measured passing (#289, #484). ADR 0038 — removeWhen: the harness
+classifies commands by their effect and reports what it could not read.
+The owner-only keys list and the leak patterns are the two places a hook
+needs what the server owns; each is a generated copy with a parity test,
+never an import (#281, #280). ADR 0040 — removeWhen: hooks may import
+server code, or the platform delivers one list to both.
 
 The refusers are honest about their reach. They convert a silent
 success into a refusal a human sees; they are not isolation. The shell

@@ -1,5 +1,157 @@
 # Changelog
 
+## Unreleased — the guard gaps (phase 31, 2026-11-04)
+
+The guards' sentences come true. The October guard-shape backlog, the
+two guard bugs found since, the eleven sibling spellings the phase 30
+security audit confirmed, the two gaps that phase filed on itself, and
+the workspace-focus redirect that hijacked a release all close in five
+waves, and three new surfaces land: a write guard keyed on the
+subagent's type, a pre-push git hook as the git-layer backstop, and a
+side-door table for every route to the default branch that is not a
+push. Every closed shape carries its harmless twin and its
+nested-working-directory variant; every shape a guard cannot see is one
+dated sentence in that guard's header, pinned by a test; every red run
+is recorded as the command plus the assertion line. ADR 0037 records
+that cairn acts as the owner on every route, so the guards refuse by
+effect and never by principal.
+
+Tool count holds at 87. Suite 2653 → 2924. Footprint 13141 → 13138 of a
+13145 pin. No new tool, no new parameter; one new config key
+(`guards.writers`) and one new setup flag (`--git-hooks`).
+
+#### the run guard
+
+- The whole-tree matcher reads a lone colon, the empty-path magic forms
+  and the repository's absolute root as the whole tree, so the forced
+  remove, checkout and restore rows refuse them; exclude-only forms stay
+  paths by decision.
+- The owner-checkout table meets its own definition: apply, every
+  HEAD-moving bisect action, restore, forced checkout-index,
+  sparse-checkout, read-tree with update, submodule update and deinit, rm
+  and clean, each with an index-only, dry-run or read twin, and a test
+  pins the list against the header.
+- Ref and reflog destruction joins discards-work in every session: reflog
+  delete, update-ref delete, any prune that is not a dry run, gc with an
+  explicit prune date. branch -D stays recoverable and off the table.
+- Config a line defines through the config-env flag or the numbered
+  config variables is folded into the invocation in git's order and
+  aliases resolve over all of it; the same fold feeds the push-setting
+  rows. An include on the line, or a setting the guard cannot read, is
+  refused outright.
+- A second, non-git table: pull-request merges, releases and repository
+  deletes through the GitHub CLI, and API writes to the merge, ref,
+  merges, releases and GraphQL ref-mutation paths through the CLI, curl
+  or wget, are refused under the same two push gates, naming the route. A
+  matrix test runs every route under both conditions from the root and a
+  nested folder beside a read twin, and pins the header's list of unseen
+  routes with the service-side control that covers each.
+- An eval is read the way the shell runs it, words joined, through one
+  reader the run and harness guards share; a plan-less clone of the
+  project's remote is refused as the project's hostile twin, stated and
+  dated.
+
+#### the harness guard
+
+- Setting git's hooks-path key in any scope and by any route, and the
+  include keys that could carry it, is refused with the standard line and
+  escape; reading it passes.
+- The configured Claude config directory is a protected zone beside the
+  home one; the pauses folder under every cairn home joins the zones.
+- A variable assigned earlier on the line is spelled out before a write
+  path is judged; one assigned from a substitution is refused as
+  unplaceable; an environment variable stays as typed, dated in the
+  header.
+- A hard link to a protected file is a write to it: ln without the
+  symbolic flag, a copy with the link flag, and the link command are
+  refused naming the source; the surface audit gains a hard-links leg.
+- The read-only plugin words join the command words, so a trailing help
+  flag reads as a read.
+- The plan-metadata tool's approve flag is refused unless the session
+  carries the owner's escape; the plan verb reads the escape from the
+  shell instead of asking a question an agent could answer.
+- Cursor's user-level hooks file and folder are refused like the project
+  pair; the adapter's file-tool mapping is marked partial and unconfirmed,
+  dated, with a test pinning the paragraph.
+- The five owner-only configuration keys are one list the server exports
+  with a safe value each; the config tool refuses setting one away from
+  it without the escape, and the guard reads a generated copy held
+  byte-equal by a parity test.
+- With no project-directory variable, the leak and harness guards find
+  the root the way the run guard does, through one shared helper; the
+  twin table runs every nested row again with the variable stripped.
+- Every "Not seen" block is pinned phrase by phrase and by line count, and
+  the unseen shapes are measured passing, so the header and the guard
+  move together.
+
+#### the leak guard and the write guard
+
+- Key-shaped secrets join the shared pattern set: cloud access key ids,
+  GitHub and Slack tokens, private-key headers, and a key, secret or token
+  assigned a long opaque value; the commit guard and the peer screen read
+  one copy.
+- A fourth guard reads the payload's agent type and refuses edit, write,
+  notebook and redirect-shaped shell writes under the project from
+  read-only or path-limited types, per a writers key with a shipped
+  default (the acceptance agent writes nothing; the designer writes its
+  draft folder). It fails open on its own error and the breaker counts it.
+
+#### the git layer
+
+- An opt-in setup flag installs a pre-push hook that refuses an unshipped
+  push to the default branch from any process in the checkout, as a thin
+  caller over the shared stamp reader and effect table; an existing hooks
+  path is respected, live hooks refuse the install in one line, the check
+  flag reports whether git reaches the hook, and the drift report
+  measures the layer as a field, never a flag.
+- The probe reports the default branch's protection — rulesets first,
+  legacy protection as fallback, a source field that says which or why
+  not — and ship prints the guard-alone line when no pull-request rule
+  exists. The probe also prints `identity: "owner"` beside the tracker
+  verdict.
+
+#### the server
+
+- The ledger line is typed at the writer: tracker-shaped id, ISO close
+  date, hash-checked test refs, a typed error before anything is written.
+  Two lines for one task rank by commit ancestry, then the stamp, then
+  the greater head hash, never by file order; a closure stands only when
+  strictly later than every fix-up.
+- The breaker judges every running manifest the refusing session owns,
+  never the newest alone; creating a manifest while another reads running
+  is refused with a typed run-live error.
+- Jira, Linear, ClickUp and Azure Boards answer the state-category
+  question from their state maps and the statuses the wire has shown
+  them; a name an adapter cannot place falls closed at the frozen-run
+  gate.
+- The measured duration believes only pause rows from the claiming
+  session, whose id the claim stamp now carries.
+- A server launched inside a workspace member keeps its own project
+  whatever the shared focus file says; the status and focus tools report
+  the launch directory, the resolved project and whether the focus
+  applied.
+
+#### setup and docs
+
+- Setup compares the Claude and agents instruction files by real path,
+  then by device and inode, before any splice, and reads a reverse link, a
+  parent climb or a hard link as the spine by another name.
+- Setup copies the merge-overlap and cost-report helpers beside the copied
+  verbs for every harness and re-points the copied verbs at that folder.
+- ADR 0037, cairn acts as the owner on every route; ADRs 0016, 0017,
+  0020, 0028, 0033 and 0034 amended, dated. This distill adds ADRs 0038
+  to 0041: what a guard cannot see is written and pinned; a shape closes
+  in the shared reader once; hooks read a generated copy of what the
+  server owns; the git layer is opt-in and carries no rule of its own.
+
+The closing security audit walked the delivered guards once more and
+filed twenty-one siblings for the next hardening phase — three critical:
+the folder the pre-push hook runs its script from is outside the harness
+guard's zones, one-character globs and relative-root spellings are
+whole-tree pathspecs the run guard reads as paths, and a same-line
+variable in a flag, path or command passes the run guard because the
+shared-reader rule reached the harness guard alone.
+
 ## v2.9.3 — the second hardening (2026-11-04)
 
 Two phases ship in this release. The second hardening (phase 30) is
