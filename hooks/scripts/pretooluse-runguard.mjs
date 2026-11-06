@@ -222,6 +222,25 @@
  *   handed to a program the guard can't read) -- covered by the token's
  *   scope and the service's log, read instead of the agent's claim (#485).
  *
+ *   The control those lines rest on is a route too (#505). A write to branch
+ *   protection, to a repository's, an organization's or an enterprise's
+ *   ruleset, or to the repository's default branch -- `gh api`, curl, wget,
+ *   a GraphQL mutation, `gh repo edit --default-branch`, or a body from a file
+ *   that may be any of those -- is refused in every session, stamp or no
+ *   stamp, under the same escape as `gh repo delete`; a repository DELETE and
+ *   a rename of the default branch never pass the gate. Their GETs, a PATCH of
+ *   any other field and `gh repo edit --description` pass. What such a write
+ *   does at the service is a dated claim, 2026-11-05: the panel left it
+ *   PLAUSIBLE, since it can't be reproduced in scratch. Asserted by
+ *   runguard-effects.test.ts and runguard-sidedoors.test.ts (#505).
+ *
+ *   Not seen, dated 2026-11-05 (#505, by decision; pinned by
+ *   runguard-sidedoors.test.ts (#505)): the same settings changed by a browser
+ *   tool, an MCP tool or a script with the owner's token, the routes the block
+ *   above already names. The one layer left for those is the agent's token
+ *   carrying no administration scope (#485); ADR 0037 says why the service
+ *   can't tell the agent from the owner.
+ *
  *   Not seen, dated 2026-11-05 (#501, by decision; a same-line URL or refspec
  *   is spelled and judged, and these two are pinned by
  *   runguard-sidedoors.test.ts (#501)):
@@ -1771,6 +1790,14 @@ function judgeSideDoor(inv, prefixed, ctx) {
   const here = { dir: ctx.cwd };
   const at = repoOf(here) === null ? ctx.project : here;
   if (process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
+    // #505 -- a write to the control the Not seen block rests on: no stamp covers it
+    if (cause.control) {
+      refuse([
+        `cairn run guard: ${cause.what} is refused in every session -- ${cause.why}`,
+        `  ${cause.control} is the owner's to change, at the service or from their own terminal.`,
+        tail,
+      ], UNSHIPPED_ENV, { effect: MOVES_SHARED_REF, reason: "a write to the control a push answers to" });
+    }
     const why = sideGateRefusal(inv, at, ctx);
     if (why) {
       const target = cause.branch === undefined ? "The guard takes its target as the default branch"
@@ -2144,4 +2171,7 @@ try {
  *   #504  the API host is parsed rather than matched: a port, a user, a trailing
  *         dot, escapes or no scheme at all still reach GitHub's table, and the
  *         path is walked first; the same merge path at another host passes.
+ *   #505  writes to branch protection, rulesets and the default branch are table
+ *         rows, refused in every session under gh repo delete's escape, so the
+ *         control the Not seen block cites can't be removed by a route it reads.
  */

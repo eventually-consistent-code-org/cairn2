@@ -761,10 +761,12 @@ describe("side doors to the push action: the non-git table, one test per row (#4
   ];
   const reads = (path: string) => [`gh api ${path}`, `curl https://api.github.com${path}`, `wget https://api.github.com${path}`];
 
-  it("the table has the eight rows the issue names, every one a moves-shared-ref cause, and names its three programs", () => {
+  it("the table has the eight rows the issue names and the seven of #505, every one a moves-shared-ref cause, and names its three programs", () => {
     expect(SIDE_DOOR_TABLE.map((r: { route: string }) => r.route)).toEqual([
       "gh pr merge", "gh release create", "gh repo delete",
       "pull request merge", "ref write", "branch merge", "release", "GraphQL mutation",
+      "gh repo edit", "branch protection write", "ruleset write", "repository delete", "default branch write", "branch rename",
+      "GraphQL protection mutation",
     ]);
     for (const row of SIDE_DOOR_TABLE) expect(typeof row.why, row.route).toBe("string");
     expect(API_PROGRAMS).toEqual(["gh api", "curl", "wget"]);
@@ -1071,5 +1073,135 @@ describe("side doors: the API host is parsed, not matched as a string (#504)", (
     expect(sideDoor("curl", ["-X", "PUT", `${H}@evil.test${PATH}`])).toBeNull();
     expect(sideDoor("curl", [`https://${H}:443${PATH}`])).toBeNull();
     expect(sideDoor("curl", ["-X", "PUT", `https://${H}:443/repos/o/r/issues/1`])).toBeNull();
+  });
+});
+
+describe("side doors: the service controls the Not seen block rests on are rows (#505)", () => {
+  type Side = { effect: string; flag: string; what: string; why: string; branch?: string; deletes?: string; control?: string };
+  const side = (command: string, aliases = new Map<string, string[]>()): Side | null => {
+    const [program, ...args] = command.trim().split(/\s+/);
+    return sideDoor(program, args, aliases);
+  };
+  const writes = (path: string, method = "PUT", ...fields: string[]) => [
+    `gh api -X ${method} ${path} ${fields.map((f) => `-f ${f}`).join(" ")}`,
+    `curl -X ${method} https://api.github.com${path} ${fields.map((f) => `--data-urlencode ${f}`).join(" ")}`,
+    `wget --method=${method} https://api.github.com${path} ${fields.length ? `--post-data=${fields.join("&")}` : ""}`,
+  ];
+  const reads = (path: string) => [`gh api ${path}`, `curl https://api.github.com${path}`, `wget https://api.github.com${path}`];
+
+  it("row: a write to any branch's protection, or any of its parts; the GET is not", () => {
+    for (const path of ["/repos/o/r/branches/main/protection", "/repos/o/r/branches/feature/x/protection",
+      "/repos/o/r/branches/main/protection/enforce_admins", "/repos/o/r/branches/main/protection/required_status_checks/contexts",
+      "/repositories/12/branches/main/protection"]) {
+      for (const method of ["PUT", "POST", "PATCH", "DELETE"]) {
+        for (const c of writes(path, method)) {
+          const hit = side(c);
+          expect(hit?.effect, c).toBe(MOVES_SHARED_REF);
+          expect(hit?.what, c).toMatch(/branch protection write$/);
+          expect(hit?.flag, c).toBe(`${method} ${path}`);
+          expect(hit?.control, c).toBe("branch protection");
+          expect(hit?.branch, c).toBeUndefined(); // every branch's, not only the default's
+        }
+      }
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+    expect(side("gh api -X PUT repos/o/r/branches/main")).toBeNull(); // no such row: the branch itself reads
+  });
+
+  it("row: a write to a repository, organization or enterprise ruleset, a new one included; the GET is not", () => {
+    for (const path of ["/repos/o/r/rulesets", "/repos/o/r/rulesets/1", "/orgs/o/rulesets", "/orgs/o/rulesets/1", "/enterprises/e/rulesets/1"]) {
+      for (const method of ["POST", "PUT", "DELETE"]) {
+        for (const c of writes(path, method, "enforcement=disabled")) {
+          const hit = side(c);
+          expect(hit?.what, c).toMatch(/ruleset write$/);
+          expect(hit?.control, c).toBe("a ruleset");
+        }
+      }
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+    for (const c of reads("/repos/o/r/rulesets/rule-suites")) expect(side(c), c).toBeNull();
+    // a file that happens to live under a folder of that name is a file
+    for (const path of ["/repos/o/r/contents/rulesets/a.txt", "/repos/o/r/contents/branches/x/protection"]) {
+      for (const c of writes(path, "PUT", "content=x")) expect(side(c), c).toBeNull();
+    }
+  });
+
+  it("row: a repository write naming default_branch, however the body spells it; another field, and no body, are not", () => {
+    for (const c of [...writes("/repos/o/r", "PATCH", "default_branch=dev"), ...writes("/repositories/12", "PATCH", "default_branch=dev"),
+      'curl -X PATCH https://api.github.com/repos/o/r -d {"default_branch":"dev"}',
+      'curl -X PATCH https://api.github.com/repos/o/r --json {"default\\u005fbranch":"dev"}',
+      "gh api --method=PATCH /repos/o/r/ -F default_branch=dev"]) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/default branch write$/);
+      expect(hit?.control, c).toBe("the repository's default branch");
+    }
+    for (const c of ["gh api -X PATCH repos/o/r --input body.json", "gh api -X PATCH repos/o/r -F default_branch=@f",
+      "curl -X PATCH https://api.github.com/repos/o/r -d @body.json"]) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/default branch write request from a file$/);
+      expect(hit?.control, c).toBe("the repository's default branch");
+    }
+    for (const c of [...writes("/repos/o/r", "PATCH", "description=x"), "gh api -X PATCH repos/o/r", ...reads("/repos/o/r"),
+      'curl -X PATCH https://api.github.com/repos/o/r -d {"description":"default_branch"}',
+      ...writes("/repos/o/r/issues/1", "PATCH", "default_branch=dev")]) {
+      expect(side(c), c).toBeNull();
+    }
+  });
+
+  it("the siblings: a repository DELETE is `gh repo delete` by another route, and renaming a branch names which one", () => {
+    for (const c of [...writes("/repos/o/r", "DELETE"), ...writes("/repositories/12", "DELETE")]) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/repository delete$/);
+      expect(hit?.deletes, c).toBe("the repository and every ref in it");
+    }
+    for (const c of writes("/repos/o/r/branches/main/rename", "POST", "new_name=trunk")) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/branch rename$/);
+      expect(hit?.branch, c).toBe("main");
+      expect(hit?.deletes, c).toBe("the default branch's name");
+    }
+    expect(side("gh api -X POST repos/o/r/branches/feature/rename -f new_name=x")?.branch).toBe("feature");
+    for (const c of reads("/repos/o/r/branches/main/rename")) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a GraphQL mutation on protection or a ruleset, by name; the escape in a JSON body hides nothing, here or on the ref mutations", () => {
+    for (const name of ["createBranchProtectionRule", "updateBranchProtectionRule", "deleteBranchProtectionRule",
+      "createRepositoryRuleset", "updateRepositoryRuleset", "deleteRepositoryRuleset"]) {
+      const c = `gh api graphql -f query=mutation{${name}(input:{}){clientMutationId}}`;
+      const hit = side(c);
+      expect(hit?.what, c).toBe("a `gh api` GraphQL protection mutation");
+      expect(hit?.flag, c).toBe(name);
+      expect(hit?.control, c).toBe("branch protection or a ruleset");
+    }
+    expect(side('curl -X POST https://api.github.com/graphql -d {"query":"mutation{delete\\u0042ranchProtectionRule(input:{}){clientMutationId}}"}')?.flag)
+      .toBe("deleteBranchProtectionRule");
+    expect(side('curl -X POST https://api.github.com/graphql -d {"query":"mutation{merge\\u0050ullRequest(input:{}){clientMutationId}}"}')?.flag)
+      .toBe("mergePullRequest");
+    const named = side("gh api graphql -f query=mutation{updateRepository(input:{defaultBranch:\"dev\"}){clientMutationId}}");
+    expect(named?.flag).toBe("updateRepository");
+    expect(named?.control).toBe("branch protection or a ruleset");
+    // a body in a file may be any of them: refused in every session, not only unstamped
+    expect(side("gh api graphql --input q.json")?.control).toBe("whatever its body changes");
+    for (const c of ["gh api graphql -f query=mutation{updateRepository(input:{description:\"x\"}){clientMutationId}}",
+      "gh api graphql -f query=query{repository(owner:\"o\",name:\"r\"){branchProtectionRules(first:1){totalCount}}}"]) {
+      expect(side(c), c).toBeNull();
+    }
+  });
+
+  it("row: gh repo edit --default-branch, either form; any other edit is not", () => {
+    for (const c of ["gh repo edit --default-branch dev", "gh repo edit o/r --default-branch=dev", "gh repo -R o/r edit --default-branch dev"]) {
+      const hit = side(c);
+      expect(hit?.effect, c).toBe(MOVES_SHARED_REF);
+      expect(hit?.flag, c).toBe("gh repo edit --default-branch");
+      expect(hit?.what, c).toBe("`gh repo edit --default-branch`");
+      expect(hit?.control, c).toBe("the repository's default branch");
+    }
+    for (const c of ["gh repo edit --description x", "gh repo edit o/r --visibility public", "gh repo edit --enable-auto-merge"]) {
+      expect(side(c), c).toBeNull();
+    }
+    const aliased = side("gh e", new Map([["e", ["repo", "edit", "--default-branch", "dev"]]]));
+    expect(aliased?.flag).toBe("gh repo edit --default-branch");
+    expect(sideEffectLine(side("gh repo edit --default-branch dev")))
+      .toBe("  effect: moves-shared-ref, from `gh repo edit --default-branch` -- the control the push action answers to.");
   });
 });

@@ -419,3 +419,117 @@ describe("side doors: a port, a user or no scheme on the API host hides nothing 
     expect(del.stderr).toContain("it deletes the default branch");
   });
 });
+
+describe("side doors: the control the Not seen block relies on can't be removed through a route the guard reads (#505)", () => {
+  // Before #505 each write here exited 0, and one allowed command removed the
+  // layer the Not seen block cites for every route the guard can't see. What
+  // each write does at the service is a dated claim: the panel left it PLAUSIBLE
+  // on 2026-11-04, since it can't be reproduced in scratch. The tests pin what
+  // the guard reads and refuses, never what GitHub then does.
+  const API = "https://api.github.com";
+  const ROWS: Array<[route: string, name: string, twin: string]> = [
+    ["gh api -X DELETE repos/o/r/branches/main/protection", "a `gh api` branch protection write", "gh api repos/o/r/branches/main/protection"],
+    ["gh api -X PUT repos/o/r/branches/feature/protection --input p.json", "a `gh api` branch protection write", "gh api repos/o/r/branches/feature/protection"],
+    [`curl -X DELETE ${API}/repos/o/r/branches/main/protection/enforce_admins`, "a `curl` branch protection write", `curl ${API}/repos/o/r/branches/main/protection/enforce_admins`],
+    [`wget --method=DELETE ${API}/repos/o/r/branches/main/protection`, "a `wget` branch protection write", `wget ${API}/repos/o/r/branches/main/protection`],
+    ["gh api -X DELETE repos/o/r/rulesets/1", "a `gh api` ruleset write", "gh api repos/o/r/rulesets/1"],
+    ["gh api -X PUT repos/o/r/rulesets/1 -f enforcement=disabled", "a `gh api` ruleset write", "gh api repos/o/r/rulesets"],
+    ["gh api -X DELETE orgs/o/rulesets/1", "a `gh api` ruleset write", "gh api orgs/o/rulesets/1"],
+    [`curl -X PUT ${API}/repos/o/r/rulesets/1 -d '{"enforcement":"disabled"}'`, "a `curl` ruleset write", `curl ${API}/repos/o/r/rulesets/1`],
+    ["gh api -X PATCH repos/o/r -f default_branch=dev", "a `gh api` default branch write", "gh api -X PATCH repos/o/r -f description=x"],
+    [`curl -X PATCH ${API}/repos/o/r -d '{"default_branch":"dev"}'`, "a `curl` default branch write", `curl -X PATCH ${API}/repos/o/r -d '{"description":"x"}'`],
+    ["gh repo edit --default-branch dev", "`gh repo edit --default-branch`", "gh repo edit --description x"],
+    ["gh api graphql -f query='mutation { deleteBranchProtectionRule(input: {branchProtectionRuleId: \"x\"}) { clientMutationId } }'",
+      "a `gh api` GraphQL protection mutation", "gh api graphql -f query='query { viewer { login } }'"],
+  ];
+
+  it("each refuses with a clean stamp and no run, from the root and a nested folder, naming the route and the owner's escape; its twin passes", () => {
+    const f = fixture(true, false);
+    for (const [route, name, twin] of ROWS) {
+      for (const cwd of [f.proj, f.sub]) {
+        const r = call(f, bash(route), cwd);
+        expect(r.status, `${route}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, route).toContain(`cairn run guard: ${name} is refused in every session`);
+        expect(r.stderr, route).toContain("the control the push action answers to");
+        expect(r.stderr, route).toContain("moves-shared-ref");
+        expect(r.stderr, route).toContain("is the owner's to change");
+        expect(r.stderr, route).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH");
+        expect(r.stderr, route).not.toMatch(/[A-Z_]+=1/);
+        const t = call(f, bash(twin), cwd);
+        expect(t.status, `${twin}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("no stamp refuses the same way, and the escape gate `gh repo delete` uses lifts it; a live run without its grant still refuses after that", () => {
+    const none = fixture(false, false);
+    for (const [route, name] of ROWS) {
+      const r = call(none, bash(route));
+      expect(r.status, route).toBe(2);
+      expect(r.stderr, route).toContain(`${name} is refused in every session`);
+      const lifted = call(none, bash(`CAIRN_ALLOW_UNSHIPPED_PUSH=1 ${route}`));
+      expect(lifted.status, `${route}\n${lifted.stderr}`).toBe(0);
+    }
+    const hot = fixture(true, true);
+    const r = call(hot, bash("CAIRN_ALLOW_UNSHIPPED_PUSH=1 gh api -X DELETE repos/o/r/rulesets/1"));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+  });
+
+  it("hostile: a spelled method or path, a gh alias set on the line, a port and a user on the host, an escape in a JSON body, a runner, a body from stdin", () => {
+    const f = fixture(true, false);
+    for (const c of [
+      'M=DELETE; gh api -X "$M" repos/o/r/branches/main/protection',
+      'P=repos/o/r/rulesets/1; gh api -X DELETE "$P"',
+      "gh alias set d 'api -X DELETE' && gh d repos/o/r/rulesets/1",
+      "gh alias set e 'repo edit --default-branch dev' && gh e",
+      'F=--default-branch; gh repo edit "$F" dev',
+      "curl -X DELETE x@api.github.com:443/repos/o/r/branches/main/protection",
+      "curl -X PATCH https://api.github.com/repos/o/r --json '{\"default\\u005fbranch\":\"dev\"}'",
+      "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{delete\\u0042ranchProtectionRule(input:{}){clientMutationId}}\"}'",
+      "timeout 5 gh api -X DELETE repos/o/r/rulesets/1",
+      "sh -c 'gh api -X DELETE repos/o/r/branches/main/protection'",
+      "echo '{}' | gh api -X PATCH repos/o/r --input -",
+      "gh api graphql --input q.json",
+    ]) {
+      for (const cwd of [f.proj, f.sub]) {
+        const r = call(f, bash(c), cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+      }
+    }
+  });
+
+  it("the siblings: a repository DELETE never passes the gate; renaming the default branch never does, another branch's is the gate's", () => {
+    const f = fixture(true, false);
+    for (const [c, why] of [["gh api -X DELETE repos/o/r", "it deletes the repository"],
+      [`curl -X DELETE ${API}/repos/o/r`, "it deletes the repository"],
+      ["gh api -X POST repos/o/r/branches/main/rename -f new_name=trunk", "it deletes the default branch's name"]]) {
+      const r = call(f, bash(c));
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain(why);
+    }
+    expect(call(f, bash("gh api -X POST repos/o/r/branches/feature/rename -f new_name=x")).status).toBe(0);
+    expect(call(f, bash("gh api repos/o/r")).status).toBe(0);
+  });
+
+  it("the Not seen line holds: the same settings changed by a browser tool, an MCP tool or a script exit 0, the line names what's left; a deleted line is red", () => {
+    const f = fixture(false, false);
+    const rows: Array<[{ tool_name: string; tool_input: Record<string, unknown> }, string]> = [
+      [{ tool_name: "mcp__playwright__browser_click", tool_input: { element: "Delete this ruleset", ref: "e9" } }, "a browser tool"],
+      [{ tool_name: "mcp__github__delete_branch_protection", tool_input: { owner: "o", repo: "r", branch: "main" } }, "an MCP tool"],
+      [bash("python3 unprotect.py o/r main"), "a script"],
+    ];
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n \*\s+/g, " ");
+    const start = header.indexOf("Not seen, dated 2026-11-05 (#505");
+    expect(start, "the #505 Not seen line opens with its date and issue").toBeGreaterThan(-1);
+    const line = header.slice(start, start + 600);
+    for (const [payload, phrase] of rows) {
+      expect(call(f, payload).status, phrase).toBe(0);
+      expect(line, phrase).toContain(phrase);
+    }
+    expect(line).toContain("the agent's token");
+    // the service's half stays a dated claim, never a sentence about GitHub
+    expect(header).toContain("a dated claim, 2026-11-05");
+  });
+});

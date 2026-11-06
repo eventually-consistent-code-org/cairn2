@@ -939,6 +939,23 @@ const MERGES_PR = "it merges a pull request onto its base branch, as a push woul
 const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRef|updateRefs|deleteRef|createCommitOnBranch)\b/;
 
 /**
+ * The GraphQL mutations that change the controls a push answers to (#505; a
+ * claim about GitHub's schema, dated 2026-11-05): branch protection rules and
+ * rulesets by name, and updateRepository only when the request names a default
+ * branch, which that mutation may not even accept -- read on the cheaper side.
+ */
+const CONTROL_MUTATIONS = /\b(createBranchProtectionRule|updateBranchProtectionRule|deleteBranchProtectionRule|createRepositoryRuleset|updateRepositoryRuleset|deleteRepositoryRuleset|updateRepository(?=\b[\s\S]*\bdefaultBranch\b))\b/;
+
+// A repository's own REST path, by name or by id, and the scopes that hold a ruleset (#505).
+const REPO_PATH = "/(?:repos/[^/]+/[^/]+|repositories/\\d+)";
+const RULESET_SCOPE = `(?:${REPO_PATH}|/orgs/[^/]+|/enterprises/[^/]+)`;
+
+// Why a write to the control itself refuses (#505), and why the default branch does.
+const REMOVES_COVER = "branch protection and rulesets are what stand behind the routes this guard can't read (its Not seen " +
+  "block), so one write here takes that cover from all of them at once.";
+const MOVES_DEFAULT = "it moves the repository's default branch: which branch is protected, and which one the ship gate reads.";
+
+/**
  * The side-door table (#483): the routes to "move a shared ref" that never
  * run git, each the effect MOVES_SHARED_REF. Two kinds of row:
  *   a gh command  `sub` and `action` (`gh pr merge`, `gh release create`,
@@ -950,7 +967,13 @@ const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranc
  *                 `ref` is the capture group naming the ref, `field` the
  *                 request field naming the branch instead (a merge's
  *                 `base`, a release's `target_commitish`, a created ref's
- *                 `ref`), `mutation` the GraphQL names a body must carry
+ *                 `ref`), `mutation` the GraphQL names a body must carry,
+ *                 `bodyField` the request field a body must carry (a repo
+ *                 PATCH's `default_branch`), `methods` the only ones it means
+ * On either kind, `opt` is the option a gh row wants (#505), `control` names
+ * the service-side control a write changes, which refuses in every session
+ * under the ship gate's escape, whatever the stamp says, asserted by
+ * runguard-effects.test.ts and runguard-sidedoors.test.ts (#505).
  * A row that names no branch leaves `branch` undefined: the guard takes
  * the target as the default branch, fail closed on the cheaper read
  * (decided phase 31, 2026-11-04) -- a PR's base is only known to the API.
@@ -974,6 +997,20 @@ export const SIDE_DOOR_TABLE = Object.freeze([
     why: "it creates or changes a release, and the tag it stands on." },
   { route: "GraphQL mutation", path: /\/graphql\/?$/i, mutation: REF_MUTATIONS,
     why: "a GraphQL mutation can merge a pull request or move a ref, as a push would." },
+  // #505 -- the controls a push answers to, and the two routes beside them that gh repo delete's own row misses
+  { route: "gh repo edit", sub: "repo", action: "edit", opt: "--default-branch", control: "the repository's default branch",
+    what: "`gh repo edit --default-branch`", why: MOVES_DEFAULT },
+  { route: "branch protection write", path: new RegExp(`^${REPO_PATH}/branches/.+/protection(?:/.*)?$`, "i"),
+    control: "branch protection", why: REMOVES_COVER },
+  { route: "ruleset write", path: new RegExp(`^${RULESET_SCOPE}/rulesets(?:/.*)?$`, "i"), control: "a ruleset", why: REMOVES_COVER },
+  { route: "repository delete", path: new RegExp(`^${REPO_PATH}$`, "i"), methods: ["DELETE"],
+    deletes: "the repository and every ref in it", why: "it deletes the repository and every ref in it." },
+  { route: "default branch write", path: new RegExp(`^${REPO_PATH}$`, "i"), bodyField: "default_branch",
+    control: "the repository's default branch", why: MOVES_DEFAULT },
+  { route: "branch rename", path: new RegExp(`^${REPO_PATH}/branches/(.+)/rename$`, "i"), ref: 1, deletes: "the default branch's name",
+    why: "it renames a branch on the remote, and the default branch and its protection follow the new name." },
+  { route: "GraphQL protection mutation", path: /\/graphql\/?$/i, mutation: CONTROL_MUTATIONS,
+    control: "branch protection or a ruleset", why: REMOVES_COVER },
 ]);
 
 /** The programs that reach the API-path rows, by the name a line spells. */
@@ -988,7 +1025,7 @@ const GH_TABLED = new Set(SIDE_DOOR_TABLE.map((r) => r.sub).filter((s) => s !== 
 // value, and the short letters that stand for them (pflag for gh, getopt
 // for curl and wget). Only the options this table reads need listing; a
 // value left unread is a bare word nothing here looks at.
-const GH_SUB_READ = { valued: ["--repo", "--target"], alias: { R: "--repo" } };
+const GH_SUB_READ = { valued: ["--repo", "--target", "--default-branch"], alias: { R: "--repo" } };
 const GH_API_READ = {
   valued: ["--method", "--raw-field", "--field", "--header", "--jq", "--template", "--preview", "--hostname",
     "--input", "--cache"],
@@ -1233,16 +1270,25 @@ function apiSideDoor(program, args) {
       if (row.path === undefined) continue;
       const m = row.path.exec(path);
       if (!m) continue;
+      if (row.methods && !row.methods.includes(method)) continue;
       const what = `a \`${program}\` ${row.route}`;
-      if (row.mutation) {
+      if (row.mutation || row.bodyField) {
+        // a body it can't read may be the one that does it (#505: so it refuses
+        // in every session, or a clean stamp would pass a protection delete)
         const unread = field("@");
         if (unread !== undefined) {
           return { effect: MOVES_SHARED_REF, flag: unread, what: `${what} request from a file`,
+            control: row.control ?? "whatever its body changes",
             why: "its body sits in a file or on stdin the guard can't read, and " + row.why.replace(/\.$/, "; it is refused as if it did.") };
         }
-        const hit = bodies.map((b) => row.mutation.exec(b)).find(Boolean);
+        if (row.bodyField) {
+          if (field(row.bodyField) === undefined) continue;
+          return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, control: row.control };
+        }
+        // the body as typed and as it decodes: JSON can spell a name in escapes
+        const hit = [...bodies, ...fields.map(([, v]) => v)].map((b) => row.mutation.exec(b)).find(Boolean);
         if (!hit) continue;
-        return { effect: MOVES_SHARED_REF, flag: hit[1], what, why: row.why };
+        return { effect: MOVES_SHARED_REF, flag: hit[1], what, why: row.why, control: row.control };
       }
       let ref = row.ref === undefined ? undefined : m[row.ref];
       if (ref === undefined && row.field !== undefined) ref = field(row.field);
@@ -1252,8 +1298,8 @@ function apiSideDoor(program, args) {
       } catch {
         branch = refBranch(ref);
       }
-      const deletes = method === "DELETE" && row.ref !== undefined && branch !== undefined ? "the default branch" : undefined;
-      return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, branch, deletes };
+      const deletes = row.deletes ?? (method === "DELETE" && row.ref !== undefined && branch !== undefined ? "the default branch" : undefined);
+      return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, branch, deletes, control: row.control };
     }
   }
   return null;
@@ -1289,20 +1335,23 @@ export function sideDoor(program, args, aliases = new Map()) {
   }
   for (const row of SIDE_DOOR_TABLE) {
     if (row.sub === undefined || row.sub !== sub) continue;
-    const { values, words } = readOpts(rest, GH_SUB_READ);
+    const { flags, values, words } = readOpts(rest, GH_SUB_READ);
     if (words[0] !== row.action) continue;
+    if (row.opt !== undefined && !flags.has(row.opt)) continue;
     const branch = row.branchOpt === undefined ? undefined : values.get(row.branchOpt)?.at(-1);
-    return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}`, what: row.what, why: row.why,
-      branch, deletes: row.deletes, alias };
+    return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}${row.opt === undefined ? "" : ` ${row.opt}`}`,
+      what: row.what, why: row.why, branch, deletes: row.deletes, control: row.control, alias };
   }
   return null;
 }
 
 /**
  * The effect line a side-door refusal adds (#483): the one effect, the
- * route that caused it, and the gh alias typed when there was one.
+ * route that caused it, and the gh alias typed when there was one. A write
+ * to the control itself (#505) says so: no ref moves, but the rule on them does.
  */
 export function sideEffectLine(cause) {
   const via = cause.alias === undefined ? "" : `, via gh alias \`${cause.alias}\``;
-  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via} -- the push action by another route.`;
+  const what = cause.control === undefined ? "the push action by another route" : "the control the push action answers to";
+  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via} -- ${what}.`;
 }
