@@ -82,8 +82,12 @@
  *   may, as may a short name or the push settings git follows) is refused
  *   unless the last plan_drift left a clean ship-gate stamp for the exact
  *   commit pushed (open issues stay prose). Other branches are untouched; a
- *   missing or unreadable stamp refuses. Escape:
- *   CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
+ *   missing or unreadable stamp refuses. A refspec built from what the line
+ *   assigned is spelled and judged like a typed one (`B=main; git push origin
+ *   $B`), and one the reader can't spell -- a substitution, or a variable from
+ *   one, `read` or an operator -- refuses as an unreadable push, on any branch,
+ *   stamp or no stamp, naming the word (#501, runguard-sidedoors.test.ts).
+ *   Escape: CAIRN_ALLOW_UNSHIPPED_PUSH=1, same two shapes.
  *
  *   moves-shared-ref, while a batch run is live: from any worktree, refused
  *   unless the run manifest grants pushAuth and marks one of its phases in
@@ -201,6 +205,16 @@
  *   interpreter (`python -c` with requests, `node -e` with fetch, GH_TOKEN
  *   handed to a program the guard can't read) -- covered by the token's
  *   scope and the service's log, read instead of the agent's claim (#485).
+ *
+ *   Not seen, dated 2026-11-05 (#501, by decision; a same-line URL or refspec
+ *   is spelled and judged, and these two are pinned by
+ *   runguard-sidedoors.test.ts (#501)):
+ *   a URL from the environment or a substitution (`curl -X PUT "$URL"`,
+ *   `U=$(cat url); curl -X PUT "$U"`): that route needs a token and has its
+ *   line above, and refusing every `curl -X POST "$URL"` would over-refuse.
+ *   a refspec in a variable the line never assigns (`git push origin $B`):
+ *   as typed, the decision of #291, though the shell may hand git the value
+ *   the session holds, or nothing and a bare push.
  *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
@@ -333,8 +347,8 @@ import {
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
-  envConfig, ghAliasSet, longNames, parseInvocation, pushArgs, readArgs, resolveAlias, sideDoor, sideEffectLine,
-  truthy,
+  envConfig, ghAliasSet, longNames, parseInvocation, pushArgs, pushWild, readArgs, resolveAlias, sideDoor,
+  sideEffectLine, truthy,
 } from "./git-effects.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -1540,6 +1554,14 @@ const STASH_ADVICE = "cairn run guard: this repository has more than one worktre
 function shipGateRefusal(inv, at, ctx) {
   try {
     if (repoOf(at) === null) return null; // no repository there -- git refuses the push itself
+    // #501 -- a word the reader can't spell may be any refspec or flag: an
+    // unreadable push, like one the settings decide, and no stamp covers it
+    const wild = pushWild(inv);
+    if (wild !== undefined) {
+      return [`it holds a word the guard can't spell (\`${wild}\`), so what it lands can't be told`,
+        "  name the branch plainly, or set it on the line (`B=name`) -- or run /cairn:ship.",
+        "this push may land on the default branch"];
+    }
     const sources = defaultBranchSources(inv, at);
     if (!sources.length) return null;
     if (sources.includes(UNKNOWN)) {
@@ -2036,6 +2058,11 @@ try {
  *         row reads words. It also reads what the reader skipped at the same
  *         stage: $'...', ${X:-word} on an unset name, {a,b}, $IFS, and a
  *         loop or function body running after an assignment below it.
+ *   #501  a refspec or API URL built from a variable: spelled by the #494 pass
+ *         and judged by the two push gates like a typed one; a word the
+ *         reader can't spell in a push refuses as an unreadable push
+ *         (git-effects.mjs pushWild, the ship gate), and the rest of the
+ *         table's rows leave a push to it.
  *   #283  eval is read as the shell runs it: its words joined by one space,
  *         the result read as a line, through the shell-words.mjs function
  *         the harness guard shares (evalCommandString) -- the runner

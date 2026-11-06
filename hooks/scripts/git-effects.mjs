@@ -625,6 +625,13 @@ export const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
 export const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.paths], PUSH_READ));
 
 /**
+ * The first word of a push the reader can't spell (#501): its remote, a
+ * refspec, or a flag a value doesn't hide. Any of them could send it anywhere,
+ * so it's the ship gate's to refuse as an unreadable push; undefined for none.
+ */
+export const pushWild = (inv) => pushArgs(inv).own.find((w) => inv.wild?.has(w));
+
+/**
  * A git command's words (from `git` on, wrappers already peeled) as an
  * invocation: the -C directories in order, the -c and --config-env values,
  * --git-dir / --work-tree / --bare as `opts`, the subcommand, its args (cut
