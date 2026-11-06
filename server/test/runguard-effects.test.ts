@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -761,12 +761,15 @@ describe("side doors to the push action: the non-git table, one test per row (#4
   ];
   const reads = (path: string) => [`gh api ${path}`, `curl https://api.github.com${path}`, `wget https://api.github.com${path}`];
 
-  it("the table has the eight rows the issue names and the seven of #505, every one a moves-shared-ref cause, and names its three programs", () => {
+  it("the table has the eight rows the issue names, the seven of #505 and the thirteen of #525, every one a moves-shared-ref cause, and names its three programs", () => {
     expect(SIDE_DOOR_TABLE.map((r: { route: string }) => r.route)).toEqual([
       "gh pr merge", "gh release create", "gh repo delete",
-      "pull request merge", "ref write", "branch merge", "release", "GraphQL mutation",
+      "file contents write", "pull request merge", "ref write", "branch merge", "release", "GraphQL mutation",
       "gh repo edit", "branch protection write", "ruleset write", "repository delete", "default branch write", "branch rename",
       "GraphQL protection mutation",
+      "gh repo sync --force", "gh repo sync", "gh repo rename", "gh pr update-branch", "gh release edit", "gh release delete",
+      "fork sync", "pull request branch update", "code scanning autofix commit",
+      "repository transfer", "repository rename", "GraphQL repository rename",
     ]);
     for (const row of SIDE_DOOR_TABLE) expect(typeof row.why, row.route).toBe("string");
     expect(API_PROGRAMS).toEqual(["gh api", "curl", "wget"]);
@@ -1122,7 +1125,11 @@ describe("side doors: the service controls the Not seen block rests on are rows 
     for (const c of reads("/repos/o/r/rulesets/rule-suites")) expect(side(c), c).toBeNull();
     // a file that happens to live under a folder of that name is a file
     for (const path of ["/repos/o/r/contents/rulesets/a.txt", "/repos/o/r/contents/branches/x/protection"]) {
-      for (const c of writes(path, "PUT", "content=x")) expect(side(c), c).toBeNull();
+      for (const c of writes(path, "PUT", "content=x")) {
+        const hit = side(c);
+        expect(hit?.what, c).toMatch(/file contents write$/); // #525: a file write moves its branch
+        expect(hit?.control, c).toBeUndefined();
+      }
     }
   });
 
@@ -1203,5 +1210,165 @@ describe("side doors: the service controls the Not seen block rests on are rows 
     expect(aliased?.flag).toBe("gh repo edit --default-branch");
     expect(sideEffectLine(side("gh repo edit --default-branch dev")))
       .toBe("  effect: moves-shared-ref, from `gh repo edit --default-branch` -- the control the push action answers to.");
+  });
+});
+
+describe("side doors: the writes that move a ref or the repository, one test per row (#525)", () => {
+  type Side = { effect: string; flag: string; what: string; why: string; branch?: string; deletes?: string; control?: string };
+  const side = (command: string, aliases = new Map<string, string[]>()): Side | null => {
+    const [program, ...args] = command.trim().split(/\s+/);
+    return sideDoor(program, args, aliases);
+  };
+  const writes = (path: string, method = "POST", ...fields: string[]) => [
+    `gh api -X ${method} ${path} ${fields.map((f) => `-f ${f}`).join(" ")}`,
+    `curl -X ${method} https://api.github.com${path} ${fields.map((f) => `--data-urlencode ${f}`).join(" ")}`,
+    `wget --method=${method} https://api.github.com${path} ${fields.length ? `--post-data=${fields.join("&")}` : ""}`,
+  ];
+  const reads = (path: string) => [`gh api ${path}`, `curl https://api.github.com${path}`, `wget https://api.github.com${path}`];
+
+  it("row: a fork sync names its branch, by id or by name; the GET is not", () => {
+    for (const path of ["/repos/o/r/merge-upstream", "/repositories/12/merge-upstream"]) {
+      for (const c of writes(path, "POST", "branch=main")) {
+        const hit = side(c);
+        expect(hit?.effect, c).toBe(MOVES_SHARED_REF);
+        expect(hit?.what, c).toMatch(/fork sync$/);
+        expect(hit?.branch, c).toBe("main");
+        expect(hit?.control, c).toBeUndefined();
+      }
+      for (const c of writes(path, "POST", "branch=refs/heads/feature")) expect(side(c)?.branch, c).toBe("feature");
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+  });
+
+  it("row: a file write or delete moves the branch it names, and with none the default; a read, and a write the description has no method for, are not", () => {
+    for (const method of ["PUT", "DELETE"]) {
+      for (const c of writes("/repos/o/r/contents/docs/a.md", method, "message=m", "branch=feature")) {
+        const hit = side(c);
+        expect(hit?.what, c).toMatch(/file contents write$/);
+        expect(hit?.branch, c).toBe("feature");
+      }
+      for (const c of writes("/repositories/12/contents/a", method, "message=m")) expect(side(c)?.branch, c).toBeUndefined();
+    }
+    for (const c of reads("/repos/o/r/contents/a.md")) expect(side(c), c).toBeNull();
+    for (const c of writes("/repos/o/r/contents/a.md", "PATCH", "message=m")) expect(side(c), c).toBeNull();
+    // the row reads first: a file named like a route answers to the branch it names, never to that route
+    expect(side("gh api -X PUT repos/o/r/contents/pulls/1/merge -f branch=feature")?.branch).toBe("feature");
+    expect(side("gh api -X PUT repos/o/r/contents/docs/merges -f branch=feature")?.what).toMatch(/file contents write$/);
+  });
+
+  it("row: merge-async is the pull request merge row; update-branch and an autofix commit each move a ref; each GET is not", () => {
+    for (const c of writes("/repos/o/r/pulls/1/merge-async", "PUT")) expect(side(c)?.what, c).toMatch(/pull request merge$/);
+    for (const c of writes("/repos/o/r/pulls/1/update-branch", "PUT")) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/pull request branch update$/);
+      expect(hit?.branch, c).toBeUndefined(); // the head branch is only known to the API
+    }
+    for (const c of writes("/repos/o/r/code-scanning/alerts/3/autofix/commits", "POST", "target_ref=refs/heads/main")) {
+      const hit = side(c);
+      expect(hit?.what, c).toMatch(/code scanning autofix commit$/);
+      expect(hit?.branch, c).toBe("main");
+    }
+    for (const path of ["/repos/o/r/pulls/1/merge-async", "/repos/o/r/pulls/1/update-branch", "/repos/o/r/code-scanning/alerts/3/autofix/commits"]) {
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+    for (const c of writes("/repos/o/r/code-scanning/alerts/3/autofix", "POST")) expect(side(c), c).toBeNull();
+  });
+
+  it("row: a transfer and a repository rename are control rows; another field on the same path, and each read, are not", () => {
+    for (const path of ["/repos/o/r/transfer", "/repositories/12/transfer"]) {
+      for (const c of writes(path, "POST", "new_owner=x")) {
+        const hit = side(c);
+        expect(hit?.what, c).toMatch(/repository transfer$/);
+        expect(hit?.control, c).toBe("where the repository lives");
+        expect(hit?.flag, c).toBe(`POST ${path}`);
+      }
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+    for (const path of ["/repos/o/r", "/repositories/12"]) {
+      for (const c of writes(path, "PATCH", "name=elsewhere")) {
+        const hit = side(c);
+        expect(hit?.what, c).toMatch(/repository rename$/);
+        expect(hit?.control, c).toBe("the repository's name");
+      }
+      for (const c of writes(path, "PATCH", "description=name")) expect(side(c), c).toBeNull();
+      for (const c of reads(path)) expect(side(c), c).toBeNull();
+    }
+    // a name on some other path is a name
+    for (const c of writes("/repos/o/r/labels/x", "PATCH", "name=y")) expect(side(c), c).toBeNull();
+    expect(sideEffectLine(side("gh api -X POST repos/o/r/transfer -f new_owner=x") as Side))
+      .toBe("  effect: moves-shared-ref, from `POST /repos/o/r/transfer` -- the control the push action answers to.");
+  });
+
+  it("row: the gh commands over the same calls; what touches only this clone, or no ref, is not", () => {
+    expect(side("gh repo sync o/fork")?.flag).toBe("gh repo sync");
+    expect(side("gh repo sync o/fork")?.branch).toBeUndefined();
+    expect(side("gh repo sync o/fork --branch dev")?.branch).toBe("dev");
+    expect(side("gh repo sync -b dev o/fork")?.branch).toBe("dev");
+    expect(side("gh repo sync o/fork -s up/stream --force")?.flag).toBe("gh repo sync --force");
+    expect(side("gh repo sync o/fork --force")?.deletes).toBe("the history the reset drops");
+    expect(side("gh repo rename x --yes")?.control).toBe("the repository's name");
+    expect(side("gh pr update-branch 1 --rebase")?.flag).toBe("gh pr update-branch");
+    expect(side("gh release edit v1 --target dev")?.branch).toBe("dev");
+    expect(side("gh release delete v1 --cleanup-tag")?.flag).toBe("gh release delete --cleanup-tag");
+    for (const c of ["gh repo sync", "gh repo sync --branch dev", "gh repo sync -s up/stream", "gh repo sync --force",
+      "gh repo archive o/r", "gh repo fork o/r", "gh pr view 1", "gh release edit v1 --notes x", "gh release delete v1 --yes"]) {
+      expect(side(c), c).toBeNull();
+    }
+    const aliased = side("gh s", new Map([["s", ["repo", "sync", "o/fork"]]]));
+    expect(aliased?.flag).toBe("gh repo sync");
+    expect(aliased?.alias).toBe("s");
+  });
+
+  it("row: the GraphQL names, dated; a query or a comment is not, and neither a transfer nor a fork sync has a mutation to name", () => {
+    const graphql = (q: string) => `gh api graphql -f query=${q}`;
+    for (const name of ["enqueuePullRequest", "updatePullRequestBranch", "createLinkedBranch"]) {
+      const hit = side(graphql(`mutation{${name}(input:{}){clientMutationId}}`));
+      expect(hit?.flag, name).toBe(name);
+      expect(hit?.control, name).toBeUndefined();
+    }
+    const renamed = side(graphql('mutation{updateRepository(input:{repositoryId:"x",name:"y"}){clientMutationId}}'));
+    expect(renamed?.what).toMatch(/GraphQL repository rename$/);
+    expect(renamed?.control).toBe("the repository's name");
+    for (const q of ['mutation{updateRepository(input:{repositoryId:"x",description:"y"}){clientMutationId}}', "query{viewer{login}}",
+      'mutation{addComment(input:{subjectId:"x",body:"y"}){clientMutationId}}']) {
+      expect(side(graphql(q)), q).toBeNull();
+    }
+  });
+
+  // What the sweep gave no row, each named in the table's own comment: a deleted line is red here.
+  it("the Not seen lines hold: each write the sweep left off the table has no row, and the comment beside the table names why, dated", () => {
+    const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "hooks", "scripts", "git-effects.mjs"), "utf8");
+    const start = source.indexOf("Not seen, dated 2026-11-06 (#525");
+    expect(start, "the sweep's Not seen block opens with its date and issue").toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf("*/", start)).replace(/\n \*\s+/g, " ");
+    const rows: Array<[path: string, method: string, phrase: string]> = [
+      ["/repos/o/r/forks", "POST", "`POST /forks`"],
+      ["/repos/o/r/generate", "POST", "`POST /generate`"],
+      ["/user/repos", "POST", "`POST /user/repos`"],
+      ["/orgs/o/repos", "POST", "`POST /orgs/{org}/repos`"],
+      ["/repos/o/r/git/commits", "POST", "`POST /git/commits`"],
+      ["/repos/o/r/git/tags", "POST", "`POST /git/tags`"],
+      ["/repos/o/r/dispatches", "POST", "`POST /dispatches`"],
+      ["/repos/o/r/actions/workflows/1/dispatches", "POST", "`POST /actions/workflows/{id}/dispatches`"],
+      ["/repos/o/r/collaborators/x", "PUT", "`PUT /collaborators/{username}`"],
+      ["/repos/o/r/keys", "POST", "`POST /keys`"],
+      ["/repos/o/r/pages/deployments", "POST", "`POST /pages/deployments`"],
+      ["/repos/o/r/pulls", "POST", "`POST /pulls`"],
+      ["/repos/o/r/pulls/1", "PATCH", "`PATCH /pulls/{n}`"],
+      ["/repos/o/r/stacks", "POST", "`POST /stacks`"],
+      ["/repos/o/r/import", "PUT", "`PUT /import`"],
+      ["/repos/o/r/properties/values", "PATCH", "`PATCH /properties/values`"],
+    ];
+    for (const [path, method, phrase] of rows) {
+      for (const c of writes(path, method)) expect(side(c), c).toBeNull();
+      expect(block, phrase).toContain(phrase);
+    }
+    for (const c of writes("/repos/o/r", "PATCH", "archived=true")) expect(side(c), c).toBeNull();
+    expect(block).toContain("`archived`");
+    for (const name of ["revertPullRequest", "cloneTemplateRepository", "createRepository", "archiveRepository", "setRepositoryCustomPropertyValues"]) {
+      expect(side(`gh api graphql -f query=mutation{${name}(input:{}){clientMutationId}}`), name).toBeNull();
+      expect(block, name).toContain(name);
+    }
+    expect(block).toContain("read 2026-11-06");
   });
 });

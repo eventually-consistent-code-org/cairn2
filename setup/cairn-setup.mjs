@@ -98,13 +98,14 @@ const gitHooks = args.includes("--git-hooks");
  *  one that points at nothing? Every name from the project down is looked at,
  *  so a folder link above the file counts as much as a link at the file. A
  *  path outside the project is a home-scoped write, not this check's (the Not
- *  seen block above).
+ *  seen block above). `base` is the project, or the worktree root for a hooks
+ *  folder a project below the root reaches up to (#526).
  *  :returns { link, real } with real null when dangling, or null when clear */
-function linkOut(path) {
-  const rel = relative(projectDir, path);
+function linkOut(path, base = projectDir) {
+  const rel = relative(base, path);
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
-  const root = realOrNull(projectDir);
-  let at = projectDir;
+  const root = realOrNull(base);
+  let at = base;
   for (const name of rel.split(sep)) {
     at = join(at, name);
     try {
@@ -128,8 +129,8 @@ function linkRefusal({ link, real }, wayOut = "point the link inside the project
 /** The one check every write passes (#498): a link out stops setup, exit 1, the
  *  way a config that does not parse does. What landed before it stays, and a
  *  re-run is byte-identical. :returns path */
-function checkLinks(path) {
-  const out = linkOut(path);
+function checkLinks(path, base) {
+  const out = linkOut(path, base);
   if (out) {
     console.error(linkRefusal(out));
     process.exit(1);
@@ -138,14 +139,14 @@ function checkLinks(path) {
 }
 
 // The only call sites of the fs writers in this file (asserted: setup.test.ts).
-function writeChecked(path, data) {
-  writeFileSync(checkLinks(path), data);
+function writeChecked(path, data, base) {
+  writeFileSync(checkLinks(path, base), data);
 }
 function copyChecked(src, path) {
   copyFileSync(src, checkLinks(path));
 }
-function mkdirChecked(path) {
-  mkdirSync(checkLinks(path), { recursive: true });
+function mkdirChecked(path, base) {
+  mkdirSync(checkLinks(path, base), { recursive: true });
 }
 
 /** The command that launches the server. Default is the portable npx form —
@@ -420,9 +421,26 @@ function gitAt(dir, gitArgs) {
 
 const expandHome = (value) => value.replace(/^~(?=\/|$)/, homedir());
 
-/** A hooks folder as git reads one: `~` expanded, a relative path from the worktree root. */
+/** The folder git reads a relative core.hooksPath from: the worktree root, whatever
+ *  folder below it the command stood in (measured against git 2.56.0, 2026-11-06,
+ *  asserted: setup.test.ts "#526"). The project's own spelling when the project is
+ *  the root, so what a root project prints stays as it was; the project's folder when
+ *  git names no root, as in a bare repository. */
+function worktreeRoot() {
+  const top = gitAt(projectDir, ["rev-parse", "--show-toplevel"]);
+  return top === null || realOrNull(top) === realOrNull(projectDir) ? projectDir : top;
+}
+
+/** A core.hooksPath value as git reads one: `~` expanded, a relative path from the worktree root. */
 function hooksDirOf(value) {
-  return resolve(projectDir, expandHome(value));
+  return resolve(worktreeRoot(), expandHome(value));
+}
+
+/** An answer from `rev-parse --git-path`, which is relative to where git stood:
+ *  the project's real folder, since `..` steps walk the disk and not a link's name. */
+function gitPathDir(answer) {
+  const root = worktreeRoot();
+  return resolve(root === projectDir ? projectDir : realOrNull(projectDir) ?? projectDir, answer);
 }
 
 // The only scopes that are this repository's own. Anything else -- global,
@@ -557,15 +575,17 @@ function gitHooksTarget() {
     const dir = hooksDirOf(setting.value);
     const why = sharedFolderWhy(setting, dir);
     if (why) {
+      // git reads this value from the root, so a project below it spells the way down
+      const own = join(relative(realOrNull(worktreeRoot()) ?? projectDir, realOrNull(projectDir) ?? projectDir), GITHOOKS_REL);
       const wayOut = setting.scope === "command"
         ? "drop the setting from this environment"
-        : `to gate this project alone, run \`git config --local core.hooksPath ${GITHOOKS_REL}\` (the shared hooks then stop running in this repository)`;
+        : `to gate this project alone, run \`git config --local core.hooksPath ${own}\` (the shared hooks then stop running in this repository)`;
       return { error: `${why}: every repository it reaches runs hooks from that folder, and --git-hooks is consent for this project alone, so nothing was written there -- ${wayOut}, then re-run` };
     }
-    return { dir, configured: setting.value };
+    return { dir, configured: setting.value, base: worktreeRoot() };
   }
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
-  const todayDir = today ? hooksDirOf(today) : null;
+  const todayDir = today ? gitPathDir(today) : null;
   let live = [];
   try {
     live = readdirSync(todayDir).filter((n) => !n.startsWith(".") && !n.endsWith(".sample"));
@@ -585,7 +605,7 @@ function installGitHooks() {
     console.error(`  --git-hooks: ${target.error}.`);
     process.exit(1);
   }
-  const path = checkLinks(join(target.dir, "pre-push"));
+  const path = checkLinks(join(target.dir, "pre-push"), target.base);
   // Setting the pointer arms whatever the folder holds (#508), so one holding
   // hooks this install did not write is the owner's to read first. A setting
   // already there arms nothing new, and its folder keeps what it holds.
@@ -608,9 +628,9 @@ function installGitHooks() {
     console.error(`  ${path}: ${error} -- then re-run cairn-setup.`);
     process.exit(1);
   }
-  mkdirChecked(target.dir);
-  if (next !== body) writeChecked(path, next);
-  chmodSync(checkLinks(path), 0o755);
+  mkdirChecked(target.dir, target.base);
+  if (next !== body) writeChecked(path, next, target.base);
+  chmodSync(checkLinks(path, target.base), 0o755);
   if (target.configured === null && gitAt(projectDir, ["config", "--local", "core.hooksPath", target.dir]) === null) {
     console.error(`  core.hooksPath could not be set to ${target.dir} -- set it yourself, then re-run cairn-setup.`);
     process.exit(1);
@@ -624,7 +644,8 @@ function installGitHooks() {
 function gitLayerStatus() {
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
   if (today === null) return null;
-  const dir = hooksDirOf(today);
+  const dir = gitPathDir(today);
+  const setting = hooksPathSetting();
   const script = join(projectDir, SCRIPTS_REL, PREPUSH);
   const carries = (p) => {
     try {
@@ -636,7 +657,6 @@ function gitLayerStatus() {
   if (carries(join(dir, "pre-push"))) {
     // An older install wrote here before #497: setup never writes here now,
     // and it never deletes, so the block stays until the owner takes it out.
-    const setting = hooksPathSetting();
     const why = setting ? sharedFolderWhy(setting, dir) : null;
     if (why) {
       return { detail: `installed at ${dir}, but ${why}: every repository it reaches runs this project's gate -- take the cairn block out of that file`, lagging: true };
@@ -647,6 +667,11 @@ function gitLayerStatus() {
   const ours = join(projectDir, GITHOOKS_REL);
   if (carries(join(ours, "pre-push"))) {
     return { detail: `installed at ${ours}, but git runs hooks from ${dir} -- not reached; re-run with --git-hooks, or point core.hooksPath back`, lagging: true };
+  }
+  // An install before #526 read a relative value from the project, and git never runs that folder.
+  const stranded = setting ? resolve(projectDir, expandHome(setting.value)) : null;
+  if (stranded !== null && carries(join(stranded, "pre-push"))) {
+    return { detail: `installed at ${stranded}, but git reads a relative core.hooksPath from the worktree root and runs hooks from ${dir} -- not reached; re-run with --git-hooks`, lagging: true };
   }
   return { detail: "not installed (opt-in: --git-hooks adds the pre-push ship gate)" };
 }
