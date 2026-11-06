@@ -3,18 +3,8 @@
 /**
  * Purpose: PreToolUse run guard -- classifies every git invocation by what
  *   it does, and refuses by effect. Exit 2 blocks; ANY internal error exits
- *   0 -- a broken guard (or classifier) never blocks work. And a guard that
- *   gives no answer blocks nothing either. With onFailure unset in hooks.json
- *   (by design and the owner's to change, ADR 0016), the Claude Code hooks
- *   reference says a hook that "exits with any other code, or fails in some other
- *   way, such as not starting or printing invalid JSON. The action goes ahead", and
- *   "a timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
- *   call". The one exception it names is a shell-form hook on Windows without Git
- *   Bash, which "can instead block the tool call". So a heap crash is a pass, and
- *   a line that can crash the guard is a bypass (#528). A dated claim, read
- *   2026-11-06. It corrects this header's "since 2.1.299 the platform fails
- *   closed", dated 2026-10-14 (#371), which the reference does not say. The page
- *   names no signal, so what the harness does with a killed guard is unmeasured.
+ *   0 -- a broken guard (or classifier) never blocks work. A guard that gives
+ *   no answer blocks nothing either: see Fail-open below.
  *
  * Effects (git-effects.mjs classifies; its EFFECT_TABLE is the data):
  *   discards-work           uncommitted or unpushed work lost with no undo.
@@ -55,6 +45,18 @@
 
 /*
  * The rules, by effect
+ *
+ * Fail-open: a guard that gives no answer blocks nothing. With onFailure unset in hooks.json
+ *   (by design and the owner's to change, ADR 0016), the Claude Code hooks
+ *   reference says a hook that "exits with any other code, or fails in some other
+ *   way, such as not starting or printing invalid JSON. The action goes ahead", and
+ *   "a timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
+ *   call". The one exception it names is a shell-form hook on Windows without Git
+ *   Bash, which "can instead block the tool call". So a heap crash is a pass, and
+ *   a line that can crash the guard is a bypass (#528). A dated claim, read
+ *   2026-11-06. It corrects this header's "since 2.1.299 the platform fails
+ *   closed", dated 2026-10-14 (#371), which the reference does not say. The page
+ *   names no signal, so what the harness does with a killed guard is unmeasured.
  *
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
  *   force, mirror and prune pushes, or one deleting the default branch; a
