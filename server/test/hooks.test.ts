@@ -6313,6 +6313,167 @@ describe("the approval stamp needs the owner's escape: plan_meta_set approve (#4
   });
 });
 
+// The third hardening's zones and pointers (#492, #500, #506, #507, #508,
+// #510) share one fixture and one guard call: a repository with a nested
+// pkg/lib, an empty home, and no system git config. `bare` strips
+// CLAUDE_PROJECT_DIR, the #459 reading of the root; every shape below runs
+// from the root and from the nested folder, with the variable and without.
+function hardenFixture(prefix: string) {
+  const p = freshDir(`cairn-hooks-${prefix}-proj-`);
+  const home = freshDir(`cairn-hooks-${prefix}-home-`);
+  mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+  spawnSync("git", ["init", "-q", p], { env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+  return { p, home };
+}
+
+/** git in a fixture, with its home and no system config; throws when git says no. */
+function hardenGit(cwd: string, home: string, ...args: string[]): string {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/** One harness guard call from `cwd`, the project unless told otherwise; `root` is what CLAUDE_PROJECT_DIR names, absent with `bare`. */
+function hardenRun(p: string, home: string, tool: string, input: Record<string, unknown>,
+  opts: { env?: Record<string, string>; cwd?: string; bare?: boolean; root?: string } = {}) {
+  const cwd = opts.cwd ?? p;
+  const env: Record<string, string | undefined> = {
+    ...process.env, CLAUDE_PROJECT_DIR: opts.root ?? p, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...opts.env,
+  };
+  for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GIT_WORK_TREE",
+    "XDG_CONFIG_HOME", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR"]) {
+    if (!(k in (opts.env ?? {}))) delete env[k];
+  }
+  if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+  const r = spawnSync(process.execPath, [HARNESSGUARD], {
+    cwd, env, encoding: "utf8", timeout: 5000,
+    input: JSON.stringify({ tool_name: tool, tool_input: input, cwd }),
+  });
+  return { status: r.status, stderr: r.stderr ?? "" };
+}
+
+const HARDEN_DC = "mcp__plugin_desktop-commander_desktop-commander__";
+
+// #492: the pre-push hook is a one-line caller; what it runs lives in
+// .cairn/harness/scripts, and the guard protected the caller and not the
+// body, so an ordinary Edit became code under the owner's identity at the
+// owner's next push. Both folders are zones now, in the project and in every
+// linked worktree of it, since the hook looks in the worktree it runs from
+// first. Only what writes is judged: the verbs and helpers there are read and
+// run as ordinary work, and setup, a process of its own, is never judged at all.
+describe("the folders the ship gate runs from are the harness guard's (#492)", () => {
+  const SCRIPTS_WHAT = "the scripts cairn's git hook runs";
+  const HOOKS_WHAT = "the folder cairn's git hooks live in";
+  const FILES: Array<[string, string]> = [
+    [".cairn/harness/scripts/lib.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/scripts/pre-push.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/scripts/git-effects.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/verbs/plan.md", SCRIPTS_WHAT],
+    [".cairn/githooks/pre-push", HOOKS_WHAT],
+    [".cairn/githooks/pre-commit", HOOKS_WHAT],
+  ];
+
+  /** The fixture with an installed-looking pair of folders. */
+  function fixture() {
+    const f = hardenFixture("gate");
+    mkdirSync(join(f.p, ".cairn", "harness", "scripts"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "harness", "verbs"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "githooks"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "notes"), { recursive: true });
+    writeFileSync(join(f.p, ".cairn", "harness", "scripts", "lib.mjs"), "export {};\n");
+    writeFileSync(join(f.p, ".cairn", "githooks", "pre-push"), "#!/bin/sh\n");
+    return f;
+  }
+
+  const refused = (r: { status: number | null; stderr: string }, what: string, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(what);
+    expect(r.stderr, label).toContain("file:");
+  };
+
+  it("refuses every tool and shell shape onto a file there, and reading or running one passes", () => {
+    const { p, home } = fixture();
+    for (const [rel, what] of FILES) {
+      refused(hardenRun(p, home, "Edit", { file_path: join(p, rel), old_string: "a", new_string: "b" }), what, `Edit ${rel}`);
+      refused(hardenRun(p, home, "Write", { file_path: join(p, rel), content: "x" }), what, `Write ${rel}`);
+      refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, rel), content: "x" }), what, `MCP ${rel}`);
+      for (const c of [`echo x >> ${rel}`, `tee ${rel} < /dev/null`, `sed -i '' s/a/b/ ${rel}`, `cp /tmp/x ${rel}`, `mv /tmp/x ${rel}`,
+        `rm ${rel}`, `touch ${rel}`, `dd if=/tmp/x of=${rel}`, `chmod 755 ${rel}`, `ln ${rel} /tmp/second-name`,
+        `bash -c 'echo x > ${rel}'`, `D=${rel}; echo x > $D`]) {
+        refused(hardenRun(p, home, "Bash", { command: c }), what, c);
+      }
+      for (const c of [`cat ${rel}`, `grep -n x ${rel}`, `cp ${rel} /tmp/copy-of-it`, `git add -N ${rel}`]) {
+        expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+      }
+    }
+    expect(hardenRun(p, home, "Bash", { command: "node .cairn/harness/scripts/merge-overlap.mjs" }).status).toBe(0);
+    expect(hardenRun(p, home, `${HARDEN_DC}read_file`, { path: join(p, ".cairn/harness/verbs/plan.md") }).status).toBe(0);
+    // an empty folder changes nothing, and the rest of .cairn is ordinary work
+    expect(hardenRun(p, home, "Bash", { command: "mkdir -p .cairn/harness" }).status).toBe(0);
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".cairn/notes/note.md"), content: "x" }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > .cairn/notes/note.md && rm -rf .cairn/notes/old" }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "cp -r /tmp/evil/. .cairn/notes/" }).status).toBe(0);
+  });
+
+  it("the hostile spellings the issue never named: a whole tree dropped on the folder, a letter case, a link, a find, a removal of what holds it", () => {
+    const { p, home } = fixture();
+    for (const c of ["cp -r /tmp/evil/. .cairn/", "rsync -a /tmp/evil/ .cairn/", "rsync -a /tmp/evil/ .cairn/harness/",
+      "tar xzf /tmp/a.tgz -C .cairn/harness", "cp -r /tmp/harness .cairn/", "mv /tmp/harness .cairn/harness",
+      "ln -s /tmp/evil .cairn/harness", "echo x > .CAIRN/HARNESS/scripts/lib.mjs", "echo x > ./.cairn/./harness/scripts/lib.mjs",
+      "cd .cairn && cd harness && echo x > scripts/lib.mjs", "git -C .cairn/harness/scripts mv lib.mjs other.mjs",
+      "find . -name lib.mjs -delete", "find .cairn/harness -type f -exec rm {} +",
+      "rm -rf .cairn", "mv .cairn /tmp/parked", "chmod -R 000 .cairn", "rm -rf .cairn/*"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    // a folder on the way, while it isn't there as one: the move plants the whole tree
+    const empty = hardenFixture("gate-empty");
+    for (const c of ["mv /tmp/evil .cairn", "cp -r /tmp/evil .cairn", "ln -s /tmp/evil .cairn"]) {
+      expect(hardenRun(empty.p, empty.home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(empty.p, empty.home, "Bash", { command: "mkdir -p .cairn/notes" }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = fixture();
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: "echo x >> ../../.cairn/harness/scripts/lib.mjs" }, at), SCRIPTS_WHAT, `shell, bare=${bare}`);
+      refused(hardenRun(p, home, "Bash", { command: "echo x >> ../../.cairn/githooks/pre-commit" }, at), HOOKS_WHAT, `hooks, bare=${bare}`);
+      refused(hardenRun(p, home, "Edit", { file_path: "../../.cairn/harness/scripts/lib.mjs", old_string: "a", new_string: "b" }, at), SCRIPTS_WHAT, `Edit, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: "cat ../../.cairn/harness/scripts/lib.mjs" }, at).status).toBe(0);
+      expect(hardenRun(p, home, "Bash", { command: "echo x > ../../.cairn/notes/note.md" }, at).status).toBe(0);
+    }
+  });
+
+  it("a linked worktree's copy counts: the hook looks in the worktree it runs from first", () => {
+    const { p, home } = fixture();
+    hardenGit(p, home, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    const wt = join(freshDir("cairn-hooks-gate-wt-"), "w1");
+    hardenGit(p, home, "worktree", "add", "-q", wt, "-b", "w1");
+    // the variable names the main checkout, the shell stands in the worktree: the session a wave worker has
+    refused(hardenRun(p, home, "Bash", { command: "echo x >> .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt }), SCRIPTS_WHAT, "worktree, variable on the main checkout");
+    refused(hardenRun(p, home, "Write", { file_path: join(wt, ".cairn/githooks/pre-push"), content: "x" }, { cwd: wt }), HOOKS_WHAT, "worktree, Write");
+    refused(hardenRun(wt, home, "Bash", { command: "echo x >> .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt, bare: true }), SCRIPTS_WHAT, "worktree, no variable");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > src.txt" }, { cwd: wt }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "cat .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt }).status).toBe(0);
+  });
+
+  it("the owner's session escape lets it through, and setup without the flag is not judged for what it writes there", () => {
+    const { p, home } = fixture();
+    const c = "echo x >> .cairn/harness/scripts/lib.mjs";
+    expect(hardenRun(p, home, "Bash", { command: c }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "node setup/cairn-setup.mjs claude" }).status).toBe(0);
+  });
+
+  it("the measured gaps, as the Not seen block says: a write in an interpreter, and the members of an archive extracted above the folder, pass", () => {
+    const { p, home } = fixture();
+    const c = "node -e \"require('fs').appendFileSync('.cairn/harness/scripts/lib.mjs','x')\"";
+    expect(hardenRun(p, home, "Bash", { command: c }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "tar xzf /tmp/a.tgz -C .cairn" }).status).toBe(0);
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with

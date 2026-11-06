@@ -209,6 +209,19 @@
  *   "core.hooksPath (#465)", and the #383 rows "git config core.hooksPath"
  *   and "a hooksPath line appended to the repo's git config".
  *
+ *   The ship gate's own folders (#492): the hook git runs is a thin caller,
+ *   so protecting the caller and not what it calls left the body an ordinary
+ *   Edit away from running under the owner's identity at the next push.
+ *   .cairn/harness (the scripts the hook runs, the verbs beside them) and
+ *   .cairn/githooks are protected trees under the project root and under
+ *   every linked worktree of it (`git worktree list`, asked once per call),
+ *   since the hook looks in the worktree it runs from first; a folder on the
+ *   way to one (.cairn), while it isn't there as a folder, counts, and so
+ *   does a folder's unknown contents copied onto it (`cp -r src/. .cairn/`).
+ *   Reading and running what's there is ordinary work, and setup is a process
+ *   of its own that no guard judges the writes of: only the agent's calls
+ *   are. Asserted: hooks.test.ts "(#492)".
+ *
  *   CLAUDE_CONFIG_DIR (#304): when set, Claude Code keeps its settings,
  *   .claude.json and its plugins, skills, agents, commands and hooks
  *   folders there instead of ~/.claude (dated claim, 2026-11-04, per the
@@ -280,7 +293,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -359,6 +372,13 @@ const MCP_DIR_WHAT = "a folder your MCP server config runs its server from";
 // the refusal names the file on its next line and asks where the
 // instruction came from, like every other (ADR 0016).
 const GIT_HOOK_WHAT = "a git hook that runs at your next checkout or commit";
+
+// cairn's own folders the installed git layer trusts (#492), under a project
+// root and every linked worktree of it, as [names, what a refusal calls it].
+const CAIRN_ZONES = [
+  [[".cairn", "harness"], "the scripts cairn's git hook runs and the verbs beside them"],
+  [[".cairn", "githooks"], "the folder cairn's git hooks live in"],
+];
 
 // How long one `git rev-parse` may take before the guard goes on without it.
 const GIT_WAIT_MS = 1500;
@@ -1245,6 +1265,29 @@ function gitAnswers() {
   return GIT_ANSWERS;
 }
 
+/** The linked worktrees of the project's repository, the main checkout among them; none when there is no git to ask. */
+function gitWorktrees() {
+  return askGit(["worktree", "list", "--porcelain"]).split("\n")
+    .filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length));
+}
+
+/**
+ * cairn's own folders as tree zones (#492), under the project root and every
+ * linked worktree of it: the hook runs `$PWD/.cairn/harness/scripts/pre-push.mjs`
+ * from the worktree a push starts in, before the install's own copy. `within`
+ * marks a zone a whole tree can be dropped on (dirRule, zoneGlob).
+ */
+function cairnZones() {
+  const zones = [];
+  for (const root of new Set([...ROOTS, ...gitWorktrees()])) {
+    const within = spellings(root);
+    for (const [names, what] of CAIRN_ZONES) {
+      for (const dir of spellings(join(root, ...names))) zones.push({ dir, what, tree: true, carve: [], within });
+    }
+  }
+  return zones;
+}
+
 /**
  * Every git config file a hooksPath or include line could land in (#465),
  * in each spelling: the repo's own and its worktree's (asked of git, else
@@ -1331,6 +1374,13 @@ function dirRule(abs) {
     if (name === ".claude-plugin") return "the plugin manifest";
     if (name === ".cursor") return "Cursor's settings directory";
   }
+  // A folder on the way to one of cairn's zones, below the root, while it
+  // isn't there as a folder (#492): `mv /tmp/evil .cairn` plants the whole
+  // tree. A link counts as not being one, or `ln -sfn` swaps it for another.
+  const way = ZONES.find((z) => z.within?.some((r) => holds(r, abs) && !same(r, abs)) && holds(abs, z.dir));
+  if (way) {
+    try { if (!lstatSync(abs).isDirectory()) return way.what; } catch { return way.what; }
+  }
   // A folder on the way to a protected script, while it isn't there as a
   // folder (#312, #314): a write here -- `mv /tmp/x ~/.config/iterm2` --
   // puts a new script in the old one's place. Into one that's there, a
@@ -1380,7 +1430,8 @@ function zoneGlob(p, remove) {
     });
     if (carved) continue;
     if (p.length === n) {
-      if (could(p[n - 1], d[n - 1], remove)) return z.what;
+      // a folder's unknown contents can be cairn's zone (#492): `cp -r src/. .cairn/`
+      if (could(p[n - 1], d[n - 1], remove || Boolean(z.within))) return z.what;
     } else if (could(p[n - 1], d[n - 1]) &&
       (z.tree || (p.length === n + 1 && couldManifest(p[n], z.dir)))) return z.what;
   }
@@ -2963,6 +3014,8 @@ try {
   // way: a tree zone too, wherever it lies -- a tracked scripts/hooks, the
   // repo's .git/hooks, or a ~/.githooks the global config names.
   for (const dir of gitHookDirs()) ZONES.push({ dir, what: GIT_HOOK_WHAT, tree: true, carve: [] });
+  // cairn's own folders the hook runs from (#492), asked of git the same way.
+  ZONES.push(...cairnZones());
   // The files that pointer can be written into (#465), listed only when the
   // call spells one in what it writes or runs -- never in a path it names,
   // so a folder called hookspath makes no edit of .git/config a pointer: a
