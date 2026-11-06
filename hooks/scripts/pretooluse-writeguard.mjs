@@ -69,8 +69,8 @@
  *   (runnerCommands: `op run --`, `find -exec`, `trap`). Refused unread, since
  *   each hands a shell a line nobody can see: a shell string holding a word the
  *   reader calls wild (`eval "$(cmd)"`), a pipe into a shell (`cmd | sh`), a
- *   nest past MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (the hook's own
- *   timeout would wave it through), a substitution past the reader's depth,
+ *   nest past MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (too costly to
+ *   read inside the hook's timeout), a substitution past the reader's depth,
  *   and tee fed by xargs. Asserted: writeguard.test.ts, "a redirect inside a
  *   nested shell". TEXT_ARGS names the programs whose words are code or text,
  *   never a line (`awk '$1 > 5'` passes); a quoted argument of a program off
@@ -170,9 +170,10 @@ const SPELL = { read: READ, cap: MAX_PLACES };
 const MAX_NEST = 8;
 
 /**
- * What one call may cost, nested re-reads included. A hook that runs out of
- * time is passed over by the harness (hooks docs, read 2026-11-05: a dated
- * claim), so a line built to outlast the guard is refused rather than read.
+ * What one call may cost, nested re-reads included, so a line built to outlast
+ * the 3000ms hooks.json gives this hook is refused rather than read. What the
+ * harness does with a hook that times out is unverified (a dated claim,
+ * 2026-11-06, read from no doc and run by no test): assume it lets the call by.
  */
 const MAX_READ = 1_000_000;
 const MAX_SEGMENTS = 4096;

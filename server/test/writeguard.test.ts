@@ -441,7 +441,7 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
     }
   });
 
-  it("a line built to run the guard out of time is refused, not waved through by the hook's timeout: nothing in these writes, only their cost does it", () => {
+  it("a line built to run the guard out of time is refused inside the hook's timeout: nothing in these writes, only their cost does it", () => {
     const c = at(fixture(), "root");
     const long = Array.from({ length: 1700 }, (_, i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`).join(";");
     const wide = Array.from({ length: 5000 }, (_, i) => `A${i}=1`).join(";");
