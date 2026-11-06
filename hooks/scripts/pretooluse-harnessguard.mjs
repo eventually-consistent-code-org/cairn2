@@ -374,12 +374,16 @@
  *   -delete` refuses wherever it could reach a protected path: an over-refusal, by
  *   decision, against a compiled pattern that could hold the guard past any budget.
  *
- *   Fails open on its own error only (exit 0 above): since Claude Code
- *   2.1.299 the platform fails closed when it cannot reach the guard or
- *   read its answer -- an action this guard could have blocked is refused,
- *   not let through, and on Windows a PreToolUse hook with no shell blocks
- *   the call. onFailure stays unset in hooks.json by design (ADR 0016).
- *   Dated claim about the harness, 2026-10-14, #371.
+ *   Fails open on its own error (exit 0 above), and a guard that gives no answer
+ *   blocks nothing either. With onFailure unset in hooks.json (by design and the
+ *   owner's to change, ADR 0016), the Claude Code hooks reference says a hook that
+ *   "exits with any other code, or fails in some other way, such as not starting
+ *   or printing invalid JSON. The action goes ahead", and "a timed-out `command`,
+ *   `http`, or `mcp_tool` hook doesn't block the tool call". The one exception it
+ *   names is a shell-form hook on Windows without Git Bash, which "can instead
+ *   block the tool call". A dated claim, read 2026-11-06 (#528). It corrects this
+ *   header's "since 2.1.299 the platform fails closed", dated 2026-10-14 (#371),
+ *   which the reference does not say.
  */
 
 import { spawnSync } from "node:child_process";

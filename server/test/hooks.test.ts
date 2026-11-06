@@ -8592,3 +8592,21 @@ describe("harness guard: no pattern the line typed is compiled, and its answers 
     expect(header).toContain("Patterns, dated 2026-11-06 (#528");
   });
 });
+
+describe("no guard says the platform fails closed: the sentence the hooks reference does not hold (#528)", () => {
+  // a claim about a third party, so it is dated and read from the page; this holds what each file says, not what the platform does
+  const GUARDS = [RUNGUARD, HARNESSGUARD, LEAKGUARD];
+
+  it("each guard quotes the page, dated, and none keeps the old sentence", () => {
+    expect(GUARDS.length).toBe(3);
+    for (const file of GUARDS) {
+      const source = readFileSync(file, "utf8").replace(/\n\s*(?:\*|\/\/)/g, " ").replace(/\s+/g, " ");
+      // the old sentence stands only as the correction's quote of itself, with its date beside it
+      expect(source, file).not.toMatch(/fails closed when it cannot reach/);
+      expect(source, file).toContain('"since 2.1.299 the platform fails closed", dated 2026-10-14 (#371), which the reference does not say');
+      expect(source, file).toContain('or fails in some other way, such as not starting or printing invalid JSON. The action goes ahead"');
+      expect(source, file).toContain("read 2026-11-06");
+      expect(source, file).toContain("onFailure");
+    }
+  });
+});

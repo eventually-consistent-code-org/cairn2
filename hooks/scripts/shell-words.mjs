@@ -711,7 +711,9 @@ export const RUNNER_HOPS = 3;
  * asserted by shell-words.test.ts, runguard-guards.test.ts and hooks.test.ts
  * "(#522)". A heredoc's body is data and never counts against MAX_READ, only
  * against MAX_RAW, the most text a line can hold at all. A body fed to a shell is
- * read as a line, and counts then.
+ * read as a line, and counts then. This charges reading and git questions, not what
+ * a guard does with what it read, which is bounded where it happens (#528): the
+ * folders and locations in the run guard, a typed pattern in the harness guard.
  */
 export const MAX_READ = 1_000_000;
 export const MAX_SEGMENTS = 4096;

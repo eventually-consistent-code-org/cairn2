@@ -3,11 +3,18 @@
 /**
  * Purpose: PreToolUse run guard -- classifies every git invocation by what
  *   it does, and refuses by effect. Exit 2 blocks; ANY internal error exits
- *   0 -- a broken guard (or classifier) never blocks work. That is the
- *   guard's own half of "fails open" only: since Claude Code 2.1.299 the
- *   platform fails closed when it cannot reach the guard or read its
- *   answer (onFailure stays unset in hooks.json by design, ADR 0016;
- *   dated claim about the harness, 2026-10-14, #371).
+ *   0 -- a broken guard (or classifier) never blocks work. And a guard that
+ *   gives no answer blocks nothing either. With onFailure unset in hooks.json
+ *   (by design and the owner's to change, ADR 0016), the Claude Code hooks
+ *   reference says a hook that "exits with any other code, or fails in some other
+ *   way, such as not starting or printing invalid JSON. The action goes ahead", and
+ *   "a timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
+ *   call". The one exception it names is a shell-form hook on Windows without Git
+ *   Bash, which "can instead block the tool call". So a heap crash is a pass, and
+ *   a line that can crash the guard is a bypass (#528). A dated claim, read
+ *   2026-11-06. It corrects this header's "since 2.1.299 the platform fails
+ *   closed", dated 2026-10-14 (#371), which the reference does not say. The page
+ *   names no signal, so what the harness does with a killed guard is unmeasured.
  *
  * Effects (git-effects.mjs classifies; its EFFECT_TABLE is the data):
  *   discards-work           uncommitted or unpushed work lost with no undo.
@@ -2111,8 +2118,10 @@ try {
  *   #319  an unquoted $(...) is one word of its command
  *   #320  process substitution and arithmetic bodies run
  *   #321  a line nested past the reader's depth is refused unread
- *   #522  the reading is linear, one read budget in the reader, a line past it
- *         refused unread, and a reader that runs out of stack refuses too.
+ *   #522  one read budget in the reader, a line past it refused unread, and a
+ *         reader that runs out of stack refuses too. What's asserted is each
+ *         shape runguard-guards.test.ts "(#522)" and "(#528)" time against the
+ *         budget, not that every path through the guard is linear (#528).
  *   #521  one depth for a shell, an eval, a heredoc fed to a shell, a pager and
  *         a runner's line, the write guard's; past it, refused unread. A runner's
  *         guesses in a row stop at RUNNER_HOPS, since a word list is no nest.
