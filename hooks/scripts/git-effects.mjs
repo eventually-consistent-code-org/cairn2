@@ -133,6 +133,9 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
   "may be another worktree's half-finished work. Park work in progress with a WIP commit on your own " +
   "branch instead, and squash it before the close.";
 
+// What a word the guard can't spell is told (#494): a plain word on the line is one it can judge.
+const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and the guard can judge it.";
+
 /**
  * The effect table (#249, #250, #264, #296, #414, #359, #434, #435, #438,
  * #464, #468, #288).
@@ -160,8 +163,23 @@ const SHARED_STASH = "the stash is shared by every worktree of this repository, 
  *   plusRef    a refspec with a leading `+`
  *   config     a `-c` setting matching `key` that reads as true
  *   probe      the repository says so: probe[name](inv) is true
+ *   wildSub    the subcommand itself is a word the guard can't spell (#494)
  * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
  * repository root when `word` is its absolute path (#288).
+ *
+ * A wild word (#494): the reader spells a line's words through what the line
+ * assigned before this table is read (shell-words.mjs spellWords), and
+ * `inv.wild` holds the ones it can't -- a substitution, a variable assigned
+ * from something it can't read, any operator on a name the line assigned. The
+ * shell may turn one into any flag or path, so where a row reads words it
+ * could be the word that fires it: a wild word a flag doesn't swallow matches
+ * every `flag` and `wholeTree` row and, in the action's place, every row with
+ * an `action`, and the refusal names the word. A row that always fires reads
+ * no word, so merge and its kin are judged as they always were. A push has its
+ * own answer, the ship gate's (pushWild). A flag on the line that keeps the
+ * write off the work tree still spares the row, and `unlessOn` still reads what
+ * was typed: the guard's Not seen block says so, dated. Asserted by
+ * runguard-guards.test.ts (#494).
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours have no discards-work row
  * because they are routine or recoverable: a single-path checkout/restore
@@ -310,6 +328,9 @@ export const EFFECT_TABLE = Object.freeze([
     why: "the value sits in an environment variable or a shell expansion the guard can't see, and the setting " +
       "decides what the command does (an alias, a mirror, a prune date); set it on the line itself " +
       "(`VAR=value git ...`, or `-c key=value`) so the guard can read it, or run the plain command." },
+  // #494 -- the subcommand itself is a word the guard can't spell; any row could be the one it fires
+  { effect: DISCARDS_WORK, when: "wildSub", what: "a git subcommand the guard can't spell",
+    why: `the shell works it out as the line runs, so what the command does can't be read off the effect table; it is refused as if it discarded work. ${SPELL_IT}` },
   { effect: MOVES_SHARED_REF, sub: "push", when: "pushTo",
     what: "`git push`", why: "it changes refs other clones fetch." },
   { effect: TOUCHES_OWNER_CHECKOUT, sub: "checkout", when: "always", what: "`git checkout`", why: REWRITES },
@@ -517,7 +538,10 @@ export function longNames(typed, names) {
  * `git clean -n --no-dry-run` deletes. `typed` is the word that first set
  * each flag, cut at any `=` (#359): what a refusal names. `values` is what
  * a long option was last given -- after its `=`, or the word it took --
- * for the rows that read one (`gc --prune=now`, #288).
+ * for the rows that read one (`gc --prune=now`, #288). `own` is every word
+ * read as itself, a flag or a bare word, and no flag's value (#494): a word
+ * the shell works out can be a flag only where it isn't swallowed, so a value
+ * after `=` or after a valued letter is left out with the rest.
  */
 export function readArgs(args, { short = "", longs = [], valued = [], alias = {} } = {}) {
   const flags = new Set();
@@ -525,6 +549,7 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
   const typed = new Map();
   const values = new Map();
   const words = [];
+  const own = [];
   const set = (n, word) => {
     flags.add(n);
     on.set(n, true);
@@ -535,6 +560,7 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const name = eq < 0 ? a : a.slice(0, eq);
+      if (eq < 0 || expands(name)) own.push(a);
       const hit = longNames(name, longs);
       for (const n of hit) set(n, name);
       if (eq >= 0) for (const n of hit) values.set(n, a.slice(eq + 1));
@@ -548,6 +574,9 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
       continue;
     }
     if (/^-[^-]/.test(a)) {
+      // the letters before anything the shell works out are the ones typed
+      const typedTo = a.search(/[$`]/) < 0 ? a.length : a.search(/[$`]/);
+      if (![...a.slice(1, typedTo)].some((l) => short.includes(l))) own.push(a);
       for (let c = 1; c < a.length; c++) {
         set(alias[a[c]] ?? `-${a[c]}`, a);
         if (short.includes(a[c])) {
@@ -558,8 +587,9 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
       continue;
     }
     words.push(a);
+    own.push(a);
   }
-  return { flags, on, typed, values, words };
+  return { flags, on, typed, values, words, own };
 }
 
 /**
@@ -574,10 +604,12 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
  * root, so the guard's repoRoot probe supplies it per word. A single path
  * -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` --
  * is not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by
- * decision (phase 31, 2026-11-04). Asserted by runguard-effects.test.ts
- * and runguard-guards.test.ts (#464).
+ * decision (phase 31, 2026-11-04). $PWD is the folder the command stands in,
+ * so `$PWD`, `$PWD/` and `$PWD/*` read as `.`, `./` and `./*` (#494). Asserted
+ * by runguard-effects.test.ts and runguard-guards.test.ts (#464, #494).
  */
-export function wholeTree(p, root) {
+export function wholeTree(typed, root) {
+  const p = typed.replace(/^\$(?:PWD|\{PWD\})(?=\/|$)/, ".");
   if (p === "") return false;
   if (/^(?::(?:\/*:?|\((?!(?:\w+,)*exclude\b)\w+(?:,\w+)*\)))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p)) return true;
   return root !== undefined && root !== null && bareRoot(p) === bareRoot(root);
@@ -659,6 +691,8 @@ function rowCause(row, inv, probe) {
   // the action word: the first arg, or "" when there is none or it is an
   // option -- git's default action, as in a bare `git stash` (#435)
   const first = inv.args[0] === undefined || inv.args[0].startsWith("-") ? "" : inv.args[0];
+  // a word the guard can't spell in the action's place could be any action (#494)
+  if (row.action !== undefined && inv.wild?.has(inv.args[0])) return inv.args[0];
   if (row.action !== undefined && ![].concat(row.action).includes(first)) return null;
   const args = row.action !== undefined && first !== "" ? inv.args.slice(1) : inv.args;
   // past a bare `--` a push's words are still refspecs, not paths; read once per row
@@ -672,6 +706,12 @@ function rowCause(row, inv, probe) {
     const { flags, on } = parsed();
     if (row.sparesTree.some((n) => on.get(n) === true) && !flags.has("--worktree")) return null;
   }
+  // a word the guard can't spell could be the word this row reads (#494): a
+  // flag or a bare word, or, for a row that wants a path, one past a `--`
+  const wildCause = (paths = []) => {
+    if (!inv.wild?.size || inv.sub === "push") return null;
+    return [...parsed().own, ...paths].find((w) => inv.wild.has(w)) ?? null;
+  };
   switch (row.when) {
     case "always":
       // the action word it matched, or the subcommand for a row without one or a bare stash
@@ -680,7 +720,7 @@ function rowCause(row, inv, probe) {
       const { flags, typed, values } = parsed();
       // a row with `value` wants the flag's value to match too (#288): `--prune=now`, not a bare `--prune`
       const hit = row.names.find((n) => flags.has(n) && (row.value === undefined || row.value.test(values.get(n) ?? "")));
-      return hit === undefined ? null : typed.get(hit) ?? hit;
+      return hit === undefined ? wildCause() : typed.get(hit) ?? hit;
     }
     case "unlessOn": {
       // one name or a list (#468): `apply --check`, `--stat`, `--numstat`, `--summary` apply nothing
@@ -691,13 +731,14 @@ function rowCause(row, inv, probe) {
       const { flags, typed, words } = parsed();
       // a row that also needs a flag names it: `-rf`, not `.` (#434)
       const need = row.needs?.find((n) => flags.has(n));
-      if (row.needs && need === undefined) return null;
+      if (row.needs && need === undefined) return wildCause();
       // the repository root as an absolute path is the whole tree too (#288):
       // the repoRoot probe answers per word, or no word is the root
       const root = typeof probe?.repoRoot === "function" ? probe.repoRoot : () => undefined;
       const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
         : [...words, ...inv.paths].find((w) => wholeTree(w, root(w))) ?? null;
-      return tree === null || need === undefined ? tree : typed.get(need) ?? need;
+      if (tree === null) return wildCause(inv.paths);
+      return need === undefined ? tree : typed.get(need) ?? need;
     }
     case "pushTo": {
       // what decides where it lands: the push-everything flags, then remote and refspecs
@@ -718,6 +759,8 @@ function rowCause(row, inv, probe) {
     }
     case "probe":
       return typeof probe?.[row.name] === "function" && probe[row.name](inv) ? row.cause : null;
+    case "wildSub":
+      return inv.wild?.has(inv.sub) ? inv.sub : null;
   }
   return null;
 }
@@ -735,7 +778,11 @@ export function classify(inv, probe = {}, { only, first = false } = {}) {
     if (only !== undefined && row.effect !== only) continue;
     const flag = rowCause(row, inv, probe);
     if (flag === null || flag === undefined) continue;
-    out.push({ effect: row.effect, flag, what: row.what, why: row.why });
+    // the row a word could fire is named through the word (#494): it's the word that refuses
+    const wild = row.when !== "wildSub" && inv.wild?.has(flag);
+    out.push({ effect: row.effect, flag,
+      what: wild ? `\`git ${inv.sub}\` with a word the guard can't spell (\`${flag}\`)` : row.what,
+      why: wild ? `the shell works that word out as the line runs, so it may be what makes this ${row.what}: ${row.why} ${SPELL_IT}` : row.why });
     if (first) break;
   }
   return out;

@@ -735,9 +735,9 @@ describe("git effects: config from the environment channels is folded in git's o
     expect(envConfig(env({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.hr", GIT_CONFIG_VALUE_0: "$V" })).unread)
       .toEqual([{ key: "alias.hr", from: "GIT_CONFIG_VALUE_0" }]);
     expect(envConfig(env({ GIT_CONFIG_PARAMETERS: "'alias.hr=reset --hard'" })).unread).toEqual([{ key: "*", from: "GIT_CONFIG_PARAMETERS" }]);
-    // the include row and the unread row apply to every subcommand: no `sub`, and so not on the builtin list
+    // the include, unread and wild-subcommand (#494) rows apply to every subcommand: no `sub`, and so not on the builtin list
     const anySub = EFFECT_TABLE.filter((r: { sub?: string }) => r.sub === undefined);
-    expect(anySub.map((r: { when: string }) => r.when).sort()).toEqual(["config", "unread"]);
+    expect(anySub.map((r: { when: string }) => r.when).sort()).toEqual(["config", "unread", "wildSub"]);
     expect(effectsOf(parseInvocation(["git", "-c", "include.path=/tmp/x.cfg", "status"]))).toEqual([DISCARDS_WORK]);
     expect(effectsOf(parseInvocation(["git", "-c", "includeIf.gitdir:/r/.path=/tmp/x.cfg", "hr"]))).toEqual([DISCARDS_WORK]);
     expect(effectsOf(parseInvocation(["git", "-c", "core.excludesFile=/tmp/x.cfg", "status"]))).toEqual([READ_ONLY]);

@@ -39,8 +39,9 @@ export const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 // Shell options that take the next word as their value (-o pipefail).
 const SHELL_VALUE_OPTS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]);
 
-// A NAME=value word in command position: an assignment, not the command.
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// A NAME=value word in command position: an assignment, not the command --
+// `X+=y` and `a[0]=y` too (#494), which the shell reads the same way.
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
 
 // Reserved words that open, continue or close a compound command; the
 // command word comes after them (#285).
@@ -250,9 +251,39 @@ function commandStart(words) {
 }
 
 /**
+ * The text a `$'...'` holds, as the shell decodes it (#494): `$'--hard'` is
+ * --hard, and so is `$'\x2d\x2dhard'`. `body` runs from just past the
+ * opening quote; returns { text, end }, `end` the closing quote's index.
+ */
+function ansiQuoted(body) {
+  const CODES = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v" };
+  let text = "";
+  let i = 0;
+  for (; i < body.length && body[i] !== "'"; i++) {
+    if (body[i] !== "\\") { text += body[i]; continue; }
+    const rest = body.slice(i + 1);
+    const m = /^(?:x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8})|([0-7]{1,3}))/.exec(rest);
+    if (m) {
+      const code = m[1] ?? m[2] ?? m[3];
+      const point = code === undefined ? parseInt(m[4], 8) : parseInt(code, 16);
+      text += point <= 0x10ffff ? String.fromCodePoint(point) : "";
+      i += m[0].length;
+    } else if (rest[0] !== undefined) {
+      text += CODES[rest[0]] ?? rest[0];
+      i++;
+    }
+  }
+  return { text, end: i };
+}
+
+/**
  * Splits a shell command line into simple-command segments, each
- * { words, reserved, redirects, heredocs: [{ delim, body, quoted }],
- * herestrings, inputs, op }. Single and double quotes and backslashes are honoured, so
+ * { words, quotes, reserved, redirects, heredocs: [{ delim, body, quoted }],
+ * herestrings, inputs, op }. `quotes` runs beside `words`: what each word's
+ * quoting said, as [start, end, kind] spans of its text -- `'` for a stretch
+ * the shell keeps literal (single quotes, a backslash), `"` for a double-quoted
+ * one, which a variable fills without splitting -- or null for a word with no
+ * quote in it (#494, read by spellWords). Single and double quotes and backslashes are honoured, so
  * quoted text stays inside its word: `git commit -m "explain git reset
  * --hard"` is one git commit with a message, never a reset, and a `>` in a
  * quoted pattern is text. Segments break at ; & | and newlines, plus
@@ -310,11 +341,13 @@ export function shellSegments(command, read = {}, depth = 0) {
   const subs = []; // bodies of command substitutions, split at the end
   const pending = []; // heredocs whose bodies start on the next line
   let words = [];
+  let quotes = []; // beside `words`: what each word's quoting said (#494)
   let redirects = [];
   let heredocs = [];
   let herestrings = [];
   let inputs = [];
   let cur = null;
+  let spans = []; // the same, for the word being read
   // what the next completed word is: word | redirect | skip | heredoc | herestring | input
   let next = "word";
   let strip = false; // `<<-` strips leading tabs before matching the delimiter
@@ -330,18 +363,29 @@ export function shellSegments(command, read = {}, depth = 0) {
       quoted = false;
     } else if (next === "herestring") herestrings.push(cur);
     else if (next === "input") inputs.push(cur);
-    else if (next === "word") words.push(cur);
+    else if (next === "word") {
+      words.push(cur);
+      quotes.push(spans.length ? spans : null);
+    }
     next = "word";
     cur = null;
+    spans = [];
+  };
+  // `text` joins the word being read, its quoting noted
+  const addQuoted = (text, kind) => {
+    const from = (cur ?? "").length;
+    cur = (cur ?? "") + text;
+    spans.push([from, from + text.length, kind]);
   };
   const endSeg = (op = null) => {
     pushWord();
     if (words.length || redirects.length) {
       const at = commandStart(words);
-      segs.push({ words: words.slice(at), reserved: words.slice(0, at), redirects, heredocs,
+      segs.push({ words: words.slice(at), quotes: quotes.slice(at), reserved: words.slice(0, at), redirects, heredocs,
         herestrings, inputs, op });
     }
     words = [];
+    quotes = [];
     redirects = [];
     heredocs = [];
     herestrings = [];
@@ -371,19 +415,31 @@ export function shellSegments(command, read = {}, depth = 0) {
     if (c === "'") {
       const j = command.indexOf("'", i + 1);
       const end = j < 0 ? command.length : j;
-      cur = (cur ?? "") + command.slice(i + 1, end);
+      addQuoted(command.slice(i + 1, end), "'");
       i = end + 1;
       continue;
     }
 
+    // $'...' -- the shell decodes the escapes, and the text is literal;
+    // $"..." is a plain double-quoted string (#494)
+    if (c === "$" && n === "'") {
+      const { text, end } = ansiQuoted(command.slice(i + 2));
+      addQuoted(text, "'");
+      i += 2 + end + 1;
+      continue;
+    }
+    if (c === "$" && n === '"') { i++; continue; }
+
     // "double quotes" -- literal but for escapes and, if read, substitutions
     if (c === '"') {
       let s = "";
+      const escaped = []; // where an escape left a character the shell keeps literal
       i++;
       while (i < command.length && command[i] !== '"') {
         const d = command[i];
         const e = command[i + 1];
         if (d === "\\" && i + 1 < command.length && (!read.posixEscapes || '"\\$`'.includes(e))) {
+          escaped.push(s.length);
           s += e;
           i += 2;
           continue;
@@ -407,8 +463,23 @@ export function shellSegments(command, read = {}, depth = 0) {
         s += d;
         i++;
       }
-      cur = (cur ?? "") + s;
+      const from = (cur ?? "").length;
+      // an escaped `$` first: the first span covering a character is its kind
+      for (const at of escaped) spans.push([from + at, from + at + 1, "'"]);
+      addQuoted(s, '"');
       i++;
+      continue;
+    }
+
+    // ${ ... } outside quotes -- whatever is in the braces stays in the word
+    // (#494): `${X:-a b}` is one expansion, never `${X:-a` and `b}`, and a
+    // substitution in it runs like any other
+    if (c === "$" && n === "{") {
+      const end = closeBrace(command, i + 2);
+      const text = command.slice(i, end + 1);
+      if (read.substitutions) subs.push(...heredocBodies(text));
+      cur = (cur ?? "") + text;
+      i = end + 1;
       continue;
     }
 
@@ -435,7 +506,7 @@ export function shellSegments(command, read = {}, depth = 0) {
     // backslash outside quotes -- the next character is literal
     if (c === "\\") {
       if (n !== undefined && n !== "\n") {
-        cur = (cur ?? "") + n;
+        addQuoted(n, "'");
         i += 2;
         continue;
       }
@@ -477,7 +548,7 @@ export function shellSegments(command, read = {}, depth = 0) {
 
     if (read.redirects && (c === ">" || (c === "&" && n === ">"))) {
       // a bare number right before `>` is the descriptor, not a word
-      if (cur !== null && /^\d+$/.test(cur)) cur = null; else pushWord();
+      if (cur !== null && /^\d+$/.test(cur)) { cur = null; spans = []; } else pushWord();
       let j = i + (c === "&" ? 2 : 1);
       if (command[j] === ">" || command[j] === "|") j++;
       if (command[j] === "&") { next = "skip"; i = j + 1; continue; } // >&2: a descriptor
@@ -542,7 +613,7 @@ export function shellSegments(command, read = {}, depth = 0) {
 export const SUBSTITUTION_DEPTH = 8;
 
 /** The segment that stands in for the bodies the reader stopped at. */
-const deepSegment = () => ({ words: [], reserved: [], redirects: [], heredocs: [], herestrings: [],
+const deepSegment = () => ({ words: [], quotes: [], reserved: [], redirects: [], heredocs: [], herestrings: [],
   inputs: [], op: null, deep: true });
 
 /** True when a line's segments hold a body nested deeper than the reader reads (#321). */
@@ -714,13 +785,116 @@ export function unwrap(words, read = {}) {
   return { words: w, assigns, writes, wrappers, dirs };
 }
 
-// Spelling a line's variables (#291)
-
-// A `$NAME` or `${NAME}` inside a word (#291).
-const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
+// Spelling a line's variables (#291, #494, #509)
 
 // The most spellings of one word before the rest count as lost.
 const SPELL_CAP = 16;
+
+/**
+ * What a variable holds when the line assigned it from something the guard
+ * can't read and no folder can be said to be safe from it (#509): a `read`,
+ * `printf -v`, `mapfile`, `getopts`, a `+=`, an array, a transforming
+ * `declare`, or any operator on an assigned name. null in `vars` is the older
+ * case, a $(...) or backtick (#291): `F=$(mktemp); echo x > $F` is a daily
+ * shape, pinned to pass, where these lead a write nowhere the guard can place.
+ * Both are wild to spellWords.
+ */
+export const UNREADABLE = Symbol("unreadable");
+
+/** True for a `vars` entry the guard can't spell: assigned from a substitution, or UNREADABLE. */
+const isWild = (v) => v === null || v === UNREADABLE;
+
+// Set while a word is spelled, and never in a word: a place an unquoted value splits.
+const BREAK = "\0";
+
+/** Index of the `}` closing a `${` whose body starts at `i`, nesting-aware. */
+function closeBrace(word, i) {
+  let depth = 1;
+  for (; i < word.length; i++) {
+    if (word[i] === "\\") i++;
+    else if (word[i] === "$" && word[i + 1] === "{") { depth++; i++; }
+    else if (word[i] === "}" && --depth === 0) return i;
+  }
+  return word.length;
+}
+
+/**
+ * What one `${...}` body asks for, as the ref expansions lists: a plain
+ * name, a positional, or an operator (`op`) on a name -- anything with more
+ * in the braces than the name, indirection (${!N}), a length (${#N}) and an
+ * array element (${N[0]}) among them. A `def` is the word a default-taking
+ * operator (`:-`, `-`, `:=`, `=`, `:+`, `+`) gives the shell when the name is
+ * not set. Null for what no value can come from (`${#}`, `${?}`).
+ */
+function braceRef(body) {
+  const m = /^([!#]?)([A-Za-z_]\w*|[0-9]+|[@*])?([^]*)$/.exec(body);
+  if (m[2] === undefined) return null;
+  if (!/^[A-Za-z_]/.test(m[2])) return m[1] === "#" ? null : { kind: "positional" };
+  if (!m[1] && !m[3]) return { kind: "name", name: m[2] };
+  const def = m[1] ? null : /^:?[-=+]([^]*)$/.exec(m[3]);
+  return { kind: "op", name: m[2], def: def ? def[1].replace(/["']/g, "") : undefined };
+}
+
+/**
+ * Every expansion in a word, in order, as { start, end, kind, dq, name, def }:
+ * `kind` is `sub` for a $(...) or backtick, `name` for $NAME and ${NAME},
+ * `op` for an operator on a name (braceRef), `positional` for $1, $@, $*.
+ * `spans` is the word's quoting from shellSegments: nothing in a literal
+ * stretch expands, and `dq` marks one a value fills without splitting.
+ * Arithmetic and process substitution are skipped -- a number and a /dev/fd
+ * path are no flag, and the reader queues their bodies as commands anyway.
+ */
+function expansions(word, spans) {
+  const out = [];
+  const quoteAt = (i) => spans?.find(([a, b]) => i >= a && i < b)?.[2];
+  // a name stops where its quoting does: `"$F"x` is $F, then an x
+  const nameEnd = (i) => {
+    const inside = spans?.find(([a, b]) => i >= a && i < b);
+    return inside ? inside[1] : Math.min(word.length, ...(spans ?? []).map(([a]) => a).filter((a) => a > i));
+  };
+  for (let i = 0; i < word.length; i++) {
+    const c = word[i];
+    const n = word[i + 1];
+    if (c !== "$" && c !== "`" && !((c === "<" || c === ">") && n === "(")) continue;
+    const q = quoteAt(i);
+    if (q === "'") continue;
+    const dq = q === '"';
+    if (c === "`") {
+      const end = closeTick(word, i + 1);
+      out.push({ start: i, end: end + 1, kind: "sub", dq });
+      i = end;
+    } else if (c !== "$") {
+      if (!dq) i = closeParen(word, i + 2);
+    } else if (n === "(") {
+      const end = closeParen(word, i + 2);
+      if (word[i + 2] !== "(") out.push({ start: i, end: end + 1, kind: "sub", dq });
+      i = end;
+    } else if (n === "{") {
+      const end = closeBrace(word, i + 2);
+      const ref = braceRef(word.slice(i + 2, end));
+      if (ref) out.push({ start: i, end: end + 1, dq, ...ref });
+      i = end;
+    } else if (n !== undefined && /[0-9@*]/.test(n)) {
+      out.push({ start: i, end: i + 2, kind: "positional", dq });
+      i++;
+    } else {
+      const m = /^[A-Za-z_]\w*/.exec(word.slice(i + 1, nameEnd(i)));
+      if (!m) continue;
+      out.push({ start: i, end: i + 1 + m[0].length, kind: "name", name: m[0], dq });
+      i += m[0].length;
+    }
+  }
+  return out;
+}
+
+/**
+ * What a ref holds on this line: undefined when the line never assigned the
+ * name, UNREADABLE for any operator on a name it did, else the `vars` entry.
+ */
+function refValue(ref, vars) {
+  if (ref.kind === "op") return vars?.has(ref.name) ? UNREADABLE : undefined;
+  return vars?.get(ref.name);
+}
 
 /**
  * `raw` with every variable the line assigned earlier spelled out (#291):
@@ -730,26 +904,34 @@ const SPELL_CAP = 16;
  * path with a folder after it, leads the write where the guard can't
  * follow -- `lost`, as a cd it can't read (#258) and a substitution leading
  * a path (#319) do; elsewhere in the path it stays as typed, judged under
- * the folder before it, as `/tmp/$(date).bak` is. A variable the line
- * never assigned stays as typed (the guard's Not seen block). Past `cap`
- * values the rest is lost too.
+ * the folder before it, as `/tmp/$(date).bak` is. An UNREADABLE one at the
+ * front is `lost` with or without a folder after it (#509). A variable the
+ * line never assigned stays as typed (the guard's Not seen block), but a
+ * default written in the word is a value too (`${X:-hooks}`), so it is
+ * judged as well. Past `cap` values the rest is lost too.
  */
 export function expandAssigned(raw, vars, cap = SPELL_CAP) {
-  if (!vars?.size) return { raws: [raw], lost: false };
   let raws = [""];
   let lost = false;
   let at = 0;
-  for (const m of raw.matchAll(VAR_REF)) {
-    const text = raw.slice(at, m.index);
-    at = m.index + m[0].length;
-    const vals = vars.get(m[1] ?? m[2]);
-    if (vals === undefined) { raws = raws.map((r) => r + text + m[0]); continue; } // never assigned on the line
-    if (vals === null) { // assigned from something the guard can't read
-      if (/^(?:\.\/)*$/.test(raw.slice(0, m.index)) && raw.slice(at).includes("/")) lost = true;
-      raws = raws.map((r) => r + text + m[0]);
-      continue;
+  for (const ref of expansions(raw)) {
+    const text = raw.slice(at, ref.start);
+    const typed = raw.slice(ref.start, ref.end);
+    const front = /^(?:\.\/)*$/.test(raw.slice(0, ref.start));
+    at = ref.end;
+    const vals = ref.kind === "sub" || ref.kind === "positional" ? undefined : refValue(ref, vars);
+    if (vals === undefined && ref.def !== undefined) { // never assigned, with a default in the word
+      const inner = expandAssigned(ref.def, vars, cap);
+      lost ||= inner.lost;
+      raws = raws.flatMap((r) => [r + text + typed, ...inner.raws.map((v) => r + text + v)]);
+    } else if (vals === undefined) { // never assigned on the line
+      raws = raws.map((r) => r + text + typed);
+    } else if (isWild(vals)) { // assigned from something the guard can't read
+      if (front && (vals === UNREADABLE || raw.slice(at).includes("/"))) lost = true;
+      raws = raws.map((r) => r + text + typed);
+    } else {
+      raws = raws.flatMap((r) => vals.map((v) => r + text + v));
     }
-    raws = raws.flatMap((r) => vals.map((v) => r + text + v));
     if (raws.length > cap) { lost = true; raws = raws.slice(0, cap); }
   }
   return { raws: raws.map((r) => r + raw.slice(at)), lost };
@@ -760,23 +942,87 @@ export function expandAssigned(raw, vars, cap = SPELL_CAP) {
  * through the variables assigned before it and the ones the guard knows
  * (`known`: the harness guard's ~, $HOME, $CAIRN_HOME ...), one per value
  * a loop variable in it holds. Null when a $(...) or backtick computes it,
- * or a variable it names was itself unresolvable.
+ * or a variable it names was itself; UNREADABLE when an operator or an
+ * UNREADABLE variable does, or a positional (#509).
  */
 function valueOf(v, vars, { known = (x) => x, cap = SPELL_CAP } = {}) {
   if (/\$\(|`/.test(v)) return null;
-  if ([...v.matchAll(VAR_REF)].some((m) => vars.get(m[1] ?? m[2]) === null)) return null;
+  const refs = expansions(v);
+  const held = refs.map((r) => (r.kind === "positional" ? UNREADABLE : refValue(r, vars)));
+  if (held.includes(null)) return null;
+  if (held.includes(UNREADABLE)) return UNREADABLE;
   const { raws, lost } = expandAssigned(v, vars, cap);
-  return lost ? null : raws.map(known);
+  return lost ? null : raws.map((x) => known(x));
 }
 
-/** `vars` with each NAME=value of `assigns` set, in order, each read through the ones before it (#291). */
+/**
+ * Sets `name` in `vars`, keeping what it held (#494): a line's later
+ * assignment may sit in a branch that never runs (`F=--hard; false && F=x`),
+ * so every value it was ever given counts. Wild wins; past `cap` values it is
+ * as good as unreadable.
+ */
+function remember(vars, name, vals, cap = SPELL_CAP) {
+  const had = vars.get(name);
+  if (had === undefined) vars.set(name, vals);
+  else if (had === UNREADABLE || vals === UNREADABLE) vars.set(name, UNREADABLE);
+  else if (had === null || vals === null) vars.set(name, null);
+  else {
+    const all = [...new Set([...had, ...vals])];
+    vars.set(name, all.length > cap ? UNREADABLE : all);
+  }
+}
+
+/**
+ * `vars` with each NAME=value of `assigns` set, in order, each read through
+ * the ones before it (#291). `X+=y` and `a[0]=y` build on a value the guard
+ * won't work out: UNREADABLE (#509).
+ */
 export function assignVars(assigns, vars, opts = {}) {
   const out = new Map(vars);
   for (const a of assigns) {
     const eq = a.indexOf("=");
-    if (eq > 0) out.set(a.slice(0, eq), valueOf(a.slice(eq + 1), out, opts));
+    if (eq <= 0) continue;
+    const m = /^([A-Za-z_]\w*)(\[[^\]]*\])?(\+)?$/.exec(a.slice(0, eq));
+    if (!m) continue;
+    remember(out, m[1], m[2] || m[3] ? UNREADABLE : valueOf(a.slice(eq + 1), out, opts), opts.cap);
   }
   return out;
+}
+
+// The letters of `read` and `mapfile` that take a value, which is no variable's name.
+const READ_VALUED = "dinNptu";
+const MAPFILE_VALUED = "dnOsuCc";
+
+/**
+ * The names a command that isn't an assignment sets (#509), each from
+ * something the guard can't read: `read` (REPLY with no name), `mapfile` and
+ * `readarray` (MAPFILE), `printf -v`, `getopts`. A `cd` and its kin move
+ * $OLDPWD to a folder the line left.
+ */
+function readNames(w) {
+  const skipping = (valued, fallback) => {
+    const names = [];
+    for (let k = 1; k < w.length; k++) {
+      if (w[k].startsWith("-")) {
+        if (valued.includes(w[k].at(-1))) k++;
+      } else if (/^[A-Za-z_]\w*$/.test(w[k])) names.push(w[k]);
+    }
+    return names.length ? names : [fallback];
+  };
+  switch (w[0]) {
+    case "read": return skipping(READ_VALUED, "REPLY");
+    case "mapfile":
+    case "readarray": return skipping(MAPFILE_VALUED, "MAPFILE");
+    case "getopts": return w[2] ? [w[2]] : [];
+    case "printf": {
+      const m = /^-v(.*)$/.exec(w[1] ?? "");
+      return m ? [m[1] || w[2]].filter(Boolean) : [];
+    }
+    case "cd":
+    case "pushd":
+    case "popd": return ["OLDPWD"];
+    default: return [];
+  }
 }
 
 /**
@@ -788,22 +1034,139 @@ export function assignVars(assigns, vars, opts = {}) {
  * command's alone, as the shell gives it: the guard hands it to the line
  * the command nests, and nothing after it sees it. `opts`: `read`, how the
  * guard reads a line, `known` and `cap`, as valueOf takes them.
+ *
+ * Unreadable, past that (#509): an array (`a=(x y)`, `declare -a`), a
+ * `declare -n` or one that transforms its value (-i -l -u -c), a `for NAME`
+ * with no word list (the positionals), and each of readNames'. An `eval`'s
+ * line assigns in this shell too, so it is read for them (#494).
  */
 export function lineVars(seg, vars, opts = {}) {
   const { words: w, assigns } = unwrap(seg.words, opts.read);
   let out = vars;
-  if (!w.length) out = assignVars(assigns, out, opts);
-  else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
-    out = assignVars(w.slice(1).filter((a) => ASSIGNMENT.test(a)), out, opts);
+  const unreadable = (names) => {
+    out = new Map(out);
+    for (const n of names) remember(out, n, UNREADABLE, opts.cap);
+  };
+  // `a=(x y)`: the reader ends the word at the `(`, so the value is never in it
+  const array = (word) => seg.op === "(" && word === seg.words.at(-1) && /^[A-Za-z_]\w*\+?=$/.test(word);
+  if (!w.length) {
+    out = assignVars(assigns.filter((a) => !array(a)), out, opts);
+    unreadable(assigns.filter(array).map((a) => a.replace(/\+?=$/, "")));
+  } else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
+    const given = w.slice(1).filter((a) => ASSIGNMENT.test(a));
+    const transforms = w.slice(1).some((a) => /^-[a-zA-Z]*[aAinluc]/.test(a));
+    const plain = transforms ? [] : given.filter((a) => !array(a));
+    out = assignVars(plain, out, opts);
+    unreadable(given.filter((a) => !plain.includes(a)).map((a) => a.slice(0, a.indexOf("=")).replace(/(\[.*\])?\+?$/, "")));
+  } else if (w[0] === "eval") {
+    for (const inner of shellSegments(evalCommandString(w.slice(1)) ?? "", opts.read ?? {})) out = lineVars(inner, out, opts);
+  } else {
+    unreadable(readNames(w));
   }
   const r = seg.reserved ?? [];
-  const at = r.findIndex((x, i) => (x === "for" || x === "select") && r[i + 2] === "in");
-  if (at >= 0) {
-    const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out, opts));
-    out = new Map(out);
-    out.set(r[at + 1], vals.includes(null) ? null : vals.flat());
+  const at = r.findIndex((x) => x === "for" || x === "select");
+  if (at >= 0 && r[at + 1] !== undefined) {
+    if (r[at + 2] === "in") {
+      const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out, opts));
+      out = new Map(out);
+      remember(out, r[at + 1], vals.includes(UNREADABLE) ? UNREADABLE : vals.includes(null) ? null : vals.flat(), opts.cap);
+    } else unreadable([r[at + 1]]);
   }
   return out;
+}
+
+// Reserved words whose body runs again, later or alongside: order on the line can't be trusted.
+const LOOPS = new Set(["while", "until", "for", "select", "repeat", "function", "coproc"]);
+
+/**
+ * The variables a line starts from (#494): `vars`, and when a loop or a
+ * function body can run after what the line assigns below it (`f() { git
+ * reset $F; }; F=--hard; f`), everything the line assigns anywhere.
+ */
+export function seedVars(segs, vars, opts = {}) {
+  const repeats = segs.some((s) => (s.reserved ?? []).some((w) => LOOPS.has(w))
+    || (s.op === "(" && s.words.length === 1 && /^[A-Za-z_][\w.:-]*$/.test(s.words[0])));
+  return repeats ? segs.reduce((out, s) => lineVars(s, out, opts), vars) : vars;
+}
+
+/**
+ * One word spelled through `vars` (#494): { alts, wild }. `alts` holds a word
+ * list per value it can take, an unquoted value split the way the shell splits
+ * it and a double-quoted one kept whole; a value that leaves an unquoted word
+ * empty leaves no word. An assignment word never splits, and with several
+ * values stays as typed (a folder the guard then calls lost). `wild` says part
+ * of it can't be spelled: it stays as typed. $IFS, which the line never set,
+ * is the break it stands for. A word with no expansion and no quote has its
+ * braces spelled (`{--hard,}`), as the shell does first, unless `braces` is
+ * off: a guard that spells them itself keeps its own marker for "anything".
+ */
+function spellWord(word, spans, vars, { cap, braces }) {
+  const refs = expansions(word, spans);
+  const assign = ASSIGNMENT.test(word);
+  if (!refs.length) return { alts: [spans || assign || !braces ? [word] : braceExpand(word)], wild: false };
+  const fill = (v, dq) => (dq || assign ? v : v.split(/\s+/).join(BREAK));
+  let raws = [""];
+  let wild = false;
+  let at = 0;
+  for (const ref of refs) {
+    const text = word.slice(at, ref.start);
+    const typed = word.slice(ref.start, ref.end);
+    at = ref.end;
+    const vals = ref.kind === "sub" || ref.kind === "positional" ? null : refValue(ref, vars);
+    if (vals === undefined && ref.name === "IFS" && ref.kind === "name") {
+      raws = raws.map((r) => r + text + (ref.dq ? " " : BREAK));
+    } else if (vals === undefined && ref.def !== undefined) {
+      const inner = spellWord(ref.def, null, vars, { cap, braces });
+      wild ||= inner.wild;
+      const defs = inner.alts.map((list) => list.map((v) => fill(v, ref.dq)).join(ref.dq ? " " : BREAK));
+      raws = raws.flatMap((r) => [r + text + typed, ...defs.map((v) => r + text + v)]);
+    } else if (vals === undefined) {
+      raws = raws.map((r) => r + text + typed);
+    } else if (isWild(vals)) {
+      wild = true;
+      raws = raws.map((r) => r + text + typed);
+    } else {
+      raws = raws.flatMap((r) => vals.map((v) => r + text + fill(v, ref.dq)));
+    }
+    if (raws.length > cap) return { alts: [[word]], wild: true };
+  }
+  raws = raws.map((r) => r + word.slice(at));
+  if (assign) return { alts: [raws.length === 1 ? [raws[0].split(BREAK).join(" ")] : [word]], wild };
+  // quoting can leave an empty word (`""`); a bare value that was empty leaves none
+  const alts = raws.map((r) => {
+    const list = r.split(BREAK).filter((x) => x !== "");
+    return list.length || !spans ? list : [""];
+  });
+  return { alts, wild };
+}
+
+/**
+ * A segment's words spelled through what the line assigned (#494), before
+ * any guard judges them: one { words, wild } per way the words can read, a
+ * variable a loop gave several values adding a reading each, so `for s in log
+ * reset; do git $s --hard; done` is read as both. `wild` is the Set of the
+ * words -- as typed -- the reader can't spell: a substitution, a positional,
+ * a variable assigned from something it can't read, any operator on a name
+ * the line assigned. A name the line never assigned stays as typed and is not
+ * wild, in every guard: the Not seen decision of #291. `opts.wild` carries
+ * the wild words of a line a runner re-reads, its words requoted (#311). Past
+ * SPELL_CAP readings a word stays as typed, wild.
+ */
+export function spellWords(seg, vars, opts = {}) {
+  const cap = opts.cap ?? SPELL_CAP;
+  const braces = opts.braces ?? true;
+  let readings = [{ words: [], wild: new Set() }];
+  seg.words.forEach((word, k) => {
+    let { alts, wild } = spellWord(word, seg.quotes?.[k] ?? null, vars, { cap, braces });
+    if (readings.length * alts.length > cap) { alts = [[word]]; wild = true; }
+    if (opts.wild?.has(word)) wild = true;
+    readings = readings.flatMap((r) => alts.map((list) => {
+      const out = { words: [...r.words, ...list], wild: new Set(r.wild) };
+      if (wild) for (const w of list) out.wild.add(w);
+      return out;
+    }));
+  });
+  return readings;
 }
 
 /**

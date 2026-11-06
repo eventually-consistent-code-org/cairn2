@@ -142,10 +142,9 @@
  *   expansion, a numbered entry with no key or value, GIT_CONFIG_PARAMETERS
  *   set by hand). A setting the guard never reads is left to git whatever
  *   its value: `--config-env=core.editor=E status` passes. Asserted by
- *   runguard-guards.test.ts (#467). Not seen, dated 2026-11-04: those
- *   variables exported earlier on the line rather than set on the
- *   command's own prefix (the push gate still counts them, linePushConfig;
- *   an alias through them does not), and a user or system config moved by
+ *   runguard-guards.test.ts (#467). Those variables exported earlier on
+ *   the line are read the same way (#494, through the spelling pass). Not
+ *   seen, dated 2026-11-04: a user or system config moved by
  *   GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, HOME or XDG_CONFIG_HOME on the
  *   prefix, which the alias probe reads from the session's files, not the
  *   line's (the push gate counts those too).
@@ -264,6 +263,40 @@
  *   that only exists in a substitution's output (`$(cat script)` run as a
  *   command) is still not seen.
  *
+ *   A line's words are spelled before they are judged (#494), by the pass
+ *   the harness guard reads through too (shell-words.mjs spellWords): each
+ *   $NAME and ${NAME} the line assigned, as the shell would hand it over, an
+ *   unquoted value split and a double-quoted one whole, a single-quoted or
+ *   escaped `$` left alone, every value a loop or a branch may have given it
+ *   -- so `F=--hard; git reset $F`, `C='git reset --hard'; $C` and `eval "$C"`
+ *   are the hard reset, and `B=main; git checkout "$B"` is the plain checkout
+ *   it looks like. $PWD and ~ or $HOME are read per folder the command may
+ *   stand in: `git rm -rf -- "$PWD"` is `.`, or the repository root. What the
+ *   reader can't spell is wild, and stays as typed: a substitution, a
+ *   variable the line assigned from one or from `read`, `printf -v`,
+ *   `mapfile`, `getopts`, `+=` or an array, a positional, and any operator on
+ *   a name the line assigned (${N:1}, ${N#x}, ${N/a/b}, ${!N}, ${N[0]},
+ *   ${N:-x}). In a word a row of the effect table reads, a wild word could
+ *   be the one that fires it, so it refuses and names the word, under that
+ *   row's effect; a value a flag swallows is not read, and a subcommand with
+ *   no such row is untouched (`git commit -m "$MSG"`, `git add "$f"`, `git
+ *   log $x`, `git stash push -m "$MSG"`). Asserted by runguard-guards.test.ts
+ *   (#494), whose last rows hold the spelling against what bash really runs.
+ *
+ *   Not seen, dated 2026-11-05 (#494; the guard reads what a line spells, and
+ *   each line below is pinned by runguard-guards.test.ts (#494) "Not seen"):
+ *   a variable the line never assigns -- the session's environment, a file
+ *   it sources, a caller's value -- stays as typed in every guard, by the
+ *   decision of #291 (`git reset $F`).
+ *   a command word only the shell can work out (`C=$(which git); $C reset
+ *   --hard`, `$GIT reset --hard`), which is the substitution-output line
+ *   above: there is no command to read the row from.
+ *   a flag on the line that keeps the write off the work tree, taken back by
+ *   a wild word after it (`git rm -f --cached . $(echo --no-cached)`): the
+ *   typed flag wins, or `git rm --cached "$f"` could never pass.
+ *   the words xargs reads from stdin (`echo --hard | xargs git reset`): a
+ *   pipe's content, which no word on the line spells.
+ *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
  *     command, cmd, shell_command  a command line; an exec-style array of
@@ -294,8 +327,9 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, argCommands, commandName, evalCommandString, pagerCommands, runnerCommands,
-  shellCommandString, shellReadsStdin, shellSegments, toolCommandLines, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, lineVars,
+  pagerCommands, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
+  toolCommandLines, unwrap,
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
@@ -329,6 +363,11 @@ const READ = {
   subshells: true, comments: true, substitutions: true, heredocs: true,
   continuation: true, posixEscapes: true, anyWhitespace: true,
 };
+
+// How the shared reader spells this guard's variables (#494). $HOME and $PWD
+// stay as typed: pathWord and wholeTree read them per folder the command may
+// stand in.
+const SPELL = { read: READ };
 
 // The session-wide escape for the always-on destructive refusals. Same shape
 // as CAIRN_HARNESS_EDIT: set in the environment, or as the leading
@@ -435,14 +474,18 @@ function readLine(line) {
     // the command piping into this one, so a heredoc it carries can be the
     // script of the shell reading it: `cat <<EOF | sh` (#322)
     let upstream = null;
-    for (const seg of shellSegments(text, READ)) {
+    const segs = shellSegments(text, READ);
+    // #494 -- what the line assigned so far, and all of it where a loop or a
+    // function body can run after an assignment below it
+    let vars = seedVars(segs, inherit.vars, SPELL);
+    for (const seg of segs) {
       // #321 -- substitutions nested deeper than the reader reads: the
       // line is refused as a whole (judgeLine), so stop reading it here
       if (seg.deep) { out.deep = true; return; }
       flush();
       const piped = upstream;
       upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
-      const segWords = descriptor && /^(\d+|-)$/.test(seg.words[0] ?? "") ? seg.words.slice(1) : seg.words;
+      const afterDescriptor = descriptor;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
       if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
       if (seg.reserved.some((w) => REPEATS.has(w))
@@ -451,103 +494,127 @@ function readLine(line) {
         out.repeats = true;
       }
 
-      // Assignments and wrappers come off the front, flag values and all, so
-      // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
-      // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
-      const { words, assigns, wrappers, dirs: wrapDirs } = unwrap(segWords, READ);
-      const cmd = commandName(words[0]);
-      // git's own env -C applies to it alone (see invTargets); anything
-      // else's -- a `bash -c` -- is where its commands run
-      noteFolders(out, seg, words, assigns, cmd === "git" ? [] : wrapDirs);
-      // every prefix assignment rides along (#467: a `HR=... bash -c 'git
-      // --config-env=alias.hr=HR hr'` reads HR); envChoices picks the GIT_ENV ones
-      const env = {
-        assigns: [...inherit.assigns, ...assigns],
-        cleared: inherit.cleared || wrappers.some(clearsEnv),
-      };
-      if (depth < 3) for (const line of pagerCommands(assigns, words)) pagers.push([line, env]);
+      // #494 -- the words spelled through what the line assigned before anything
+      // reads them, one reading per value a loop gave a word; what can't be spelled
+      // stays as typed, in `wild`. A segment is one step of the line however many
+      // ways it reads, so one reading's push is never "earlier" than another's
+      const firstStep = out.steps.length;
+      const stepsRead = [];
+      const foldSteps = () => out.steps.splice(firstStep).forEach((moves, k) => { stepsRead[k] ||= moves; });
+      for (const { words: spelled, wild } of spellWords(seg, vars, { wild: inherit.wild })) {
+        foldSteps();
+        const segWords = afterDescriptor && /^(\d+|-)$/.test(spelled[0] ?? "") ? spelled.slice(1) : spelled;
+        // Assignments and wrappers come off the front, flag values and all, so
+        // `/usr/bin/sudo -u root git reset --hard` is still git (#270) -- and
+        // in any letter case: a Mac runs `GIT` and `/usr/bin/Git` as git (#300)
+        const { words, assigns, wrappers, dirs: wrapDirs } = unwrap(segWords, READ);
+        const cmd = commandName(words[0]);
+        // git's own env -C applies to it alone (see invTargets); anything
+        // else's -- a `bash -c` -- is where its commands run
+        noteFolders(out, seg, words, assigns, cmd === "git" ? [] : wrapDirs);
+        // every prefix assignment rides along (#467: a `HR=... bash -c 'git
+        // --config-env=alias.hr=HR hr'` reads HR); envChoices picks the GIT_ENV ones
+        const env = {
+          assigns: [...inherit.assigns, ...assigns],
+          cleared: inherit.cleared || wrappers.some(clearsEnv),
+          // a nested line inherits the line's variables, and this command's own prefix (#291, #494)
+          vars: assignVars(assigns, vars, SPELL),
+          wild: new Set([...inherit.wild, ...wild]),
+        };
+        if (depth < 3) for (const line of pagerCommands(assigns, words)) pagers.push([line, env]);
 
-      // sh -c / bash -lc: the script is one quoted word -- parse it too,
-      // found the same way the harness guard finds it (#270)
-      if (SHELLS.has(cmd) && depth < 2) {
-        const script = shellCommandString(words.slice(1));
-        // #322 -- a shell reading stdin runs the heredoc fed to it, its own
-        // or the one piped in (`cat <<EOF | sh`), as the harness guard reads it
-        const docs = !script && shellReadsStdin(words.slice(1))
-          ? [seg, ...(piped ? [piped] : [])].flatMap((s) => s.heredocs) : [];
-        if (script) walk(script, depth + 1, env);
-        else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
-        else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
-        continue;
-      }
-      // #283 -- eval joins its words with one space and runs the result as
-      // a line: read that line, the way the harness guard reads it (the
-      // shared evalCommandString), never its words one at a time. Past the
-      // depth a shell string is read at, it is a step that can do anything.
-      if (cmd === "eval") {
-        const script = evalCommandString(words.slice(1));
-        if (script && depth < 2) walk(script, depth + 1, env);
-        else if (script) out.steps.push(true);
-        continue;
-      }
-      if (cmd !== "git") {
-        // #311 -- a program runner off the table (op run, bundle exec, tmux
-        // new-session, uv run ...) may run a later word as the real command;
-        // judge those inner lines too, so the wrapper table stops growing.
-        // HARMLESS commands (and ARG_SAFE ones, via runnerCommands) read, not
-        // run, their arguments, so a line that only mentions git stays clear
-        // -- all but the one option that runs a program (rg --pre, man -P,
-        // gh alias set --shell, #315), whose value is read either way.
-        // #483 -- the push action by another route: a gh, curl or wget
-        // command that moves a shared ref through GitHub's API is an
-        // invocation of its own (`side` is its cause), judged by the two
-        // moves-shared-ref gates, and its own step: its later words are
-        // its method and URL, never a command the runner backstop below
-        // should read. A `gh alias set` earlier on the line is kept, so
-        // `gh alias set m 'pr merge' && gh m 1` is the merge; the set
-        // itself moves no ref.
-        const alias = cmd === "gh" ? ghAliasSet(words.slice(1)) : null;
-        if (alias) out.ghAliases.set(alias[0], alias[1]);
-        const side = sideDoor(cmd, words.slice(1), out.ghAliases);
-        if (side) {
-          out.invs.push({ side, assigns, step: out.steps.length, wrapDirs, envAssigns: env.assigns,
-            envCleared: env.cleared, dirs: [], configs: [], configEnvs: [], unread: [], opts: {}, sub: "", args: [], paths: [] });
-          out.steps.push(true);
+        // sh -c / bash -lc: the script is one quoted word -- parse it too,
+        // found the same way the harness guard finds it (#270)
+        if (SHELLS.has(cmd) && depth < 2) {
+          const script = shellCommandString(words.slice(1));
+          // #322 -- a shell reading stdin runs the heredoc fed to it, its own
+          // or the one piped in (`cat <<EOF | sh`), as the harness guard reads it
+          const docs = !script && shellReadsStdin(words.slice(1))
+            ? [seg, ...(piped ? [piped] : [])].flatMap((s) => s.heredocs) : [];
+          if (script) walk(script, depth + 1, env);
+          else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
+          else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
           continue;
         }
-        if (depth < 3) {
-          const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
-          for (const line of inner) walk(line, depth + 1, env);
+        // #283 -- eval joins its words with one space and runs the result as
+        // a line: read that line, the way the harness guard reads it (the
+        // shared evalCommandString), never its words one at a time. Past the
+        // depth a shell string is read at, it is a step that can do anything.
+        if (cmd === "eval") {
+          const script = evalCommandString(words.slice(1));
+          if (script && depth < 2) walk(script, depth + 1, env);
+          else if (script) out.steps.push(true);
+          continue;
         }
-        out.steps.push(alias ? writesFile(words) : !HARMLESS.has(cmd) || writesFile(words));
-        continue;
-      }
+        if (cmd !== "git") {
+          // #311 -- a program runner off the table (op run, bundle exec, tmux
+          // new-session, uv run ...) may run a later word as the real command;
+          // judge those inner lines too, so the wrapper table stops growing.
+          // HARMLESS commands (and ARG_SAFE ones, via runnerCommands) read, not
+          // run, their arguments, so a line that only mentions git stays clear
+          // -- all but the one option that runs a program (rg --pre, man -P,
+          // gh alias set --shell, #315), whose value is read either way.
+          // #483 -- the push action by another route: a gh, curl or wget
+          // command that moves a shared ref through GitHub's API is an
+          // invocation of its own (`side` is its cause), judged by the two
+          // moves-shared-ref gates, and its own step: its later words are
+          // its method and URL, never a command the runner backstop below
+          // should read. A `gh alias set` earlier on the line is kept, so
+          // `gh alias set m 'pr merge' && gh m 1` is the merge; the set
+          // itself moves no ref.
+          const alias = cmd === "gh" ? ghAliasSet(words.slice(1)) : null;
+          if (alias) out.ghAliases.set(alias[0], alias[1]);
+          const side = sideDoor(cmd, words.slice(1), out.ghAliases);
+          if (side) {
+            out.invs.push({ side, assigns, step: out.steps.length, wrapDirs, envAssigns: env.assigns,
+              envCleared: env.cleared, dirs: [], configs: [], configEnvs: [], unread: [], opts: {}, sub: "", args: [], paths: [] });
+            out.steps.push(true);
+            continue;
+          }
+          if (depth < 3) {
+            const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
+            for (const line of inner) walk(line, depth + 1, env);
+          }
+          out.steps.push(alias ? writesFile(words) : !HARMLESS.has(cmd) || writesFile(words));
+          continue;
+        }
 
-      // #301 -- top-level options and their values come off, `--` splits paths off (git-effects.mjs)
-      // #467 -- the config the line defines through the environment is read
-      // here, never handed to git: --config-env values and GIT_CONFIG_COUNT
-      // entries through readEnv, the numbered ones first as git reads them,
-      // then the inline aliases are walked over the whole of it
-      const readEnv = envLookup(assigns, env);
-      const parsed = parseInvocation(words, { aliases: false, env: readEnv });
-      const fromEnv = envConfig(readEnv);
-      const inv = {
-        assigns,
-        ...parsed,
-        configs: [...fromEnv.configs, ...parsed.configs],
-        unread: [...fromEnv.unread, ...parsed.unread],
-        step: out.steps.length,
-        wrapDirs,
-        envAssigns: env.assigns,
-        envCleared: env.cleared,
-      };
-      resolveAlias(inv);
-      out.steps.push(movesRefs(inv) || writesFile(words));
-      out.invs.push(inv);
+        // #301 -- top-level options and their values come off, `--` splits paths off (git-effects.mjs)
+        // #467 -- the config the line defines through the environment is read
+        // here, never handed to git: --config-env values and GIT_CONFIG_COUNT
+        // entries through readEnv, the numbered ones first as git reads them,
+        // then the inline aliases are walked over the whole of it
+        const readEnv = envLookup(assigns, env);
+        const parsed = parseInvocation(words, { aliases: false, env: readEnv });
+        const fromEnv = envConfig(readEnv);
+        // #494 -- a -c setting the reader can't spell is one the guard can't read:
+        // the #467 rows judge it, by its key when the key itself is typed
+        const wildConfigs = parsed.configs.filter((c) => wild.has(c)).map((c) => {
+          const key = c.includes("=") ? c.slice(0, c.indexOf("=")) : "*";
+          return { key: /[$`]/.test(key) ? "*" : key, from: `-c ${c}` };
+        });
+        const inv = {
+          assigns,
+          ...parsed,
+          configs: [...fromEnv.configs, ...parsed.configs],
+          unread: [...fromEnv.unread, ...parsed.unread, ...wildConfigs],
+          step: out.steps.length,
+          wrapDirs,
+          envAssigns: env.assigns,
+          envCleared: env.cleared,
+          wild,
+        };
+        resolveAlias(inv);
+        out.steps.push(movesRefs(inv) || writesFile(words));
+        out.invs.push(inv);
+      }
+      foldSteps();
+      out.steps.push(...stepsRead);
+      vars = lineVars(seg, vars, SPELL);
     }
     flush();
   };
-  walk(line, 0, { assigns: [], cleared: false });
+  walk(line, 0, { assigns: [], cleared: false, vars: new Map(), wild: new Set() });
   return out;
 }
 
@@ -579,11 +646,13 @@ function noteFolders(out, seg, words, assigns, wrapDirs) {
  * A variable's value as the git command would see it (#467), for the
  * config it defines through the environment (--config-env, GIT_CONFIG_COUNT
  * and its entries): the command's own leading assignment, last one winning,
- * else a wrapper's around it (`HR=x bash -c 'git ...'`), else the
+ * else a wrapper's around it (`HR=x bash -c 'git ...'`), else what the
+ * line assigned before it (`export HR=x; git ...`, #494), else the
  * session's -- the guard runs in the environment the tool's shell starts
  * from -- unless a wrapper may clear it (env -i, sudo). Undefined when none
- * holds it: the guard reads nothing it can't see, and a variable the
- * tool's shell alone sets (a profile export) is refused, never guessed.
+ * holds it, or the line assigned it from something it can't read: the guard
+ * reads nothing it can't see, and a variable the tool's shell alone sets (a
+ * profile export) is refused, never guessed.
  */
 function envLookup(assigns, env) {
   return (name) => {
@@ -591,6 +660,9 @@ function envLookup(assigns, env) {
       const own = list.filter((a) => a.startsWith(`${name}=`)).pop();
       if (own !== undefined) return own.slice(name.length + 1);
     }
+    const held = env.vars.get(name);
+    if (held === null || held === UNREADABLE) return undefined;
+    if (held !== undefined) return held.at(-1);
     return env.cleared ? undefined : process.env[name];
   };
 }
@@ -1367,18 +1439,20 @@ function linkedWorktrees(at) {
  * reports as `/private/tmp/repo` -- so the classifier's string compare
  * meets it. A relative word, a path under the root, another repository's
  * root (git refuses a path outside the work tree itself), or a target git
- * can't read is undefined: a path, like the other probes' no. Asserted by
- * runguard-guards.test.ts (#464, the #288 rows).
+ * can't read is undefined: a path, like the other probes' no. ~ and $HOME
+ * are spelled the way the shell does (#494). Asserted by
+ * runguard-guards.test.ts (#464, #494, the #288 rows).
  */
 function repoRoot(at, word) {
-  if (!isAbsolute(word)) return undefined;
+  const typed = word.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+  const bare = /^(?:\$|~)/.test(typed) ? pathWord(typed, at.dir) : typed;
+  if (bare === LOST || !isAbsolute(bare)) return undefined;
   if (at.top === undefined) {
     const top = gitOut(at, ["rev-parse", "--show-toplevel"]);
     at.top = top ? realPath(top) : null;
   }
   if (at.top === null) return undefined;
-  const bare = word.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
-  return realPath(bare) === at.top ? bare : undefined;
+  return realPath(bare) === at.top ? typed : undefined;
 }
 
 /**
@@ -1956,6 +2030,12 @@ try {
  *         read are the Not seen block in the rules above, each with its
  *         service-side control; runguard-sidedoors.test.ts (#484) pins the
  *         block line by line.
+ *   #494  a same-line variable in a flag, path or whole command: the #291
+ *         expansion moved into the shared reader, so both guards read one
+ *         spelling pass; what it can't spell is wild, and refuses where a
+ *         row reads words. It also reads what the reader skipped at the same
+ *         stage: $'...', ${X:-word} on an unset name, {a,b}, $IFS, and a
+ *         loop or function body running after an assignment below it.
  *   #283  eval is read as the shell runs it: its words joined by one space,
  *         the result read as a line, through the shell-words.mjs function
  *         the harness guard shares (evalCommandString) -- the runner

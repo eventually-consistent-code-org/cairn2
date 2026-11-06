@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -3403,5 +3403,222 @@ describe("run guard: eval runs its words joined, read as one line (#283)", () =>
     expect(guard(proj, home, "eval 'CAIRN_ALLOW_DESTRUCTIVE_GIT=1 git reset' '--hard'").status).toBe(0);
     expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 eval 'git reset' '--hard'").status).toBe(2);
     expect(guard(proj, home, "CAIRN_ALLOW_DESTRUCTIVE_GIT=1 bash -c 'git reset --hard'").status).toBe(2);
+  });
+});
+
+// #494 -- the run guard read flags, paths and whole commands off the literal
+// words, and the #291 expansion lived in the harness guard alone, so `F=--hard;
+// git reset $F` was a hard reset it read as a reset to a commit named `$F`. The
+// reader spells a line's words through what the line assigned before either
+// guard judges them (shell-words.mjs spellWords); what it can't spell -- a
+// substitution, a variable assigned from something unreadable, any operator on
+// an assigned name -- is wild, and a wild word where the table's rows read
+// words could be the word that fires one, so it refuses and names the word.
+describe("a flag, path or command the shell builds from a same-line variable meets the run guard (#494)", () => {
+  function nested(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  // Spelled out, and judged as the shell would run them
+  const SPELLED = [
+    "F=--hard; git reset $F", 'F=--hard; git reset "$F"', "F=--hard; git reset ${F}", "export F=--hard; git reset $F",
+    "F=--har; git reset $F", "F=--hard\ngit reset $F", "G=--hard; F=$G; git reset $F",
+    "C='git reset --hard'; $C", 'C=\'git reset --hard\'; eval "$C"', "C='git reset --hard'; eval $C",
+    'C=\'git reset --hard\'; bash -c "$C"', "C=git; $C reset --hard", "S=reset; git $S --hard",
+    'git rm -rf -- "$PWD"', 'git rm -rf -- "${PWD}"', 'git rm -rf -- "$PWD/"', 'git rm -rf "$PWD/*"',
+    'D=$PWD; git rm -rf -- "$D"', "P=.; git checkout -- $P", "P=:/; git restore $P", "X=clear; git stash $X",
+    // hostile: a value that spells a second flag or a command, a word the shell builds another way
+    "F='--hard -q'; git reset $F", "F='-q --hard'; git reset $F", "C='sudo git reset --hard'; $C",
+    "F=--hard; bash -c 'git reset $F'", "F=--hard; eval 'git reset $F'", "F=--hard bash -c 'git reset $F'",
+    "eval 'F=--hard'; git reset $F", "git reset ${X:---hard}", "git reset ${X:---hard -q}", "git reset ${X-${Y:---hard}}", "echo ${X:-$(git reset --hard)}", "git reset $'--hard'",
+    "git reset $'\\x2d\\x2dhard'", "git reset {--hard,}", "git reset${IFS}--hard", "f() { git reset $F; }; F=--hard; f",
+    "F=--hard; false && F=--soft; git reset $F", "for F in --soft --hard; do git reset $F; done",
+    "for S in log reset; do git $S --hard; done", "for i in 1 2; do git reset $F; F=--hard; done",
+    'A=\'reset --hard\'; git -c alias.x="$A" x', "F=; git $F reset --hard",
+    "export HR='reset --hard'; git --config-env=alias.hr=HR hr",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.hr GIT_CONFIG_VALUE_0='reset --hard'; git hr",
+  ];
+
+  // Wild: refused, naming the word it can't spell
+  const WILD: Array<[string, string]> = [
+    ["F=$(echo --hard); git reset $F", "$F"],
+    ["F=`echo --hard`; git reset $F", "$F"],
+    ['git reset "$(echo --hard)"', "$(echo --hard)"],
+    ["git reset `echo --hard`", "`echo --hard`"],
+    ["git reset --$(echo hard)", "--$(echo hard)"],
+    ["read F; git reset $F", "$F"],
+    ["IFS= read -r F; git reset $F", "$F"],
+    ["printf -v F -- --hard; git reset $F", "$F"],
+    ["F=--ha; F+=rd; git reset $F", "$F"],
+    ["mapfile -t a; git reset ${a[0]}", "${a[0]}"],
+    ["a=(--hard); git reset ${a[0]}", "${a[0]}"],
+    ["a[0]=--hard; git reset ${a[0]}", "${a[0]}"],
+    ["F=--hard; git reset ${F:0}", "${F:0}"],
+    ["F=--hardx; git reset ${F%x}", "${F%x}"],
+    ["F=x--hard; git reset ${F#x}", "${F#x}"],
+    ["F=--hxrd; git reset ${F/x/a}", "${F/x/a}"],
+    ["A=F; F=--hard; git reset ${!A}", "${!A}"],
+    ["F=--hard; git reset ${F:-x}", "${F:-x}"],
+    ["declare -n R=F; F=--hard; git reset $R", "$R"],
+    ["S=$(echo reset); git $S --hard", "$S"],
+    ["X=$(echo clear); git stash $X", "$X"],
+    ['f=$(cat x); git checkout -- "$f"', "$f"],
+    ['f=$(cat x); git restore "$f"', "$f"],
+    ['f=$(cat x); git rm -f "$f"', "$f"],
+    ['T=$(git rev-parse --show-toplevel); git rm -rf -- "$T"', "$T"],
+    ['git rm -rf -- "$(pwd)"', "$(pwd)"],
+    ['W=$(cat x); git worktree remove "$W"', "$W"],
+    ['B=$(cat x); git checkout "$B"', "$B"],
+    ['B=$(cat x); git switch "$B"', "$B"],
+    ["bash -c 'git reset $1' _ --hard", "$1"],
+    ["set -- --hard; git reset $1", "$1"],
+    ['W=$(cat x); op run -- git reset "$W"', "$W"],
+    ["for f in $(git ls-files); do git checkout -- $f; done", "$f"],
+    ["for F; do git reset $F; done", "$F"],
+    ['cd sub; git rm -rf -- "$OLDPWD"', "$OLDPWD"],
+  ];
+
+  // The twins: the same shapes with nothing a row could read, or read and clear
+  const TWINS = [
+    'M=hello; git commit -m "$M"', 'M=$(cat x); git commit -m "$M"', 'git commit -m "$(cat x)"',
+    'f=$(cat x); git add "$f"', "x=$(cat y); git log $x", "git log $(cat y)", 'M=$(date); git stash push -m "$M"',
+    'git stash -m "$(date)"', 'f=$(cat x); git stash push -- "$f"', 'N=$(cat x); git checkout -b "$N"',
+    'N=$(cat x); git switch -c "$N"', 'S=$(cat x); git restore --source "$S" seed.txt',
+    'B=main; git checkout "$B"', "F=--soft; git reset $F", "F=seed.txt; git reset $F", 'T=$(cat x); git reset -- "$T"',
+    'f=$(cat x); git restore --staged "$f"', 'f=$(cat x); git rm --cached "$f"', 'f=$(cat x); git rm -- "$f"',
+    'f=$(cat x); git rm -f --dry-run "$f"', 'x=$(cat y); git clean -n "$x"',
+    "C='git status'; $C", "C='git status'; eval \"$C\"", 'C=\'git reset --hard\'; echo "$C"', "F=--hard; echo $F",
+    "F=--hard; git reset '$F'", "F=--hard; git reset \\$F", 'F=\'--hard -q\'; git reset "$F"',
+    'x=$(cat y); git merge "$x"', 'x=$(cat y); git rebase "$x"', 'x=$(cat y); git apply "$x"',
+    'x=$(cat y); git worktree add "$x"', 'git rm -f -- "$PWD/seed.txt"', "git reset HEAD~$((0+1))",
+    "git log ${X:-main}", "git reset ${X:-HEAD}", "F=--hard; F=--soft; git status; echo $F",
+  ];
+
+  it("spelled through what the line assigned, each is judged as the shell would run it, from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const c of SPELLED) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+        expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      }
+    }
+  });
+
+  it("a word it can't spell, where a row reads words, refuses and names the word, from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const [c, word] of WILD) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("can't spell");
+        expect(r.stderr, c).toContain(`\`${word}\``);
+        expect(r.stderr, c).toContain("effect: discards-work");
+        expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+      }
+    }
+  });
+
+  it("the twins pass from the root and a nested folder: a value a flag swallows is not read, an untabled subcommand is untouched, a quote keeps a word literal", () => {
+    const { proj, home, sub } = nested();
+    for (const c of TWINS) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the repository root through ~ or $HOME is the whole tree, as its typed absolute path is (#288); a folder under it is a path", () => {
+    const { proj, home } = nested();
+    const parent = dirname(proj);
+    const name = basename(proj);
+    for (const c of [`git rm -rf -- "$HOME/${name}"`, `git rm -rf -- "\${HOME}/${name}/"`, `git rm -rf ~/${name}`, `D=$HOME/${name}; git rm -rf -- "$D"`]) {
+      const r = guard(proj, home, c, { HOME: parent });
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    }
+    expect(guard(proj, home, `git rm -rf -- "$HOME/${name}/sub"`, { HOME: parent }).status).toBe(0);
+  });
+
+  it("a -c setting it can't spell is judged by the rows that read settings: an alias or a key it can't read refuses; a setting the table never reads passes", () => {
+    const { proj, home } = nested();
+    for (const c of ['A=$(cat x); git -c alias.y="$A" y', 'K=$(cat x); git -c "$K" y', 'git -c "$(cat x)" status',
+      'M=$(cat x); git -c "remote.origin.mirror=$M" status']) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("effect: discards-work");
+    }
+    for (const c of ['N=$(whoami); git -c "user.name=$N" commit -m x', 'git -c "user.name=$(whoami)" status']) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("the owner's escape lifts a wild refusal, session-wide and as the command's own prefix", () => {
+    const { proj, home } = nested();
+    const line = 'git reset "$(echo --hard)"';
+    expect(guard(proj, home, line).status).toBe(2);
+    expect(guard(proj, home, line, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" }).status).toBe(0);
+    expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${line}`).status).toBe(0);
+  });
+
+  it("mid-run, a wild word on a row only the owner's checkout reads refuses there, naming it; the always-on rows of merge and its kin are judged as before", () => {
+    const { proj, home } = fixture({ status: "running", phases: [], pushAuth: { granted: false } });
+    const r = guard(proj, home, 'x=$(cat y); git read-tree "$x"');
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("`$x`");
+    expect(r.stderr).toContain("touches-owner-checkout");
+    const m = guard(proj, home, 'x=$(cat y); git merge "$x"');
+    expect(m.status, m.stderr).toBe(2);
+    expect(m.stderr).toContain("git merge");
+    // no live run: read-tree has no discards-work row a word could fire
+    const quiet = fixture();
+    expect(guard(quiet.proj, quiet.home, 'x=$(cat y); git read-tree "$x"').status).toBe(0);
+  });
+
+  it("the reader's spelling is what bash runs: for each line, one reading is the argv bash hands the command", async () => {
+    const { lineVars, shellSegments, spellWords } = await import("../../hooks/scripts/shell-words.mjs");
+    const lines = [
+      "F=--hard; git reset $F", 'F=--hard; git reset "$F"', "F='a b'; git x $F", "F='a b'; git x \"$F\"",
+      "F='a b'; git x p$F", "F=; git x $F y", 'F=; git x "$F" y', "F=--hard; git x '$F'", "F=--hard; git x \\$F",
+      "F=--hard; git x \"\\$F\"", "git x $'--hard'", "git x $'a\\tb'", "git x {a,b}c", "git x${IFS}y", "unset X; git x ${X:-a b}",
+      "F=b; G=a$F; git x $G", "for F in a b; do git x $F; done", 'F=a; git x "p${F}s"', 'git x $"q"',
+      'F=a; git x "$F"s', "F=a; git x $F's'", 'F=a; G=b; git x "$F"$G', "F='a b'; git x \"$F\"$F",
+    ];
+    for (const line of lines) {
+      const out = execFileSync("bash", ["-c", `git() { printf '%s\\n' "$@"; echo =; }; ${line}`], { encoding: "utf8" });
+      const runs = out.split("=\n").slice(0, -1).map((b) => b.split("\n").slice(0, -1));
+      let vars = new Map();
+      const readings: string[][] = [];
+      for (const seg of shellSegments(line, { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true })) {
+        for (const r of spellWords(seg, vars)) if (r.words[0] === "git") readings.push(r.words.slice(1));
+        vars = lineVars(seg, vars);
+      }
+      expect(runs.length, line).toBeGreaterThan(0);
+      for (const argv of runs) expect(readings, `${line}: bash ran ${JSON.stringify(argv)}`).toContainEqual(argv);
+    }
+  });
+
+  it("what the Not seen block says is not seen, is not: each passes, and a deleted line is red", () => {
+    const { proj, home } = nested();
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0];
+    const rows: Array<[string, string, Record<string, string>]> = [
+      ["git reset $F", "a variable the line never assigns", { F: "--hard" }],
+      [". ./env.sh; git reset $F", "a variable the line never assigns", {}],
+      ["C=$(which git); $C reset --hard", "a command word only the shell can work out", {}],
+      ["$GIT reset --hard", "a command word only the shell can work out", { GIT: "git" }],
+      ['C=$(cat x); eval "$C"', "a command word only the shell can work out", {}],
+      ["git $X reset --hard", "a variable the line never assigns", {}],
+      ["echo --hard | xargs git reset", "the words xargs reads from stdin", {}],
+      ["N=$(echo --no-cached); git rm -f --cached . $N", "a flag on the line that keeps the write off the work tree", {}],
+    ];
+    for (const [c, line, env] of rows) {
+      expect(guard(proj, home, c, env).status, c).toBe(0);
+      expect(header, c).toContain(line);
+    }
+    expect(header).toContain("Not seen, dated 2026-11-05");
   });
 });
