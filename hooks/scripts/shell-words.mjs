@@ -612,6 +612,27 @@ export function shellSegments(command, read = {}, depth = 0) {
  */
 export const SUBSTITUTION_DEPTH = 8;
 
+/**
+ * How many lines within lines a guard reads, the one depth all three hold
+ * (#521): a shell's -c string, an eval, a heredoc fed to a shell, a pager
+ * value, a runner's inner line. Past it the line is refused unread, the way a
+ * body past SUBSTITUTION_DEPTH is. Before #521 the run and harness guards just
+ * stopped reading at three, and passed what they had not read, so four `sh -c`
+ * around a hard reset was the bypass. Asserted: runguard-guards.test.ts and
+ * hooks.test.ts "(#521)", writeguard.test.ts "a nest deeper than the guard reads".
+ */
+export const MAX_NEST = SUBSTITUTION_DEPTH;
+
+/**
+ * How many runner guesses in a row a guard re-reads (#521). runnerCommands is a
+ * guess at which later word is the command, so each bare word of `foo a b c`
+ * opens another line that is no nest at all, and a long word list reaches any
+ * depth: that is a limit to stop at, never one to refuse at. A shell string
+ * starts the count again, so a runner at the bottom of a nest is still read. What
+ * this leaves unread is in each guard's Not seen block (asserted: "(#521)").
+ */
+export const RUNNER_HOPS = 3;
+
 /** The segment that stands in for the bodies the reader stopped at. */
 const deepSegment = () => ({ words: [], quotes: [], reserved: [], redirects: [], heredocs: [], herestrings: [],
   inputs: [], op: null, deep: true });

@@ -2256,6 +2256,79 @@ describe("run guard: a line nested deeper than the reader reads is refused unrea
   });
 });
 
+// #521: past a fixed depth this guard stopped reading a nested shell and passed
+// it, so the guard's own limit was the bypass. One depth in the reader now, the
+// one the write guard holds, and past it the line is refused unread.
+describe("run guard: a shell nested past the reader's depth is refused unread, never passed (#521)", () => {
+  const shells = (line: string, n: number): string =>
+    n === 0 ? line : `sh -c '${shells(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const evals = (line: string, n: number): string =>
+    n === 0 ? line : `eval '${evals(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const RESET = "git reset --hard";
+
+  it("one to eight levels are judged, and a hard reset inside is the reset, from the root and a nested cwd", () => {
+    const { proj, home } = fixture();
+    const nested = join(proj, "pkg", "lib");
+    mkdirSync(nested, { recursive: true });
+    for (const cwd of [proj, nested]) {
+      for (const n of [1, 2, 3, 4, 8]) {
+        const r = guard(proj, home, shells(RESET, n), {}, cwd);
+        expect(r.status, `${n} levels from ${cwd}`).toBe(2);
+        expect(r.stderr, `${n} levels from ${cwd}`).toContain("git reset --hard");
+        expect(guard(proj, home, shells("echo hi", n), {}, cwd).status, `twin, ${n} levels`).toBe(0);
+      }
+    }
+  });
+
+  it("past eight levels the line is refused unread, whatever is inside, in every shape that hands a shell a line", () => {
+    const { proj, home } = fixture();
+    const nested = join(proj, "pkg", "lib");
+    mkdirSync(nested, { recursive: true });
+    for (const cwd of [proj, nested]) {
+      for (const c of [shells(RESET, 9), shells(RESET, 12), shells("echo hi", 9), evals(RESET, 9),
+        `bash -lc ${JSON.stringify(shells(RESET, 9))}`, `nohup ${shells(RESET, 9)}`]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, c.slice(0, 40)).toBe(2);
+        expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
+        expectOwnerTail(r.stderr, c.slice(0, 40));
+      }
+    }
+  });
+
+  it("the shapes beside a nested shell hold the same depth: eval, a heredoc fed to a shell, a pager, a runner, past the old limit", () => {
+    const { proj, home } = fixture();
+    for (const [shape, line] of [
+      ["eval four deep", evals(RESET, 4)],
+      ["eval inside shells", shells(evals(RESET, 2), 3)],
+      ["a heredoc fed to a shell, four deep", shells(`sh <<'EOF'\n${RESET}\nEOF`, 4)],
+      ["a pager value, four deep", shells(`GIT_PAGER="${RESET}" git log`, 4)],
+      ["a runner four deep", shells(`uv run ${RESET}`, 4)],
+      ["a runner at the limit", shells(`uv run ${RESET}`, 8)],
+      ["man -P at the limit", shells(`man -P "${RESET}" ls`, 8)],
+    ] as const) {
+      expect(guard(proj, home, line).status, shape).toBe(2);
+    }
+  });
+
+  it("a runner's long word list is not a nest: it is read as before and never refused for its length of words", () => {
+    const { proj, home } = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    const r = guard(proj, home, `foo ${words}`);
+    expect(r.status, r.stderr).toBe(0);
+    // the later words are still read as a runner's command, a few bare words in
+    expect(guard(proj, home, `foo a b c ${RESET}`).status).toBe(2);
+    expect(guard(proj, home, `foo ${Array(20).fill("w").join(" ")} ${RESET}`).status).toBe(2);
+  });
+
+  it("the Not seen line holds: a command past three runner guesses stays unread, and the header names it", () => {
+    const { proj, home } = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    expect(guard(proj, home, `foo ${words} ${RESET}`).status).toBe(0);
+    const header = readFileSync(RUNGUARD, "utf8");
+    expect(header.split("\nimport ")[0]).toContain("more than three runner guesses");
+  });
+});
+
 // #322: heredocs were not modelled here, so every body line read as a
 // command of its own -- `cat > README.md <<'EOF'` with "never run git
 // reset --hard" as prose was refused -- while the $(...) an unquoted body

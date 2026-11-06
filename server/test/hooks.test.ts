@@ -8054,3 +8054,81 @@ describe("a write path built with an operator, array or read on a same-line vari
     expect(block).toContain("under a folder the guard knows");
   });
 });
+
+// #521: the harness half. Past a fixed depth a nested shell's write was never
+// read and the line passed; one depth in the reader now, and past it, refused.
+describe("harness guard: a shell nested past the reader's depth is refused unread, never passed (#521)", () => {
+  const shells = (line: string, n: number): string =>
+    n === 0 ? line : `sh -c '${shells(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const evals = (line: string, n: number): string =>
+    n === 0 ? line : `eval '${evals(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const WRITE = "echo x > hooks/hooks.json";
+  function fixture() {
+    const p = freshDir("cairn-hooks-521-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+
+  it("one to eight levels are judged, and the write inside is the write, from the root and a nested cwd", () => {
+    const p = fixture();
+    for (const n of [1, 2, 3, 4, 8]) {
+      for (const [cwd, write] of [[p, WRITE], [join(p, "pkg", "lib"), "echo x > ../../hooks/hooks.json"]] as const) {
+        const r = judge(p, shells(write, n), cwd);
+        expect(r.status, `${n} levels from ${cwd}`).toBe(2);
+        expect(r.stderr, `${n} levels from ${cwd}`).toContain("hook directory");
+        expect(judge(p, shells("echo hi", n), cwd).status, `twin, ${n} levels`).toBe(0);
+      }
+    }
+    expect(judge(p, "sh -c 'echo hi'").status).toBe(0);
+  });
+
+  it("past eight levels the line is refused unread, whatever is inside", () => {
+    const p = fixture();
+    for (const cwd of [p, join(p, "pkg", "lib")]) {
+      for (const c of [shells(WRITE, 9), shells(WRITE, 12), shells("echo hi", 9), evals(WRITE, 9),
+        `bash -lc ${JSON.stringify(shells(WRITE, 9))}`, `nohup ${shells(WRITE, 9)}`]) {
+        const r = judge(p, c, cwd);
+        expect(r.status, c.slice(0, 40)).toBe(2);
+        expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
+      }
+    }
+  });
+
+  it("the shapes beside a nested shell hold the same depth: eval, a heredoc fed to a shell, a pager, a runner, a shell alias", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["eval four deep", evals(WRITE, 4)],
+      ["eval inside shells", shells(evals(WRITE, 2), 3)],
+      ["a heredoc fed to a shell, four deep", shells(`sh <<'EOF'\n${WRITE}\nEOF`, 4)],
+      ["a pager value, four deep", shells(`GIT_PAGER="${WRITE}" git log`, 4)],
+      ["a runner four deep", shells(`uv run ${WRITE}`, 4)],
+      ["a runner at the limit", shells("uv run rm hooks/hooks.json", 8)],
+      ["npm exec four deep", shells("npm exec -- rm hooks/hooks.json", 4)],
+      ["a shell alias four deep", shells(`git -c alias.x="!${WRITE}" x`, 4)],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(2);
+    }
+  });
+
+  it("a runner's long word list is not a nest: it is read as before and never refused for its length of words", () => {
+    const p = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    expect(judge(p, `foo ${words}`).status).toBe(0);
+    expect(judge(p, "foo a b c rm hooks/hooks.json").status).toBe(2);
+    expect(judge(p, `foo ${Array(20).fill("w").join(" ")} rm hooks/hooks.json`).status).toBe(2);
+  });
+
+  it("the Not seen line holds: a command past three runner guesses stays unread, and the header names it", () => {
+    const p = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    expect(judge(p, `foo ${words} rm hooks/hooks.json`).status).toBe(0);
+    const header = readFileSync(HARNESSGUARD, "utf8");
+    expect(header.slice(0, header.indexOf("*/"))).toContain("more than three runner guesses");
+  });
+});

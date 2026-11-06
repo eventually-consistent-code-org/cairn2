@@ -138,8 +138,8 @@
  *   knows the folder -- `$(pwd)/x` is the shell's, from every folder a cd
  *   before it can reach, `$(git rev-parse --show-toplevel)/x` the repo
  *   root above each of those (#321) -- and refused otherwise.
- *   Substitutions nest SUBSTITUTION_DEPTH levels deep; a line nested
- *   deeper is refused unread (#321). A command
+ *   Substitutions and the lines a shell is handed nest MAX_NEST levels deep;
+ *   a line nested deeper is refused unread (#321, #521; hooks.test.ts). A command
  *   that plants a whole tree is judged by where it lands, like a mkdir of
  *   it (#317): git clone, worktree add, submodule add and init, gh repo
  *   clone and fork --clone, npx degit, and the create-* initializers npm,
@@ -343,6 +343,11 @@
  *   sentence above is about what this guard reads. Pinned by hooks.test.ts
  *   "(#500)".
  *
+ *   Not seen, dated 2026-11-05 (#521, pinned by hooks.test.ts "(#521)"): a
+ *   command more than three runner guesses in, past eight bare words each
+ *   (`foo w1 ... w30 rm hooks/x`), since a guess is no nest and refusing there
+ *   would refuse every long word list.
+ *
  *   Not seen, dated 2026-11-05 (#509, by the decision of #291; both pinned by
  *   hooks.test.ts "(#509)"): a value from a file the line sources, which reads
  *   as a name the line never assigned (`. ./env.sh; echo x > $HK/y`). A value
@@ -363,7 +368,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
   quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
   suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
@@ -2481,7 +2486,7 @@ function unspelled(word, ctx) {
  * stands in, under the variables the line gave it.
  */
 function shellAliasTargets(line, dir, ctx) {
-  if (ctx.depth >= 3) return [];
+  if (ctx.depth >= MAX_NEST) return [{ deep: true }];
   const out = [];
   for (const at of new Set([dir, gitRoot(dir)])) {
     out.push(...lineTargets(line, at, ctx.depth + 1, { walk: ctx.walk, vars: assignVars(ctx.assigns ?? [], ctx.vars, SPELL) }));
@@ -2733,7 +2738,7 @@ function runnerTargets(cmd, args, ctx, add, out) {
     const a = args[i];
     const line = ["-c", "--call", "--shell-mode"].includes(a) ? args[i + 1]
       : a.startsWith("--call=") ? a.slice(7) : undefined;
-    if (line !== undefined && ctx.depth < 3) out.push(...lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    if (line !== undefined) out.push(...deeper(line, ctx));
   }
   const at = args.findIndex((a) => CLAUDE_PKG.test(a) || /^claude(?:\.[cm]?js)?$/.test(cmdName(a)));
   if (at >= 0) claudeTargets(args.slice(at + 1), ctx, add);
@@ -2741,11 +2746,11 @@ function runnerTargets(cmd, args, ctx, add, out) {
   // words after the subcommand (past any `--`) as a command line, read like
   // bash. `run` scripts a package.json entry the guard can't see, so it stays out.
   const sub = args.findIndex((a) => ["exec", "x", "dlx"].includes(cmdName(a)));
-  if (sub >= 0 && ctx.depth < 3) {
+  if (sub >= 0) {
     let rest = args.slice(sub + 1);
     const dd = rest.indexOf("--");
     if (dd >= 0) rest = rest.slice(dd + 1);
-    if (rest.length) out.push(...lineTargets(rest.join(" "), ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    if (rest.length) out.push(...deeper(rest.join(" "), ctx));
   }
 }
 
@@ -2834,11 +2839,7 @@ function writeTargets(seg, ctx) {
   }
   // #315 -- a pager variable set here (PAGER=, MANPAGER=, GIT_PAGER= ...)
   // names a program man, git or gh runs: its value is a command line too
-  if (ctx.depth < 3) {
-    for (const inner of pagerCommands(assigns, w0)) {
-      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
-    }
-  }
+  for (const inner of pagerCommands(assigns, w0)) out.push(...deeper(inner, ctx));
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
   const cmd = cmdName(w[0]); // `TEE` and `/BIN/RM` run tee and rm on a Mac (#295)
@@ -2849,8 +2850,9 @@ function writeTargets(seg, ctx) {
   // eval's line is its words joined by one space (#283), through the
   // function the run guard reads it with, so the two guards agree on it.
   if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
-    if (ctx.depth >= 3) return out;
     const nest = (text, rest = []) => {
+      // #521 -- past the reader's depth a line is refused unread, never passed
+      if (ctx.depth >= MAX_NEST) { out.push({ deep: true }); return; }
       const marker = rest.join(" ").split("").find((c) => c === STDIN || c === WALK);
       out.push(...lineTargets(text, ctx.dir, ctx.depth + 1, {
         positional: marker,
@@ -2919,12 +2921,22 @@ function writeTargets(seg, ctx) {
   // ordinary line that merely names a protected path passes -- all but the
   // one option that runs a program (man -P, rg --pre, gh alias set --shell,
   // #315), which runnerCommands hands back as a line of its own.
-  else if (ctx.depth < 3) {
-    for (const inner of runnerCommands(w)) {
-      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
-    }
+  // #521 -- a guess in a row stops at RUNNER_HOPS, since a long word list is no
+  // nest; a guess the depth would leave unread refuses like a shell.
+  else if ((ctx.hops ?? 0) < RUNNER_HOPS) {
+    const hops = (ctx.hops ?? 0) + 1;
+    for (const inner of runnerCommands(w)) out.push(...deeper(inner, { ...ctx, hops }));
   }
   return out;
+}
+
+/**
+ * One line a command hands on, read one level down; past the reader's depth
+ * it stands for a line nobody read, and is refused (#521).
+ */
+function deeper(line, ctx) {
+  if (ctx.depth >= MAX_NEST) return [{ deep: true }];
+  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops });
 }
 
 /** True when the segment's own leading assignments carry the override. */
@@ -3359,7 +3371,7 @@ try {
   if (hit.deep) {
     // #321: substitutions nested past what the reader reads -- fail closed
     console.error(
-      `cairn harness guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
+      `cairn harness guard: this line nests commands deeper than the guard reads (${MAX_NEST} ` +
       "levels), so what runs inside them can't be judged.",
     );
     console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");

@@ -69,7 +69,7 @@
  *   (runnerCommands: `op run --`, `find -exec`, `trap`). Refused unread, since
  *   each hands a shell a line nobody can see: a shell string holding a word the
  *   reader calls wild (`eval "$(cmd)"`), a pipe into a shell (`cmd | sh`), a
- *   nest past MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (too costly to
+ *   nest past the reader's MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (too costly to
  *   read inside the hook's timeout), a substitution past the reader's depth,
  *   and tee fed by xargs. Asserted: writeguard.test.ts, "a redirect inside a
  *   nested shell". TEXT_ARGS names the programs whose words are code or text,
@@ -113,6 +113,10 @@
  *     `'$HOME/x'`, read as spelled, since a target carries no quoting past
  *     the parser. Pinned, with the /tmp link spelling of the line above, by
  *     "the Not seen shapes stay passing" under "a target is spelled".
+ *   - dated 2026-11-05 (#521): a command more than three runner guesses in,
+ *     past eight bare words each (`foo w1 ... w30 tee x`), since a guess is no
+ *     nest and refusing there would refuse every long word list. Pinned by
+ *     "the Not seen shapes stay passing" under "a redirect inside a nested shell".
  *   - a harness that sends no agent_type (Cursor and the rest): allowed, as
  *     the issue scopes it; a per-harness field mapping is a later issue.
  *   - a verifier or seat dispatched as a general-purpose subagent
@@ -132,7 +136,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { projectRoot, projectRoots, readCairnConfig } from "./lib.mjs";
 import {
-  SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
+  MAX_NEST, RUNNER_HOPS, SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
   shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
 } from "./shell-words.mjs";
 
@@ -165,9 +169,6 @@ const MAX_PLACES = 16;
 
 /** How the reader spells a line's variables here. */
 const SPELL = { read: READ, cap: MAX_PLACES };
-
-/** How many shells within shells are read; a shell past this is refused unread, a runner's candidate left alone. */
-const MAX_NEST = 8;
 
 /**
  * What one call may cost, nested re-reads included, so a line built to outlast
@@ -351,14 +352,17 @@ function shellWrites(command, cwd) {
 
         const below = { dirs: there, vars: standing(assignVars(assigns, vars, SPELL), there) };
         const deeper = new Set([...wilds, ...wild]);
-        const nest = (inner) => {
+        const nest = (inner, hops = 0) => {
           // a program's later words re-read as suffixes of each other, so each is read once per place and per spelling
-          const key = JSON.stringify([inner, there, [...below.vars], [...deeper]], (_, v) => (typeof v === "symbol" ? "?" : v));
+          const key = JSON.stringify([inner, there, [...below.vars], [...deeper], hops], (_, v) => (typeof v === "symbol" ? "?" : v));
           if (seen.has(key)) return;
           seen.add(key);
-          walk(inner, below, depth + 1, deeper);
+          walk(inner, { ...below, hops }, depth + 1, deeper);
         };
-        if (depth < MAX_NEST) for (const inner of pagerCommands(assigns, words)) nest(inner);
+        // #521 -- a line past the reader's depth is refused unread, whoever hands it on
+        const pagers = pagerCommands(assigns, words);
+        if (pagers.length && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
+        else for (const inner of pagers) nest(inner);
 
         if (SHELLS.has(name) || name === "eval" || name === "su") {
           const script = name === "eval" ? evalCommandString(args)
@@ -386,10 +390,12 @@ function shellWrites(command, cwd) {
               : [...new Set([...moves, ...spots.flatMap((s) => moves.map((d) => resolve(d, s)))])];
             moves = next === null || next.length > MAX_PLACES ? null : next;
           }
-        } else if (depth < MAX_NEST) {
+        } else if ((from.hops ?? 0) < RUNNER_HOPS) {
           // the program's later words may be the real command (#311); only the
           // option that runs one, on a program whose words are text
-          for (const inner of TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words)) nest(inner);
+          const inner = TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words);
+          if (inner.length && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
+          else for (const line of inner) nest(line, (from.hops ?? 0) + 1);
         }
       }
       dirs = moves;

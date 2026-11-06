@@ -348,6 +348,10 @@
  *   a command word only the shell can work out (`C=$(which git); $C reset
  *   --hard`, `$GIT reset --hard`), which is the substitution-output line
  *   above: there is no command to read the row from.
+ *   dated 2026-11-05 (#521, pinned by runguard-guards.test.ts "(#521)"): a
+ *   command more than three runner guesses in, past eight bare words each
+ *   (`foo w1 ... w30 git reset --hard`), since a guess is no nest and refusing
+ *   there would refuse every long word list.
  *   a flag on the line that keeps the write off the work tree, taken back by
  *   a wild word after it (`git rm -f --cached . $(echo --no-cached)`): the
  *   typed flag wins, or `git rm --cached "$f"` could never pass.
@@ -384,7 +388,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, lineVars,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, lineVars,
   pagerCommands, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
   toolCommandLines, unwrap,
 } from "./shell-words.mjs";
@@ -409,8 +413,8 @@ const BREAKER = await import("./breaker.mjs").catch(() => null);
  * How this guard reads a command line (shell-words.mjs): ( ) and #
  * comments end a command, a $(...) or backtick is one word whose body is
  * a command of its own (#257, #319) -- a <(...), >(...) or $((...)) too
- * (#320) -- and backslash-newline joins lines. Bodies nest
- * SUBSTITUTION_DEPTH levels; a line nested deeper is refused unread (#321).
+ * (#320) -- and backslash-newline joins lines. Bodies and the lines a shell
+ * is handed nest MAX_NEST levels; a line nested deeper is refused unread (#321, #521).
  * A heredoc body is data, never command lines (#322): only the
  * substitutions an unquoted body runs are read, each as a line of its
  * own, so a README written through `cat <<'EOF'` can mention a hard
@@ -578,16 +582,21 @@ function readLine(line) {
           vars: assignVars(assigns, vars, SPELL),
           wild: new Set([...inherit.wild, ...wild]),
         };
-        if (depth < 3) for (const line of pagerCommands(assigns, words)) pagers.push([line, env]);
+        // #521 -- one depth with every guard, and a line past it is refused unread:
+        // before this, a shell string past the depth was never read, and passed
+        const nested = pagerCommands(assigns, words);
+        if (nested.length && depth >= MAX_NEST) { out.deep = true; return; }
+        for (const line of nested) pagers.push([line, env]);
 
         // sh -c / bash -lc: the script is one quoted word -- parse it too,
         // found the same way the harness guard finds it (#270)
-        if (SHELLS.has(cmd) && depth < 2) {
+        if (SHELLS.has(cmd)) {
           const script = shellCommandString(words.slice(1));
           // #322 -- a shell reading stdin runs the heredoc fed to it, its own
           // or the one piped in (`cat <<EOF | sh`), as the harness guard reads it
           const docs = !script && shellReadsStdin(words.slice(1))
             ? [seg, ...(piped ? [piped] : [])].flatMap((s) => s.heredocs) : [];
+          if ((script || docs.length) && depth >= MAX_NEST) { out.deep = true; return; }
           if (script) walk(script, depth + 1, env);
           else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
           else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
@@ -595,12 +604,11 @@ function readLine(line) {
         }
         // #283 -- eval joins its words with one space and runs the result as
         // a line: read that line, the way the harness guard reads it (the
-        // shared evalCommandString), never its words one at a time. Past the
-        // depth a shell string is read at, it is a step that can do anything.
+        // shared evalCommandString), never its words one at a time.
         if (cmd === "eval") {
           const script = evalCommandString(words.slice(1));
-          if (script && depth < 2) walk(script, depth + 1, env);
-          else if (script) out.steps.push(true);
+          if (script && depth >= MAX_NEST) { out.deep = true; return; }
+          if (script) walk(script, depth + 1, env);
           continue;
         }
         if (cmd !== "git") {
@@ -628,9 +636,13 @@ function readLine(line) {
             out.steps.push(true);
             continue;
           }
-          if (depth < 3) {
+          // #521 -- a guess in a row stops at RUNNER_HOPS, since a long word list
+          // is no nest; a guess the depth would leave unread refuses like a shell
+          const hops = inherit.hops ?? 0;
+          if (hops < RUNNER_HOPS) {
             const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
-            for (const line of inner) walk(line, depth + 1, env);
+            if (inner.length && depth >= MAX_NEST) { out.deep = true; return; }
+            for (const line of inner) walk(line, depth + 1, { ...env, hops: hops + 1 });
           }
           out.steps.push(alias ? writesFile(words) : !HARMLESS.has(cmd) || writesFile(words));
           continue;
@@ -1849,7 +1861,7 @@ function judgeLine(line, start, ctx) {
   // guard never saw; fail closed rather than let the unread part run
   if (line.deep) {
     refuse([
-      `cairn run guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
+      `cairn run guard: this line nests commands deeper than the guard reads (${MAX_NEST} ` +
       "levels), so what runs inside them can't be judged.",
       "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
     ], undefined, { effect: "unread", reason: "a line nested past the reader's depth" });
@@ -2064,6 +2076,9 @@ try {
  *   #319  an unquoted $(...) is one word of its command
  *   #320  process substitution and arithmetic bodies run
  *   #321  a line nested past the reader's depth is refused unread
+ *   #521  one depth for a shell, an eval, a heredoc fed to a shell, a pager and
+ *         a runner's line, the write guard's; past it, refused unread. A runner's
+ *         guesses in a row stop at RUNNER_HOPS, since a word list is no nest.
  *   #322  a heredoc body is data; the substitutions it runs are commands
  *   #359  classified by effect; refusals derived from the effects
  *   #414  forced worktree remove refused in every session
