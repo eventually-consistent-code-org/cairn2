@@ -343,3 +343,79 @@ describe("a refspec or API URL built from a variable meets the two push gates (#
     }
   });
 });
+
+describe("side doors: a port, a user or no scheme on the API host hides nothing (#504)", () => {
+  // Before #504 the host was one regex against the literal api.github.com, so
+  // each spelling here exited the guard clean while curl connected to the same
+  // address and merged the pull request. GitHub answers a trailing dot with
+  // HTTP 400 (the panel's measure, 2026-11-04), and the parse reads it anyway.
+  const H = "api.github.com";
+  const PATH = "/repos/o/r/pulls/1/merge";
+  const SPELLED = [`https://${H}:443${PATH}`, `https://x@${H}${PATH}`, `https://x:y@${H}:443${PATH}`, `https://${H}.${PATH}`,
+    `${H}${PATH}`, `${H}:443${PATH}`, `x@${H}${PATH}`, `https:/${H}${PATH}`, `https://api%2Egithub%2Ecom${PATH}`];
+  const ROUTES: Array<(u: string) => [command: string, route: string]> = [
+    (u) => [`curl -X PUT ${u}`, "a `curl` pull request merge is a push"],
+    (u) => [`curl --request PUT --url ${u}`, "a `curl` pull request merge is a push"],
+    (u) => [`wget --method=PUT ${u}`, "a `wget` pull request merge is a push"],
+  ];
+
+  it("no stamp: each spelling refuses by each program, naming the route, from the root and a nested folder; its read twin passes", () => {
+    const f = fixture(false, false);
+    for (const u of SPELLED) {
+      for (const route of ROUTES) {
+        const [c, name] = route(u);
+        for (const cwd of [f.proj, f.sub]) {
+          const r = call(f, bash(c), cwd);
+          expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain(name);
+          expect(r.stderr, c).toContain("moves-shared-ref");
+        }
+      }
+      for (const c of [`curl ${u}`, `wget ${u}`]) {
+        for (const cwd of [f.proj, f.sub]) expect(call(f, bash(c), cwd).status, c).toBe(0);
+      }
+    }
+  });
+
+  it("the gates, not the host's spelling, decide: a clean stamp passes each one, a live run refuses each one", () => {
+    const clean = fixture(true, false);
+    const hot = fixture(true, true);
+    for (const u of SPELLED) {
+      const c = `curl -X PUT ${u}`;
+      expect(call(clean, bash(c)).status, c).toBe(0);
+      const r = call(hot, bash(c));
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+    }
+  });
+
+  it("the twins pass: the merge path at another host, with GitHub's name in the user, a subdomain, the query or the fragment", () => {
+    const f = fixture(false, false);
+    for (const u of ["https://evil.test", "evil.test", `https://${H}@evil.test`, `${H}:443@evil.test`, `https://${H}.evil.test`]) {
+      for (const cwd of [f.proj, f.sub]) {
+        expect(call(f, bash(`curl -X PUT ${u}${PATH}`), cwd).status, u).toBe(0);
+        expect(call(f, bash(`wget --method=PUT ${u}${PATH}`), cwd).status, u).toBe(0);
+      }
+    }
+    expect(call(f, bash(`curl -X PUT 'https://evil.test?@${H}${PATH}'`)).status).toBe(0);
+  });
+
+  it("hostile: a host from a same-line variable, a branch delete with no scheme, a mutation at a spelled host, a walked path", () => {
+    const f = fixture(true, false);
+    const none = fixture(false, false);
+    for (const c of [`H=${H}:443; curl -X PUT "https://$H${PATH}"`, `U=x@${H}; curl -X PUT "$U${PATH}"`,
+      `curl -X POST ${H}:443/graphql -d '{"query":"mutation{mergePullRequest(input:{}){clientMutationId}}"}'`,
+      `curl -X PUT https://${H}/repos/o/r/pulls/1/x/../merge`, `curl -X PUT https://${H}/repos/o/r/pulls/1/merg%65`,
+      `timeout 5 curl -X PUT ${H}${PATH}`, `sh -c "curl -X PUT ${H}:443${PATH}"`]) {
+      for (const cwd of [none.proj, none.sub]) {
+        const r = call(none, bash(c), cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("moves-shared-ref");
+      }
+    }
+    // deleting the default branch never passes the gate, stamp or no stamp, whichever way the host is written
+    const del = call(f, bash(`curl -X DELETE x@${H}:443/repos/o/r/git/refs/heads/main`));
+    expect(del.status, del.stderr).toBe(2);
+    expect(del.stderr).toContain("it deletes the default branch");
+  });
+});

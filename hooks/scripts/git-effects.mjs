@@ -1075,19 +1075,55 @@ export function readOpts(args, { valued = [], alias = {} } = {}) {
  * dropped, or null: for gh, its endpoint as typed (`repos/o/r/...`,
  * `/repos/...`) or any URL's path, an enterprise host's `/api/v3` prefix
  * cut off; for curl and wget (`url` true), only a URL at api.github.com,
- * or one whose path starts `/api/v3/` -- GitHub Enterprise's REST root (a
- * dated claim, 2026-11-04) -- is GitHub's.
+ * or one whose path starts `/api/v3/` or is `/api/graphql` -- GitHub
+ * Enterprise's REST and GraphQL roots (a dated claim, 2026-11-04) -- is
+ * GitHub's. The host is parsed, as curl parses it (#504, measured against curl
+ * 8.7, 2026-11-05; wget's word is read the same way, unmeasured): any number of
+ * slashes after the scheme or none at all, a user up to the last `@`, a port, escapes, a
+ * trailing dot and letter case all come off, so `x@api.github.com:443` is
+ * GitHub and `api.github.com@evil.test` is not. Asserted by
+ * runguard-effects.test.ts and runguard-sidedoors.test.ts (#504).
  */
 export function apiPath(word, { url = false } = {}) {
-  const m = /^(?:https?:\/\/([^/?#]+))?([^?#]*)/i.exec(String(word));
-  if (!m) return null;
-  const host = m[1];
-  let path = m[2];
-  if (host === undefined && url) return null;
-  if (host !== undefined && url && !/^api\.github\.com$/i.test(host) && !/^\/api\/v3\//i.test(path)) return null;
-  if (host === undefined && !url && /^[a-z]+:/i.test(word)) return null; // some other scheme
-  path = path.replace(/^\/api\/v3(?=\/)/i, "");
-  return `/${path.replace(/^\/+/, "")}`;
+  const text = String(word);
+  const scheme = /^https?:\/+/i.exec(text);
+  if (!url && !scheme) return /^[a-z]+:/i.test(text) ? null : requestPath(/^[^?#]*/.exec(text)[0]).replace(/^\/api\/v3(?=\/)/i, "");
+  // no scheme: a word that can't start a host is a flag, a path or some other scheme
+  if (!scheme && /^[-/]|^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return null;
+  const [, authority, rest] = /^([^/?#]*)([^?#]*)/.exec(scheme ? text.slice(scheme[0].length) : text);
+  const path = requestPath(rest);
+  if (url && apiHost(authority) !== "api.github.com" && !/^\/api\/(?:v3\/|graphql$)/i.test(path)) return null;
+  return path.replace(/^\/api\/v3(?=\/)/i, "");
+}
+
+/** A URL authority's host as it connects (#504): no user, no port, escapes undone, lower case, no trailing dot. */
+function apiHost(authority) {
+  let host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d*$/, "");
+  try {
+    host = decodeURIComponent(host);
+  } catch {
+    // a stray %: the host as typed, which is nobody's API
+  }
+  return host.toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * A URL path the way the request reaches the service (#504): an escaped
+ * unreserved character undone (`merg%65`), dot steps walked, doubled and
+ * trailing slashes gone, so a row's regexp reads one spelling. An escaped `/` is
+ * no step of its own and stays as it is, for the ref rows to decode.
+ */
+function requestPath(path) {
+  const plain = path.replace(/%([0-9a-f]{2})/gi, (hit, hex) => {
+    const c = String.fromCharCode(parseInt(hex, 16));
+    return /[A-Za-z0-9._~-]/.test(c) ? c : hit;
+  });
+  const steps = [];
+  for (const part of plain.split("/")) {
+    if (part === "..") steps.pop();
+    else if (part !== "" && part !== ".") steps.push(part);
+  }
+  return `/${steps.join("/")}`;
 }
 
 /**

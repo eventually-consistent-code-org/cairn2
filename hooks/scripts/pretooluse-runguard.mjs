@@ -183,7 +183,9 @@
  *   updateRef and kin; a request whose body is a file is refused unread);
  *   `gh release create`; `gh repo delete`; and a curl or wget write (a
  *   method, data, a form, an upload) to the same paths at api.github.com
- *   or an enterprise /api/v3/ path. git-effects.mjs's SIDE_DOOR_TABLE
+ *   or an enterprise /api/v3/ path, the host parsed as curl parses it, so a
+ *   port, a user, a trailing dot or no scheme hides nothing (#504, asserted
+ *   by runguard-sidedoors.test.ts). git-effects.mjs's SIDE_DOOR_TABLE
  *   classifies them, and the two moves-shared-ref gates above apply as to
  *   a push, the refusal naming the route ("a `gh api` pull request merge
  *   is a push"). A route naming a branch (--target, a ref path, a `base`
@@ -2139,4 +2141,7 @@ try {
  *         file (`*.*`) is whole-tree too.
  *   #502  a leading + in a remote's push setting is the force row, on every
  *         channel the guard reads; with no + it is judged for where it lands.
+ *   #504  the API host is parsed rather than matched: a port, a user, a trailing
+ *         dot, escapes or no scheme at all still reach GitHub's table, and the
+ *         path is walked first; the same merge path at another host passes.
  */

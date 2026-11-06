@@ -1012,3 +1012,64 @@ describe("git effects: a leading + in a remote's push setting is the force row (
     expect(causes("git push origin main", DISCARDS_WORK)).toEqual([]);
   });
 });
+
+describe("side doors: the API host is parsed, not matched as a string (#504)", () => {
+  const H = "api.github.com";
+  const PATH = "/repos/o/r/pulls/1/merge";
+
+  it("every spelling curl reaches the same host by is GitHub's (measured against curl 8.7, 2026-11-05); a scheme-less URL is read too", () => {
+    for (const u of [`https://${H}:443${PATH}`, `https://x@${H}${PATH}`, `https://x:y@${H}:443${PATH}`, `https://${H}.${PATH}`,
+      `HTTPS://API.GITHUB.COM${PATH}`, `https:/${H}${PATH}`, `https:///${H}${PATH}`, `http://${H}${PATH}`, `https://${H}:${PATH}`,
+      `${H}${PATH}`, `${H}:443${PATH}`, `x@${H}${PATH}`, `x:y@${H}:443${PATH}`, `${H}.${PATH}`, `https://api%2Egithub%2Ecom${PATH}`,
+      `https://evil.test:9\\@${H}${PATH}`]) {
+      expect(apiPath(u, { url: true }), u).toBe(PATH);
+    }
+    // the enterprise root reads the same with a port, a user or no scheme at all
+    for (const u of ["ghe.example.com/api/v3/repos/o/r/merges", "x@ghe.example.com:8443/api/v3/repos/o/r/merges",
+      "https://x@ghe.example.com:8443/api/v3/repos/o/r/merges"]) {
+      expect(apiPath(u, { url: true }), u).toBe("/repos/o/r/merges");
+    }
+    // ...and so does its GraphQL root, which sits beside /api/v3 rather than under it
+    expect(apiPath("https://ghe.example.com/api/graphql", { url: true })).toBe("/api/graphql");
+    expect(sideDoor("curl", ["-X", "POST", "ghe.example.com:8443/api/graphql", "-d", "query=mutation{mergePullRequest(input:{}){clientMutationId}}"])?.flag)
+      .toBe("mergePullRequest");
+    expect(apiPath("https://example.com/api/graphql/x", { url: true })).toBeNull();
+  });
+
+  it("the harmless twins: the merge path at another host, whatever the URL says about GitHub in its user, subdomain, query or fragment", () => {
+    for (const u of [`https://evil.test${PATH}`, `evil.test${PATH}`, `https://${H}@evil.test${PATH}`, `https://${H}:443@evil.test${PATH}`,
+      `${H}@evil.test${PATH}`, `https://${H}.evil.test${PATH}`, `https://not${H}${PATH}`, `https://${H}\\@evil.test${PATH}`,
+      `https://evil.test?@${H}${PATH}`, `https://evil.test#@${H}${PATH}`, `ftp://${H}${PATH}`, "repos/o/r/merges", PATH, "-XPUT", "--url",
+      "Authorization: token x", ""]) {
+      expect(apiPath(u, { url: true }), u).toBeNull();
+    }
+  });
+
+  it("the path is read the way the request reaches it: dot steps walked, doubled slashes and unreserved escapes undone, an escaped slash kept", () => {
+    for (const u of [`https://${H}/repos/o/r/pulls/1/x/../merge`, `https://${H}${PATH}/.`, `https://${H}/repos/o/r/pulls/1/./merge`,
+      `https://${H}//repos/o/r//pulls/1/merge`, `https://${H}/repos/o/r/pulls/1/merg%65`, `${H}/repos/o/r/pulls/1/%6Derge`]) {
+      expect(apiPath(u, { url: true }), u).toBe(PATH);
+    }
+    expect(apiPath("repos/o/r/pulls/1/./merge")).toBe(PATH);
+    expect(apiPath(`https://${H}/repos/o/r/git/refs/heads/a%2Fb`, { url: true })).toBe("/repos/o/r/git/refs/heads/a%2Fb");
+  });
+
+  it("each program's merge reads through the parse, and the host a word names decides, not the words around it", () => {
+    for (const [program, args] of [
+      ["curl", ["-X", "PUT", `https://${H}:443${PATH}`]],
+      ["curl", ["-XPUT", `x@${H}${PATH}`]],
+      ["curl", ["--request", "PUT", "--url", `https://x@${H}:443${PATH}`]],
+      ["curl", ["-X", "PUT", `${H}${PATH}`]],
+      ["wget", ["--method=PUT", `https://x:y@${H}${PATH}`]],
+      ["wget", ["--method=PUT", `${H}:443${PATH}`]],
+    ] as Array<[string, string[]]>) {
+      const hit = sideDoor(program, args);
+      expect(hit?.effect, args.join(" ")).toBe(MOVES_SHARED_REF);
+      expect(hit?.flag, args.join(" ")).toBe(`PUT ${PATH}`);
+    }
+    expect(sideDoor("curl", ["-X", "PUT", `https://${H}:443/repos/o/r/git/refs/heads/feature`])?.branch).toBe("feature");
+    expect(sideDoor("curl", ["-X", "PUT", `${H}@evil.test${PATH}`])).toBeNull();
+    expect(sideDoor("curl", [`https://${H}:443${PATH}`])).toBeNull();
+    expect(sideDoor("curl", ["-X", "PUT", `https://${H}:443/repos/o/r/issues/1`])).toBeNull();
+  });
+});
