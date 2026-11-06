@@ -195,7 +195,10 @@ export class AzureBoardsTracker implements Tracker {
     return encodeURIComponent(this.cfg.project);
   }
 
-  private normalizeState(fields: WorkItemFields): StateCategory {
+  /** The category a read's own fields place it in: Azure's category when the
+   *  response carries one this code knows, else the states map. undefined when
+   *  neither can say, and the caller decides what that means (#496). */
+  private placeState(fields: WorkItemFields): StateCategory | undefined {
     const category = fields["System.StateCategory"];
     if (category) {
       const c = category.toLowerCase();
@@ -207,27 +210,34 @@ export class AzureBoardsTracker implements Tracker {
     const { states } = this.cfg;
     if (state === states.closed) return "closed";
     if (state === states.in_progress) return "in_progress";
-    return "open";
+    if (state === states.open) return "open";
+    return undefined;
   }
 
-  // State names Azure has shown this instance with the category they
-  // normalize to -- filled by every work item read, so the pre-write
-  // question below answers from data already fetched and never fetches
-  // for itself (#471). The work-item-type states call
-  // (GET {project}/_apis/wit/workitemtypes/{type}/states, name + category
-  // per state, as of 2026-11-04 per the Azure DevOps REST 7.0 reference)
-  // could warm this for never-seen states; it is not wired, because the
-  // question is answered with no network and a never-seen name falls
-  // closed at the gate anyway.
+  // State names Azure has shown this instance with a category that placed
+  // them -- filled by every work item read, so the pre-write question below
+  // answers from data already fetched and never fetches for itself (#471).
+  // A state neither the response's category nor the states map can place is
+  // NOT learned (#496): the read's own bucket defaults to open, and learning
+  // that default answered the freeze gate "open" for a Completed or Removed
+  // state, the one class the freeze exists to stop. It stays undefined and
+  // falls closed. Asserted by azure-boards.unit.test.ts and
+  // tracker-contract.test.ts. Whether a live GET carries System.StateCategory
+  // is unverified as of 2026-11-05, and this rests on neither answer. The
+  // work-item-type states call (GET
+  // {project}/_apis/wit/workitemtypes/{type}/states, name + category per
+  // state, as of 2026-11-04 per the Azure DevOps REST 7.0 reference) could
+  // warm this; it is not wired, because the question is answered with no
+  // network and a name it cannot place falls closed at the gate anyway.
   private readonly seenStates = new Map<string, StateCategory>();
 
   /** The SPI's pre-write question (#427, #471): the canonical three by
    *  name; a states-map key by the native state it writes, and a native
    *  state by itself -- the three required entries carry their category,
-   *  any other only once Azure has shown it on a work item read. undefined
-   *  otherwise: the freeze gate then falls closed rather than letting the
-   *  name through. Exact-case, as normalizeState compares. Asserted by
-   *  azure-boards.unit.test.ts and tracker-contract.test.ts. */
+   *  any other only once Azure has shown it on a work item read with a
+   *  category. undefined otherwise: the freeze gate then falls closed rather
+   *  than letting the name through. Exact-case, as placeState compares.
+   *  Asserted by azure-boards.unit.test.ts and tracker-contract.test.ts. */
   stateCategory(state: IssueState): StateCategory | undefined {
     if (state === "open" || state === "in_progress" || state === "closed") return state;
     const { states } = this.cfg;
@@ -240,8 +250,9 @@ export class AzureBoardsTracker implements Tracker {
 
   private normalize(raw: WorkItem): Issue {
     const f = raw.fields;
-    const category = this.normalizeState(f);
-    if (f["System.State"]) this.seenStates.set(f["System.State"], category);
+    const placed = this.placeState(f);
+    const category = placed ?? "open";
+    if (f["System.State"] && placed) this.seenStates.set(f["System.State"], placed);
     const tags = f["System.Tags"];
     const labels = tags ? tags.split("; ").filter(Boolean) : [];
     const assignedTo = f["System.AssignedTo"];

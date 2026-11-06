@@ -26,15 +26,18 @@ export declare class ClickUpTracker implements Tracker {
     probe(): Promise<ProbeResult>;
     /** Validates a caller-supplied phase (list) id before it reaches a URL. defaultListId is trusted config, not user input. */
     private assertPhaseId;
-    private normalizeState;
+    /** The category a status's type places it in; undefined for a custom status
+     *  that is not the configured in_progress, or a type this code does not
+     *  know, and the caller decides what that means (#496). */
+    private placeStatus;
     private readonly seenStatuses;
     /** The SPI's pre-write question (#427, #471): the canonical three by
      *  name; a statuses-map key by the native status it writes, and a native
      *  status by itself -- the three required entries carry their category,
-     *  any other only once ClickUp has shown it with its type. undefined
-     *  otherwise: the freeze gate then falls closed rather than letting the
-     *  name through. Case-insensitive, as normalizeState compares. Asserted
-     *  by clickup.unit.test.ts and tracker-contract.test.ts. */
+     *  any other only once ClickUp has shown it with a type that places it.
+     *  undefined otherwise: the freeze gate then falls closed rather than
+     *  letting the name through. Case-insensitive, as placeStatus compares.
+     *  Asserted by clickup.unit.test.ts and tracker-contract.test.ts. */
     stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     createIssue(input: IssueCreate): Promise<Issue>;

@@ -309,4 +309,132 @@ describe("a frozen run cannot close an issue by the backend's own spelling (#471
     expect((await call("issue_update", { id: "7", state: "backlog" })).isError).toBe(false);
     expect(azWrites(calls)).toHaveLength(1);
   });
+
+  // ---- #496: a state the adapter could not place was learned as open ----
+  // Every adapter's read-side bucket defaults to open, and "open" is the one
+  // answer the gate lets through, so learning that default handed a frozen run
+  // the close #471 was written to stop. Only a category the wire actually
+  // carried, or the config's own mapping, may be learned.
+  const azWiCategory = (state: string, category: string) => {
+    const base = wi(state);
+    return { ...base, fields: { ...base.fields, "System.StateCategory": category } };
+  };
+  const makeAzureShowing = (show: (c: Call) => unknown) => {
+    const { f, calls } = routedFetch((c) => {
+      if (c.url.includes("/comments")) return { body: { id: 1 } };
+      if (c.method === "PATCH") {
+        const op = (c.body as Array<{ path: string; value: string }>).find((o) => o.path === "/fields/System.State");
+        return { body: wi(op?.value ?? "To Do") };
+      }
+      return { body: show(c) };
+    });
+    const states = { ...azCfg.states, ship: "Shipped", drop: "Removed", triage: "Triage" };
+    return { tracker: new AzureBoardsTracker({ ...azCfg, states }, f, () => "pat123"), calls };
+  };
+
+  it("azure-boards: a Completed or Removed state read with no category field is refused by alias and by name, and no PATCH is sent", async () => {
+    const { tracker, calls } = makeAzureShowing((c) => wi(c.url.includes("/workitems/8") ? "Shipped" : "Removed"));
+    const call = await connect(tracker, true);
+    expect((await call("issue_get", { id: "8" })).isError).toBe(false);
+    expect((await call("issue_get", { id: "9" })).isError).toBe(false);
+    for (const state of ["ship", "drop", "Shipped", "Removed"]) {
+      expect((await call("issue_update", { id: "8", state })).json.code).toBe("RUN_FROZEN");
+    }
+    expect(azWrites(calls)).toHaveLength(0);
+  });
+
+  it("azure-boards twin: an alias whose state a read showed with a Proposed category still passes while frozen", async () => {
+    const { tracker, calls } = makeAzureShowing(() => azWiCategory("Triage", "Proposed"));
+    const call = await connect(tracker, true);
+    expect((await call("issue_get", { id: "8" })).isError).toBe(false);
+    expect(tracker.stateCategory?.("triage")).toBe("open");
+    expect((await call("issue_update", { id: "8", state: "triage" })).isError).toBe(false);
+    expect(azWrites(calls)).toHaveLength(1);
+  });
+
+  it("azure-boards hostile: a name that only resolves on Object.prototype never reads as open", async () => {
+    const { tracker, calls } = makeAzureShowing(() => wi("To Do"));
+    const call = await connect(tracker, true);
+    for (const state of ["constructor", "__proto__", "toString"]) {
+      expect((await call("issue_update", { id: "8", state })).json.code).toBe("RUN_FROZEN");
+    }
+    expect(azWrites(calls)).toHaveLength(0);
+  });
+
+  it("jira sibling: a status with no category, or Jira's 'undefined' No Category key, is not learned from a read or a transition list", async () => {
+    const show = (name: string, statusCategory?: { key: string }) => ({
+      key: "CHN-7",
+      fields: {
+        summary: "t", description: null, status: { name, statusCategory },
+        updated: "2026-07-12T00:00:00.000+0000", labels: [],
+      },
+    });
+    const { f, calls } = routedFetch((c) => {
+      if (c.url.includes("/transitions") && c.method === "GET") return { body: { transitions: [
+        { id: "11", name: "To Do", to: { name: "To Do", statusCategory: { key: "new" } } },
+        { id: "41", name: "Ship It", to: { name: "Shipped" } },
+      ] } };
+      if (c.url.includes("/transitions")) return { status: 204 };
+      if (c.url.includes("CHN-8")) return { body: show("Parked", { key: "undefined" }) };
+      if (c.url.includes("CHN-9")) return { body: show("Shipped") };
+      return { body: show("To Do", { key: "new" }) };
+    });
+    const tracker = new JiraTracker(jiraCfg, f, () => ({ email: "e", token: "t" }));
+    const call = await connect(tracker, true);
+    expect((await call("issue_get", { id: "CHN-8" })).isError).toBe(false);
+    expect((await call("issue_get", { id: "CHN-9" })).isError).toBe(false);
+    // the owner's own transition reads the list the frozen run's names come from
+    await tracker.updateIssue("CHN-7", { state: "To Do" });
+    const before = jiraTransitions(calls).length;
+    expect(tracker.stateCategory?.("To Do")).toBe("open");
+    for (const state of ["Parked", "Shipped", "Ship It"]) {
+      expect((await call("issue_update", { id: "CHN-7", state })).json.code).toBe("RUN_FROZEN");
+    }
+    expect(jiraTransitions(calls)).toHaveLength(before);
+  });
+
+  it("linear sibling: a state type Linear's vocabulary does not hold, or none at all, is not learned", async () => {
+    const { f, calls } = routedFetch((c) => {
+      const { query, variables } = c.body as { query: string; variables: Record<string, unknown> };
+      if (query.includes("query Issue") && String(variables.id) === "ENG-3") {
+        return { body: { data: { issue: linearNode("ENG-3", { name: "Shipped", type: "future_type" }) } } };
+      }
+      if (query.includes("query Issue") && String(variables.id) === "ENG-4") {
+        return { body: { data: { issue: linearNode("ENG-4", { name: "Parked" } as { name: string; type: string }) } } };
+      }
+      return linearRoute(c);
+    });
+    const tracker = new LinearTracker({ teamId: "team-uuid-1", apiKeyEnv: "LINEAR_API_KEY" }, f, () => "lin_key");
+    const call = await connect(tracker, true);
+    expect((await call("issue_get", { id: "ENG-3" })).isError).toBe(false);
+    expect((await call("issue_get", { id: "ENG-4" })).isError).toBe(false);
+    for (const state of ["Shipped", "Parked"]) {
+      expect((await call("issue_update", { id: "ENG-3", state })).json.code).toBe("RUN_FROZEN");
+    }
+    expect(linearUpdates(calls)).toHaveLength(0);
+  });
+
+  it("clickup sibling: a custom status the config does not place, or a status with no type, is not learned; an open-type status still is", async () => {
+    const shown: Record<string, unknown> = {
+      s1: { status: "shipped", type: "custom" },
+      w1: { status: "weird" },
+      o1: { status: "parked", type: "open" },
+    };
+    const { f, calls } = routedFetch((c) => {
+      if (c.method === "PUT") return cuRoute(c);
+      const id = Object.keys(shown).find((k) => c.url.includes(`/task/${k}`));
+      return id ? { body: cuTask(shown[id] as { status: string; type: string }) } : cuRoute(c);
+    });
+    const statuses = { ...cuCfg.statuses, ship: "shipped", park: "parked" };
+    const tracker = new ClickUpTracker({ ...cuCfg, statuses }, f, () => "tok");
+    const call = await connect(tracker, true);
+    for (const id of Object.keys(shown)) expect((await call("issue_get", { id })).isError).toBe(false);
+    for (const state of ["ship", "shipped", "weird"]) {
+      expect((await call("issue_update", { id: "s1", state })).json.code).toBe("RUN_FROZEN");
+    }
+    expect(cuWrites(calls)).toHaveLength(0);
+    expect(tracker.stateCategory?.("park")).toBe("open");
+    expect((await call("issue_update", { id: "o1", state: "park" })).isError).toBe(false);
+    expect(cuWrites(calls)).toHaveLength(1);
+  });
 });

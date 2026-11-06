@@ -1,6 +1,6 @@
 import { ReadCache } from "../core/cache.js";
 import type {
-  Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState,
+  BranchProtection, Capability, Issue, IssueComment, IssueCreate, IssueLink, IssuePatch, IssueState,
   LinkType, Milestone, Phase, ProbeResult, StateCategory, Tracker, WorklogEntry,
 } from "./types.js";
 
@@ -15,9 +15,13 @@ export class CachedTracker implements Tracker {
 
   // Optional on Tracker — present only when the inner adapter has it, so the
   // caller's "capabilities.hasWorklog && tracker.logWork" gate keeps working.
+  // A method missing here is missing on every real server, since production
+  // wraps every tracker in this class (#495) -- contract-cached.test.ts walks
+  // the SPI out of types.ts and fails on any method this class drops.
   logWork?: (id: string, minutes: number) => Promise<void>;
   resolveSelf?: () => Promise<string | undefined>;
   probe?: () => Promise<ProbeResult>;
+  branchProtection?: () => Promise<BranchProtection>;
   stateCategory?: (state: IssueState) => StateCategory | undefined;
   linkIssues?: (from: string, type: LinkType, to: string) => Promise<void>;
   unlinkIssues?: (from: string, type: LinkType, to: string) => Promise<void>;
@@ -44,6 +48,10 @@ export class CachedTracker implements Tracker {
     }
     if (inner.probe) {
       this.probe = () => this.inner.probe!();
+    }
+    if (inner.branchProtection) {
+      // never cached: a rule removed a minute ago must not read as protected
+      this.branchProtection = () => this.inner.branchProtection!();
     }
     if (inner.stateCategory) {
       // a pure lookup: nothing to cache, nothing to invalidate

@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CairnError } from "../errors.js";
 const WORKSPACE_FILE = "cairn-workspace.json";
 const focusPath = (root) => join(root, ".cairn", "basecamp", "focus.json");
@@ -114,18 +114,50 @@ export function setFocus(launchDir, project) {
     return { focus: project, projectDir: resolved.resolvedProject, focusApplied: resolved.focusApplied };
 }
 /**
- * True when `dir` is a configured member's directory or lies anywhere inside
- * one. Compared segment-wise (never a string prefix): `b-other` is not inside
- * member `b`, and a `..` spelled into the launch dir was resolved before it
- * got here — workspace-context.test.ts, the #487 hostile twins.
+ * True when `dir` is `parent` or lies anywhere inside it. Compared segment-wise
+ * (never a string prefix): `b-other` is not inside `b`, a folder named `..cache`
+ * inside `b` is, and a `..` spelled into the launch dir was resolved before it
+ * got here — workspace-context.test.ts, the #487 and #499 hostile twins.
  */
-function insideConfiguredMember(info, dir) {
-    return info.members.some((m) => {
-        if (!m.configured)
-            return false;
-        const rel = relative(m.absPath, dir);
-        return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-    });
+function within(parent, dir) {
+    const rel = relative(parent, dir);
+    return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+/** The path with its links resolved, or as spelled when it cannot be read. */
+function real(path) {
+    try {
+        return realpathSync.native(path);
+    }
+    catch {
+        return path;
+    }
+}
+/**
+ * True when a session launched in `dir` already has a project of its own, so
+ * the focus is not its business. Three shapes, each pinned by
+ * workspace-context.test.ts:
+ *
+ * - inside a configured member (#487), whatever its path;
+ * - inside a listed member with no cairn.json yet (#499), a fresh clone or a
+ *   project mid-setup, when that member sits below the workspace root. A listed
+ *   `.` or `..` with no cairn.json would otherwise swallow the root sessions
+ *   the focus exists for;
+ * - inside a folder below the root that holds its own cairn.json, listed or
+ *   not (#499). The root's own cairn.json does not count.
+ *
+ * A launch spelled through a symlink counts by where the link lands, so a link
+ * into a member is that member's session and keeps its own spelling.
+ */
+function ownsSession(info, dir) {
+    const inside = (path) => within(path, dir) || within(real(path), real(dir));
+    const claims = (m) => m.configured || (m.absPath !== info.root && within(info.root, m.absPath));
+    if (info.members.some((m) => claims(m) && inside(m.absPath)))
+        return true;
+    for (let d = dir; d !== info.root && within(info.root, d); d = dirname(d)) {
+        if (existsSync(join(d, "cairn.json")))
+            return true;
+    }
+    return false;
 }
 /**
  * The one function every tool call resolves its project dir through, with
@@ -133,24 +165,25 @@ function insideConfiguredMember(info, dir) {
  * set, both resolve to `launchDir` itself — the compatibility path that keeps
  * single-project behavior byte-identical.
  *
- * A launch dir that is itself a configured member (or sits inside one) is
- * that member's session and resolves to itself whatever the focus says
- * (#487): the focus file is one file under the workspace root, shared by
- * every session beneath it, and honoring it here let one session's
- * `basecamp focus` silently repoint a sibling session's writes into its own
- * planning folder and tracker. The focus applies only to a session launched
- * at the workspace root or in a folder no member owns — the sessions that
- * have no project of their own. A focus naming a member that has since
- * vanished or lost its cairn.json is a stale-focus error for THOSE sessions,
- * never a silent fallback to launchDir; a member launch is not the stale
- * focus's business and is never blocked by it.
+ * A launch dir that has a project of its own (ownsSession above) resolves to
+ * itself whatever the focus says (#487, #499): the focus file is one file under
+ * the workspace root, shared by every session beneath it, and honoring it here
+ * let one session's `basecamp focus` silently repoint a sibling session's
+ * writes into its own planning folder and tracker. A member with no cairn.json
+ * yet gets CONFIG_MISSING from the tools that need one, never a write elsewhere.
+ * The focus applies only to a session launched at the workspace root or in a
+ * folder that claims no project — the sessions that have none of their own. A
+ * focus naming a member that has since vanished or lost its cairn.json is a
+ * stale-focus error for THOSE sessions, never a silent fallback to launchDir; a
+ * session with its own project is not the stale focus's business and is never
+ * blocked by it.
  */
 export function resolveProject(launchDir) {
     const self = { launchDir, resolvedProject: launchDir, focusApplied: false };
     const info = findWorkspace(launchDir);
     if (!info || info.focus === null)
         return self;
-    if (insideConfiguredMember(info, resolve(launchDir)))
+    if (ownsSession(info, resolve(launchDir)))
         return self;
     const member = info.members.find((m) => m.name === info.focus);
     if (!member || !member.configured) {

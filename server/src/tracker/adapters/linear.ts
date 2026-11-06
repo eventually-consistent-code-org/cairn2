@@ -95,8 +95,15 @@ export class LinearTracker implements Tracker {
   // Workflow state names Linear has shown this instance, lowercased, with
   // the category their type buckets to -- filled by every issue read and by
   // the team states fetch, so the pre-write question below answers from
-  // data already fetched and never fetches for itself (#471).
+  // data already fetched and never fetches for itself (#471). A type outside
+  // the six below is NOT learned (#496): categoryOfType's default is open, and
+  // "open" is the one answer the freeze gate lets through. The six are a dated
+  // claim, as of 2026-11-05 per this adapter's own mapping. Asserted by
+  // tracker-contract.test.ts.
   private readonly seenStates = new Map<string, StateCategory>();
+  private static readonly PLACED_TYPES: ReadonlySet<string> = new Set([
+    "completed", "canceled", "started", "unstarted", "backlog", "triage",
+  ]);
 
   /** Linear's state.type → the semantic bucket: completed and canceled are
    *  closed, started is in progress, unstarted/backlog/triage are open. */
@@ -106,7 +113,9 @@ export class LinearTracker implements Tracker {
   }
 
   private learnState(name: string | undefined, type: string): void {
-    if (name) this.seenStates.set(name.toLowerCase(), LinearTracker.categoryOfType(type));
+    if (name && LinearTracker.PLACED_TYPES.has(type)) {
+      this.seenStates.set(name.toLowerCase(), LinearTracker.categoryOfType(type));
+    }
   }
 
   /** The SPI's pre-write question (#427, #471): the canonical three by name;

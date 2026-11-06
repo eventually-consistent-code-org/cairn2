@@ -33,15 +33,18 @@ export declare class AzureBoardsTracker implements Tracker {
      *  project exists. A typo'd project now 404s instead of reading "ok". */
     probe(): Promise<ProbeResult>;
     private get projectPath();
-    private normalizeState;
+    /** The category a read's own fields place it in: Azure's category when the
+     *  response carries one this code knows, else the states map. undefined when
+     *  neither can say, and the caller decides what that means (#496). */
+    private placeState;
     private readonly seenStates;
     /** The SPI's pre-write question (#427, #471): the canonical three by
      *  name; a states-map key by the native state it writes, and a native
      *  state by itself -- the three required entries carry their category,
-     *  any other only once Azure has shown it on a work item read. undefined
-     *  otherwise: the freeze gate then falls closed rather than letting the
-     *  name through. Exact-case, as normalizeState compares. Asserted by
-     *  azure-boards.unit.test.ts and tracker-contract.test.ts. */
+     *  any other only once Azure has shown it on a work item read with a
+     *  category. undefined otherwise: the freeze gate then falls closed rather
+     *  than letting the name through. Exact-case, as placeState compares.
+     *  Asserted by azure-boards.unit.test.ts and tracker-contract.test.ts. */
     stateCategory(state: IssueState): StateCategory | undefined;
     private normalize;
     /** Escapes single quotes in a WIQL string literal by doubling them. */

@@ -24,6 +24,7 @@ export declare class LinearTracker implements Tracker {
      *  instead of reading "ok". */
     probe(): Promise<ProbeResult>;
     private readonly seenStates;
+    private static readonly PLACED_TYPES;
     /** Linear's state.type → the semantic bucket: completed and canceled are
      *  closed, started is in progress, unstarted/backlog/triage are open. */
     private static categoryOfType;

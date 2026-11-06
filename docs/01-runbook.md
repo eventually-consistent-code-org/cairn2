@@ -898,7 +898,7 @@ each member keeps its own tracker-first setup untouched. `focus <member>`
 repoints EVERY verb at that member — plan, work, issue calls, banner,
 handoff — because they all resolve through the same project dir; nothing
 downstream needs to know a workspace exists. That repoint reaches a
-session launched at the workspace root (or in a folder no member owns);
+session launched at the workspace root (or in a folder with no project of its own);
 a session launched inside a member stays in that member whatever the
 focus says, and the tool result says which happened (`focusApplied`,
 #487). `dispatch` decomposes a goal
