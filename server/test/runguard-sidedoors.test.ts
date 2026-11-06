@@ -537,6 +537,182 @@ describe("side doors: the control the Not seen block relies on can't be removed 
   });
 });
 
+describe("side doors: the writes that move a ref or the repository, from the sweep of GitHub's published description (#525)", () => {
+  // Before #525 each of these exited 0 on merged main. What each does at the
+  // service is a dated claim, read 2026-11-06 from GitHub's REST description and
+  // GraphQL schema: the tests pin what the guard reads and refuses, never what
+  // GitHub then does.
+  const API = "https://api.github.com";
+  // [the route, the name it refuses under, a GET of the same path, a write to a branch nobody ships from]
+  const GATED: Array<[route: string, name: string, read: string, twin?: string]> = [
+    ["gh api -X POST repos/o/r/merge-upstream -f branch=main", "a `gh api` fork sync", "gh api repos/o/r/merge-upstream",
+      "gh api -X POST repos/o/r/merge-upstream -f branch=feature"],
+    [`curl -X POST ${API}/repos/o/r/merge-upstream -d '{"branch":"main"}'`, "a `curl` fork sync", `curl ${API}/repos/o/r/merge-upstream`,
+      `curl -X POST ${API}/repos/o/r/merge-upstream -d '{"branch":"feature"}'`],
+    [`wget --post-data=branch=main ${API}/repos/o/r/merge-upstream`, "a `wget` fork sync", `wget ${API}/repos/o/r/merge-upstream`,
+      `wget --post-data=branch=feature ${API}/repos/o/r/merge-upstream`],
+    ["gh api -X PUT repos/o/r/contents/a.txt -f message=m -f content=eA== -f branch=main", "a `gh api` file contents write", "gh api repos/o/r/contents/a.txt",
+      "gh api -X PUT repos/o/r/contents/a.txt -f message=m -f content=eA== -f branch=feature"],
+    // no branch named is the repository's default, by GitHub's own description
+    ["gh api -X PUT repos/o/r/contents/a.txt -f message=m -f content=eA==", "a `gh api` file contents write", "gh api repos/o/r/contents/a.txt?ref=feature"],
+    [`curl -X DELETE ${API}/repos/o/r/contents/a.txt -d '{"message":"m","sha":"x","branch":"main"}'`, "a `curl` file contents write", `curl ${API}/repos/o/r/contents/a.txt`,
+      `curl -X DELETE ${API}/repos/o/r/contents/a.txt -d '{"message":"m","sha":"x","branch":"feature"}'`],
+    ["gh api -X PUT repos/o/r/pulls/1/merge-async", "a `gh api` pull request merge", "gh api repos/o/r/pulls/1/merge-async"],
+    [`wget --method=PUT ${API}/repos/o/r/pulls/1/merge-async`, "a `wget` pull request merge", `wget ${API}/repos/o/r/pulls/1/merge-async`],
+    ["gh api -X PUT repos/o/r/pulls/1/update-branch", "a `gh api` pull request branch update", "gh api repos/o/r/pulls/1"],
+    [`curl -X PUT ${API}/repos/o/r/pulls/1/update-branch`, "a `curl` pull request branch update", `curl ${API}/repos/o/r/pulls/1`],
+    ["gh api -X POST repos/o/r/code-scanning/alerts/1/autofix/commits -f target_ref=refs/heads/main", "a `gh api` code scanning autofix commit",
+      "gh api repos/o/r/code-scanning/alerts/1/autofix", "gh api -X POST repos/o/r/code-scanning/alerts/1/autofix/commits -f target_ref=refs/heads/feature"],
+    ["gh repo sync o/fork", "`gh repo sync`", "gh repo view o/fork", "gh repo sync o/fork --branch feature"],
+    ["gh pr update-branch 1", "`gh pr update-branch`", "gh pr view 1"],
+    ["gh release edit v1 --target main", "`gh release edit --target`", "gh release edit v1 --notes x", "gh release edit v1 --target feature"],
+    ["gh release delete v1 --cleanup-tag", "`gh release delete --cleanup-tag`", "gh release delete v1"],
+    ["gh api graphql -f query='mutation { enqueuePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'", "a `gh api` GraphQL mutation",
+      "gh api graphql -f query='query { viewer { login } }'"],
+    ["gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: \"x\"}) { clientMutationId } }'", "a `gh api` GraphQL mutation",
+      "gh api graphql -f query='query { viewer { login } }'"],
+    ["gh api graphql -f query='mutation { createLinkedBranch(input: {issueId: \"x\", oid: \"y\"}) { clientMutationId } }'", "a `gh api` GraphQL mutation",
+      "gh api graphql -f query='query { viewer { login } }'"],
+  ];
+  // Moving the repository: a stamp is no answer, as it is none for a protection write.
+  const MOVED: Array<[route: string, name: string, read: string]> = [
+    ["gh api -X POST repos/o/r/transfer -f new_owner=x", "a `gh api` repository transfer", "gh api repos/o/r/transfer"],
+    [`curl -X POST ${API}/repos/o/r/transfer -d '{"new_owner":"x"}'`, "a `curl` repository transfer", `curl ${API}/repos/o/r/transfer`],
+    [`wget --post-data=new_owner=x ${API}/repos/o/r/transfer`, "a `wget` repository transfer", `wget ${API}/repos/o/r/transfer`],
+    ["gh api -X PATCH repos/o/r -f name=elsewhere", "a `gh api` repository rename", "gh api repos/o/r"],
+    [`curl -X PATCH ${API}/repos/o/r -d '{"name":"elsewhere"}'`, "a `curl` repository rename", `curl ${API}/repos/o/r`],
+    ["gh repo rename elsewhere --yes", "`gh repo rename`", "gh repo view"],
+    ["gh api graphql -f query='mutation { updateRepository(input: {repositoryId: \"x\", name: \"elsewhere\"}) { clientMutationId } }'",
+      "a `gh api` GraphQL repository rename", "gh api graphql -f query='mutation { updateRepository(input: {repositoryId: \"x\", description: \"d\"}) { clientMutationId } }'"],
+  ];
+
+  it("gated: with no stamp each refuses as a push, from the root and a nested folder, naming the route; its GET passes", () => {
+    const f = fixture(false, false);
+    for (const [route, name, read] of GATED) {
+      for (const cwd of [f.proj, f.sub]) {
+        const r = call(f, bash(route), cwd);
+        expect(r.status, `${route}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, route).toContain(`cairn run guard: ${name} is a push`);
+        expect(r.stderr, route).toContain("moves-shared-ref");
+        expect(r.stderr, route).not.toMatch(/[A-Z_]+=1/);
+        const t = call(f, bash(read), cwd);
+        expect(t.status, `${read}\n${t.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("gated, the twins: a write naming a branch nobody ships from passes with no stamp at all; a clean stamp passes every one; a live run still refuses", () => {
+    const none = fixture(false, false);
+    const twins = GATED.flatMap(([, , , twin]) => (twin === undefined ? [] : [twin]));
+    expect(twins.length).toBeGreaterThan(0);
+    for (const twin of twins) {
+      for (const cwd of [none.proj, none.sub]) {
+        const r = call(none, bash(twin), cwd);
+        expect(r.status, `${twin}\n${r.stderr}`).toBe(0);
+      }
+    }
+    const clean = fixture(true, false);
+    for (const [route] of GATED) expect(call(clean, bash(route)).status, route).toBe(0);
+    const hot = fixture(true, true);
+    for (const [route] of GATED) {
+      const r = call(hot, bash(route));
+      expect(r.status, route).toBe(2);
+      expect(r.stderr, route).toContain("run-x");
+    }
+  });
+
+  it("moved: each refuses in every session, a clean stamp included, from the root and a nested folder, under the escape `gh repo delete` uses; its read passes", () => {
+    const f = fixture(true, false);
+    for (const [route, name, read] of MOVED) {
+      for (const cwd of [f.proj, f.sub]) {
+        const r = call(f, bash(route), cwd);
+        expect(r.status, `${route}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, route).toContain(`cairn run guard: ${name} is refused in every session`);
+        expect(r.stderr, route).toContain("is the owner's to change");
+        expect(r.stderr, route).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH");
+        expect(r.stderr, route).not.toMatch(/[A-Z_]+=1/);
+        const t = call(f, bash(read), cwd);
+        expect(t.status, `${read}\n${t.stderr}`).toBe(0);
+      }
+      expect(call(f, bash(`CAIRN_ALLOW_UNSHIPPED_PUSH=1 ${route}`)).status, route).toBe(0);
+    }
+    const hot = fixture(true, true);
+    const r = call(hot, bash("CAIRN_ALLOW_UNSHIPPED_PUSH=1 gh api -X POST repos/o/r/transfer -f new_owner=x"));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("run-x");
+  });
+
+  it("hostile: by repository id, no scheme, a user and port, an escaped or walked path, a spelled method or path, an alias, a runner, a body from stdin", () => {
+    const f = fixture(false, false);
+    for (const c of [
+      "gh api -X POST repositories/12/transfer -f new_owner=x",
+      "curl -X POST api.github.com/repos/o/r/transfer -d new_owner=x",
+      "curl -X POST x@api.github.com:443/repos/o/r/transfer -d new_owner=x",
+      "gh api -X POST repos/o/r/trans%66er -f new_owner=x",
+      "gh api -X POST repos/o/r/git/../transfer -f new_owner=x",
+      "gh api -X post /REPOS/o/r/TRANSFER/ -f new_owner=x",
+      "M=POST; gh api -X \"$M\" repos/o/r/transfer -f new_owner=x",
+      "P=repos/o/r/transfer; gh api -X POST \"$P\" -f new_owner=x",
+      "gh alias set t 'api -X POST repos/o/r/transfer' && gh t -f new_owner=x",
+      "timeout 5 gh api -X POST repos/o/r/transfer -f new_owner=x",
+      "sh -c 'gh api -X POST repos/o/r/transfer -f new_owner=x'",
+      "echo '{\"name\":\"x\"}' | gh api -X PATCH repos/o/r --input -",
+      "curl -X PATCH https://api.github.com/repos/o/r --json '{\"na\\u006de\":\"x\"}'",
+    ]) {
+      for (const cwd of [f.proj, f.sub]) {
+        const r = call(f, bash(c), cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+      }
+    }
+    for (const c of [
+      "gh api -X POST repositories/12/merge-upstream -f branch=main",
+      "curl -X POST api.github.com/repos/o/r/merge-upstream -d branch=main",
+      "gh api -X POST repos/o/r/merg%65-upstream -f branch=main",
+      "gh api -X POST repos/o/r -f x=y && gh api -X POST repos/o/r/merge-upstream -f branch=main",
+      // the body the guard can't read names no branch, so it reads as the default
+      "echo '{\"branch\":\"feature\"}' | gh api repos/o/r/merge-upstream --input -",
+      "gh api -X POST repos/o/r/merge-upstream -f branch=refs/heads/main",
+      "gh repo sync o/fork -b main",
+      "gh repo -R o/fork sync o/fork",
+      "gh alias set s 'repo sync o/fork' && gh s",
+      "gh api -X PUT repos/o/r/contents/docs/merges -f content=eA==",
+    ]) {
+      const r = call(f, bash(c), f.sub);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("is a push");
+    }
+  });
+
+  it("a forced gh repo sync of the default branch never passes the gate, a stamp included; another branch's is the gate's; a local sync is no remote write", () => {
+    const f = fixture(true, false);
+    const r = call(f, bash("gh repo sync o/fork --force"));
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("it deletes the history the reset drops");
+    expect(call(f, bash("gh repo sync o/fork --force -b feature")).status).toBe(0);
+    const none = fixture(false, false);
+    for (const local of ["gh repo sync", "gh repo sync --branch main", "gh repo sync -s up/stream", "gh repo sync --force"]) {
+      const t = call(none, bash(local));
+      expect(t.status, `${local}\n${t.stderr}`).toBe(0);
+    }
+  });
+
+  it("the harmless twins: a file named like a route is a file; a path that only starts like one is no route", () => {
+    const none = fixture(false, false);
+    for (const c of [
+      "gh api -X PUT repos/o/r/contents/transfer -f content=eA== -f branch=feature",
+      "gh api -X PUT repos/o/r/contents/merge-upstream -f content=eA== -f branch=feature",
+      "gh api -X PUT repos/o/r/contents/git/refs/heads/main -f content=eA== -f branch=feature",
+      "gh api -X POST repos/o/r/merge-upstream-x -f branch=main",
+      "gh api -X POST repos/o/r/forks",
+      "gh api -X PATCH repos/o/r -f description=name",
+    ]) {
+      const r = call(none, bash(c));
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+});
+
 describe("side doors: a request whose host no word names stays Not seen, pinned (#504)", () => {
   it("each exits 0 and is named in the header; a deleted line is red", () => {
     const f = fixture(false, false);

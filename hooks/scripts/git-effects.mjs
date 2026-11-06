@@ -937,9 +937,12 @@ const MERGES_PR = "it merges a pull request onto its base branch, as a push woul
 /**
  * The GraphQL mutations that merge a pull request or move a ref (a claim
  * about GitHub's schema, dated 2026-11-04): what a `gh api graphql` or a
- * curl to /graphql can do that a REST path above does.
+ * curl to /graphql can do that a REST path above does. The last three joined
+ * from the #525 sweep (dated 2026-11-06, the Not seen block below the table):
+ * a merge queue merges, a branch update merges into a pull request's head, a
+ * linked branch is a new ref.
  */
-const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRef|updateRefs|deleteRef|createCommitOnBranch)\b/;
+const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRef|updateRefs|deleteRef|createCommitOnBranch|enqueuePullRequest|updatePullRequestBranch|createLinkedBranch)\b/;
 
 /**
  * The GraphQL mutations that change the controls a push answers to (#505; a
@@ -948,6 +951,13 @@ const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranc
  * branch, which that mutation may not even accept -- read on the cheaper side.
  */
 const CONTROL_MUTATIONS = /\b(createBranchProtectionRule|updateBranchProtectionRule|deleteBranchProtectionRule|createRepositoryRuleset|updateRepositoryRuleset|deleteRepositoryRuleset|updateRepository(?=\b[\s\S]*\bdefaultBranch\b))\b/;
+
+/**
+ * updateRepository when the request names a name (#525; its input carries `name`,
+ * a claim about GitHub's schema, read 2026-11-06). A request that only selects
+ * `name` back reads as a rename too -- the cheaper side, as above.
+ */
+const RENAME_MUTATIONS = /\b(updateRepository(?=\b[\s\S]*\bname\b))\b/;
 
 // A repository's own REST path, by name or by id, and the scopes that hold a ruleset (#505).
 const REPO_PATH = "/(?:repos/[^/]+/[^/]+|repositories/\\d+)";
@@ -958,13 +968,20 @@ const REMOVES_COVER = "branch protection and rulesets are what stand behind the 
   "block), so one write here takes that cover from all of them at once.";
 const MOVES_DEFAULT = "it moves the repository's default branch: which branch is protected, and which one the ship gate reads.";
 
+// Why the #525 rows refuse. What each does at the service is a claim about GitHub, read 2026-11-06.
+const MOVES_REPO = "it moves the repository and every ref in it to another owner, out from under every clone's remote.";
+const RENAMES_REPO = "it moves the repository to a new name, out from under every clone's remote.";
+const UPDATES_PR = "it merges the base branch into a pull request's branch on the remote, and only the API knows which branch that is.";
+
 /**
  * The side-door table (#483): the routes to "move a shared ref" that never
  * run git, each the effect MOVES_SHARED_REF. Two kinds of row:
  *   a gh command  `sub` and `action` (`gh pr merge`, `gh release create`,
  *                 `gh repo delete`); `branchOpt` names the option that
  *                 says which branch (a release's --target), `deletes` what
- *                 the command deletes outright
+ *                 the command deletes outright, `dest` that it only reaches
+ *                 the remote when a word names a repository (`gh repo sync`
+ *                 with none syncs this clone, #525)
  *   an API path   `path`, a regexp on the endpoint's path, reached by `gh
  *                 api`, curl or wget with a write method (API_PROGRAMS);
  *                 `ref` is the capture group naming the ref, `field` the
@@ -984,6 +1001,31 @@ const MOVES_DEFAULT = "it moves the repository's default branch: which branch is
  * create`, `gh pr comment` and a write to any other path have no row.
  * Asserted by runguard-effects.test.ts (one test per row),
  * runguard-guards.test.ts (#483) and runguard-sidedoors.test.ts (#484).
+ *
+ * Not seen, dated 2026-11-06 (#525), read 2026-11-06 from GitHub's published REST
+ * description (info.version 1.1.4: 602 write operations, 264 on a repository's
+ * path) and GraphQL schema (246 mutations, last modified 2026-10-30), a claim
+ * about a third party that can expire. The sweep's writes that move no existing
+ * ref, or none this guard can read, carry no row, each pinned by
+ * runguard-effects.test.ts:
+ *   a new repository  `POST /forks`, `POST /generate`, `POST /user/repos`,
+ *                     `POST /orgs/{org}/repos`, createRepository, cloneTemplateRepository
+ *   objects no ref    `POST /git/commits`, `POST /git/tags`, and the blob and tree
+ *   names yet         writes beside them
+ *   code that runs    `POST /dispatches`, `POST /actions/workflows/{id}/dispatches`:
+ *   elsewhere         a workflow may push with its own token, and branch protection
+ *                     is what stands there
+ *   push rights       `PUT /collaborators/{username}`, `POST /keys`: the push itself
+ *                     still meets the gates, by whatever route it takes
+ *   a freeze          `archived` on a repository PATCH, archiveRepository: no ref moves
+ *   a site            `POST /pages/deployments`
+ *   a proposal        `POST /pulls`, `PATCH /pulls/{n}` (a new base moves nothing until
+ *                     the merge), `POST /stacks`, revertPullRequest (a new branch only)
+ *   closed            `PUT /import`: the description says closed since 2024-04-12
+ *   who a rule        `PATCH /properties/values`, setRepositoryCustomPropertyValues: a
+ *   reaches           value may take a repository out of a ruleset that targets it,
+ *                     unconfirmed, and #505's class rather than this sweep's
+ * A transfer and a fork sync have no GraphQL mutation to name.
  */
 export const SIDE_DOOR_TABLE = Object.freeze([
   { route: "gh pr merge", sub: "pr", action: "merge", what: "`gh pr merge`", why: MERGES_PR },
@@ -991,7 +1033,10 @@ export const SIDE_DOOR_TABLE = Object.freeze([
     what: "`gh release create`", why: "it creates a tag on the remote, a ref every clone fetches." },
   { route: "gh repo delete", sub: "repo", action: "delete", deletes: "the repository and every ref in it",
     what: "`gh repo delete`", why: "it deletes the repository and every ref in it." },
-  { route: "pull request merge", path: /\/pulls\/\d+\/merge\/?$/i, why: MERGES_PR },
+  // read first (#525): a file named like a route below is a file, and answers to the branch it names
+  { route: "file contents write", path: new RegExp(`^${REPO_PATH}/contents(?:/.*)?$`, "i"), methods: ["PUT", "DELETE"], field: "branch",
+    why: "it commits a file change onto a branch on the remote, as a push would." },
+  { route: "pull request merge", path: /\/pulls\/\d+\/merge(?:-async)?\/?$/i, why: MERGES_PR },
   { route: "ref write", path: /\/git\/refs(?:\/(.+?))?\/?$/i, ref: 1, field: "ref",
     why: "it creates, moves or deletes a ref on the remote, as a push would." },
   { route: "branch merge", path: /\/merges\/?$/i, field: "base",
@@ -1014,6 +1059,26 @@ export const SIDE_DOOR_TABLE = Object.freeze([
     why: "it renames a branch on the remote, and the default branch and its protection follow the new name." },
   { route: "GraphQL protection mutation", path: /\/graphql\/?$/i, mutation: CONTROL_MUTATIONS,
     control: "branch protection or a ruleset", why: REMOVES_COVER },
+  // #525 -- the sweep's writes that move a ref or the repository, and the gh commands over the same calls
+  { route: "gh repo sync --force", sub: "repo", action: "sync", opt: "--force", dest: true, branchOpt: "--branch", deletes: "the history the reset drops",
+    what: "`gh repo sync --force`", why: "it hard-resets a branch on the remote to match its source." },
+  { route: "gh repo sync", sub: "repo", action: "sync", dest: true, branchOpt: "--branch",
+    what: "`gh repo sync`", why: "it moves a branch on the remote to match its source, as a push would." },
+  { route: "gh repo rename", sub: "repo", action: "rename", control: "the repository's name",
+    what: "`gh repo rename`", why: RENAMES_REPO },
+  { route: "gh pr update-branch", sub: "pr", action: "update-branch", what: "`gh pr update-branch`", why: UPDATES_PR },
+  { route: "gh release edit", sub: "release", action: "edit", opt: "--target", branchOpt: "--target",
+    what: "`gh release edit --target`", why: "it changes the commit a release and its tag stand on." },
+  { route: "gh release delete", sub: "release", action: "delete", opt: "--cleanup-tag",
+    what: "`gh release delete --cleanup-tag`", why: "it deletes a tag on the remote, a ref every clone fetches." },
+  { route: "fork sync", path: new RegExp(`^${REPO_PATH}/merge-upstream$`, "i"), field: "branch",
+    why: "it moves a fork's branch on the remote to match its upstream, as a push would." },
+  { route: "pull request branch update", path: new RegExp(`^${REPO_PATH}/pulls/\\d+/update-branch$`, "i"), why: UPDATES_PR },
+  { route: "code scanning autofix commit", path: new RegExp(`^${REPO_PATH}/code-scanning/alerts/\\d+/autofix/commits$`, "i"), field: "target_ref",
+    why: "it commits a fix onto a branch on the remote, as a push would." },
+  { route: "repository transfer", path: new RegExp(`^${REPO_PATH}/transfer$`, "i"), control: "where the repository lives", why: MOVES_REPO },
+  { route: "repository rename", path: new RegExp(`^${REPO_PATH}$`, "i"), bodyField: "name", control: "the repository's name", why: RENAMES_REPO },
+  { route: "GraphQL repository rename", path: /\/graphql\/?$/i, mutation: RENAME_MUTATIONS, control: "the repository's name", why: RENAMES_REPO },
 ]);
 
 /** The programs that reach the API-path rows, by the name a line spells. */
@@ -1028,7 +1093,7 @@ const GH_TABLED = new Set(SIDE_DOOR_TABLE.map((r) => r.sub).filter((s) => s !== 
 // value, and the short letters that stand for them (pflag for gh, getopt
 // for curl and wget). Only the options this table reads need listing; a
 // value left unread is a bare word nothing here looks at.
-const GH_SUB_READ = { valued: ["--repo", "--target", "--default-branch"], alias: { R: "--repo" } };
+const GH_SUB_READ = { valued: ["--repo", "--target", "--default-branch", "--branch", "--source"], alias: { R: "--repo", b: "--branch", s: "--source" } };
 const GH_API_READ = {
   valued: ["--method", "--raw-field", "--field", "--header", "--jq", "--template", "--preview", "--hostname",
     "--input", "--cache"],
@@ -1341,6 +1406,7 @@ export function sideDoor(program, args, aliases = new Map()) {
     const { flags, values, words } = readOpts(rest, GH_SUB_READ);
     if (words[0] !== row.action) continue;
     if (row.opt !== undefined && !flags.has(row.opt)) continue;
+    if (row.dest && words[1] === undefined) continue;
     const branch = row.branchOpt === undefined ? undefined : values.get(row.branchOpt)?.at(-1);
     return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}${row.opt === undefined ? "" : ` ${row.opt}`}`,
       what: row.what, why: row.why, branch, deletes: row.deletes, control: row.control, alias };
