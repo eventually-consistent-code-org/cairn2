@@ -3155,7 +3155,7 @@ describe("run guard: the push action by another route meets the push gates (#483
     [`gh api -X PUT ${MERGE}`, `gh api ${MERGE}`],
     ["gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
       "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 1) { merged } } }'"],
-    ["gh api graphql -F query=@merge.graphql", "gh api graphql -f query='mutation { addComment(input: {subjectId: \"x\", body: \"hi\"}) { clientMutationId } }'"],
+    // a GraphQL body from a file left this table with #505: it may be a protection delete, so no stamp covers it (runguard-sidedoors.test.ts)
     ["gh release create v1.0 --notes x", "gh release list"],
     ["gh repo delete o/r --yes", "gh repo view o/r"],
     [`curl -X PUT ${MERGE} -H "Authorization: token x"`, `curl ${MERGE} -H "Authorization: token x"`],
@@ -3657,5 +3657,473 @@ describe("a flag, path or command the shell builds from a same-line variable mee
       expect(header, c).toContain(line);
     }
     expect(header).toContain("Not seen, dated 2026-11-05");
+  });
+});
+
+describe("run guard: a one-character glob or a relative root reaches every tracked file (#493)", () => {
+  // Each spelling is held against git itself first: `git ls-files` lists every
+  // tracked file for it. Before #493 each exited the guard clean, and the
+  // forced rm cleared the tree or the checkout rewrote it from the index.
+  /** A committed repo with files at two depths; `sub` is a folder holding some of them. */
+  function tree(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "src");
+    mkdirSync(join(sub, "deep"), { recursive: true });
+    mkdirSync(join(proj, "docs"));
+    writeFileSync(join(sub, "a.ts"), "a\n");
+    writeFileSync(join(sub, "deep", "b.ts"), "b\n");
+    writeFileSync(join(proj, "docs", "c.md"), "c\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "tree", "--no-gpg-sign");
+    return { proj, home, sub };
+  }
+  const ls = (cwd: string, ...specs: string[]) => git(cwd, "ls-files", "--full-name", "--", ...specs).split("\n").filter(Boolean);
+  const SHAPES = ["git rm -rf --", "git checkout --", "git restore --"];
+  const SPELLINGS = ["?*", "*?", "[a-zA-Z._]*", "src/..", "./src/../", ".//", ":(glob)**", ":/?*", ":(top)?*"];
+
+  it("the spellings are every tracked file to git, except `*/`, which lists none", () => {
+    const { proj } = tree();
+    const all = ls(proj, ":/");
+    expect(all.length).toBe(4);
+    for (const s of SPELLINGS) expect(ls(proj, s), s).toEqual(all);
+    expect(ls(proj, "*/")).toEqual([]);
+    expect(ls(proj, `:(glob)${realpathSync(proj)}/**`)).toEqual(all);
+    // the second leg's spellings, held against git too
+    expect(ls(proj, "*.*")).toEqual(all);
+    expect(ls(proj, ":!x*")).toEqual(all);
+    expect(ls(proj, "*.ts", "*.md", "*.txt")).toEqual(all);
+  });
+
+  it("each is refused for rm, checkout and restore from the root and a nested folder, naming the escape; the owner's escape lifts it", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of SPELLINGS) {
+        const c = `${shape} '${s}'`;
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "nested" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain("refused in every session");
+          expect(r.stderr, c).toContain("effect: discards-work, from `");
+          expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        }
+        expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`).status, c).toBe(0);
+      }
+    }
+  });
+
+  it("the twins pass from the root and a nested folder: a real path, a glob with a suffix that reaches some files, a glob git lists nothing for", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of ["src/*.ts", "src/a.ts", ":/src", "*.ts", "*/", "src/deep/..", ":(literal)*", ":(exclude)src"]) {
+        const c = `${shape} '${s}'`;
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "nested" : "root"}\n${r.stderr}`).toBe(0);
+        }
+      }
+    }
+    // unforced, index-only and dry-run rm stay what they were
+    for (const c of ["git rm -r '?*'", "git rm --cached -r '?*'", "git rm -rfn '?*'", "git restore --staged '?*'"]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("hostile: the root plus a glob, a climb out of a nested folder, a magic that hides the glob, a variable, -C from outside", () => {
+    const { proj, home, sub } = tree();
+    const root = realpathSync(proj);
+    for (const [c, cwd] of [
+      [`git rm -rf -- '${root}/?*'`, proj],
+      [`git checkout -- '${root}/[a-z]*'`, proj],
+      [`git restore -- '${root}/src/..'`, proj],
+      [`git rm -rf -- '${root}//'`, sub],
+      [`git rm -rf -- ':(glob)${root}/**'`, proj],
+      ["git rm -rf -- '../?*'", sub],
+      ["git checkout -- '../src/..'", sub],
+      ["git restore -- '../*'", sub],
+      ["git rm -rf -- ':(top,glob)**/*'", sub],
+      ["git rm -rf -- ':(attr:!nothing)'", proj],
+      ["P='?*'; git rm -rf -- \"$P\"", proj],
+      ["git rm -rf -- \"$PWD/src/..\"", proj],
+      ["git rm -rf -- \"$PWD/?*\"", sub],
+      [`git -C ${sub} rm -rf -- '../?*'`, proj],
+      ["timeout 5 git rm -rf -- '?*'", proj],
+      ["sh -c \"git rm -rf -- '?*'\"", proj],
+    ] as Array<[string, string]>) {
+      const r = guard(proj, home, c, {}, cwd);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    }
+    // the same magic on a real path, and the root's own files named: paths
+    for (const c of [`git rm -rf -- '${root}/src/?*'`, `git checkout -- '${root}/?*.ts'`, `git rm -rf -- '${root}/*/'`,
+      "git rm -rf -- ':(glob)src/**'"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("the second leg: a word with a literal character that git says reaches every tracked file refuses; some files, or a nested folder's own, pass", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of ["'*.*'", "'[a-z]*.*'", "':!x*'", "'*.ts' '*.md' '*.txt'", "'src/../*.*'"]) {
+        const c = `${shape} ${s}`;
+        const r = guard(proj, home, c);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+      }
+      // from the nested folder `*.*` is that folder's files, and `../*.*` is everything
+      expect(guard(proj, home, `${shape} '*.*'`, {}, sub).status, shape).toBe(0);
+      expect(guard(proj, home, `${shape} '../*.*'`, {}, sub).status, shape).toBe(2);
+      // the union of two that stops short of everything is a path
+      expect(guard(proj, home, `${shape} '*.ts' '*.md'`).status, shape).toBe(0);
+    }
+  });
+
+  it("zero tracked files is never a match, and where git can't answer the word's own spelling stands", () => {
+    const home = freshDir("cairn-runguard-home-");
+    const empty = freshDir("cairn-runguard-empty-");
+    git(empty, "init", "-q", "-b", "main");
+    expect(guard(empty, home, "git rm -rf -- '*.*'").status).toBe(0);
+    expect(guard(empty, home, "git checkout -- '*.ts'").status).toBe(0);
+    expect(guard(empty, home, "git rm -rf -- '?*'").status).toBe(2);
+    const outside = freshDir("cairn-runguard-outside-");
+    expect(guard(outside, home, "git rm -rf -- '*.*'").status).toBe(0);
+    expect(guard(outside, home, "git rm -rf -- '?*'").status).toBe(2);
+    // a pathspec git refuses outright: no answer, and git refuses the rm the same way
+    const { proj, home: h2 } = tree();
+    expect(guard(proj, h2, "git rm -rf -- '../*.*'").status).toBe(0);
+    expect(spawnSync("git", ["ls-files", "--", "../*.*"], { cwd: proj, encoding: "utf8" }).status).toBe(128);
+  });
+
+  it("the Not seen lines hold: a glob reaching some files, and plain paths naming every file one by one, pass; a deleted line is red", () => {
+    const { proj, home } = tree();
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n \*\s+/g, " ");
+    const rows: Array<[string, string]> = [
+      ["git rm -rf -- '*.ts'", "a glob like `*.ts` reaching some of the tracked files stays a path"],
+      ["git checkout -- seed.txt src/a.ts src/deep/b.ts docs/c.md", "several plain paths that happen to name every file one by one"],
+    ];
+    for (const [c, line] of rows) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      expect(header, c).toContain(line);
+    }
+  });
+});
+
+describe("run guard: a forced push written as a push setting is the force row (#502)", () => {
+  // The gap opens once the owner has shipped: with a clean stamp at HEAD the
+  // push reads as a plain push landing on a stamped main, and git applies the
+  // leading + and rewrites the remote. Every fixture here is stamped.
+  const SPEC = "+refs/heads/*:refs/heads/*";
+  const KEYS = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push";
+
+  /** The stamped fixture with a nested folder to run from -- the #383 matrix. */
+  function shipped(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  function expectForce(r: { status: number | null; stderr: string }, c: string): void {
+    expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    expect(r.stderr, c).toContain("refused in every session");
+    expect(r.stderr, c).toContain("`git push --force`");
+    expect(r.stderr, c).toContain("effect: discards-work");
+    expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+  }
+
+  it("git really does force on these, and rejects the twins, in a throwaway repository", () => {
+    const bare = freshDir("cairn-runguard-remote-");
+    const proj = freshDir("cairn-runguard-proj-");
+    git(bare, "init", "-q", "--bare");
+    git(proj, "init", "-q", "-b", "main");
+    writeFileSync(join(proj, "a"), "1\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "one", "--no-gpg-sign");
+    writeFileSync(join(proj, "a"), "2\n");
+    git(proj, "commit", "-q", "-a", "-m", "two", "--no-gpg-sign");
+    git(proj, "remote", "add", "origin", bare);
+    git(proj, "push", "-q", "origin", "main");
+    git(proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    const run = (...a: string[]) => spawnSync("git", a, { cwd: proj, encoding: "utf8" });
+    // the twins first: each rejected, so the rewrite is still there to force
+    for (const a of [["-c", "remote.origin.push=refs/heads/*:refs/heads/*", "push", "origin", "main"],
+      ["-c", `remote.origin.push=${SPEC}`, "push", "origin", "main:main"], ["-c", `remote.other.push=${SPEC}`, "push", "origin", "main"]]) {
+      const r = run(...a);
+      expect(r.status, a.join(" ")).toBe(1);
+      expect(r.stderr, a.join(" ")).toContain("rejected");
+    }
+    const forced = run("-c", `remote.origin.push=${SPEC}`, "push", "origin", "main");
+    expect(forced.status).toBe(0);
+    expect(forced.stderr).toContain("forced update");
+  });
+
+  it("every channel on the line refuses, stamped, from the root and a nested folder: -c, --config-env, GIT_CONFIG_COUNT, an export, a spelled variable", () => {
+    const { proj, home, sub } = shipped();
+    for (const c of [
+      `git -c remote.origin.push=${SPEC} push origin main`,
+      `git -c remote.origin.push=${SPEC} push`,
+      `git -c REMOTE.origin.PUSH=${SPEC} push origin`,
+      `V=${SPEC} git --config-env=remote.origin.push=V push origin main`,
+      `${KEYS} GIT_CONFIG_VALUE_0=${SPEC} git push origin main`,
+      `export ${KEYS} GIT_CONFIG_VALUE_0=${SPEC}; git push origin main`,
+      `S=${SPEC}; git -c "remote.origin.push=$S" push origin main`,
+    ]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+      // the owner's escape lifts the row, and the stamp still covers the commit
+      expect(guard(proj, home, c, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1", CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status, c).toBe(0);
+    }
+  });
+
+  it("the saved and session channels refuse too, once the guard asks the repository", () => {
+    const { proj, home, sub } = shipped();
+    git(proj, "config", "remote.origin.push", SPEC);
+    for (const c of ["git push origin main", "git push origin", "git push"]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+    }
+    // ...and any one value of several is enough: push is a multi-valued key
+    const many = shipped();
+    git(many.proj, "config", "--add", "remote.origin.push", "refs/heads/a:refs/heads/a");
+    git(many.proj, "config", "--add", "remote.origin.push", SPEC);
+    expectForce(guard(many.proj, many.home, "git push origin main"), "two values");
+    // a remote picked by the settings
+    const other = shipped();
+    git(other.proj, "config", "remote.pushDefault", "up");
+    git(other.proj, "config", "remote.up.push", SPEC);
+    expectForce(guard(other.proj, other.home, "git push"), "remote.pushDefault");
+    // the session's own GIT_CONFIG_*, which reaches git through the guard's probe
+    const session = shipped();
+    expectForce(guard(session.proj, session.home, "git push origin main", {
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.push", GIT_CONFIG_VALUE_0: SPEC }), "session environment");
+  });
+
+  it("hostile: an alias that carries it, and a value the guard can't read, refuse like the row", () => {
+    const { proj, home, sub } = shipped();
+    for (const c of [
+      `git -c 'alias.p=-c remote.origin.push=${SPEC} push' p origin main`,
+      `git -c alias.p=push -c remote.origin.push=${SPEC} p origin main`,
+    ]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+    }
+    for (const c of [
+      'git -c "remote.origin.push=$(cat spec)" push origin main',
+      "git --config-env=remote.origin.push=NOT_SET_ANYWHERE push origin main",
+      `${KEYS} GIT_CONFIG_VALUE_0='$(cat spec)' git push origin main`,
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("a git setting from a value the guard can't read");
+    }
+  });
+
+  it("the twins: the same setting with no + is judged for where it lands, and a setting git won't follow here changes nothing", () => {
+    const { proj, home, sub } = shipped();
+    const plain = `git -c remote.origin.push=${SPEC.slice(1)} push origin main`;
+    for (const c of [plain, `git -c remote.origin.push=${SPEC} push origin main:main`, `git -c remote.origin.push=${SPEC} push origin HEAD`,
+      `git -c remote.other.push=${SPEC} push origin main`, `V=${SPEC.slice(1)} git --config-env=remote.origin.push=V push origin main`,
+      `${KEYS} GIT_CONFIG_VALUE_0=${SPEC.slice(1)} CAIRN_ALLOW_UNSHIPPED_PUSH=1 git push origin main`]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    // with no stamp the same no-+ setting meets the ship gate: a gate, not the force row
+    const unshipped = fixture(undefined, false);
+    const gated = guard(unshipped.proj, unshipped.home, plain);
+    expect(gated.status).toBe(2);
+    expect(gated.stderr).toContain("lands on the default branch");
+    expect(gated.stderr).not.toContain("`git push --force`");
+    // the saved twins: another remote's +, a saved setting with no +, a src:dst the setting never maps
+    const saved = shipped();
+    git(saved.proj, "config", "remote.up.push", SPEC);
+    expect(guard(saved.proj, saved.home, "git push origin main").status).toBe(0);
+    git(saved.proj, "config", "remote.origin.push", SPEC.slice(1));
+    expect(guard(saved.proj, saved.home, "git push origin main").status).toBe(0);
+    git(saved.proj, "config", "--replace-all", "remote.origin.push", SPEC);
+    expect(guard(saved.proj, saved.home, "git push origin main:main").status).toBe(0);
+  });
+});
+
+describe("the pre-push hook: a rewrite of the default branch is the table's force row (#503)", () => {
+  // Real pushes from a plain shell, as setup.test.ts (#456) runs them: the
+  // hook file is the thin caller cairn-setup installs, the remote a bare repo.
+  // Before #503 the hook built its invocation from the refspecs alone, so a
+  // stamped rewrite of main read as a plain push and printed `forced update`.
+  const HOOK = join(dirname(RUNGUARD), "pre-push.mjs");
+
+  /** A repo on main with two commits pushed to a bare remote, then the hook wired in; no stamp yet. */
+  function hooked(): { proj: string; home: string; bare: string; sub: string } {
+    const bare = freshDir("cairn-prepush-remote-");
+    const proj = freshDir("cairn-prepush-proj-");
+    const home = freshDir("cairn-prepush-home-");
+    git(bare, "init", "-q", "--bare", "-b", "main");
+    git(proj, "init", "-q", "-b", "main");
+    git(proj, "config", "user.email", "t@t");
+    git(proj, "config", "user.name", "t");
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "a.txt"), "1\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "one", "--no-gpg-sign");
+    writeFileSync(join(sub, "a.txt"), "2\n");
+    git(proj, "commit", "-q", "-a", "-m", "two", "--no-gpg-sign");
+    git(proj, "remote", "add", "origin", bare);
+    git(proj, "push", "-q", "origin", "main");
+    const hooks = freshDir("cairn-prepush-hooks-");
+    writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\nexec "${process.execPath}" "${HOOK}" "$@"\n`);
+    chmodSync(join(hooks, "pre-push"), 0o755);
+    git(proj, "config", "core.hooksPath", hooks);
+    return { proj, home, bare, sub };
+  }
+
+  /** `git push` as a plain shell runs it: every harness and cairn variable stripped, the cairn home pinned. */
+  function push(cwd: string, home: string, args: string[], extra: Record<string, string> = {}) {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !k.startsWith("CLAUDE_") && !k.startsWith("CAIRN_")) env[k] = v;
+    }
+    const r = spawnSync("git", ["push", ...args], { cwd, encoding: "utf8", timeout: 20000,
+      env: { ...env, ...GIT_IDENT, CAIRN_HOME: home, ...extra } });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** The commit rewritten in place, and the clean stamp plan_drift would leave for it. */
+  function rewriteAndStamp(f: { proj: string; home: string }): string {
+    git(f.proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    return git(f.proj, "rev-parse", "HEAD");
+  }
+
+  function expectForce(r: { status: number | null; stderr: string }, label: string): void {
+    expect(r.status, `${label}\n${r.stderr}`).not.toBe(0);
+    expect(r.stderr, label).toContain("cairn run guard: `git push --force` is refused in every session");
+    expect(r.stderr, label).toContain("effect: discards-work, from `+");
+    expect(r.stderr, label).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    expect(r.stderr, label).toContain("doesn't descend from it");
+    expect(r.stderr, label).not.toContain("forced update");
+  }
+
+  it("a stamped rewrite of main refuses by every spelling of the force, from the root and a nested folder; the remote stays put", () => {
+    const f = hooked();
+    const before = git(f.bare, "rev-parse", "main");
+    rewriteAndStamp(f);
+    for (const args of [["--force", "origin", "main"], ["-f", "origin", "main"], ["origin", "+main"], ["origin", "+HEAD:refs/heads/main"],
+      ["--force-with-lease", "origin", "main"], ["--force", "origin", "HEAD:main"]]) {
+      for (const cwd of [f.proj, f.sub]) expectForce(push(cwd, f.home, args), args.join(" "));
+    }
+    expect(git(f.bare, "rev-parse", "main")).toBe(before);
+  });
+
+  it("the channels the run guard reads for a force are covered here by the effect: a setting's +, an alias, a rewind with no new commit", () => {
+    const f = hooked();
+    const before = git(f.bare, "rev-parse", "main");
+    rewriteAndStamp(f);
+    const r = spawnSync("git", ["-c", "remote.origin.push=+refs/heads/*:refs/heads/*", "push", "origin", "main"],
+      { cwd: f.proj, encoding: "utf8", env: { ...process.env, ...GIT_IDENT, CAIRN_HOME: f.home, CLAUDE_PROJECT_DIR: "" } });
+    expectForce({ status: r.status, stderr: r.stderr }, "a push setting's +");
+    expect(git(f.bare, "rev-parse", "main")).toBe(before);
+    // a rewind: the stamp names an older commit, and nothing new is pushed at all
+    const g = hooked();
+    const older = git(g.proj, "rev-parse", "HEAD~1");
+    stamp(g.proj, g.home, { head: older });
+    expectForce(push(g.proj, g.home, ["--force", "origin", "HEAD~1:main"]), "a rewind");
+  });
+
+  it("a remote sha this clone doesn't hold reads as a rewrite: another clone's commit can't be vouched for, and the refusal says to fetch", () => {
+    const f = hooked();
+    const other = freshDir("cairn-prepush-other-");
+    git(other, "clone", "-q", f.bare, ".");
+    git(other, "config", "user.email", "t@t");
+    git(other, "config", "user.name", "t");
+    writeFileSync(join(other, "b.txt"), "b\n");
+    git(other, "add", "-A");
+    git(other, "commit", "-q", "-m", "theirs", "--no-gpg-sign");
+    git(other, "push", "-q", "origin", "main");
+    const theirs = git(f.bare, "rev-parse", "main");
+    writeFileSync(join(f.proj, "c.txt"), "c\n");
+    git(f.proj, "add", "-A");
+    git(f.proj, "commit", "-q", "-m", "mine", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    expectForce(push(f.proj, f.home, ["--force", "origin", "main"]), "not held, forced");
+    expect(git(f.bare, "rev-parse", "main")).toBe(theirs);
+    // the twin: fetched and merged, it's a fast-forward again
+    git(f.proj, "pull", "-q", "--no-rebase", "--no-edit", "--no-gpg-sign", "origin", "main");
+    stamp(f.proj, f.home);
+    const ok = push(f.proj, f.home, ["origin", "main"]);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(git(f.bare, "rev-parse", "main")).toBe(git(f.proj, "rev-parse", "HEAD"));
+  });
+
+  it("the twins pass: a fast-forward with a clean stamp, a first push of a new ref, a force push of another branch (named Not seen)", () => {
+    const f = hooked();
+    writeFileSync(join(f.proj, "d.txt"), "d\n");
+    git(f.proj, "add", "-A");
+    git(f.proj, "commit", "-q", "-m", "three", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    for (const cwd of [f.proj, f.sub]) {
+      const r = push(cwd, f.home, ["origin", "main"]);
+      expect(r.status, r.stderr).toBe(0);
+    }
+    expect(git(f.bare, "rev-parse", "main")).toBe(git(f.proj, "rev-parse", "HEAD"));
+    // a first push of a default-named ref: nothing there to rewrite, and the stamp covers it
+    const master = push(f.proj, f.home, ["origin", "main:master"]);
+    expect(master.status, master.stderr).toBe(0);
+    // a first push to an empty remote
+    const empty = freshDir("cairn-prepush-empty-");
+    git(empty, "init", "-q", "--bare");
+    git(f.proj, "remote", "add", "fresh", empty);
+    const first = push(f.proj, f.home, ["fresh", "main"]);
+    expect(first.status, first.stderr).toBe(0);
+    // a feature branch rewritten and forced: the hook's rule is the default branch's
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    git(f.proj, "commit", "-q", "--allow-empty", "-m", "f1", "--no-gpg-sign");
+    expect(push(f.proj, f.home, ["origin", "feature"]).status).toBe(0);
+    git(f.proj, "commit", "-q", "--amend", "--allow-empty", "-m", "f2", "--no-gpg-sign");
+    const forced = push(f.proj, f.home, ["--force", "origin", "feature"]);
+    expect(forced.status, forced.stderr).toBe(0);
+    const header = readFileSync(HOOK, "utf8").split("\n// Imports")[0].replace(/\n \*\s+/g, " ");
+    expect(header).toContain("a forced push of any other branch");
+  });
+
+  it("the ancestry is read in the repository the push leaves, wherever the session's project sits: a fast-forward never reads as a rewrite", () => {
+    const f = hooked();
+    const elsewhere = fixture().proj;
+    git(f.proj, "commit", "-q", "--allow-empty", "-m", "three", "--no-gpg-sign");
+    const r = push(f.proj, f.home, ["origin", "main"], { CLAUDE_PROJECT_DIR: elsewhere, CAIRN_ALLOW_UNSHIPPED_PUSH: "1" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("`git push --force`");
+  });
+
+  it("the owner's escape lifts the force row and leaves the stamp's rule standing", () => {
+    const f = hooked();
+    const r0 = push(f.proj, f.home, ["origin", "main"]);
+    expect(r0.status, r0.stderr).toBe(0); // nothing to send, nothing to judge
+    git(f.proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    // no stamp: lifted past the force row, the default-branch rule still refuses, under its own escape
+    const gated = push(f.proj, f.home, ["--force", "origin", "main"], { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" });
+    expect(gated.status, gated.stderr).not.toBe(0);
+    expect(gated.stderr).toContain("this push lands on the default branch");
+    expect(gated.stderr).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH");
+    stamp(f.proj, f.home);
+    const lifted = push(f.proj, f.home, ["--force", "origin", "main"], { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" });
+    expect(lifted.status, lifted.stderr).toBe(0);
+    expect(lifted.stderr).toContain("forced update");
+  });
+
+  it("hostile: what stdin claims stays data: a non-hex sha never reaches git's argv, and refuses as a rewrite", () => {
+    const f = hooked();
+    stamp(f.proj, f.home);
+    const head = git(f.proj, "rev-parse", "HEAD");
+    const hook = (line: string) => spawnSync(process.execPath, [HOOK, "origin", "x"], {
+      cwd: f.proj, encoding: "utf8", input: `${line}\n`,
+      env: { ...process.env, CAIRN_HOME: f.home, CLAUDE_PROJECT_DIR: "" },
+    });
+    for (const remote of ["--help", "--is-ancestor", "deadbeef".repeat(5)]) {
+      const r = hook(`refs/heads/main ${head} refs/heads/main ${remote}`);
+      expect(r.status, `${remote}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, remote).toContain("`git push --force`");
+    }
+    // the same line with the remote at a real ancestor, and with no ref there yet, passes
+    expect(hook(`refs/heads/main ${head} refs/heads/main ${git(f.proj, "rev-parse", "HEAD~1")}`).status).toBe(0);
+    expect(hook(`refs/heads/main ${head} refs/heads/main ${"0".repeat(40)}`).status).toBe(0);
   });
 });

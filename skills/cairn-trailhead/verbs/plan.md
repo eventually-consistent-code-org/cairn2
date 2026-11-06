@@ -139,11 +139,14 @@ Plan the given phase per the `cairn-planning` skill's depth dial.
    move happened. Ask before adopting.
 8. Approve (engineer mode, `verify.rerun` on): the owner's stamp is what
    lets the close-time re-run execute this plan's `verify:` lines (#423,
-   ADR 0017). The stamp is a human act by mechanism, not by this step's
-   manners: the harness guard refuses `plan_meta_set(approve: true)`
-   unless the session was started with `CAIRN_HARNESS_EDIT=1` in its
-   environment (#460; asserted: `server/test/hooks.test.ts` "the approval
-   stamp needs the owner's escape"). So this step TELLS, never asks. Read
+   ADR 0017). Where the harness guard runs (Claude Code and Cursor, a dated
+   claim, 2026-11-05), the stamp is a human act by mechanism, not by this
+   step's manners: it refuses `plan_meta_set(approve: true)` and a write
+   onto the stamps' folder unless the session was started with
+   `CAIRN_HARNESS_EDIT=1` in its environment (#460, #500; asserted:
+   `server/test/hooks.test.ts` "the approval stamp needs the owner's
+   escape", "(#500)"). On any other harness it rests on this step alone, so
+   never write a stamp by hand. So this step TELLS, never asks. Read
    the escape from the shell (`echo "${CAIRN_HARNESS_EDIT:-unset}"`):
    - `1`: the owner started this session to approve. Show the final
      PLAN.md, then call `plan_meta_set(phaseDir, approve: true)`; the

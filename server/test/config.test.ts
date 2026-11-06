@@ -434,12 +434,12 @@ describe("owner-only keys are one list the server exports and the hook reads (#2
   const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const base = { tracker: { type: "github", config: { repo: "o/r" } } };
 
-  it("the list is the five keys the plan names, with a safe value for each but the write table", () => {
+  it("the list is the six keys the plans name, with a safe value for each but the write table", () => {
     expect([...OWNER_ONLY_KEYS]).toEqual([
-      "leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers",
+      "leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers", "verify.rerun",
     ]);
     expect({ ...OWNER_ONLY_SAFE }).toEqual({
-      "leakGuard.enabled": true, "ship.confirm": true, "auto.breaker": 3, "peers.*.execCapable": false,
+      "leakGuard.enabled": true, "ship.confirm": true, "auto.breaker": 3, "peers.*.execCapable": false, "verify.rerun": false,
     });
   });
 
@@ -451,6 +451,13 @@ describe("owner-only keys are one list the server exports and the hook reads (#2
     expect(ownerOnlyKeysIn({ peers: { codex: { execCapable: true }, grok: { enabled: true } } })).toEqual(["peers.codex.execCapable"]);
     expect(ownerOnlyKeysIn({ guards: { writers: { readOnly: [] } } })).toEqual(["guards.writers"]);
     expect(ownerOnlyKeysIn({ guards: { writers: {} } })).toEqual(["guards.writers"]);
+    // #500 -- the switch that makes a stamp matter: on is the owner's, off and the timeout beside it are not
+    expect(ownerOnlyKeysIn({ verify: { rerun: true } })).toEqual(["verify.rerun"]);
+    expect(ownerOnlyKeysIn({ verify: { rerun: "true", timeoutSeconds: 5 } })).toEqual(["verify.rerun"]);
+    expect(ownerOnlyKeysIn({ verify: { rerun: false } })).toEqual([]);
+    expect(ownerOnlyKeysIn({ verify: { timeoutSeconds: 5 } })).toEqual([]);
+    expect(() => assertOwnerOnly({ verify: { rerun: true } }, {})).toThrow(/verify\.rerun/);
+    expect(() => assertOwnerOnly({ verify: { rerun: true } }, { CAIRN_HARNESS_EDIT: "1" })).not.toThrow();
     // two at once, named in list order
     expect(ownerOnlyKeysIn({ ship: { confirm: false }, leakGuard: { enabled: false } })).toEqual(["leakGuard.enabled", "ship.confirm"]);
     // the hostile spellings: a string where the boolean goes, and a provider the schema would refuse anyway

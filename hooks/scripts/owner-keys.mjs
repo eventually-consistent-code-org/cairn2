@@ -20,6 +20,7 @@ export const OWNER_ONLY_KEYS = Object.freeze([
   "auto.breaker",
   "peers.*.execCapable",
   "guards.writers",
+  "verify.rerun",
 ]);
 
 export const OWNER_ONLY_SAFE = Object.freeze({
@@ -27,4 +28,5 @@ export const OWNER_ONLY_SAFE = Object.freeze({
   "ship.confirm": true,
   "auto.breaker": 3,
   "peers.*.execCapable": false,
+  "verify.rerun": false,
 });

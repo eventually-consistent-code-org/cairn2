@@ -130,7 +130,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import { projectRoot, readCairnConfig } from "./lib.mjs";
+import { projectRoot, projectRoots, readCairnConfig } from "./lib.mjs";
 import {
   SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
   shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
@@ -412,8 +412,9 @@ try {
   const type = payload?.agent_type;
   if (typeof type !== "string" || !type) process.exit(0);
 
-  // #459 -- the root the harness names, else the one git or a .claude folder marks above the cwd
-  const projectDir = projectRoot(payload);
+  // #459 -- the root the harness names, else the one git or a .claude folder marks above the cwd;
+  // #510 -- from a nested repository, the nearest root holding a table: the outer project's, when it has none
+  const projectDir = projectRoots(payload).find((r) => readCairnConfig(r) !== null) ?? projectRoot(payload);
   // absent or malformed cairn.json: not a project this guard judges -- fail open
   const config = readCairnConfig(projectDir);
   if (config === null) process.exit(0);

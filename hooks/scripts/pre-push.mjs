@@ -20,16 +20,19 @@
  *   the remote's HEAD branch) is refused unless the last plan_drift left a
  *   clean ship-gate stamp for the exact commit pushed; the escape is
  *   CAIRN_ALLOW_UNSHIPPED_PUSH set to 1 in the environment, which the hook
- *   says it honoured. A push deleting the default branch is the table's
- *   discards-work row, under the run guard's escape for it. Exit 2 is the
- *   one refusal the hook file turns into a refused push; any other exit,
- *   an internal error included, fails open -- a broken hook never blocks
- *   work (ADR 0016).
+ *   says it honoured. A push deleting the default branch, or rewriting it
+ *   (#503: the remote sha on its line isn't an ancestor, or isn't held here),
+ *   is the table's discards-work row, under the run guard's escape for it,
+ *   stamp or no stamp (runguard-guards.test.ts #503). Exit 2 is the one
+ *   refusal the hook file turns into a refused push; any other exit, an
+ *   internal error included, fails open -- a broken hook never blocks work
+ *   (ADR 0016).
  *
  *   Not seen, dated 2026-11-04: `git push --no-verify` skips every
  *   pre-push hook; so does a clone whose config never got the hooksPath.
  *   A ruleset at the tracker host is the only layer past that
- *   (docs/01-runbook.md, the ship-gate section).
+ *   (docs/01-runbook.md, the ship-gate section). By decision, dated 2026-11-05
+ *   (#503, pinned there): a forced push of any other branch isn't this layer's.
  *
  * removeWhen: the tracker host's branch ruleset is read for every project
  *   cairn runs in (config_probe, #485) and refuses the unshipped push
@@ -39,7 +42,7 @@
  */
 
 // Imports
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -49,8 +52,9 @@ import { DISCARDS_WORK, MOVES_SHARED_REF, classify, effectLine, parseInvocation 
 // Constants
 const UNSHIPPED_ENV = "CAIRN_ALLOW_UNSHIPPED_PUSH";
 const DESTRUCTIVE_ENV = "CAIRN_ALLOW_DESTRUCTIVE_GIT";
-// git spells a ref being deleted as the all-zero sha
+// git spells a ref being deleted, or one the remote doesn't have yet, as the all-zero sha
 const ZERO_SHA = /^0+$/;
+const HEX_SHA = /^[0-9a-f]+$/i;
 // the one exit the hook file reads as "refuse the push"; every other exit fails open
 const REFUSED = 2;
 
@@ -101,8 +105,30 @@ function main() {
   });
   if (!landing.length) return; // feature branches, tags, other refs: not this hook's call
 
-  // The effect, from the table: the push as its refspecs spell it
-  const specs = landing.map(([localRef, sha, remoteRef]) => `${ZERO_SHA.test(sha) ? "" : localRef}:${remoteRef}`);
+  // #503 -- does this ref replace what the remote holds? git's flags never reach
+  // a hook, so the answer is the remote sha it hands over: a new ref replaces
+  // nothing; exit 0 is a fast-forward, 1 is not one, and 128 is a sha this clone
+  // doesn't hold, which it can't vouch for (a shallow clone reads the same, and
+  // fetching clears it). A feature branch's force is not this layer's: the rule
+  // here is the default branch's, and only `landing` is asked.
+  // A sha that isn't hex never reaches git's argv. Asked where git ran this hook,
+  // the repository the push leaves, whatever project the session names. git not
+  // answering at all is the hook's own error, so it fails open (ADR 0016).
+  const rewrites = (sha, remoteSha) => {
+    if (ZERO_SHA.test(sha) || ZERO_SHA.test(remoteSha)) return false;
+    if (!HEX_SHA.test(sha) || !HEX_SHA.test(remoteSha)) return true;
+    const r = spawnSync("git", ["merge-base", "--is-ancestor", remoteSha, sha], { cwd: process.cwd(), stdio: "ignore", timeout: 5000 });
+    if (r.status === null) throw new Error("git can't say whether this push is a fast-forward");
+    return r.status !== 0;
+  };
+  const rewritten = landing.filter(([, sha, , remoteSha]) => rewrites(sha, remoteSha));
+
+  // The effect, from the table: the push as its refspecs spell it, and one that
+  // rewrites what the remote holds spelled the way its force row reads (#503)
+  const specs = landing.map((ref) => {
+    const [localRef, sha, remoteRef] = ref;
+    return `${rewritten.includes(ref) ? "+" : ""}${ZERO_SHA.test(sha) ? "" : localRef}:${remoteRef}`;
+  });
   const inv = parseInvocation(["git", "push", remote, ...specs], { aliases: false });
   const deletes = landing.some(([, sha]) => ZERO_SHA.test(sha));
   const causes = classify(inv, { deletesDefaultBranch: () => deletes });
@@ -111,6 +137,8 @@ function main() {
   if (destructive && process.env[DESTRUCTIVE_ENV] !== "1") {
     refuse([
       `cairn run guard: ${destructive.what} is refused in every session — ${destructive.why}`,
+      ...rewritten.map(([, , remoteRef, remoteSha]) => `  the remote's ${remoteRef} is at ${remoteSha.slice(0, 7)}, and this ` +
+        "push doesn't descend from it: a rewrite, or a commit this clone hasn't fetched yet."),
       effectLine(inv, destructive),
     ], DESTRUCTIVE_ENV);
   }

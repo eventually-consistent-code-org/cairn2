@@ -59,6 +59,17 @@
  *   judged against the project (asserted: hooks.test.ts, the #383 nested
  *   rows run once more with the variable stripped).
  *
+ *   With no variable, a nested repository is not the whole project (#510):
+ *   every rule also judges against any folder above that root holding .claude
+ *   or cairn.json, stopping below the home folder, which holds .claude too
+ *   (lib.mjs projectRoots, the write guard's too). What such an outer project's
+ *   settings run, its git hooks and its config files count the same. The
+ *   variable set, or a nested repository under no such folder, is one root as
+ *   ever. The leak guard stays the inner repository's, since the commit lands
+ *   there. Asserted: hooks.test.ts "(#510)". Not seen, dated 2026-11-05: an
+ *   outer folder marked by neither is no project the guards can name, whatever
+ *   it holds (pinned there too).
+ *
  *   Breaker (#358): each refusal is handed to breaker.mjs, which appends
  *   its audit row (a digest of the input, never the path) and, while a
  *   batch run is live, counts it toward freezing the run -- a run that
@@ -81,13 +92,13 @@
  *   ordinary work as a file, but the keys only the owner sets -- the list
  *   the server exports (config.ts OWNER_ONLY_KEYS: the leak guard's off
  *   switch, ship's confirmation, the breaker's limit, a peer's
- *   execCapable, the write table), read here from the generated
+ *   execCapable, the write table, the close-time re-run), read here from the generated
  *   owner-keys.mjs -- are the harness: an Edit or Write is applied to the
  *   file in the guard's head and each key's value compared, so one set
  *   away from its safe value is refused, naming the key, while the safe
  *   value, a sibling key and a removal land; a shell line or an MCP input
  *   that writes cairn.json and spells a key's last word (`enabled`,
- *   `confirm`, `breaker`, `execCapable`, `writers`, in any case, a JSON
+ *   `confirm`, `breaker`, `execCapable`, `writers`, `rerun`, in any case, a JSON
  *   \u escape decoded) is refused as typed, whatever value it sets -- the
  *   guard cannot run it. Asserted: hooks.test.ts "(#281)"; config_set
  *   refuses the same keys with OWNER_ONLY (config.test.ts "owner-only").
@@ -167,10 +178,15 @@
  *   name, carrying `approve` (true, "true" or 1) mints the owner's
  *   approval stamp on a plan, the act the close-time verify re-run
  *   trusts (ADR 0017); refused unless the session carries
- *   CAIRN_HARNESS_EDIT=1, so the stamp is a human act by mechanism and
- *   not by the plan verb's manners. Asserted: hooks.test.ts
- *   "plan_meta_set approve (#460)" and the #383 row "plan_meta_set with
- *   approve".
+ *   CAIRN_HARNESS_EDIT=1. The file that flag writes is the same act, so
+ *   .cairn/state/approvals is a protected tree too, under the project and
+ *   each linked worktree (#500; the server's own write passes no hook), and
+ *   verify.rerun, the switch the stamp matters under, is an owner-only key.
+ *   Where this guard runs, then, a stamp is a human act by mechanism and not
+ *   by the plan verb's manners; on a harness that runs no hooks it is a
+ *   dated claim (Claude Code and Cursor only, ADR 0017, 2026-11-05).
+ *   Asserted: hooks.test.ts "plan_meta_set approve (#460)", "(#500)" and the
+ *   #383 row "plan_meta_set with approve".
  *
  *   Git hooks (#353): the folder git runs its hooks from is a protected
  *   tree for every tool above -- core.hooksPath when set, the repo's own
@@ -209,6 +225,62 @@
  *   "core.hooksPath (#465)", and the #383 rows "git config core.hooksPath"
  *   and "a hooksPath line appended to the repo's git config".
  *
+ *   A git line is read through its aliases first (#506), by the run guard's
+ *   resolver (git-effects.mjs resolveAlias), so every git leg here reads
+ *   what git runs: an inline -c, --config-env, GIT_CONFIG_COUNT (on the
+ *   line or in the session), one saved earlier (asked of git at the folder
+ *   the command runs in), and a `!` alias, whose body is a line of its own.
+ *   Saving an alias is judged the same, as what it would run: `git config
+ *   alias.x 'config core.hooksPath d'`. A subcommand or a config key the
+ *   guard can't read (from a stream, or a substitution) counts as the pointer,
+ *   and so does an alias whose value it can't. Asserted: hooks.test.ts "(#506)".
+ *
+ *   A template folder (#507): git copies the hooks/ of the folder an init
+ *   or clone names into the repository's .git/hooks, the third way to plant
+ *   one. `--template` in any abbreviation git's parser takes, init.templateDir
+ *   on any channel (-c, --config-env, GIT_CONFIG_COUNT, `git config` in any
+ *   scope, a line into a git config file), GIT_TEMPLATE_DIR on the line or in
+ *   the session (a submodule's clone inherits it), and a -c or --config that
+ *   clone writes into the new repository's config naming the pointer are all
+ *   refused. A plain init or clone, reading the key, and the same setting on
+ *   a command that copies nothing pass. Asserted: hooks.test.ts "(#507)".
+ *
+ *   The install (#508): `cairn-setup <harness> --git-hooks` sets the pointer
+ *   and arms whatever the folder holds, so the flag being the consent means
+ *   the owner's, and any process can pass a flag. Every spelling refuses
+ *   without the owner's escape: the program by name or path, its package
+ *   through npx, pnpm dlx, yarn dlx, bunx or npm exec, any of cairn's runners
+ *   carrying the flag, a flag spelled from the line, and on a line naming the
+ *   program, a word the guard can't read that may be it. The install without
+ *   the flag passes, and naming it (grep, cat, echo) runs nothing. The inline
+ *   prefix is honoured as on every harness write (#265). Setup refuses a
+ *   folder holding hooks it did not write on its own, for the harnesses
+ *   running no guard. Asserted: hooks.test.ts "(#508)", setup.test.ts "(#508)".
+ *
+ *   Not seen, dated 2026-11-05 (#508): a renamed copy of setup run directly,
+ *   and setup started from an interpreter. Pinned by hooks.test.ts "(#508)".
+ *
+ *   Not seen, dated 2026-11-05 (#506, by decision: the filed scope is the
+ *   pointer, and refusing every key below would refuse daily configuration):
+ *   a git config key other than the pointer that names a program git runs
+ *   later -- core.fsmonitor, core.sshCommand, a `!` alias running a program
+ *   the line doesn't write. Pinned by hooks.test.ts "(#506)".
+ *
+ *   The ship gate's own folders (#492): the hook git runs is a thin caller,
+ *   so protecting the caller and not what it calls left the body an ordinary
+ *   Edit away from running under the owner's identity at the next push.
+ *   .cairn/harness (the scripts the hook runs, the verbs beside them) and
+ *   .cairn/githooks are protected trees under the project root and under
+ *   every linked worktree of it (`git worktree list`, asked once per call),
+ *   since the hook looks in the worktree it runs from first; a folder on the
+ *   way to one (.cairn), while it isn't there as a folder, counts, and so
+ *   does a folder's unknown contents copied onto it (`cp -r src/. .cairn/`).
+ *   A package folder's own pair counts at any depth in the project, since
+ *   setup installs where it stands.
+ *   Reading and running what's there is ordinary work, and setup is a process
+ *   of its own that no guard judges the writes of: only the agent's calls
+ *   are. Asserted: hooks.test.ts "(#492)".
+ *
  *   CLAUDE_CONFIG_DIR (#304): when set, Claude Code keeps its settings,
  *   .claude.json and its plugins, skills, agents, commands and hooks
  *   folders there instead of ~/.claude (dated claim, 2026-11-04, per the
@@ -241,7 +313,7 @@
  *   The program a hook or an MCP server starts by name off PATH. An MCP
  *   server that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
- *   A hooksPath or include that reaches a git config file in content the
+ *   A hooksPath, include or templateDir that reaches a git config file in content the
  *   line doesn't spell (`cp evil.cfg .git/config`, an unreadable patch),
  *   and the editor `git config --edit` opens (#465).
  *   A protected path in a variable the line never assigns (#291, by
@@ -265,6 +337,12 @@
  *   a name it never assigned (${X:-hooks}) is judged as a value. Asserted:
  *   hooks.test.ts "(#509)".
  *
+ *   Not seen, dated 2026-11-05 (#500, by the decision of #289): a stamp a
+ *   process writes itself (`node -e`, a script), which reads as a write in
+ *   an interpreter; the server's reader checks its shape and no more, so the
+ *   sentence above is about what this guard reads. Pinned by hooks.test.ts
+ *   "(#500)".
+ *
  *   Not seen, dated 2026-11-05 (#509, by the decision of #291; both pinned by
  *   hooks.test.ts "(#509)"): a value from a file the line sources, which reads
  *   as a name the line never assigned (`. ./env.sh; echo x > $HK/y`). A value
@@ -280,16 +358,17 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
+  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
   quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
   suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
-import { projectRoot } from "./lib.mjs";
+import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
+import { projectRoots } from "./lib.mjs";
 import { OWNER_ONLY_KEYS, OWNER_ONLY_SAFE } from "./owner-keys.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -368,11 +447,31 @@ const GIT_WAIT_MS = 1500;
 // by command or by a line written into a config file.
 const HOOKS_PATH_KEY = "core.hookspath";
 const HOOKS_PATH_WHAT = "where git looks for its hooks (core.hooksPath)";
+// Where an init or clone copies its hooks from (#507), as git reads the key,
+// and what a refusal calls it.
+const TEMPLATE_KEY = "init.templatedir";
+const TEMPLATE_WHAT = "the template folder git copies hooks from (init.templateDir, --template)";
 // The other pointer: include.path and includeIf.<condition>.path name a
 // file git reads config from, which can carry the key (folded keys), and
 // the sections those keys live in.
 const POINTER_KEY = /^include(?:if\..*)?\.path$/;
 const POINTER_SECTION = /^include(?:if\..*)?$/;
+// The install that sets the pointer (#508): the flag, the program's own names
+// and the package that ships it, never `cairn-server`.
+const SETUP_FLAG = "--git-hooks";
+const SETUP_BIN = /^cairn-setup(?:\.mjs)?$/;
+const SETUP_PKG = /^(?:npm:)?@eventually-consistent\/cairn(?:@[^/]*)?$/;
+// What git runs itself, so no alias can stand in for it (#506): every
+// subcommand this guard has a leg for, and the everyday ones, which spares
+// asking git for an alias of `status` on every call. A builtin left off is
+// only read as its alias, if the line or the config names one.
+const GIT_BUILTINS = new Set(["checkout", "restore", "rm", "mv", "apply", "clone", "init", "worktree", "submodule",
+  "config", "status", "log", "diff", "show", "add", "commit", "branch", "fetch", "pull", "push", "merge", "rebase",
+  "reset", "switch", "stash", "tag", "remote", "rev-parse", "ls-files", "cherry-pick", "revert", "blame", "grep",
+  "describe", "clean", "gc", "bisect", "notes", "reflog", "hash-object", "cat-file", "rev-list", "ls-tree",
+  "for-each-ref", "symbolic-ref", "update-ref", "var", "version", "help"]);
+// A word the shell computes as the line runs, which no reading can spell.
+const COMPUTED = /\$\(|`/;
 // `git config`'s value-taking options, so a key is never read out of one.
 const GIT_CONFIG = { short: "f", long: ["--file", "--blob", "--type", "--default", "--get-color", "--comment",
   "--value", "--url"] };
@@ -383,8 +482,10 @@ const GIT_CONFIG_SECTIONS = new Set(["--remove-section", "--rename-section", "re
 const GIT_CONFIG_READS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
   "--get-colorbool", "-l", "--list", "-e", "--edit", "get", "list", "edit"]);
 // The words a call must spell before a write to a git config file is
-// judged (#465): the key, or an include that can carry it.
-const POINTER_WORDS = /hookspath|include/;
+// judged (#465): the key, an include that can carry it, or the template
+// folder (#507), which a refusal names on its own.
+const POINTER_WORDS = /hookspath|include|templatedir/;
+const HOOKS_POINTER_WORDS = /hookspath|include/;
 
 // Options whose value is the folder a runner works in (#316): uv's
 // --directory, npm's and pnpm's -C, bun's --cwd, as the next word or with
@@ -632,6 +733,22 @@ const OWNER_LEAVES = OWNER_ONLY_KEYS.map((k) => [k, fold(k.split(".").pop())]);
 const APPROVAL_TOOL = /(?:^|__)plan_meta_set$/;
 const APPROVAL_WHAT = "the owner's approval stamp on a plan";
 
+// cairn's own folders something else trusts, under a project root and every
+// linked worktree of it, as [names, what a refusal calls it]: the ones the
+// installed git layer runs from (#492), and the stamps the close-time re-run
+// reads (#500), which the tool's approve flag above is only one way to write.
+const CAIRN_ZONES = [
+  [[".cairn", "harness"], "the scripts cairn's git hook runs and the verbs beside them"],
+  [[".cairn", "githooks"], "the folder cairn's git hooks live in"],
+  [[".cairn", "state", "approvals"], APPROVAL_WHAT],
+];
+// Setup installs where it stands, so a package folder of the project can hold
+// the same three, and its hook names its own script: matched at any depth
+// inside the project, like a nested .claude.
+for (const [names, what] of CAIRN_ZONES) {
+  PROTECTED.push({ re: new RegExp(`^(?:.*/)?${names.join("/").replace(/\./g, "\\.")}/`, "i"), what });
+}
+
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
 const TOOL_REMOVES = new Set(["delete", "remove", "rm", "rmdir", "unlink", "trash", "erase"]);
@@ -657,6 +774,8 @@ const LIST_CAP = 500;
 
 // Variables -- the folders every rule is measured against, set per payload.
 // Each holds the path as given and its real path, when a symlink differs.
+// PROJECTS is the roots as lib.mjs names them, the shell's own first (#510).
+let PROJECTS = [];
 let ROOTS = [];
 let HOMES = [];
 // Protected places outside the project (#263, #267), each { dir, what,
@@ -673,11 +792,13 @@ let SCRIPTS = [];
 // zones too big to list in full.
 let ENTRIES = null;
 let UNLISTED = [];
-// What git answered once this run (#353, #465), and the git config files a
+// What git answered once this run, per project (#353, #465), and the git config files a
 // pointer line could land in, in every spelling -- listed only when the
 // call spells one (POINTER_WORDS), empty otherwise.
-let GIT_ANSWERS = null;
+const GIT_ANSWERS = new Map();
+const GIT_WORKTREES = new Map();
 let GIT_CONFIGS = [];
+let GIT_CONFIG_WHAT = HOOKS_PATH_WHAT;
 
 // Paths
 
@@ -753,13 +874,18 @@ function below(dir, abs) {
   return a.length >= d.length && d.every((x, j) => same(x, a[j])) ? a.slice(d.length) : null;
 }
 
-/** Project-relative POSIX path, or null when the path escapes the project. */
-function projectRelative(abs) {
+/**
+ * The path relative to each project root holding it, as POSIX paths; none when
+ * it escapes them all. One path can be two things (#510): `hooks/vendored/a`
+ * in the outer project is `a` in the repository standing there.
+ */
+function projectRelatives(abs) {
+  const out = new Set();
   for (const root of ROOTS) {
     const rest = below(root, abs);
-    if (rest) return rest.join("/");
+    if (rest) out.add(rest.join("/"));
   }
-  return null;
+  return [...out];
 }
 
 /** True when `abs` is `dir` or any folder above it, letter case aside (#295). */
@@ -1063,21 +1189,23 @@ function commandScripts(command, vars, base = null, depth = 0) {
  */
 function settingsScripts() {
   const home = resolve(homedir());
-  const project = ROOTS[0];
   const plugin = livePluginRoot();
   // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means; the user
   // settings under CLAUDE_CONFIG_DIR too when it is set (#304)
   const cfg = configDir();
+  // and each project root's own (#510), with the folder its $CLAUDE_PROJECT_DIR means
   const sources = [
-    ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin]),
-    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin]) : []),
-    ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin]),
-    [join(project, "hooks", "hooks.json"), project],
-    [join(plugin, "hooks", "hooks.json"), plugin],
+    ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin, PROJECTS[0]]),
+    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin, PROJECTS[0]]) : []),
+    ...PROJECTS.flatMap((project) => [
+      ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin, project]),
+      [join(project, "hooks", "hooks.json"), project, project],
+    ]),
+    [join(plugin, "hooks", "hooks.json"), plugin, PROJECTS[0]],
   ];
   const seen = new Set();
   const out = new Set();
-  for (const [file, pluginRoot] of sources) {
+  for (const [file, pluginRoot, project] of sources) {
     if (seen.has(file)) continue;
     seen.add(file);
     try {
@@ -1127,7 +1255,7 @@ function serverLines(server) {
  */
 function mcpScripts() {
   const home = resolve(homedir());
-  const project = ROOTS[0];
+  const project = PROJECTS[0];
   const parse = (file) => {
     try { return JSON.parse(readText(file) ?? ""); } catch { return null; }
   };
@@ -1147,8 +1275,10 @@ function mcpScripts() {
       for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
     }
   }
-  take(parse(join(project, ".mcp.json")), project);
-  take(parse(join(project, ".cursor", "mcp.json")), project);
+  for (const root of PROJECTS) { // each project root's own (#510)
+    take(parse(join(root, ".mcp.json")), root);
+    take(parse(join(root, ".cursor", "mcp.json")), root);
+  }
   take(parse(join(home, ".cursor", "mcp.json")), project);
   const seen = new Set();
   const scripts = new Set();
@@ -1158,7 +1288,7 @@ function mcpScripts() {
     const vars = { HOME: home, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: dir, userHome: home, workspaceFolder: dir };
     const keep = ({ path, folder }) => {
       for (const s of spellings(path)) {
-        if (projectRelative(s) !== null) continue;
+        if (projectRelatives(s).length) continue;
         if (!folder) scripts.add(s);
         else if (!anchors.some((a) => holds(s, a))) folders.add(s);
       }
@@ -1199,21 +1329,30 @@ function mcpScripts() {
  * make every write a hook.
  */
 function gitHookDirs() {
-  let dir = gitAnswers().hooks;
-  if (dir === null) {
-    const dotGit = join(gitRoot(ROOTS[0]), ".git");
-    try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { return []; }
-  }
-  if (dir === null) return [];
   const anchors = [...ROOTS, ...HOMES];
-  return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)));
+  const dirs = [];
+  // each project root's own (#510)
+  for (const project of PROJECTS) {
+    const { hooks, typed } = gitAnswers(project);
+    let dir = hooks;
+    if (dir === null) {
+      const dotGit = join(gitRoot(project), ".git");
+      try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { /* no repo */ }
+    }
+    if (dir !== null) dirs.push(dir);
+    // a relative core.hooksPath is relative to each worktree git runs a hook in (#492)
+    if (typed && !isAbsolute(expandHome(typed)) && !/^\.git(?:\/|$)/.test(typed)) {
+      for (const wt of gitWorktrees(project)) dirs.push(resolve(wt, typed));
+    }
+  }
+  return [...new Set(dirs.flatMap((d) => spellings(d)))].filter((d) => !anchors.some((a) => holds(d, a)));
 }
 
-/** One git command from the project, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
-function askGit(args) {
+/** One git command from the project, or `cwd`, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
+function askGit(args, cwd = ROOTS[0]) {
   try {
     const r = spawnSync("git", args, {
-      cwd: ROOTS[0], encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
+      cwd, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
     });
     return r.status === 0 ? String(r.stdout).trim() : "";
@@ -1227,28 +1366,56 @@ function askGit(args) {
  * #465): `git rev-parse --git-path hooks --git-path config --git-path
  * config.worktree`, one line each as git resolves them -- core.hooksPath
  * applied for hooks, the common dir's config in a linked worktree, ~
- * expanded, a relative path from the project. Each null when there is no
- * git to ask.
+ * expanded, a relative path from the project; `typed` is the hooks answer as
+ * git gave it. Each null when there is no git to ask.
  */
-function gitAnswers() {
-  if (GIT_ANSWERS) return GIT_ANSWERS;
-  GIT_ANSWERS = { hooks: null, config: null, worktree: null };
-  const lines = askGit(["rev-parse", "--git-path", "hooks", "--git-path", "config", "--git-path", "config.worktree"])
+function gitAnswers(project) {
+  if (GIT_ANSWERS.has(project)) return GIT_ANSWERS.get(project);
+  let answers = { hooks: null, typed: null, config: null, worktree: null };
+  const lines = askGit(["rev-parse", "--git-path", "hooks", "--git-path", "config", "--git-path", "config.worktree"], project)
     .split("\n").map((l) => l.trim());
   if (lines.length >= 3 && lines[0] && lines[1]) {
-    GIT_ANSWERS = {
-      hooks: resolve(ROOTS[0], expandHome(lines[0])),
-      config: resolve(ROOTS[0], expandHome(lines[1])),
-      worktree: lines[2] ? resolve(ROOTS[0], expandHome(lines[2])) : null,
+    answers = {
+      hooks: resolve(project, expandHome(lines[0])),
+      typed: lines[0],
+      config: resolve(project, expandHome(lines[1])),
+      worktree: lines[2] ? resolve(project, expandHome(lines[2])) : null,
     };
   }
-  return GIT_ANSWERS;
+  GIT_ANSWERS.set(project, answers);
+  return answers;
+}
+
+/** The linked worktrees of a project's repository, the main checkout among them; none when there is no git to ask. */
+function gitWorktrees(project) {
+  if (!GIT_WORKTREES.has(project)) {
+    GIT_WORKTREES.set(project, askGit(["worktree", "list", "--porcelain"], project).split("\n")
+      .filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length)));
+  }
+  return GIT_WORKTREES.get(project);
+}
+
+/**
+ * cairn's own folders as tree zones (#492), under the project root and every
+ * linked worktree of it: the hook runs `$PWD/.cairn/harness/scripts/pre-push.mjs`
+ * from the worktree a push starts in, before the install's own copy. `within`
+ * marks a zone a whole tree can be dropped on (dirRule, zoneGlob).
+ */
+function cairnZones() {
+  const zones = [];
+  for (const root of new Set([...ROOTS, ...PROJECTS.flatMap(gitWorktrees)])) {
+    const within = spellings(root);
+    for (const [names, what] of CAIRN_ZONES) {
+      for (const dir of spellings(join(root, ...names))) zones.push({ dir, what, tree: true, carve: [], within });
+    }
+  }
+  return zones;
 }
 
 /**
  * Every git config file a hooksPath or include line could land in (#465),
- * in each spelling: the repo's own and its worktree's (asked of git, else
- * .git/config under the nearest .git), the global ones -- GIT_CONFIG_GLOBAL
+ * in each spelling: each project root's own and its worktree's (asked of git,
+ * else .git/config under the nearest .git, #510), the global ones -- GIT_CONFIG_GLOBAL
  * when set, ~/.gitconfig, and $XDG_CONFIG_HOME/git/config, which is
  * ~/.config/git/config by default -- and the system file: /etc/gitconfig,
  * and what `git var GIT_CONFIG_SYSTEM` names (git 2.37+, a claim about git
@@ -1256,13 +1423,15 @@ function gitAnswers() {
  */
 function gitConfigFiles() {
   const files = [];
-  const { config, worktree } = gitAnswers();
-  if (config) files.push(config);
-  else {
-    const dotGit = join(gitRoot(ROOTS[0]), ".git");
-    try { if (statSync(dotGit).isDirectory()) files.push(join(dotGit, "config")); } catch { /* no repo */ }
+  for (const project of PROJECTS) {
+    const { config, worktree } = gitAnswers(project);
+    if (config) files.push(config);
+    else {
+      const dotGit = join(gitRoot(project), ".git");
+      try { if (statSync(dotGit).isDirectory()) files.push(join(dotGit, "config")); } catch { /* no repo */ }
+    }
+    if (worktree) files.push(worktree);
   }
-  if (worktree) files.push(worktree);
   const home = resolve(homedir());
   const named = (v) => (v && isAbsolute(expandHome(v)) ? resolve(expandHome(v)) : null);
   const global = named(process.env.GIT_CONFIG_GLOBAL);
@@ -1303,11 +1472,10 @@ function fileRule(abs) {
   }
   // a git config file, while the call spells a pointer git reads from it
   // (#465): the hooksPath that moves the folder #353 protects, or an include
-  if (GIT_CONFIGS.some((f) => same(abs, f))) return HOOKS_PATH_WHAT;
+  if (GIT_CONFIGS.some((f) => same(abs, f))) return GIT_CONFIG_WHAT;
   const zone = zoneOf(abs);
   if (zone) return zone;
-  const rel = projectRelative(abs);
-  if (rel !== null) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
+  for (const rel of projectRelatives(abs)) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
   // a script the settings run, wherever it lives (#312), or one an MCP
   // config launches (#314); anything else outside the project is not this
   // guard's business
@@ -1321,8 +1489,7 @@ function dirRule(abs) {
   }
   const zone = ZONES.find((z) => same(z.dir, abs));
   if (zone) return zone.what;
-  const rel = projectRelative(abs);
-  if (rel) {
+  for (const rel of projectRelatives(abs)) {
     const r = fold(rel);
     if (r === "hooks") return "the hook directory";
     for (const [up, sub, what] of SUB_TREES) if (r === `${up}/${sub}` || r.endsWith(`/${up}/${sub}`)) return what;
@@ -1330,6 +1497,13 @@ function dirRule(abs) {
     if (name === ".claude") return "a Claude settings directory";
     if (name === ".claude-plugin") return "the plugin manifest";
     if (name === ".cursor") return "Cursor's settings directory";
+  }
+  // A folder on the way to one of cairn's zones, below the root, while it
+  // isn't there as a folder (#492): `mv /tmp/evil .cairn` plants the whole
+  // tree. A link counts as not being one, or `ln -sfn` swaps it for another.
+  const way = ZONES.find((z) => z.within?.some((r) => holds(r, abs) && !same(r, abs)) && holds(abs, z.dir));
+  if (way) {
+    try { if (!lstatSync(abs).isDirectory()) return `the folder holding ${way.what}`; } catch { return `the folder holding ${way.what}`; }
   }
   // A folder on the way to a protected script, while it isn't there as a
   // folder (#312, #314): a write here -- `mv /tmp/x ~/.config/iterm2` --
@@ -1380,7 +1554,8 @@ function zoneGlob(p, remove) {
     });
     if (carved) continue;
     if (p.length === n) {
-      if (could(p[n - 1], d[n - 1], remove)) return z.what;
+      // a folder's unknown contents can be cairn's zone (#492): `cp -r src/. .cairn/`
+      if (could(p[n - 1], d[n - 1], remove || Boolean(z.within))) return z.what;
     } else if (could(p[n - 1], d[n - 1]) &&
       (z.tree || (p.length === n + 1 && couldManifest(p[n], z.dir)))) return z.what;
   }
@@ -1422,8 +1597,7 @@ function could(comp, name, anyOk = true) {
  */
 function globRule(abs, mode) {
   const remove = mode === "remove";
-  const rel = projectRelative(abs);
-  if (rel !== null) {
+  for (const rel of projectRelatives(abs)) {
     const c = rel ? rel.split("/") : [];
     if (c.length && could(c[0], "hooks")) return "the hook directory";
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
@@ -2252,7 +2426,7 @@ function degitTargets(words, add) {
  * --get and kin, get, list and --list read and pass; -e opens an editor
  * the guard can't see (Not seen).
  */
-function gitConfigTargets(rest, ctx, out) {
+function gitConfigTargets(rest, seg, ctx, add, out) {
   const words = ctx.positional ? rest.map((a) => a.replace(POSITIONAL, ctx.positional)) : rest;
   const { opts, operands } = parseOpts(words, GIT_CONFIG);
   const names = opts.map((o) => o.name);
@@ -2271,29 +2445,159 @@ function gitConfigTargets(rest, ctx, out) {
   if (!writes && keyed.length < 2) return;
   const key = keyed[0];
   if (key === undefined) return;
+  // #506 -- a key the shell computes is any key; saving an alias is judged as
+  // what it would run, so a planted `git st` never reaches the owner's terminal
+  if (unspelled(key, ctx)) {
+    out.push({ raw: `${key} (a git config key the guard can't read)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  if (fold(key).startsWith("alias.") && keyed[1] !== undefined) {
+    if (keyed[1].startsWith("!")) out.push(...shellAliasTargets(keyed[1].slice(1), ctx.dir, ctx));
+    else gitTargets(aliasWords(keyed[1]), seg, ctx, add, out);
+  }
+  // a section renamed onto one holds the same key under the new name
+  const onto = section && keyed[1] !== undefined ? keyed[1] : null;
   const pointer = could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ||
-    (section && (could(key, "core") || POINTER_SECTION.test(fold(key))));
+    (section && (could(key, "core") || POINTER_SECTION.test(fold(key)))) ||
+    (onto !== null && (could(onto, "core") || POINTER_SECTION.test(fold(onto))));
   if (pointer) out.push({ raw: `${key} (a git config key)`, what: HOOKS_PATH_WHAT });
+  else if (could(key, TEMPLATE_KEY) || (onto !== null && could(onto, "init"))) {
+    out.push({ raw: `${key} (a git config key)`, what: TEMPLATE_WHAT });
+  }
+}
+
+/** True for a word the shell works out as the line runs, a substitution or a name the line set from one (#506). */
+function unspelled(word, ctx) {
+  if (COMPUTED.test(word) || expandAssigned(word, ctx.vars, MAX_PLACES).lost) return true;
+  return [...word.matchAll(/\$\{?!?([A-Za-z_]\w*)/g)].some(([, name]) => {
+    const held = ctx.vars?.get(name);
+    return held === null || held === UNREADABLE;
+  });
+}
+
+/**
+ * A `!` alias's body, read as a line (#506): git runs it in a shell from the
+ * top of the worktree, so it is judged there and from the folder the command
+ * stands in, under the variables the line gave it.
+ */
+function shellAliasTargets(line, dir, ctx) {
+  if (ctx.depth >= 3) return [];
+  const out = [];
+  for (const at of new Set([dir, gitRoot(dir)])) {
+    out.push(...lineTargets(line, at, ctx.depth + 1, { walk: ctx.walk, vars: assignVars(ctx.assigns ?? [], ctx.vars, SPELL) }));
+  }
+  return out;
+}
+
+/**
+ * A git line as an invocation with its aliases walked (#506), the way the run
+ * guard reads one and through the same resolver: the numbered environment
+ * entries first as git reads them, then the -c and --config-env values, on
+ * the variables this command's prefix and the line gave it; an alias from
+ * neither is asked of git at the folder the command runs in. A -c the shell
+ * still works out is a setting the guard can't read, so it lands in `unread`
+ * rather than be expanded as typed. Returns the invocation and the folder.
+ */
+function gitInvocation(words, ctx) {
+  const assigns = ctx.assigns ?? [];
+  const env = (name) => {
+    const own = assigns.filter((a) => a.startsWith(`${name}=`)).pop();
+    if (own !== undefined) return own.slice(name.length + 1);
+    if (!ctx.vars?.has(name)) return process.env[name];
+    const held = ctx.vars.get(name);
+    return held === null || held === UNREADABLE ? undefined : held.at(-1);
+  };
+  const parsed = parseInvocation(["git", ...words], { aliases: false, env });
+  const fromEnv = envConfig(env);
+  const open = (c) => /[$`]/.test(c);
+  const inv = {
+    ...parsed,
+    configs: [...fromEnv.configs, ...parsed.configs.filter((c) => !open(c))],
+    unread: [...fromEnv.unread, ...parsed.unread, ...parsed.configs.filter(open).map((c) => {
+      const key = c.includes("=") ? c.slice(0, c.indexOf("=")) : "*";
+      return { key: open(key) ? "*" : key, from: `-c ${c}` };
+    })],
+  };
+  const place = (dirs) => dirs.reduce((at, d) => dirTarget(d, at, ctx.shellDir ?? ctx.dir)[0], ctx.dir);
+  const at = place(inv.dirs);
+  resolveAlias(inv, (name) => askGit(["config", "--get", `alias.${name}`], at) || undefined, (sub) => GIT_BUILTINS.has(sub));
+  return { inv, dir: place(inv.dirs) };
+}
+
+/**
+ * What a -c or --config value on `git clone` writes into the new repository's
+ * config (#507), as the hit it is: the template key, the pointer, or a key the
+ * guard can't read; any other is ordinary. Null for an ordinary one.
+ */
+function cloneSetting(value) {
+  const key = value.includes("=") ? value.slice(0, value.indexOf("=")) : value;
+  if (could(key, TEMPLATE_KEY)) return TEMPLATE_WHAT;
+  const open = /[$`]/.test(key) || STANDINS.some((m) => key.includes(m));
+  return open || could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ? HOOKS_PATH_WHAT : null;
+}
+
+/**
+ * The template an init, clone or submodule's clone is told to copy hooks from
+ * (#507), as hits: GIT_TEMPLATE_DIR and init.templateDir on any channel the
+ * invocation read, and for init and clone the flags themselves -- the long
+ * names as git's parser takes them, any shorter start of one -- and what
+ * clone's -c and --config write into the new repository.
+ */
+function gitSeedTargets(inv, ctx, out) {
+  const named = ctx.assigns?.some((a) => a.startsWith("GIT_TEMPLATE_DIR=")) || ctx.vars?.has("GIT_TEMPLATE_DIR")
+    || process.env.GIT_TEMPLATE_DIR !== undefined;
+  if (named) out.push({ raw: "GIT_TEMPLATE_DIR (a folder git copies hooks from)", what: TEMPLATE_WHAT });
+  const key = (c) => fold(c.includes("=") ? c.slice(0, c.indexOf("=")) : c);
+  const set = inv.configs.find((c) => key(c) === TEMPLATE_KEY);
+  if (set !== undefined) out.push({ raw: `${set} (a git config value)`, what: TEMPLATE_WHAT });
+  const unread = inv.unread.find((u) => u.key === "*" || fold(u.key) === TEMPLATE_KEY);
+  if (unread) out.push({ raw: `${unread.from} (a setting the guard can't read)`, what: TEMPLATE_WHAT });
+  if (inv.sub === "submodule") return;
+  const words = inv.args;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const long = /^(--[^=]+)(?:=(.*))?$/.exec(w);
+    const short = long || w.startsWith("--") ? null : /^-[A-Za-z]*?c(.*)$/.exec(w);
+    if (long && "--template".startsWith(long[1])) {
+      out.push({ raw: `${w} (a folder git copies hooks from)`, what: TEMPLATE_WHAT });
+    } else if (inv.sub === "clone" && ((long && "--config".startsWith(long[1])) || short)) {
+      const value = (long ? long[2] : short[1]) || words[i + 1] || "";
+      const what = cloneSetting(value);
+      if (what) out.push({ raw: `${value} (a setting clone writes)`, what });
+    }
+  }
 }
 
 /**
  * git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree
  * clone and kin plant (#317), the config key that moves the hooks folder
- * (#465) -- from its -C folder (#258), read the way a
+ * (#465) -- each read on the subcommand git runs, its aliases walked (#506)
+ * -- from its -C folder (#258), read the way a
  * cd target is (#318): `~/proj`, `$HOME/proj` and `"$PWD"` spelled out,
  * and a folder the guard can't read (`-C "$X"`) LOST, so a relative
  * operand from it is refused rather than judged under a folder literally
  * named `~`.
  */
 function gitTargets(args, seg, ctx, add, out) {
-  let k = 0;
-  let dir = ctx.dir;
-  while (k < args.length && args[k].startsWith("-")) {
-    if (args[k] === "-C" && args[k + 1]) [dir] = dirTarget(args[k + 1], dir, ctx.shellDir ?? ctx.dir);
-    k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+  const words = ctx.positional ? args.map((a) => a.replace(POSITIONAL, ctx.positional)) : args;
+  const { inv, dir } = gitInvocation(words, ctx);
+  const { sub } = inv;
+  const rest = inv.paths.length ? [...inv.args, "--", ...inv.paths] : inv.args;
+  if (sub === SHELL_ALIAS) {
+    // git hands a shell alias the words typed after it
+    out.push(...shellAliasTargets([inv.shell, ...rest.map(quoteWord)].join(" "), dir, ctx));
+    return;
   }
-  const sub = args[k];
-  const ops = plain(args.slice(k + 1));
+  // a subcommand from a stream or a substitution could be any of them; an
+  // alias whose value the guard can't read could be any line
+  const aliased = sub && !GIT_BUILTINS.has(sub) && inv.unread.find((u) => u.key === "*" || fold(u.key) === `alias.${fold(sub)}`);
+  if (STANDINS.some((m) => sub.includes(m)) || unspelled(sub, ctx) || aliased) {
+    const shown = aliased ? aliased.from : sub;
+    out.push({ raw: `${shown} (a git subcommand the guard can't read)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  if (sub === "init" || sub === "clone" || sub === "submodule") gitSeedTargets(inv, ctx, out);
+  const ops = plain(rest);
   if (sub === "checkout" || sub === "restore") for (const a of ops) add(a, "write", dir);
   else if (sub === "rm") for (const a of ops) add(a, "remove", dir);
   else if (sub === "mv" && ops.length >= 2) {
@@ -2303,9 +2607,9 @@ function gitTargets(args, seg, ctx, add, out) {
       add(s, "remove", dir);
       add(join(dest, basename(s)), "write", dir);
     }
-  } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
-  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, args.slice(k + 1), dir, add);
-  else if (sub === "config") gitConfigTargets(args.slice(k + 1), ctx, out);
+  } else if (sub === "apply") applyTargets(rest, seg, { ...ctx, dir }, add);
+  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, rest, dir, add);
+  else if (sub === "config") gitConfigTargets(rest, seg, { ...ctx, dir }, add, out);
 }
 
 /**
@@ -2446,6 +2750,29 @@ function runnerTargets(cmd, args, ctx, add, out) {
 }
 
 /**
+ * `cairn-setup --git-hooks`, run by the agent (#508): the flag on the program
+ * by name or path, on its package, or on any of the runners (`npm run setup
+ * -- --git-hooks` names neither). On a line naming the program, a word the
+ * guard can't read -- a substitution, a variable, a glob, a word from a stream
+ * -- may be the flag, past the value --project takes. No path to judge: the
+ * hit carries its own `what`.
+ */
+function setupTargets(cmd, args, out) {
+  const runner = RUNNERS.has(cmd);
+  const named = SETUP_BIN.test(cmd) ||
+    (runner && args.some((a) => SETUP_BIN.test(cmdName(a)) || SETUP_PKG.test(fold(a))));
+  if (!runner && !named) return;
+  if (args.includes(SETUP_FLAG)) {
+    out.push({ raw: `cairn-setup ${SETUP_FLAG} (it points git at a folder of hooks)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  if (!named) return;
+  const open = args.find((a, i) => args[i - 1] !== "--project" && !a.startsWith("--project=") &&
+    (/[$`*?[]/.test(a) || STANDINS.some((m) => a.includes(m))));
+  if (open !== undefined) out.push({ raw: `cairn-setup ${open} (it may be ${SETUP_FLAG})`, what: HOOKS_PATH_WHAT });
+}
+
+/**
  * Every path one segment would change, as { raw, abs, mode }. Generous
  * inside a write command; silent for a command that only reads.
  */
@@ -2549,6 +2876,7 @@ function writeTargets(seg, ctx) {
   }
   // `rm -rf {hooks,}` is `rm -rf hooks`: spell braces out first, as bash does (#258)
   args = args.flatMap((a) => braceExpand(a, ANY));
+  setupTargets(cmd, args, out);
   // find acts on every path it walks: -delete, and -exec's command with {} in it (#258)
   if (cmd === "find") {
     const spec = parseFind(args);
@@ -2578,7 +2906,7 @@ function writeTargets(seg, ctx) {
   else if (cmd === "tar" || cmd === "bsdtar" || cmd === "gtar") tarTargets(args, ctx, add);
   else if (cmd === "unzip") unzipTargets(args, ctx, add);
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
-  else if (cmd === "git") gitTargets(args, seg, ctx, add, out);
+  else if (cmd === "git") gitTargets(args, seg, { ...ctx, assigns }, add, out);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
   else if (RUNNERS.has(cmd)) runnerTargets(cmd, args, ctx, add, out);
   // #317 -- an initializer run by name, or through `pnpm dlx` / `npm exec`
@@ -2940,9 +3268,11 @@ try {
   if (!core && !mcpPaths.length && !mcpLines.length && !approves) process.exit(0);
 
   // #459 -- the root the harness names, else the one git or a .claude folder
-  // marks above the shell's cwd; never the subfolder the shell stands in
-  const projectDir = projectRoot(payload);
-  ROOTS = spellings(projectDir);
+  // marks above the shell's cwd; never the subfolder the shell stands in. #510
+  // -- and from a nested repository, the outer project too
+  PROJECTS = projectRoots(payload);
+  const projectDir = PROJECTS[0];
+  ROOTS = [...new Set(PROJECTS.flatMap((p) => spellings(p)))];
   HOMES = spellings(homedir());
   ZONES = outsideZones();
   // Relative paths resolve where the tool runs -- the payload's cwd -- not
@@ -2963,11 +3293,17 @@ try {
   // way: a tree zone too, wherever it lies -- a tracked scripts/hooks, the
   // repo's .git/hooks, or a ~/.githooks the global config names.
   for (const dir of gitHookDirs()) ZONES.push({ dir, what: GIT_HOOK_WHAT, tree: true, carve: [] });
+  // cairn's own folders the hook runs from (#492), asked of git the same way.
+  ZONES.push(...cairnZones());
   // The files that pointer can be written into (#465), listed only when the
   // call spells one in what it writes or runs -- never in a path it names,
   // so a folder called hookspath makes no edit of .git/config a pointer: a
   // user.name line into .git/config stays ordinary work.
-  if (POINTER_WORDS.test(fold(JSON.stringify(withoutPaths(toolInput))))) GIT_CONFIGS = gitConfigFiles();
+  const spelled = fold(JSON.stringify(withoutPaths(toolInput)));
+  if (POINTER_WORDS.test(spelled)) {
+    GIT_CONFIGS = gitConfigFiles();
+    GIT_CONFIG_WHAT = HOOKS_POINTER_WORDS.test(spelled) ? HOOKS_PATH_WHAT : TEMPLATE_WHAT;
+  }
 
   // The approval stamp (#460): the flag itself is the write, so the hit is
   // made here -- the tool's input names no path for the loops below to judge.

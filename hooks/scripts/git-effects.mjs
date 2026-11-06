@@ -148,8 +148,10 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  *              with it, or the word it took, matches -- `gc --prune=now`,
  *              never the bare `--prune` that keeps the default (#288)
  *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
- *              glob, the colon magic of #464, the repository root as an
- *              absolute path through the `repoRoot` probe, #288), or
+ *              relative spelling of it, a path with no literal character, the
+ *              colon magic of #464, the repository root as an absolute path
+ *              through the `repoRoot` probe, #288), the words together reach
+ *              every tracked file (the `reachesEveryFile` probe, #493), or
  *              --pathspec-from-file hides it; `needs` names the flag the
  *              row also wants and names (a forced rm, #434: unforced, git
  *              refuses a modified file itself)
@@ -161,11 +163,18 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
  *   plusRef    a refspec with a leading `+`
+ *   pushSetting  a `+` in `remote.<r>.push` this push would follow (#502): on
+ *              the line, by any channel `configs` folds in, for the remote it
+ *              names, or in the repository's or session's config through the
+ *              `forcePushConfigured` probe; asserted by runguard-effects.test.ts
+ *              and runguard-guards.test.ts (#502)
  *   config     a `-c` setting matching `key` that reads as true
  *   probe      the repository says so: probe[name](inv) is true
  *   wildSub    the subcommand itself is a word the guard can't spell (#494)
  * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
- * repository root when `word` is its absolute path (#288).
+ * repository root when `word` is its absolute path (#288), and
+ * `reachesEveryFile(words)`, true when `git ls-files` lists every tracked file
+ * for those pathspecs and at least one file is tracked (#493).
  *
  * A wild word (#494): the reader spells a line's words through what the line
  * assigned before this table is read (shell-words.mjs spellWords), and
@@ -246,7 +255,7 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  * same key through --config-env or GIT_CONFIG_KEY_n) pulls a file's every
  * setting in -- an alias, a mirror, a prune date -- unread here, so the
  * command is refused outright; and a setting this table reads (an alias,
- * `remote.<r>.mirror`, `gc.pruneExpire`, an include) whose value sits
+ * `remote.<r>.mirror`, `remote.<r>.push`, `gc.pruneExpire`, an include) whose value sits
  * where the guard can't read it -- a variable neither the prefix nor the
  * environment holds, a `$` expansion, GIT_CONFIG_PARAMETERS set by hand,
  * a numbered entry with no key or value -- is refused the same way
@@ -302,6 +311,9 @@ export const EFFECT_TABLE = Object.freeze([
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "plusRef",
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
+  // #502 -- the same + from a remote's push setting, on any channel
+  { effect: DISCARDS_WORK, sub: "push", when: "pushSetting",
+    what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--mirror"],
     what: "`git push --mirror`", why: "it force-updates and deletes remote refs to match this clone." },
   { effect: DISCARDS_WORK, sub: "push", when: "config", key: /^remote\.(.+)\.mirror(?:=(.*))?$/i,
@@ -323,7 +335,7 @@ export const EFFECT_TABLE = Object.freeze([
       "none of them before the line runs, so what the command does can't be told; it is refused as if it discarded " +
       "work. Put the setting on the line itself (`-c key=value`) and the guard can judge it." },
   // #467 -- a setting this table reads, from a value the guard can't; any subcommand
-  { effect: DISCARDS_WORK, when: "unread", key: /^(?:alias\.|include(?:if\.[^=]*)?\.path$|remote\..+\.mirror$|gc\.pruneexpire$)/i,
+  { effect: DISCARDS_WORK, when: "unread", key: /^(?:alias\.|include(?:if\.[^=]*)?\.path$|remote\..+\.(?:mirror|push)$|gc\.pruneexpire$)/i,
     what: "a git setting from a value the guard can't read",
     why: "the value sits in an environment variable or a shell expansion the guard can't see, and the setting " +
       "decides what the command does (an alias, a mirror, a prune date); set it on the line itself " +
@@ -447,10 +459,13 @@ export function inlineAlias(inv, name) {
  * settings gathered so far are kept, the expansion's own coming after
  * them -- read through the same `env` lookup the invocation was parsed
  * with (#467), so a --config-env inside an alias value is folded too.
+ * `builtin` names what else git runs itself, for a caller whose own rows
+ * sit off this table (the harness guard's `config`, #506): no alias stands
+ * in for one, an inline `-c alias.config=status` included.
  */
-export function resolveAlias(inv, lookup = () => undefined) {
+export function resolveAlias(inv, lookup = () => undefined, builtin = () => false) {
   const seen = new Set();
-  while (inv.sub && !TABLED.has(inv.sub) && !seen.has(inv.sub)) {
+  while (inv.sub && !TABLED.has(inv.sub) && !builtin(inv.sub) && !seen.has(inv.sub)) {
     seen.add(inv.sub);
     const value = inlineAlias(inv, inv.sub) ?? lookup(inv.sub);
     if (typeof value !== "string" || value === "") return inv;
@@ -593,30 +608,103 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
 }
 
 /**
- * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, a bare glob (`*`, `**`, `./*` -- a pathspec
- * `*` crosses `/`), and the magic spellings git reads as everything (#464):
- * a lone `:`, `::`, `:/`, `:/:`, `:/.`, `:(top)`, and any long-form magic
- * with no path after it (`:(glob,top)`, `:(icase)` -- measured against git
- * 2.56, 2026-11-04: `git rm -rfn -- :` lists every tracked file). With
+ * A pathspec's magic read off (#493), the way git's parser takes it: the
+ * long form `:(top,glob)path`, or the short `:` with `/`, `!` or `^` and an
+ * optional closing `:`. `path` is what's left, `exclude` and `literal` the two
+ * magics that change what the path means. A word with no magic is all path.
+ */
+function readPathspec(word) {
+  const long = /^:\(([^)]*)\)/.exec(word);
+  if (long) {
+    const magic = long[1].split(",");
+    return { path: word.slice(long[0].length), exclude: magic.includes("exclude"), literal: magic.includes("literal") };
+  }
+  const short = /^:([/!^]*):?/.exec(word);
+  if (short) return { path: word.slice(short[0].length), exclude: /[!^]/.test(short[1]), literal: false };
+  return { path: word, exclude: false, literal: false };
+}
+
+/**
+ * A path as its steps, the way git normalizes one (#493): `.` and empty steps
+ * go, a `..` takes the step before it, so `src/..`, `./src/../` and `.//` are
+ * no steps at all. A `..` left over leads, and climbs out of a nested folder.
+ */
+function pathSteps(path) {
+  const steps = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === ".." && steps.length && steps.at(-1) !== "..") steps.pop();
+    else steps.push(part);
+  }
+  return steps;
+}
+
+// A step with no literal character: stars, question marks and bracket groups only (#493).
+const GLOB_ONLY = /^(?:\*|\?|\[[!^]?\]?(?:\[:\w+:\]|[^\]\\])*\])+$/;
+
+// A path git leaves a trailing `/` on: `*/`, `*/.` and `*/x/..` list no file at all (measured, git 2.56, 2026-11-05).
+const DIR_ONLY = /\/\.{0,2}$/;
+
+/**
+ * The folder a word names when it stands for everything in it (#288, #493),
+ * magic and a trailing `/`, `/.` or glob-only step dropped and the rest
+ * normalized: `/repo/`, `/repo/src/..`, `/repo/?*` and `:(glob)/repo/**` are all
+ * `/repo`. A glob with a trailing `/` lists nothing, so it keeps its step.
+ */
+export function rootSpelling(word) {
+  const { path } = readPathspec(word);
+  const steps = pathSteps(path);
+  if (!DIR_ONLY.test(path)) while (steps.length && GLOB_ONLY.test(steps.at(-1))) steps.pop();
+  return `${path.startsWith("/") ? "/" : ""}${steps.join("/")}`;
+}
+
+/**
+ * True for a pathspec that names the whole tree rather than a file in it, read
+ * off the word alone (#493). It normalizes first, so `.`, `./`, `..`, `../..`,
+ * `src/..`, `./src/../` and `.//` are the folder itself; then a path with no
+ * literal character is everything: `*`, `**`, `?*`, `*?`, `[a-z]*`, `./*`,
+ * `../?*`, `*`+`/`+`*` -- a pathspec `*` crosses `/`. Magic comes off first, so
+ * the spellings git reads as everything (#464) are the same rule: a lone `:`,
+ * `::`, `:/`, `:/:`, `:/.`, `:(top)`, any long form with no path after it
+ * (`:(glob,top)`, `:(attr:!x)`), and `:(glob)**`, `:/?*`, `:(top)?*` (measured
+ * against git 2.56: `git ls-files -- '?*'` lists every tracked file, and `*`+`/`
+ * lists none, so it stays a path, as does `:(literal)*`, a file named `*`). With
  * `root`, the repository's own absolute path, that path too -- `/repo`,
- * `/repo/`, `/repo/.`, `/repo/*` (#288); only the repository knows its
- * root, so the guard's repoRoot probe supplies it per word. A single path
- * -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` --
- * is not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by
- * decision (phase 31, 2026-11-04). $PWD is the folder the command stands in,
- * so `$PWD`, `$PWD/` and `$PWD/*` read as `.`, `./` and `./*` (#494). Asserted
- * by runguard-effects.test.ts and runguard-guards.test.ts (#464, #494).
+ * `/repo/`, `/repo/.`, `/repo/*`, `/repo/?*` (#288, #493); only the repository
+ * knows its root, so the guard's repoRoot probe supplies it per word. A single
+ * path -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` -- is
+ * not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by decision
+ * (phase 31, 2026-11-04). What a word with a literal character reaches only git
+ * can say: pathspecAsks and the guard's reachesEveryFile probe. $PWD is the
+ * folder the command stands in, so `$PWD`, `$PWD/` and `$PWD/*` read as `.`, `./`
+ * and `./*` (#494). Asserted by runguard-effects.test.ts and
+ * runguard-guards.test.ts (#464, #493, #494).
  */
 export function wholeTree(typed, root) {
   const p = typed.replace(/^\$(?:PWD|\{PWD\})(?=\/|$)/, ".");
   if (p === "") return false;
-  if (/^(?::(?:\/*:?|\((?!(?:\w+,)*exclude\b)\w+(?:,\w+)*\)))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p)) return true;
-  return root !== undefined && root !== null && bareRoot(p) === bareRoot(root);
+  const { path, exclude, literal } = readPathspec(p);
+  if (exclude) return false;
+  if (!path.startsWith("/")) {
+    const steps = pathSteps(path).filter((s) => s !== "..");
+    if (!steps.length) return true;
+    if (!literal && !DIR_ONLY.test(path) && steps.every((s) => GLOB_ONLY.test(s))) return true;
+  }
+  return root !== undefined && root !== null && rootSpelling(p) === rootSpelling(root);
 }
 
-/** A folder path with its trailing `/`, `/.` and `/*` spellings dropped -- what names the folder itself (#288). */
-const bareRoot = (p) => p.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+/**
+ * True for a pathspec only git can judge (#493): its path holds a glob or a
+ * `..`, so it may reach every tracked file while the word still shows a literal
+ * character (`*.*`, `[a-z]*.*`, `:!x*`, `lib/../*.ts`). A plain path never asks,
+ * so `git rm -rf src` runs no git of its own, and nor does a word the shell
+ * still has to work out.
+ */
+export function pathspecAsks(word) {
+  if (/[$`]/.test(word)) return false;
+  const { path } = readPathspec(word);
+  return /[*?[]/.test(path) || /(?:^|\/)\.\.(?:\/|$)/.test(path);
+}
 
 /** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
 export const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
@@ -744,8 +832,16 @@ function rowCause(row, inv, probe) {
       // the repository root as an absolute path is the whole tree too (#288):
       // the repoRoot probe answers per word, or no word is the root
       const root = typeof probe?.repoRoot === "function" ? probe.repoRoot : () => undefined;
-      const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
-        : [...words, ...inv.paths].find((w) => wholeTree(w, root(w))) ?? null;
+      const specs = [...words, ...inv.paths];
+      let tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
+        : specs.find((w) => wholeTree(w, root(w))) ?? null;
+      // #493 -- the second leg: the words together, as git would read them,
+      // asked of the repository when one holds a glob or a `..`. No probe, or
+      // no answer from git, and the word's own spelling is what stands.
+      if (tree === null && typeof probe?.reachesEveryFile === "function") {
+        const asked = specs.find(pathspecAsks);
+        if (asked !== undefined && probe.reachesEveryFile(specs.filter((w) => !/[$`]/.test(w)))) tree = asked;
+      }
       if (tree === null) return wildCause(inv.paths);
       return need === undefined ? tree : typed.get(need) ?? need;
     }
@@ -757,6 +853,23 @@ function rowCause(row, inv, probe) {
     }
     case "plusRef":
       return pushArgs(inv).words.find((w) => w.startsWith("+")) ?? null;
+    case "pushSetting": {
+      // git follows the setting for a bare push and maps a branch typed on its
+      // own through it, the + included; a typed `a:b`, HEAD and @ are their own,
+      // and --all and --delete never read it (measured, git 2.56, 2026-11-05)
+      const { flags, values, words } = pushArgs(inv);
+      if (flags.has("--all") || flags.has("--branches") || flags.has("--delete")) return null;
+      const typed = words.slice(1);
+      if (typed.length && typed.every((w) => w.includes(":") || w === "HEAD" || w === "@")) return null;
+      // the remote it names, or with none typed any remote's: only the repository can say which
+      const remote = words[0] ?? values.get("--repo");
+      const hit = (inv.configs ?? []).find((c) => {
+        const m = /^remote\.(.+)\.push=\+/i.exec(c);
+        return m && (remote === undefined || m[1] === remote);
+      });
+      if (hit !== undefined) return `-c ${hit.slice(0, hit.indexOf("="))}`;
+      return typeof probe?.forcePushConfigured === "function" && probe.forcePushConfigured(inv) ? "remote.<name>.push" : null;
+    }
     case "config": {
       const hit = (inv.configs ?? []).find((c) => { const m = row.key.exec(c); return m && truthy(m[2] ?? "true"); });
       return hit === undefined ? null : `-c ${hit.split("=")[0]}`;
@@ -829,6 +942,23 @@ const MERGES_PR = "it merges a pull request onto its base branch, as a push woul
 const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRef|updateRefs|deleteRef|createCommitOnBranch)\b/;
 
 /**
+ * The GraphQL mutations that change the controls a push answers to (#505; a
+ * claim about GitHub's schema, dated 2026-11-05): branch protection rules and
+ * rulesets by name, and updateRepository only when the request names a default
+ * branch, which that mutation may not even accept -- read on the cheaper side.
+ */
+const CONTROL_MUTATIONS = /\b(createBranchProtectionRule|updateBranchProtectionRule|deleteBranchProtectionRule|createRepositoryRuleset|updateRepositoryRuleset|deleteRepositoryRuleset|updateRepository(?=\b[\s\S]*\bdefaultBranch\b))\b/;
+
+// A repository's own REST path, by name or by id, and the scopes that hold a ruleset (#505).
+const REPO_PATH = "/(?:repos/[^/]+/[^/]+|repositories/\\d+)";
+const RULESET_SCOPE = `(?:${REPO_PATH}|/orgs/[^/]+|/enterprises/[^/]+)`;
+
+// Why a write to the control itself refuses (#505), and why the default branch does.
+const REMOVES_COVER = "branch protection and rulesets are what stand behind the routes this guard can't read (its Not seen " +
+  "block), so one write here takes that cover from all of them at once.";
+const MOVES_DEFAULT = "it moves the repository's default branch: which branch is protected, and which one the ship gate reads.";
+
+/**
  * The side-door table (#483): the routes to "move a shared ref" that never
  * run git, each the effect MOVES_SHARED_REF. Two kinds of row:
  *   a gh command  `sub` and `action` (`gh pr merge`, `gh release create`,
@@ -840,7 +970,13 @@ const REF_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranc
  *                 `ref` is the capture group naming the ref, `field` the
  *                 request field naming the branch instead (a merge's
  *                 `base`, a release's `target_commitish`, a created ref's
- *                 `ref`), `mutation` the GraphQL names a body must carry
+ *                 `ref`), `mutation` the GraphQL names a body must carry,
+ *                 `bodyField` the request field a body must carry (a repo
+ *                 PATCH's `default_branch`), `methods` the only ones it means
+ * On either kind, `opt` is the option a gh row wants (#505), `control` names
+ * the service-side control a write changes, which refuses in every session
+ * under the ship gate's escape, whatever the stamp says, asserted by
+ * runguard-effects.test.ts and runguard-sidedoors.test.ts (#505).
  * A row that names no branch leaves `branch` undefined: the guard takes
  * the target as the default branch, fail closed on the cheaper read
  * (decided phase 31, 2026-11-04) -- a PR's base is only known to the API.
@@ -864,6 +1000,20 @@ export const SIDE_DOOR_TABLE = Object.freeze([
     why: "it creates or changes a release, and the tag it stands on." },
   { route: "GraphQL mutation", path: /\/graphql\/?$/i, mutation: REF_MUTATIONS,
     why: "a GraphQL mutation can merge a pull request or move a ref, as a push would." },
+  // #505 -- the controls a push answers to, and the two routes beside them that gh repo delete's own row misses
+  { route: "gh repo edit", sub: "repo", action: "edit", opt: "--default-branch", control: "the repository's default branch",
+    what: "`gh repo edit --default-branch`", why: MOVES_DEFAULT },
+  { route: "branch protection write", path: new RegExp(`^${REPO_PATH}/branches/.+/protection(?:/.*)?$`, "i"),
+    control: "branch protection", why: REMOVES_COVER },
+  { route: "ruleset write", path: new RegExp(`^${RULESET_SCOPE}/rulesets(?:/.*)?$`, "i"), control: "a ruleset", why: REMOVES_COVER },
+  { route: "repository delete", path: new RegExp(`^${REPO_PATH}$`, "i"), methods: ["DELETE"],
+    deletes: "the repository and every ref in it", why: "it deletes the repository and every ref in it." },
+  { route: "default branch write", path: new RegExp(`^${REPO_PATH}$`, "i"), bodyField: "default_branch",
+    control: "the repository's default branch", why: MOVES_DEFAULT },
+  { route: "branch rename", path: new RegExp(`^${REPO_PATH}/branches/(.+)/rename$`, "i"), ref: 1, deletes: "the default branch's name",
+    why: "it renames a branch on the remote, and the default branch and its protection follow the new name." },
+  { route: "GraphQL protection mutation", path: /\/graphql\/?$/i, mutation: CONTROL_MUTATIONS,
+    control: "branch protection or a ruleset", why: REMOVES_COVER },
 ]);
 
 /** The programs that reach the API-path rows, by the name a line spells. */
@@ -878,7 +1028,7 @@ const GH_TABLED = new Set(SIDE_DOOR_TABLE.map((r) => r.sub).filter((s) => s !== 
 // value, and the short letters that stand for them (pflag for gh, getopt
 // for curl and wget). Only the options this table reads need listing; a
 // value left unread is a bare word nothing here looks at.
-const GH_SUB_READ = { valued: ["--repo", "--target"], alias: { R: "--repo" } };
+const GH_SUB_READ = { valued: ["--repo", "--target", "--default-branch"], alias: { R: "--repo" } };
 const GH_API_READ = {
   valued: ["--method", "--raw-field", "--field", "--header", "--jq", "--template", "--preview", "--hostname",
     "--input", "--cache"],
@@ -965,19 +1115,55 @@ export function readOpts(args, { valued = [], alias = {} } = {}) {
  * dropped, or null: for gh, its endpoint as typed (`repos/o/r/...`,
  * `/repos/...`) or any URL's path, an enterprise host's `/api/v3` prefix
  * cut off; for curl and wget (`url` true), only a URL at api.github.com,
- * or one whose path starts `/api/v3/` -- GitHub Enterprise's REST root (a
- * dated claim, 2026-11-04) -- is GitHub's.
+ * or one whose path starts `/api/v3/` or is `/api/graphql` -- GitHub
+ * Enterprise's REST and GraphQL roots (a dated claim, 2026-11-04) -- is
+ * GitHub's. The host is parsed, as curl parses it (#504, measured against curl
+ * 8.7, 2026-11-05; wget's word is read the same way, unmeasured): any number of
+ * slashes after the scheme or none at all, a user up to the last `@`, a port, escapes, a
+ * trailing dot and letter case all come off, so `x@api.github.com:443` is
+ * GitHub and `api.github.com@evil.test` is not. Asserted by
+ * runguard-effects.test.ts and runguard-sidedoors.test.ts (#504).
  */
 export function apiPath(word, { url = false } = {}) {
-  const m = /^(?:https?:\/\/([^/?#]+))?([^?#]*)/i.exec(String(word));
-  if (!m) return null;
-  const host = m[1];
-  let path = m[2];
-  if (host === undefined && url) return null;
-  if (host !== undefined && url && !/^api\.github\.com$/i.test(host) && !/^\/api\/v3\//i.test(path)) return null;
-  if (host === undefined && !url && /^[a-z]+:/i.test(word)) return null; // some other scheme
-  path = path.replace(/^\/api\/v3(?=\/)/i, "");
-  return `/${path.replace(/^\/+/, "")}`;
+  const text = String(word);
+  const scheme = /^https?:\/+/i.exec(text);
+  if (!url && !scheme) return /^[a-z]+:/i.test(text) ? null : requestPath(/^[^?#]*/.exec(text)[0]).replace(/^\/api\/v3(?=\/)/i, "");
+  // no scheme: a word that can't start a host is a flag, a path or some other scheme
+  if (!scheme && /^[-/]|^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return null;
+  const [, authority, rest] = /^([^/?#]*)([^?#]*)/.exec(scheme ? text.slice(scheme[0].length) : text);
+  const path = requestPath(rest);
+  if (url && apiHost(authority) !== "api.github.com" && !/^\/api\/(?:v3\/|graphql$)/i.test(path)) return null;
+  return path.replace(/^\/api\/v3(?=\/)/i, "");
+}
+
+/** A URL authority's host as it connects (#504): no user, no port, escapes undone, lower case, no trailing dot. */
+function apiHost(authority) {
+  let host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d*$/, "");
+  try {
+    host = decodeURIComponent(host);
+  } catch {
+    // a stray %: the host as typed, which is nobody's API
+  }
+  return host.toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * A URL path the way the request reaches the service (#504): an escaped
+ * unreserved character undone (`merg%65`), dot steps walked, doubled and
+ * trailing slashes gone, so a row's regexp reads one spelling. An escaped `/` is
+ * no step of its own and stays as it is, for the ref rows to decode.
+ */
+function requestPath(path) {
+  const plain = path.replace(/%([0-9a-f]{2})/gi, (hit, hex) => {
+    const c = String.fromCharCode(parseInt(hex, 16));
+    return /[A-Za-z0-9._~-]/.test(c) ? c : hit;
+  });
+  const steps = [];
+  for (const part of plain.split("/")) {
+    if (part === "..") steps.pop();
+    else if (part !== "" && part !== ".") steps.push(part);
+  }
+  return `/${steps.join("/")}`;
 }
 
 /**
@@ -1087,16 +1273,25 @@ function apiSideDoor(program, args) {
       if (row.path === undefined) continue;
       const m = row.path.exec(path);
       if (!m) continue;
+      if (row.methods && !row.methods.includes(method)) continue;
       const what = `a \`${program}\` ${row.route}`;
-      if (row.mutation) {
+      if (row.mutation || row.bodyField) {
+        // a body it can't read may be the one that does it (#505: so it refuses
+        // in every session, or a clean stamp would pass a protection delete)
         const unread = field("@");
         if (unread !== undefined) {
           return { effect: MOVES_SHARED_REF, flag: unread, what: `${what} request from a file`,
+            control: row.control ?? "whatever its body changes",
             why: "its body sits in a file or on stdin the guard can't read, and " + row.why.replace(/\.$/, "; it is refused as if it did.") };
         }
-        const hit = bodies.map((b) => row.mutation.exec(b)).find(Boolean);
+        if (row.bodyField) {
+          if (field(row.bodyField) === undefined) continue;
+          return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, control: row.control };
+        }
+        // the body as typed and as it decodes: JSON can spell a name in escapes
+        const hit = [...bodies, ...fields.map(([, v]) => v)].map((b) => row.mutation.exec(b)).find(Boolean);
         if (!hit) continue;
-        return { effect: MOVES_SHARED_REF, flag: hit[1], what, why: row.why };
+        return { effect: MOVES_SHARED_REF, flag: hit[1], what, why: row.why, control: row.control };
       }
       let ref = row.ref === undefined ? undefined : m[row.ref];
       if (ref === undefined && row.field !== undefined) ref = field(row.field);
@@ -1106,8 +1301,8 @@ function apiSideDoor(program, args) {
       } catch {
         branch = refBranch(ref);
       }
-      const deletes = method === "DELETE" && row.ref !== undefined && branch !== undefined ? "the default branch" : undefined;
-      return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, branch, deletes };
+      const deletes = row.deletes ?? (method === "DELETE" && row.ref !== undefined && branch !== undefined ? "the default branch" : undefined);
+      return { effect: MOVES_SHARED_REF, flag: `${method} ${path}`, what, why: row.why, branch, deletes, control: row.control };
     }
   }
   return null;
@@ -1143,20 +1338,23 @@ export function sideDoor(program, args, aliases = new Map()) {
   }
   for (const row of SIDE_DOOR_TABLE) {
     if (row.sub === undefined || row.sub !== sub) continue;
-    const { values, words } = readOpts(rest, GH_SUB_READ);
+    const { flags, values, words } = readOpts(rest, GH_SUB_READ);
     if (words[0] !== row.action) continue;
+    if (row.opt !== undefined && !flags.has(row.opt)) continue;
     const branch = row.branchOpt === undefined ? undefined : values.get(row.branchOpt)?.at(-1);
-    return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}`, what: row.what, why: row.why,
-      branch, deletes: row.deletes, alias };
+    return { effect: MOVES_SHARED_REF, flag: `gh ${sub} ${row.action}${row.opt === undefined ? "" : ` ${row.opt}`}`,
+      what: row.what, why: row.why, branch, deletes: row.deletes, control: row.control, alias };
   }
   return null;
 }
 
 /**
  * The effect line a side-door refusal adds (#483): the one effect, the
- * route that caused it, and the gh alias typed when there was one.
+ * route that caused it, and the gh alias typed when there was one. A write
+ * to the control itself (#505) says so: no ref moves, but the rule on them does.
  */
 export function sideEffectLine(cause) {
   const via = cause.alias === undefined ? "" : `, via gh alias \`${cause.alias}\``;
-  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via} -- the push action by another route.`;
+  const what = cause.control === undefined ? "the push action by another route" : "the control the push action answers to";
+  return `  effect: ${cause.effect}, from \`${cause.flag}\`${via} -- ${what}.`;
 }
