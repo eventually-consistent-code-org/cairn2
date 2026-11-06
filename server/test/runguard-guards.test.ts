@@ -4483,3 +4483,63 @@ describe("run guard: where a command may run is bounded inside the round, never 
     expect(r.stderr).toContain("cd, pushd");
   });
 });
+
+/**
+ * #528: `git reset --soft "$X"` is the everyday way to move a branch to a commit a
+ * substitution names, and #494's wild word refused it, though the flag keeps the
+ * write off the work tree: the over-refusal that phase brought in. The rule is the
+ * Not seen line that already holds for `git rm --cached "$f"`: the typed flag wins.
+ */
+describe("run guard: a soft or mixed reset with a word it can't spell passes, a bare one doesn't (#528)", () => {
+  const PASS = [
+    'git reset --soft "$X"', 'T=$(cat x); git reset --soft "$T"', 'git reset --soft "$(git rev-parse HEAD~1)"', 'git reset --soft "$(cat x)"',
+    'git reset --mixed "$(cat x)"', 'git reset -q --soft "$(cat x)"', 'git reset --sof "$(cat x)"', 'git reset --mix "$(cat x)"', 'git reset "$(cat x)" --soft',
+    'F=--soft; git reset $F "$(cat x)"', 'git -C . reset --soft "$(cat x)"', 'sh -c \'git reset --soft "$(cat x)"\'',
+  ];
+  const REFUSE = [
+    'git reset "$(cat x)"', 'T=$(cat x); git reset "$T"', 'git reset --hard "$(cat x)"', 'git reset --soft "$(cat x)" --hard', 'git reset --hard --soft "$(cat x)"',
+    "git reset --soft --hard", "git reset --hard --soft", 'git reset --no-soft "$(cat x)"', "git reset --soft$(cat x)", 'git $(cat x) --soft "$(cat y)"',
+    'for S in --soft --hard; do git reset $S "$(cat x)"; done', 'F=--hard; git reset --soft "$(cat x)" $F', "git reset --soft ${X:---hard}",
+    'sh -c \'git reset "$(cat x)"\'',
+  ];
+  function nested() {
+    const f = fixture();
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+
+  it("passes, from the root and a nested folder, with a typed mode that keeps the write off the work tree", () => {
+    const { proj, home, sub } = nested();
+    for (const c of PASS) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("refuses, from the root and a nested folder, with no such mode, or with --hard typed anywhere beside it", () => {
+    const { proj, home, sub } = nested();
+    for (const c of REFUSE) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+      }
+    }
+  });
+
+  it("the Not seen line: a wild word after the typed mode may take it back, and git really does take the last one", () => {
+    const { proj, home } = nested();
+    expect(guard(proj, home, 'git reset --soft "$(echo --hard)"').status).toBe(0);
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n\s*\*/g, " ").replace(/\s+/g, " ");
+    expect(header).toContain('a soft or mixed reset, dated 2026-11-06 (#528): `git reset --soft "$(echo --hard)"` passes');
+    // git's own reading, which is why the line has to be written down: the last mode wins
+    writeFileSync(join(proj, "seed.txt"), "changed\n");
+    git(proj, "add", "seed.txt");
+    git(proj, "reset", "--hard", "--soft");
+    expect(readFileSync(join(proj, "seed.txt"), "utf8")).toBe("changed\n");
+    git(proj, "reset", "--soft", "--hard");
+    expect(readFileSync(join(proj, "seed.txt"), "utf8")).not.toBe("changed\n");
+  });
+});

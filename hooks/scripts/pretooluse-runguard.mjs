@@ -361,7 +361,12 @@
  *   there would refuse every long word list.
  *   a flag on the line that keeps the write off the work tree, taken back by
  *   a wild word after it (`git rm -f --cached . $(echo --no-cached)`): the
- *   typed flag wins, or `git rm --cached "$f"` could never pass.
+ *   typed flag wins, or `git rm --cached "$f"` could never pass. By the same
+ *   rule a soft or mixed reset, dated 2026-11-06 (#528): `git reset --soft
+ *   "$(echo --hard)"` passes though git takes the last mode it's given, or `git
+ *   reset --soft "$(git rev-parse HEAD~1)"` could never pass. A bare `git reset
+ *   "$X"` names no mode, and stays refused by decision. Pinned by
+ *   runguard-guards.test.ts "a soft or mixed reset".
  *   the words xargs reads from stdin (`echo --hard | xargs git reset`): a
  *   pipe's content, which no word on the line spells.
  *
