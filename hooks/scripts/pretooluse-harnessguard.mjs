@@ -368,6 +368,12 @@
  *   read or built under a folder the guard knows, judged there though it may
  *   climb out (`read N; echo x > /tmp/$N`), as `/tmp/$(date).bak` is.
  *
+ *   Patterns, dated 2026-11-06 (#528; pinned by hooks.test.ts "(#528)"): a find
+ *   -regex is matched by hand, plain characters, `.`, `*`, a bracket and an escaped
+ *   mark. Anything else in one selects, so `find . -regex '.*\.\(tmp\|log\)'
+ *   -delete` refuses wherever it could reach a protected path: an over-refusal, by
+ *   decision, against a compiled pattern that could hold the guard past any budget.
+ *
  *   Fails open on its own error only (exit 0 above): since Claude Code
  *   2.1.299 the platform fails closed when it cannot reach the guard or
  *   read its answer -- an action this guard could have blocked is refused,
@@ -382,7 +388,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, lineVars, literalHead,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, holdsBraceList, lineVars, literalHead,
   overBudget, pagerCommands, quoteWord, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments,
   spellWords, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
 } from "./shell-words.mjs";
@@ -1594,21 +1600,99 @@ function zoneGlob(p, remove) {
   return null;
 }
 
-/** One glob component as a regex; a stand-in matches any name. */
+// Patterns a line typed (#528). A RegExp built from one backtracks: `find . -regex
+// '(.*.*.*.*)*z' -delete` held this guard past any budget, and so did a glob of
+// stars. So a pattern is matched here by hand, and only a bracket is compiled, one
+// character against a set, which has nothing to backtrack over.
+
+// Past this a pattern is read as any name: no file has a name that long.
+const MAX_PATTERN = 4096;
+const SELECTS = { test: () => true };
+const ANY_CHAR = () => true;
+const NOT_SLASH = (c) => c !== "/";
+// One charge to the read budget per this many steps of matching, so the clock arms on real work only.
+const MATCH_STEP = 100_000;
+let matchSteps = 0;
+
+/** True once matching has spent the call's budget: a test then selects, and the line is refused. */
+function matchSpent(steps) {
+  matchSteps += steps;
+  for (; matchSteps >= MATCH_STEP; matchSteps -= MATCH_STEP) READ.budget.asks++;
+  return overBudget(READ.budget);
+}
+
+const literal = (c, ci) => {
+  if (!ci) return (x) => x === c;
+  const folded = fold(c);
+  return (x) => fold(x) === folded;
+};
+
+/** A bracket's one-character test; a bad range throws, and the callers read that as unreadable. */
+function charClass(body, ci) {
+  const re = new RegExp(`^[${body.replace(/\\/g, "\\\\").replace(/^(\^?)\]/, "$1\\]")}]$`, ci ? "i" : "");
+  return (x) => re.test(x);
+}
+
+/** Adds `atom` to a pattern, a star beside the same star being no more of a pattern. */
+function pushAtom(atoms, atom) {
+  const last = atoms[atoms.length - 1];
+  if (!(atom.star && last?.star && last.one === atom.one)) atoms.push(atom);
+}
+
+/**
+ * Atoms as something to .test() text with: each `one` takes one character, a
+ * `star` any run of them. Every atom the text could stand before is carried
+ * across it at once, so the cost is text times atoms and no pattern can do worse,
+ * and a text shorter than the atoms it must fill is out at the door.
+ */
+function matcher(atoms, gate) {
+  const need = atoms.filter((a) => !a.star).length;
+  const reach = (set) => {
+    for (let k = 0; k < atoms.length; k++) if (set[k] && atoms[k].star) set[k + 1] = 1;
+    return set;
+  };
+  return {
+    test(text) {
+      if (gate && !gate(text)) return false;
+      if (need > text.length) return false;
+      if (matchSpent(text.length * atoms.length + 1)) return true;
+      let here = new Uint8Array(atoms.length + 1);
+      here[0] = 1;
+      reach(here);
+      for (let i = 0; i < text.length; i++) {
+        const next = new Uint8Array(atoms.length + 1);
+        let alive = false;
+        for (let k = 0; k < atoms.length; k++) {
+          if (here[k] && atoms[k].one(text[i])) {
+            next[atoms[k].star ? k : k + 1] = 1;
+            alive = true;
+          }
+        }
+        if (!alive) return false;
+        here = reach(next);
+      }
+      return here[atoms.length] === 1;
+    },
+  };
+}
+
+/** One glob component to match names with; a stand-in matches any name. */
 function compRe(comp) {
-  let re = /^[*?[]/.test(comp) ? "(?!\\.)" : ""; // a leading wildcard skips dotfiles
+  if (comp.length > MAX_PATTERN) return SELECTS;
+  const atoms = [];
   for (let i = 0; i < comp.length; i++) {
     const c = comp[i];
     const close = c === "[" ? comp.indexOf("]", i + 2) : -1;
-    if (STANDINS.includes(c)) re += ".*";
-    else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
+    if (STANDINS.includes(c)) pushAtom(atoms, { one: ANY_CHAR, star: true });
+    else if (c === "*") pushAtom(atoms, { one: NOT_SLASH, star: true });
+    else if (c === "?") atoms.push({ one: NOT_SLASH });
     else if (close > 0) {
-      re += `[${comp.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      atoms.push({ one: charClass(comp.slice(i + 1, close).replace(/^!/, "^"), false) });
       i = close;
-    } else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    } else atoms.push({ one: literal(c, false) });
   }
-  return new RegExp(`^${re}$`);
+  // a leading wildcard skips dotfiles
+  return matcher(atoms, /^[*?[]/.test(comp) ? (text) => text[0] !== "." : null);
 }
 
 /**
@@ -1941,11 +2025,15 @@ function parseFind(args) {
   const spec = {
     starts: starts.length ? starts : ["."], tests: [], negated: false, remove: false, execs: [], files: [],
   };
+  const typedTests = new Set(); // one test typed a thousand times is one test (#528)
   for (; i < args.length; i++) {
     const a = args[i];
     if (a === "!" || a === "-not") spec.negated = true;
     else if (FIND_TESTS.has(a)) {
-      spec.tests.push({ kind: a.replace(/^-i?/, ""), ci: a.startsWith("-i"), pat: args[++i] ?? "" });
+      const pat = args[++i] ?? "";
+      const key = `${a}\0${pat}`;
+      if (!typedTests.has(key)) spec.tests.push({ kind: a.replace(/^-i?/, ""), ci: a.startsWith("-i"), pat });
+      typedTests.add(key);
     } else if (a === "-delete") spec.remove = true;
     else if (FIND_EXEC.has(a)) {
       // the command runs once per path (or batch, with +), {} standing for it
@@ -1964,19 +2052,53 @@ function parseFind(args) {
 
 /** fnmatch(3) without FNM_PATHNAME, as find's -name and -path use it. */
 function fnmatchRe(pat, ci) {
-  let re = "";
+  if (pat.length > MAX_PATTERN) return SELECTS;
+  const atoms = [];
   for (let i = 0; i < pat.length; i++) {
     const c = pat[i];
     const close = c === "[" ? pat.indexOf("]", i + 2) : -1;
-    if (c === "\\" && i + 1 < pat.length) re += pat[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    else if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
+    if (c === "\\" && i + 1 < pat.length) atoms.push({ one: literal(pat[++i], ci) });
+    else if (c === "*") pushAtom(atoms, { one: ANY_CHAR, star: true });
+    else if (c === "?") atoms.push({ one: ANY_CHAR });
     else if (close > 0) {
-      re += `[${pat.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      atoms.push({ one: charClass(pat.slice(i + 1, close).replace(/^!/, "^"), ci) });
       i = close;
-    } else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    } else atoms.push({ one: literal(c, ci) });
   }
-  return new RegExp(`^${re}$`, ci ? "i" : "");
+  return matcher(atoms);
+}
+
+/**
+ * A find -regex, never compiled (#528). Plain characters, `.`, `*`, a bracket and
+ * an escaped mark read alike in every -regextype find has, so those are matched;
+ * anything else (a group, an alternative, `+`, `?`, an anchor, `[[:alpha:]]`, `\w`)
+ * means different things in different dialects, and selects, as a test the guard
+ * can't read always has. In any letter case, for the reason testSelects gives.
+ */
+function regexRe(pat) {
+  if (pat.length > MAX_PATTERN) return SELECTS;
+  const atoms = [];
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    if (c === "\\") {
+      const e = pat[++i];
+      if (e === undefined || !/[.*[\]^$\\/-]/.test(e)) return SELECTS;
+      atoms.push({ one: literal(e, true) });
+    } else if (c === ".") atoms.push({ one: ANY_CHAR });
+    else if (c === "*") {
+      const last = atoms.pop();
+      if (!last) return SELECTS;
+      pushAtom(atoms, { one: last.one, star: true });
+    } else if (c === "[") {
+      const close = pat.indexOf("]", i + 2);
+      const body = close < 0 ? "" : pat.slice(i + 1, close);
+      if (close < 0 || /\[[:.=]/.test(body)) return SELECTS;
+      atoms.push({ one: charClass(body, true) });
+      i = close;
+    } else if ("()|+?{}^$".includes(c)) return SELECTS;
+    else atoms.push({ one: literal(c, true) });
+  }
+  return matcher(atoms);
 }
 
 /**
@@ -1987,7 +2109,7 @@ function fnmatchRe(pat, ci) {
 function testSelects(t, entry, shown) {
   if (t.kind === "lname") return false; // symlink targets; the protected files are not links
   try {
-    if (t.kind === "regex") return new RegExp(`^(?:${t.pat})$`, "i").test(shown);
+    if (t.kind === "regex") return regexRe(t.pat).test(shown);
     const x = t.kind === "name" ? basename(entry) : shown;
     return fnmatchRe(t.pat, t.ci).test(x) || fnmatchRe(fold(t.pat), false).test(fold(x));
   } catch {
@@ -3080,7 +3202,7 @@ function dirTarget(raw, from, pwd = from) {
     base = name === "HOME" ? resolve(homedir()) : pwd;
     rest = raw.slice(m[0].length).replace(/^\/+/, "");
   }
-  if (/[$`]|^~|\{[^}]*(?:,|\.\.)[^}]*\}/.test(rest)) return [LOST];
+  if (/[$`]|^~/.test(rest) || holdsBraceList(rest)) return [LOST];
   if (!/[*?[]/.test(rest)) return [resolveIn(base, rest || ".")];
   const found = expandGlob(base, rest);
   if (found === null || found.length > 1) return [LOST];

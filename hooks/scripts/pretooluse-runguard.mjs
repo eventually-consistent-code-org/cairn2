@@ -389,7 +389,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
   MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, freshGuess,
-  lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
+  holdsBraceList, lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
   shellSegments, spellWords, tooDeep, toolCommandLines, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import {
@@ -816,7 +816,7 @@ function pathWord(raw, from) {
     base = (m[1] ?? m[2]) === "PWD" ? from : homedir();
     rest = rest.slice(m[0].length).replace(/^\/+/, "");
   }
-  if (/[$`*?[]|^~|\{[^}]*(?:,|\.\.)[^}]*\}/.test(rest)) return LOST;
+  if (/[$`*?[]|^~/.test(rest) || holdsBraceList(rest)) return LOST;
   if (isAbsolute(rest)) return resolve(rest);
   return base === LOST ? LOST : resolve(base, rest || ".");
 }
@@ -835,7 +835,7 @@ function cdTargets(move, from, cdpaths) {
   if (ops[0] === "-" || /^[+-]\d+$/.test(ops[0])) return [LOST];
   const out = [pathWord(ops[0], from)];
   if (!/^(?:\/|\.\.?(?:\/|$)|~|\$)/.test(ops[0])) {
-    for (const entry of cdpaths.flatMap((v) => v.split(":"))) out.push(pathWord(join(entry || ".", ops[0]), from));
+    for (const entry of cdpaths) out.push(pathWord(join(entry, ops[0]), from));
   }
   return out;
 }
@@ -848,18 +848,24 @@ function cdTargets(move, from, cdpaths) {
  * so none ever takes a folder away, and every git command is judged from
  * all of them. In a loop or function body a cd can run again, so the
  * moves apply until nothing new turns up; a line still growing then, or
- * past MAX_TARGETS, has gone somewhere the guard can't follow -- LOST.
+ * past MAX_TARGETS, has gone somewhere the guard can't follow -- LOST. The
+ * cap is read per folder, inside the round (#528): each cd doubles what came
+ * before it, so a cap read between rounds let 18 of them build 2^18 paths.
+ * Asserted: runguard-guards.test.ts "(#528)".
  */
 function linePlaces(line, start) {
-  const cdpaths = [...(process.env.CDPATH ? [process.env.CDPATH] : []), ...line.cdpaths];
+  // each folder a CDPATH names once, however it is spelled, however often (#528)
+  const cdpaths = [...new Set([...(process.env.CDPATH ? [process.env.CDPATH] : []), ...line.cdpaths]
+    .flatMap((v) => v.split(":")).map((entry) => join(entry || ".")))];
   const places = [start];
-  const add = (more) => { for (const p of more) if (!places.includes(p)) places.push(p); };
   for (let round = 0; ; round++) {
     const before = places.length;
     for (const m of line.moves) {
-      add(places.flatMap((p) => (m.cmd ? cdTargets(m, p, cdpaths) : [pathWord(m.raw, p)])));
+      for (const p of places.slice()) {
+        for (const q of m.cmd ? cdTargets(m, p, cdpaths) : [pathWord(m.raw, p)]) if (!places.includes(q)) places.push(q);
+        if (places.length > MAX_TARGETS) return [...places.slice(0, MAX_TARGETS), LOST];
+      }
     }
-    if (places.length > MAX_TARGETS) return [...places.slice(0, MAX_TARGETS), LOST];
     if (!line.repeats || places.length === before) return places;
     if (round === 3) return [...places, LOST];
   }
@@ -898,11 +904,17 @@ function envChoices(inv, lineEnv) {
  * environment it runs under, with GIT_DIR, GIT_WORK_TREE and
  * GIT_COMMON_DIR resolved from that folder the way git resolves them --
  * or LOST where the guard can't tell. One per folder the shell may be in
- * and per value each variable may hold.
+ * and per value each variable may hold, counted as they are built (#528): 200
+ * values of each variable is eight million environments, which ran the guard
+ * out of heap, and a crash is no refusal (this file's header). Unreadable values
+ * all land on one key, so what's tried is counted too, not just what's found.
+ * Asserted: runguard-guards.test.ts "(#528)".
  */
 function invTargets(inv, places, lineEnv) {
   const choices = envChoices(inv, lineEnv);
   const found = new Map();
+  const past = () => [...[...found.values()].slice(0, MAX_TARGETS), LOST];
+  let tried = 0;
   for (const place of places) {
     let dir = place;
     for (const d of [...inv.wrapDirs, ...inv.dirs]) dir = pathWord(d, dir);
@@ -910,6 +922,7 @@ function invTargets(inv, places, lineEnv) {
     for (const gitDir of choices[0]) {
       for (const workTree of choices[1]) {
         for (const common of choices[2]) {
+          if (found.size > MAX_TARGETS || ++tried > MAX_TARGETS * MAX_TARGETS) return past();
           const env = { ...process.env };
           let lost = false;
           [gitDir, workTree, common].forEach((v, k) => {
@@ -925,8 +938,7 @@ function invTargets(inv, places, lineEnv) {
       }
     }
   }
-  const targets = [...found.values()];
-  return targets.length > MAX_TARGETS ? [...targets.slice(0, MAX_TARGETS), LOST] : targets;
+  return found.size > MAX_TARGETS ? past() : [...found.values()];
 }
 
 /** A path with its links resolved, or as given when it doesn't exist. */

@@ -809,3 +809,18 @@ describe("write guard: a write after a quoted brace in a default is read and jud
     }
   });
 });
+
+describe("write guard: a line of cds is bounded inside its time (#528)", () => {
+  const cds = Array.from({ length: 200 }, (_, i) => `cd d${i}`).join("; ");
+
+  for (const where of ["root", "nested"] as const) {
+    it(`200 cds before a write are refused in time, from the ${where}; before a read, they pass`, () => {
+      const c = at(fixture(), where);
+      const t0 = Date.now();
+      const r = judge(c, sh(`${cds}; echo x > ${c.rel}src/x.ts`));
+      expect(r.status, r.stderr).toBe(2);
+      expect(Date.now() - t0).toBeLessThan(3000);
+      expect(judge(c, sh(`${cds}; cat seed.txt`)).status).toBe(0);
+    });
+  }
+});

@@ -4412,3 +4412,74 @@ describe("run guard: a command after a quoted brace in a default is read and jud
     }
   });
 });
+
+/**
+ * #528: three paths the read budget never checks. A round of cds doubled its
+ * folders before the cap was read, so 18 of them stalled the guard and more never
+ * came back. A line's git locations multiplied with no cap at all, so 200 values
+ * each ran the guard out of heap, and a crash is an exit other than 0 or 2, which
+ * lets the call go ahead (the dated claim in the guard's header).
+ */
+describe("run guard: where a command may run is bounded inside the round, never after it (#528)", () => {
+  const RESET = "git reset --hard";
+  const n = (k: number, f: (i: number) => string, sep = "; ") => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+  const SHAPES: Array<[string, (end: string) => string]> = [
+    ["18 cds", (end) => `${n(18, (i) => `cd d${i}`)}; ${end}`],
+    ["200 cds", (end) => `${n(200, (i) => `cd d${i}`)}; ${end}`],
+    ["pushd and cd, in a loop body", (end) => `while true; do ${n(40, (i) => `pushd d${i}; cd e${i}`)}; done; ${end}`],
+    ["env -C after env -C", (end) => `${n(40, (i) => `env -C d${i}`, " ")} true; ${end}`],
+    ["a CDPATH of 5000 folders", (end) => `CDPATH=${n(5000, (i) => `p${i}`, ":")}; cd x; cd y; ${end}`],
+    ["one folder in a CDPATH, 5000 times, under 300 cds", (end) => `CDPATH=${n(5000, () => "p", ":")}; ${n(300, () => "cd x")}; ${end}`],
+    ["200 values of each git location", (end) =>
+      `${["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"].map((k) => n(200, (i) => `${k}=/v${i}`)).join("; ")}; ${end}`],
+    ["200 unreadable values of each", (end) =>
+      `${["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"].map((k) => n(200, (i) => `${k}=$v${i}`)).join("; ")}; ${end}`],
+    ["a cd word of 100000 open braces", (end) => `cd ${"{".repeat(100000)}; ${end}`],
+  ];
+
+  function nested() {
+    const f = fixture();
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+  const inTime = (run: () => { status: number | null; stderr: string }, label: string, status: number) => {
+    const t0 = Date.now();
+    const r = run();
+    expect(r.status, `${label}: ${r.stderr.split("\n")[0]}`).toBe(status);
+    expect(Date.now() - t0, label).toBeLessThan(3000);
+    return r;
+  };
+
+  it("every shape ending in a reset is refused inside the budget, from the root and a nested folder, and never crashes", () => {
+    const { proj, home, sub } = nested();
+    for (const [shape, line] of SHAPES) {
+      for (const cwd of [proj, sub]) {
+        const r = inTime(() => guard(proj, home, line(RESET), {}, cwd), `${shape} from ${cwd === sub ? "sub" : "root"}`, 2);
+        expect(r.stderr, shape).not.toContain("heap out of memory");
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same shapes ending in reading git pass, in the same time", () => {
+    const { proj, home, sub } = nested();
+    for (const [shape, line] of SHAPES) {
+      for (const cwd of [proj, sub]) inTime(() => guard(proj, home, line("git status"), {}, cwd), `${shape} from ${cwd === sub ? "sub" : "root"}`, 0);
+    }
+  }, 120_000);
+
+  it("the bound changes no answer below it: four cds and two git locations are followed as they were", () => {
+    const { proj, home } = nested();
+    expect(guard(proj, home, `cd a; cd b; cd c; cd d; ${RESET}`).status).toBe(2);
+    expect(guard(proj, home, "cd a; cd b; cd c; cd d; git status").status).toBe(0);
+    expect(guard(proj, home, `GIT_DIR=/a; GIT_DIR=/b; GIT_WORK_TREE=/c; ${RESET}`).status).toBe(2);
+    expect(guard(proj, home, "GIT_DIR=/a; GIT_DIR=/b; GIT_WORK_TREE=/c; git log -1").status).toBe(0);
+  });
+
+  it("a gated command past the bound is refused as lost, which is what the cap always meant", () => {
+    const { proj, home } = nested();
+    const r = guard(proj, home, `${n(18, (i) => `cd d${i}`)}; git push origin main`);
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("cd, pushd");
+  });
+});

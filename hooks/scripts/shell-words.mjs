@@ -818,6 +818,24 @@ function braceAt(word) {
 }
 
 /**
+ * True when a word holds a `{...}` with a comma or a `..` in it, a list the shell
+ * may spell out. One pass, where the regular expression it replaced walked to the
+ * end of the word from every `{`, so a `cd` word of open braces held a guard (#528).
+ */
+export function holdsBraceList(word) {
+  let from = 0;
+  for (let close = word.indexOf("}"); close >= 0; close = word.indexOf("}", from)) {
+    const open = word.indexOf("{", from);
+    if (open >= 0 && open < close) {
+      const body = word.slice(open + 1, close);
+      if (body.includes(",") || body.includes("..")) return true;
+    }
+    from = close + 1;
+  }
+  return false;
+}
+
+/**
  * The words one word brace-expands to, the way bash spells them out before
  * running a command (#258): `rm -rf {hooks,}` removes hooks. Past BRACE_CAP
  * words, or for a sequence too long to list, the rest of the brace is
