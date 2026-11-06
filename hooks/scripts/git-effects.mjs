@@ -148,8 +148,10 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  *              with it, or the word it took, matches -- `gc --prune=now`,
  *              never the bare `--prune` that keeps the default (#288)
  *   wholeTree  a pathspec names the whole tree (wholeTree below: `.`, a
- *              glob, the colon magic of #464, the repository root as an
- *              absolute path through the `repoRoot` probe, #288), or
+ *              relative spelling of it, a path with no literal character, the
+ *              colon magic of #464, the repository root as an absolute path
+ *              through the `repoRoot` probe, #288), the words together reach
+ *              every tracked file (the `reachesEveryFile` probe, #493), or
  *              --pathspec-from-file hides it; `needs` names the flag the
  *              row also wants and names (a forced rm, #434: unforced, git
  *              refuses a modified file itself)
@@ -165,7 +167,9 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  *   probe      the repository says so: probe[name](inv) is true
  *   wildSub    the subcommand itself is a word the guard can't spell (#494)
  * The probes a wholeTree row asks on its own: `repoRoot(word)`, the
- * repository root when `word` is its absolute path (#288).
+ * repository root when `word` is its absolute path (#288), and
+ * `reachesEveryFile(words)`, true when `git ls-files` lists every tracked file
+ * for those pathspecs and at least one file is tracked (#493).
  *
  * A wild word (#494): the reader spells a line's words through what the line
  * assigned before this table is read (shell-words.mjs spellWords), and
@@ -593,30 +597,103 @@ export function readArgs(args, { short = "", longs = [], valued = [], alias = {}
 }
 
 /**
- * True for a pathspec that names the whole tree rather than a file in it:
- * `.`, `./`, `..`, `../..`, a bare glob (`*`, `**`, `./*` -- a pathspec
- * `*` crosses `/`), and the magic spellings git reads as everything (#464):
- * a lone `:`, `::`, `:/`, `:/:`, `:/.`, `:(top)`, and any long-form magic
- * with no path after it (`:(glob,top)`, `:(icase)` -- measured against git
- * 2.56, 2026-11-04: `git rm -rfn -- :` lists every tracked file). With
+ * A pathspec's magic read off (#493), the way git's parser takes it: the
+ * long form `:(top,glob)path`, or the short `:` with `/`, `!` or `^` and an
+ * optional closing `:`. `path` is what's left, `exclude` and `literal` the two
+ * magics that change what the path means. A word with no magic is all path.
+ */
+function readPathspec(word) {
+  const long = /^:\(([^)]*)\)/.exec(word);
+  if (long) {
+    const magic = long[1].split(",");
+    return { path: word.slice(long[0].length), exclude: magic.includes("exclude"), literal: magic.includes("literal") };
+  }
+  const short = /^:([/!^]*):?/.exec(word);
+  if (short) return { path: word.slice(short[0].length), exclude: /[!^]/.test(short[1]), literal: false };
+  return { path: word, exclude: false, literal: false };
+}
+
+/**
+ * A path as its steps, the way git normalizes one (#493): `.` and empty steps
+ * go, a `..` takes the step before it, so `src/..`, `./src/../` and `.//` are
+ * no steps at all. A `..` left over leads, and climbs out of a nested folder.
+ */
+function pathSteps(path) {
+  const steps = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === ".." && steps.length && steps.at(-1) !== "..") steps.pop();
+    else steps.push(part);
+  }
+  return steps;
+}
+
+// A step with no literal character: stars, question marks and bracket groups only (#493).
+const GLOB_ONLY = /^(?:\*|\?|\[[!^]?\]?(?:\[:\w+:\]|[^\]\\])*\])+$/;
+
+// A path git leaves a trailing `/` on: `*/`, `*/.` and `*/x/..` list no file at all (measured, git 2.56, 2026-11-05).
+const DIR_ONLY = /\/\.{0,2}$/;
+
+/**
+ * The folder a word names when it stands for everything in it (#288, #493),
+ * magic and a trailing `/`, `/.` or glob-only step dropped and the rest
+ * normalized: `/repo/`, `/repo/src/..`, `/repo/?*` and `:(glob)/repo/**` are all
+ * `/repo`. A glob with a trailing `/` lists nothing, so it keeps its step.
+ */
+export function rootSpelling(word) {
+  const { path } = readPathspec(word);
+  const steps = pathSteps(path);
+  if (!DIR_ONLY.test(path)) while (steps.length && GLOB_ONLY.test(steps.at(-1))) steps.pop();
+  return `${path.startsWith("/") ? "/" : ""}${steps.join("/")}`;
+}
+
+/**
+ * True for a pathspec that names the whole tree rather than a file in it, read
+ * off the word alone (#493). It normalizes first, so `.`, `./`, `..`, `../..`,
+ * `src/..`, `./src/../` and `.//` are the folder itself; then a path with no
+ * literal character is everything: `*`, `**`, `?*`, `*?`, `[a-z]*`, `./*`,
+ * `../?*`, `*`+`/`+`*` -- a pathspec `*` crosses `/`. Magic comes off first, so
+ * the spellings git reads as everything (#464) are the same rule: a lone `:`,
+ * `::`, `:/`, `:/:`, `:/.`, `:(top)`, any long form with no path after it
+ * (`:(glob,top)`, `:(attr:!x)`), and `:(glob)**`, `:/?*`, `:(top)?*` (measured
+ * against git 2.56: `git ls-files -- '?*'` lists every tracked file, and `*`+`/`
+ * lists none, so it stays a path, as does `:(literal)*`, a file named `*`). With
  * `root`, the repository's own absolute path, that path too -- `/repo`,
- * `/repo/`, `/repo/.`, `/repo/*` (#288); only the repository knows its
- * root, so the guard's repoRoot probe supplies it per word. A single path
- * -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` --
- * is not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by
- * decision (phase 31, 2026-11-04). $PWD is the folder the command stands in,
- * so `$PWD`, `$PWD/` and `$PWD/*` read as `.`, `./` and `./*` (#494). Asserted
- * by runguard-effects.test.ts and runguard-guards.test.ts (#464, #494).
+ * `/repo/`, `/repo/.`, `/repo/*`, `/repo/?*` (#288, #493); only the repository
+ * knows its root, so the guard's repoRoot probe supplies it per word. A single
+ * path -- `src/a.ts`, `.gitignore`, `:/src`, `::src`, `*.ts`, `/repo/src` -- is
+ * not, and nor are the exclude forms (`:!x`, `:(exclude)x`): paths, by decision
+ * (phase 31, 2026-11-04). What a word with a literal character reaches only git
+ * can say: pathspecAsks and the guard's reachesEveryFile probe. $PWD is the
+ * folder the command stands in, so `$PWD`, `$PWD/` and `$PWD/*` read as `.`, `./`
+ * and `./*` (#494). Asserted by runguard-effects.test.ts and
+ * runguard-guards.test.ts (#464, #493, #494).
  */
 export function wholeTree(typed, root) {
   const p = typed.replace(/^\$(?:PWD|\{PWD\})(?=\/|$)/, ".");
   if (p === "") return false;
-  if (/^(?::(?:\/*:?|\((?!(?:\w+,)*exclude\b)\w+(?:,\w+)*\)))?(?:\.{1,2}(?:\/\.{1,2})*)?\/?\**$/.test(p)) return true;
-  return root !== undefined && root !== null && bareRoot(p) === bareRoot(root);
+  const { path, exclude, literal } = readPathspec(p);
+  if (exclude) return false;
+  if (!path.startsWith("/")) {
+    const steps = pathSteps(path).filter((s) => s !== "..");
+    if (!steps.length) return true;
+    if (!literal && !DIR_ONLY.test(path) && steps.every((s) => GLOB_ONLY.test(s))) return true;
+  }
+  return root !== undefined && root !== null && rootSpelling(p) === rootSpelling(root);
 }
 
-/** A folder path with its trailing `/`, `/.` and `/*` spellings dropped -- what names the folder itself (#288). */
-const bareRoot = (p) => p.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+/**
+ * True for a pathspec only git can judge (#493): its path holds a glob or a
+ * `..`, so it may reach every tracked file while the word still shows a literal
+ * character (`*.*`, `[a-z]*.*`, `:!x*`, `lib/../*.ts`). A plain path never asks,
+ * so `git rm -rf src` runs no git of its own, and nor does a word the shell
+ * still has to work out.
+ */
+export function pathspecAsks(word) {
+  if (/[$`]/.test(word)) return false;
+  const { path } = readPathspec(word);
+  return /[*?[]/.test(path) || /(?:^|\/)\.\.(?:\/|$)/.test(path);
+}
 
 /** True for a git config value that reads as true (`true`, `yes`, `on`, `1`, bare). */
 export const truthy = (v) => !/^(false|no|off|0)$/i.test(String(v).trim());
@@ -744,8 +821,16 @@ function rowCause(row, inv, probe) {
       // the repository root as an absolute path is the whole tree too (#288):
       // the repoRoot probe answers per word, or no word is the root
       const root = typeof probe?.repoRoot === "function" ? probe.repoRoot : () => undefined;
-      const tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
-        : [...words, ...inv.paths].find((w) => wholeTree(w, root(w))) ?? null;
+      const specs = [...words, ...inv.paths];
+      let tree = flags.has("--pathspec-from-file") ? typed.get("--pathspec-from-file")
+        : specs.find((w) => wholeTree(w, root(w))) ?? null;
+      // #493 -- the second leg: the words together, as git would read them,
+      // asked of the repository when one holds a glob or a `..`. No probe, or
+      // no answer from git, and the word's own spelling is what stands.
+      if (tree === null && typeof probe?.reachesEveryFile === "function") {
+        const asked = specs.find(pathspecAsks);
+        if (asked !== undefined && probe.reachesEveryFile(specs.filter((w) => !/[$`]/.test(w)))) tree = asked;
+      }
       if (tree === null) return wildCause(inv.paths);
       return need === undefined ? tree : typed.get(need) ?? need;
     }

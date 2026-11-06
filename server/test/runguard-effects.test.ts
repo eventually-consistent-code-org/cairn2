@@ -19,7 +19,8 @@ import { createHash } from "node:crypto";
 import {
   DISCARDS_WORK, MOVES_SHARED_REF, TOUCHES_OWNER_CHECKOUT, READ_ONLY, EFFECTS, EFFECT_TABLE,
   API_PROGRAMS, SIDE_DOOR_TABLE,
-  apiPath, classify, effectsOf, envConfig, ghAliasSet, parseInvocation, readOpts, sideDoor, sideEffectLine, wholeTree,
+  apiPath, classify, effectsOf, envConfig, ghAliasSet, parseInvocation, pathspecAsks, readOpts, rootSpelling, sideDoor,
+  sideEffectLine, wholeTree,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/git-effects.mjs";
 
@@ -912,5 +913,54 @@ describe("side doors to the push action: the non-git table, one test per row (#4
     expect(apiPath("https://example.com/repos/o/r/merges", { url: true })).toBeNull();
     expect(apiPath("https://API.GitHub.com/repos/o/r/merges", { url: true })).toBe("/repos/o/r/merges");
     expect(apiPath("mailto:x@y", {})).toBeNull();
+  });
+});
+
+describe("git effects: a relative root or a pathspec with no literal character is the whole tree (#493)", () => {
+  it("every spelling normalizes to the folder itself or holds no literal character; the twins keep one", () => {
+    for (const p of ["?*", "*?", "[a-zA-Z._]*", "src/..", "./src/../", ".//", "./.", "src/deep/../..", "*/..", "../?*",
+      "../../*", "src/../?*", ":(glob)**", ":(glob)**/*", ":/?*", ":(top)?*", ":/:?*", "::?*", ":(icase)?*", ":/src/..",
+      ":(attr:!x)", ":(top,attr:!x)?*", ":(top,literal)", "[!x]*", "[^x]*", "[[:alpha:].]*", "**/*", "$PWD/?*", "$PWD/src/..",
+      "${PWD}/.//"]) {
+      expect(wholeTree(p), p).toBe(true);
+    }
+    for (const p of ["src/*.ts", "src/a.ts", ":/src", "*.ts", ".*", "*.*", "..x", "...", "src/deep/..", "src/deep/../",
+      "*/", "?*/", "*/.", "*//", "*/x/..", ":(glob)**/", "\\*", "\\?*", "[abc", "[s]rc", "a?", ":(literal)*", ":(literal)?*",
+      ":(literal)[a-z]*", ":!?*", ":^?*", ":(exclude)?*", ":(attr:foo)src/a.ts", "$X/*"]) {
+      expect(wholeTree(p), p).toBe(false);
+    }
+  });
+
+  it("the root plus a glob, or spelled through a `..`, is the root; a folder under it and a glob with a suffix are paths", () => {
+    const root = "/work/repo";
+    for (const p of ["/work/repo/?*", "/work/repo/[a-z]*", "/work/repo//", "/work/repo/src/..", "/work/repo/./src/../",
+      ":(glob)/work/repo/**", ":(icase)/work/repo"]) {
+      expect(wholeTree(p, root), p).toBe(true);
+    }
+    for (const p of ["/work/repo/*/", "/work/repo/src/?*", "/work/repo/?*.ts", "/work/repo/src/deep/..", "/work/repo2/?*"]) {
+      expect(wholeTree(p, root), p).toBe(false);
+    }
+    expect(rootSpelling("/work/repo/src/../?*")).toBe("/work/repo");
+    expect(rootSpelling("/")).toBe("/");
+  });
+
+  it("the second leg: a glob or a `..` with a literal character asks the repository, a plain path never does", () => {
+    for (const p of ["*.*", "[a-z]*.*", ":!x*", ":(exclude)*.md", "lib/../*.ts", "a/../b", "../x"]) expect(pathspecAsks(p), p).toBe(true);
+    for (const p of ["src/a.ts", "src", ":/src", ":!x", "..x", "$X/*", "`x`/*", ""]) expect(pathspecAsks(p), p).toBe(false);
+    const asked: string[][] = [];
+    const says = (answer: boolean) => ({ reachesEveryFile: (specs: string[]) => { asked.push(specs); return answer; } });
+    expect(causes("git rm -rf *.*", DISCARDS_WORK, says(true)).map((h) => h.flag)).toEqual(["-rf"]);
+    expect(causes("git checkout -- *.*", DISCARDS_WORK, says(true)).map((h) => h.flag)).toEqual(["*.*"]);
+    expect(causes("git restore *.ts *.md", DISCARDS_WORK, says(true)).map((h) => h.flag)).toEqual(["*.ts"]);
+    expect(asked.at(-1)).toEqual(["*.ts", "*.md"]);
+    expect(causes("git checkout -- *.ts", DISCARDS_WORK, says(false))).toEqual([]);
+    asked.length = 0;
+    // a plain path, an unforced rm and an index-only restore never run git at all
+    for (const c of ["git rm -rf src/a.ts", "git rm -r *.*", "git restore --staged *.*"]) {
+      expect(causes(c, DISCARDS_WORK, says(true)), c).toEqual([]);
+    }
+    expect(asked).toEqual([]);
+    // no probe (a test, a reader with no repository): the word's own spelling stands
+    expect(causes("git rm -rf *.*", DISCARDS_WORK)).toEqual([]);
   });
 });

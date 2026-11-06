@@ -3659,3 +3659,151 @@ describe("a flag, path or command the shell builds from a same-line variable mee
     expect(header).toContain("Not seen, dated 2026-11-05");
   });
 });
+
+describe("run guard: a one-character glob or a relative root reaches every tracked file (#493)", () => {
+  // Each spelling is held against git itself first: `git ls-files` lists every
+  // tracked file for it. Before #493 each exited the guard clean, and the
+  // forced rm cleared the tree or the checkout rewrote it from the index.
+  /** A committed repo with files at two depths; `sub` is a folder holding some of them. */
+  function tree(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "src");
+    mkdirSync(join(sub, "deep"), { recursive: true });
+    mkdirSync(join(proj, "docs"));
+    writeFileSync(join(sub, "a.ts"), "a\n");
+    writeFileSync(join(sub, "deep", "b.ts"), "b\n");
+    writeFileSync(join(proj, "docs", "c.md"), "c\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "tree", "--no-gpg-sign");
+    return { proj, home, sub };
+  }
+  const ls = (cwd: string, ...specs: string[]) => git(cwd, "ls-files", "--full-name", "--", ...specs).split("\n").filter(Boolean);
+  const SHAPES = ["git rm -rf --", "git checkout --", "git restore --"];
+  const SPELLINGS = ["?*", "*?", "[a-zA-Z._]*", "src/..", "./src/../", ".//", ":(glob)**", ":/?*", ":(top)?*"];
+
+  it("the spellings are every tracked file to git, except `*/`, which lists none", () => {
+    const { proj } = tree();
+    const all = ls(proj, ":/");
+    expect(all.length).toBe(4);
+    for (const s of SPELLINGS) expect(ls(proj, s), s).toEqual(all);
+    expect(ls(proj, "*/")).toEqual([]);
+    expect(ls(proj, `:(glob)${realpathSync(proj)}/**`)).toEqual(all);
+    // the second leg's spellings, held against git too
+    expect(ls(proj, "*.*")).toEqual(all);
+    expect(ls(proj, ":!x*")).toEqual(all);
+    expect(ls(proj, "*.ts", "*.md", "*.txt")).toEqual(all);
+  });
+
+  it("each is refused for rm, checkout and restore from the root and a nested folder, naming the escape; the owner's escape lifts it", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of SPELLINGS) {
+        const c = `${shape} '${s}'`;
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "nested" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain("refused in every session");
+          expect(r.stderr, c).toContain("effect: discards-work, from `");
+          expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+        }
+        expect(guard(proj, home, `CAIRN_ALLOW_DESTRUCTIVE_GIT=1 ${c}`).status, c).toBe(0);
+      }
+    }
+  });
+
+  it("the twins pass from the root and a nested folder: a real path, a glob with a suffix that reaches some files, a glob git lists nothing for", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of ["src/*.ts", "src/a.ts", ":/src", "*.ts", "*/", "src/deep/..", ":(literal)*", ":(exclude)src"]) {
+        const c = `${shape} '${s}'`;
+        for (const cwd of [proj, sub]) {
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "nested" : "root"}\n${r.stderr}`).toBe(0);
+        }
+      }
+    }
+    // unforced, index-only and dry-run rm stay what they were
+    for (const c of ["git rm -r '?*'", "git rm --cached -r '?*'", "git rm -rfn '?*'", "git restore --staged '?*'"]) {
+      expect(guard(proj, home, c).status, c).toBe(0);
+    }
+  });
+
+  it("hostile: the root plus a glob, a climb out of a nested folder, a magic that hides the glob, a variable, -C from outside", () => {
+    const { proj, home, sub } = tree();
+    const root = realpathSync(proj);
+    for (const [c, cwd] of [
+      [`git rm -rf -- '${root}/?*'`, proj],
+      [`git checkout -- '${root}/[a-z]*'`, proj],
+      [`git restore -- '${root}/src/..'`, proj],
+      [`git rm -rf -- '${root}//'`, sub],
+      [`git rm -rf -- ':(glob)${root}/**'`, proj],
+      ["git rm -rf -- '../?*'", sub],
+      ["git checkout -- '../src/..'", sub],
+      ["git restore -- '../*'", sub],
+      ["git rm -rf -- ':(top,glob)**/*'", sub],
+      ["git rm -rf -- ':(attr:!nothing)'", proj],
+      ["P='?*'; git rm -rf -- \"$P\"", proj],
+      ["git rm -rf -- \"$PWD/src/..\"", proj],
+      ["git rm -rf -- \"$PWD/?*\"", sub],
+      [`git -C ${sub} rm -rf -- '../?*'`, proj],
+      ["timeout 5 git rm -rf -- '?*'", proj],
+      ["sh -c \"git rm -rf -- '?*'\"", proj],
+    ] as Array<[string, string]>) {
+      const r = guard(proj, home, c, {}, cwd);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    }
+    // the same magic on a real path, and the root's own files named: paths
+    for (const c of [`git rm -rf -- '${root}/src/?*'`, `git checkout -- '${root}/?*.ts'`, `git rm -rf -- '${root}/*/'`,
+      "git rm -rf -- ':(glob)src/**'"]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("the second leg: a word with a literal character that git says reaches every tracked file refuses; some files, or a nested folder's own, pass", () => {
+    const { proj, home, sub } = tree();
+    for (const shape of SHAPES) {
+      for (const s of ["'*.*'", "'[a-z]*.*'", "':!x*'", "'*.ts' '*.md' '*.txt'", "'src/../*.*'"]) {
+        const c = `${shape} ${s}`;
+        const r = guard(proj, home, c);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+      }
+      // from the nested folder `*.*` is that folder's files, and `../*.*` is everything
+      expect(guard(proj, home, `${shape} '*.*'`, {}, sub).status, shape).toBe(0);
+      expect(guard(proj, home, `${shape} '../*.*'`, {}, sub).status, shape).toBe(2);
+      // the union of two that stops short of everything is a path
+      expect(guard(proj, home, `${shape} '*.ts' '*.md'`).status, shape).toBe(0);
+    }
+  });
+
+  it("zero tracked files is never a match, and where git can't answer the word's own spelling stands", () => {
+    const home = freshDir("cairn-runguard-home-");
+    const empty = freshDir("cairn-runguard-empty-");
+    git(empty, "init", "-q", "-b", "main");
+    expect(guard(empty, home, "git rm -rf -- '*.*'").status).toBe(0);
+    expect(guard(empty, home, "git checkout -- '*.ts'").status).toBe(0);
+    expect(guard(empty, home, "git rm -rf -- '?*'").status).toBe(2);
+    const outside = freshDir("cairn-runguard-outside-");
+    expect(guard(outside, home, "git rm -rf -- '*.*'").status).toBe(0);
+    expect(guard(outside, home, "git rm -rf -- '?*'").status).toBe(2);
+    // a pathspec git refuses outright: no answer, and git refuses the rm the same way
+    const { proj, home: h2 } = tree();
+    expect(guard(proj, h2, "git rm -rf -- '../*.*'").status).toBe(0);
+    expect(spawnSync("git", ["ls-files", "--", "../*.*"], { cwd: proj, encoding: "utf8" }).status).toBe(128);
+  });
+
+  it("the Not seen lines hold: a glob reaching some files, and plain paths naming every file one by one, pass; a deleted line is red", () => {
+    const { proj, home } = tree();
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n \*\s+/g, " ");
+    const rows: Array<[string, string]> = [
+      ["git rm -rf -- '*.ts'", "a glob like `*.ts` reaching some of the tracked files stays a path"],
+      ["git checkout -- seed.txt src/a.ts src/deep/b.ts docs/c.md", "several plain paths that happen to name every file one by one"],
+    ];
+    for (const [c, line] of rows) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      expect(header, c).toContain(line);
+    }
+  });
+});
