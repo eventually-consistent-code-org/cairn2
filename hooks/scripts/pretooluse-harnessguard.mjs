@@ -59,6 +59,17 @@
  *   judged against the project (asserted: hooks.test.ts, the #383 nested
  *   rows run once more with the variable stripped).
  *
+ *   With no variable, a nested repository is not the whole project (#510):
+ *   every rule also judges against any folder above that root holding .claude
+ *   or cairn.json, stopping below the home folder, which holds .claude too
+ *   (lib.mjs projectRoots, the write guard's too). What such an outer project's
+ *   settings run, its git hooks and its config files count the same. The
+ *   variable set, or a nested repository under no such folder, is one root as
+ *   ever. The leak guard stays the inner repository's, since the commit lands
+ *   there. Asserted: hooks.test.ts "(#510)". Not seen, dated 2026-11-05: an
+ *   outer folder marked by neither is no project the guards can name, whatever
+ *   it holds (pinned there too).
+ *
  *   Breaker (#358): each refusal is handed to breaker.mjs, which appends
  *   its audit row (a digest of the input, never the path) and, while a
  *   batch run is live, counts it toward freezing the run -- a run that
@@ -355,7 +366,7 @@ import {
   suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
-import { projectRoot } from "./lib.mjs";
+import { projectRoots } from "./lib.mjs";
 import { OWNER_ONLY_KEYS, OWNER_ONLY_SAFE } from "./owner-keys.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -755,6 +766,8 @@ const LIST_CAP = 500;
 
 // Variables -- the folders every rule is measured against, set per payload.
 // Each holds the path as given and its real path, when a symlink differs.
+// PROJECTS is the roots as lib.mjs names them, the shell's own first (#510).
+let PROJECTS = [];
 let ROOTS = [];
 let HOMES = [];
 // Protected places outside the project (#263, #267), each { dir, what,
@@ -771,10 +784,11 @@ let SCRIPTS = [];
 // zones too big to list in full.
 let ENTRIES = null;
 let UNLISTED = [];
-// What git answered once this run (#353, #465), and the git config files a
+// What git answered once this run, per project (#353, #465), and the git config files a
 // pointer line could land in, in every spelling -- listed only when the
 // call spells one (POINTER_WORDS), empty otherwise.
-let GIT_ANSWERS = null;
+const GIT_ANSWERS = new Map();
+const GIT_WORKTREES = new Map();
 let GIT_CONFIGS = [];
 let GIT_CONFIG_WHAT = HOOKS_PATH_WHAT;
 
@@ -852,13 +866,18 @@ function below(dir, abs) {
   return a.length >= d.length && d.every((x, j) => same(x, a[j])) ? a.slice(d.length) : null;
 }
 
-/** Project-relative POSIX path, or null when the path escapes the project. */
-function projectRelative(abs) {
+/**
+ * The path relative to each project root holding it, as POSIX paths; none when
+ * it escapes them all. One path can be two things (#510): `hooks/vendored/a`
+ * in the outer project is `a` in the repository standing there.
+ */
+function projectRelatives(abs) {
+  const out = new Set();
   for (const root of ROOTS) {
     const rest = below(root, abs);
-    if (rest) return rest.join("/");
+    if (rest) out.add(rest.join("/"));
   }
-  return null;
+  return [...out];
 }
 
 /** True when `abs` is `dir` or any folder above it, letter case aside (#295). */
@@ -1162,21 +1181,23 @@ function commandScripts(command, vars, base = null, depth = 0) {
  */
 function settingsScripts() {
   const home = resolve(homedir());
-  const project = ROOTS[0];
   const plugin = livePluginRoot();
   // each file, with the folder its ${CLAUDE_PLUGIN_ROOT} means; the user
   // settings under CLAUDE_CONFIG_DIR too when it is set (#304)
   const cfg = configDir();
+  // and each project root's own (#510), with the folder its $CLAUDE_PROJECT_DIR means
   const sources = [
-    ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin]),
-    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin]) : []),
-    ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin]),
-    [join(project, "hooks", "hooks.json"), project],
-    [join(plugin, "hooks", "hooks.json"), plugin],
+    ...SETTINGS_NAMES.map((n) => [join(home, ".claude", n), plugin, PROJECTS[0]]),
+    ...(cfg ? SETTINGS_NAMES.map((n) => [join(cfg, n), plugin, PROJECTS[0]]) : []),
+    ...PROJECTS.flatMap((project) => [
+      ...SETTINGS_NAMES.map((n) => [join(project, ".claude", n), plugin, project]),
+      [join(project, "hooks", "hooks.json"), project, project],
+    ]),
+    [join(plugin, "hooks", "hooks.json"), plugin, PROJECTS[0]],
   ];
   const seen = new Set();
   const out = new Set();
-  for (const [file, pluginRoot] of sources) {
+  for (const [file, pluginRoot, project] of sources) {
     if (seen.has(file)) continue;
     seen.add(file);
     try {
@@ -1226,7 +1247,7 @@ function serverLines(server) {
  */
 function mcpScripts() {
   const home = resolve(homedir());
-  const project = ROOTS[0];
+  const project = PROJECTS[0];
   const parse = (file) => {
     try { return JSON.parse(readText(file) ?? ""); } catch { return null; }
   };
@@ -1246,8 +1267,10 @@ function mcpScripts() {
       for (const [dir, entry] of Object.entries(projects)) if (isAbsolute(dir)) take(entry, dir);
     }
   }
-  take(parse(join(project, ".mcp.json")), project);
-  take(parse(join(project, ".cursor", "mcp.json")), project);
+  for (const root of PROJECTS) { // each project root's own (#510)
+    take(parse(join(root, ".mcp.json")), root);
+    take(parse(join(root, ".cursor", "mcp.json")), root);
+  }
   take(parse(join(home, ".cursor", "mcp.json")), project);
   const seen = new Set();
   const scripts = new Set();
@@ -1257,7 +1280,7 @@ function mcpScripts() {
     const vars = { HOME: home, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: dir, userHome: home, workspaceFolder: dir };
     const keep = ({ path, folder }) => {
       for (const s of spellings(path)) {
-        if (projectRelative(s) !== null) continue;
+        if (projectRelatives(s).length) continue;
         if (!folder) scripts.add(s);
         else if (!anchors.some((a) => holds(s, a))) folders.add(s);
       }
@@ -1298,14 +1321,23 @@ function mcpScripts() {
  * make every write a hook.
  */
 function gitHookDirs() {
-  let dir = gitAnswers().hooks;
-  if (dir === null) {
-    const dotGit = join(gitRoot(ROOTS[0]), ".git");
-    try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { return []; }
-  }
-  if (dir === null) return [];
   const anchors = [...ROOTS, ...HOMES];
-  return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)));
+  const dirs = [];
+  // each project root's own (#510)
+  for (const project of PROJECTS) {
+    const { hooks, typed } = gitAnswers(project);
+    let dir = hooks;
+    if (dir === null) {
+      const dotGit = join(gitRoot(project), ".git");
+      try { if (statSync(dotGit).isDirectory()) dir = join(dotGit, "hooks"); } catch { /* no repo */ }
+    }
+    if (dir !== null) dirs.push(dir);
+    // a relative core.hooksPath is relative to each worktree git runs a hook in (#492)
+    if (typed && !isAbsolute(expandHome(typed)) && !/^\.git(?:\/|$)/.test(typed)) {
+      for (const wt of gitWorktrees(project)) dirs.push(resolve(wt, typed));
+    }
+  }
+  return [...new Set(dirs.flatMap((d) => spellings(d)))].filter((d) => !anchors.some((a) => holds(d, a)));
 }
 
 /** One git command from the project, or `cwd`, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
@@ -1326,28 +1358,33 @@ function askGit(args, cwd = ROOTS[0]) {
  * #465): `git rev-parse --git-path hooks --git-path config --git-path
  * config.worktree`, one line each as git resolves them -- core.hooksPath
  * applied for hooks, the common dir's config in a linked worktree, ~
- * expanded, a relative path from the project. Each null when there is no
- * git to ask.
+ * expanded, a relative path from the project; `typed` is the hooks answer as
+ * git gave it. Each null when there is no git to ask.
  */
-function gitAnswers() {
-  if (GIT_ANSWERS) return GIT_ANSWERS;
-  GIT_ANSWERS = { hooks: null, config: null, worktree: null };
-  const lines = askGit(["rev-parse", "--git-path", "hooks", "--git-path", "config", "--git-path", "config.worktree"])
+function gitAnswers(project) {
+  if (GIT_ANSWERS.has(project)) return GIT_ANSWERS.get(project);
+  let answers = { hooks: null, typed: null, config: null, worktree: null };
+  const lines = askGit(["rev-parse", "--git-path", "hooks", "--git-path", "config", "--git-path", "config.worktree"], project)
     .split("\n").map((l) => l.trim());
   if (lines.length >= 3 && lines[0] && lines[1]) {
-    GIT_ANSWERS = {
-      hooks: resolve(ROOTS[0], expandHome(lines[0])),
-      config: resolve(ROOTS[0], expandHome(lines[1])),
-      worktree: lines[2] ? resolve(ROOTS[0], expandHome(lines[2])) : null,
+    answers = {
+      hooks: resolve(project, expandHome(lines[0])),
+      typed: lines[0],
+      config: resolve(project, expandHome(lines[1])),
+      worktree: lines[2] ? resolve(project, expandHome(lines[2])) : null,
     };
   }
-  return GIT_ANSWERS;
+  GIT_ANSWERS.set(project, answers);
+  return answers;
 }
 
-/** The linked worktrees of the project's repository, the main checkout among them; none when there is no git to ask. */
-function gitWorktrees() {
-  return askGit(["worktree", "list", "--porcelain"]).split("\n")
-    .filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length));
+/** The linked worktrees of a project's repository, the main checkout among them; none when there is no git to ask. */
+function gitWorktrees(project) {
+  if (!GIT_WORKTREES.has(project)) {
+    GIT_WORKTREES.set(project, askGit(["worktree", "list", "--porcelain"], project).split("\n")
+      .filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length)));
+  }
+  return GIT_WORKTREES.get(project);
 }
 
 /**
@@ -1358,7 +1395,7 @@ function gitWorktrees() {
  */
 function cairnZones() {
   const zones = [];
-  for (const root of new Set([...ROOTS, ...gitWorktrees()])) {
+  for (const root of new Set([...ROOTS, ...PROJECTS.flatMap(gitWorktrees)])) {
     const within = spellings(root);
     for (const [names, what] of CAIRN_ZONES) {
       for (const dir of spellings(join(root, ...names))) zones.push({ dir, what, tree: true, carve: [], within });
@@ -1369,8 +1406,8 @@ function cairnZones() {
 
 /**
  * Every git config file a hooksPath or include line could land in (#465),
- * in each spelling: the repo's own and its worktree's (asked of git, else
- * .git/config under the nearest .git), the global ones -- GIT_CONFIG_GLOBAL
+ * in each spelling: each project root's own and its worktree's (asked of git,
+ * else .git/config under the nearest .git, #510), the global ones -- GIT_CONFIG_GLOBAL
  * when set, ~/.gitconfig, and $XDG_CONFIG_HOME/git/config, which is
  * ~/.config/git/config by default -- and the system file: /etc/gitconfig,
  * and what `git var GIT_CONFIG_SYSTEM` names (git 2.37+, a claim about git
@@ -1378,13 +1415,15 @@ function cairnZones() {
  */
 function gitConfigFiles() {
   const files = [];
-  const { config, worktree } = gitAnswers();
-  if (config) files.push(config);
-  else {
-    const dotGit = join(gitRoot(ROOTS[0]), ".git");
-    try { if (statSync(dotGit).isDirectory()) files.push(join(dotGit, "config")); } catch { /* no repo */ }
+  for (const project of PROJECTS) {
+    const { config, worktree } = gitAnswers(project);
+    if (config) files.push(config);
+    else {
+      const dotGit = join(gitRoot(project), ".git");
+      try { if (statSync(dotGit).isDirectory()) files.push(join(dotGit, "config")); } catch { /* no repo */ }
+    }
+    if (worktree) files.push(worktree);
   }
-  if (worktree) files.push(worktree);
   const home = resolve(homedir());
   const named = (v) => (v && isAbsolute(expandHome(v)) ? resolve(expandHome(v)) : null);
   const global = named(process.env.GIT_CONFIG_GLOBAL);
@@ -1428,8 +1467,7 @@ function fileRule(abs) {
   if (GIT_CONFIGS.some((f) => same(abs, f))) return GIT_CONFIG_WHAT;
   const zone = zoneOf(abs);
   if (zone) return zone;
-  const rel = projectRelative(abs);
-  if (rel !== null) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
+  for (const rel of projectRelatives(abs)) for (const p of PROTECTED) if (p.re.test(fold(rel))) return p.what;
   // a script the settings run, wherever it lives (#312), or one an MCP
   // config launches (#314); anything else outside the project is not this
   // guard's business
@@ -1443,8 +1481,7 @@ function dirRule(abs) {
   }
   const zone = ZONES.find((z) => same(z.dir, abs));
   if (zone) return zone.what;
-  const rel = projectRelative(abs);
-  if (rel) {
+  for (const rel of projectRelatives(abs)) {
     const r = fold(rel);
     if (r === "hooks") return "the hook directory";
     for (const [up, sub, what] of SUB_TREES) if (r === `${up}/${sub}` || r.endsWith(`/${up}/${sub}`)) return what;
@@ -1458,7 +1495,7 @@ function dirRule(abs) {
   // tree. A link counts as not being one, or `ln -sfn` swaps it for another.
   const way = ZONES.find((z) => z.within?.some((r) => holds(r, abs) && !same(r, abs)) && holds(abs, z.dir));
   if (way) {
-    try { if (!lstatSync(abs).isDirectory()) return way.what; } catch { return way.what; }
+    try { if (!lstatSync(abs).isDirectory()) return `the folder holding ${way.what}`; } catch { return `the folder holding ${way.what}`; }
   }
   // A folder on the way to a protected script, while it isn't there as a
   // folder (#312, #314): a write here -- `mv /tmp/x ~/.config/iterm2` --
@@ -1552,8 +1589,7 @@ function could(comp, name, anyOk = true) {
  */
 function globRule(abs, mode) {
   const remove = mode === "remove";
-  const rel = projectRelative(abs);
-  if (rel !== null) {
+  for (const rel of projectRelatives(abs)) {
     const c = rel ? rel.split("/") : [];
     if (c.length && could(c[0], "hooks")) return "the hook directory";
     if (c.length === 1 && could(c[0], ".mcp.json")) return "the MCP server config";
@@ -3224,9 +3260,11 @@ try {
   if (!core && !mcpPaths.length && !mcpLines.length && !approves) process.exit(0);
 
   // #459 -- the root the harness names, else the one git or a .claude folder
-  // marks above the shell's cwd; never the subfolder the shell stands in
-  const projectDir = projectRoot(payload);
-  ROOTS = spellings(projectDir);
+  // marks above the shell's cwd; never the subfolder the shell stands in. #510
+  // -- and from a nested repository, the outer project too
+  PROJECTS = projectRoots(payload);
+  const projectDir = PROJECTS[0];
+  ROOTS = [...new Set(PROJECTS.flatMap((p) => spellings(p)))];
   HOMES = spellings(homedir());
   ZONES = outsideZones();
   // Relative paths resolve where the tool runs -- the payload's cwd -- not

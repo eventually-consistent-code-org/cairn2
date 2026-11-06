@@ -120,6 +120,30 @@ export function projectRoot(payload) {
   }
 }
 
+/**
+ * Every root a write guard judges against (#510): projectRoot first, then,
+ * with no CLAUDE_PROJECT_DIR, any folder above it holding .claude or
+ * cairn.json, nearest first, stopping below the home folder, which holds
+ * .claude too. A shell standing in a nested repository (a submodule, a scratch
+ * repo, a cloned dependency) had made that repository the whole project, so a
+ * write to the outer one's harness files fell outside it and passed. The
+ * variable set, or a nested repository under no such folder, is projectRoot
+ * alone, as it always was. The leak guard stays on projectRoot: a commit lands
+ * in the inner repository. Asserted: hooks.test.ts "(#510)". Never throws.
+ */
+export function projectRoots(payload) {
+  const inner = resolve(projectRoot(payload));
+  if (process.env.CLAUDE_PROJECT_DIR) return [inner];
+  const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+  const home = real(homedir());
+  const roots = [inner];
+  if (real(inner) === home) return roots;
+  for (let d = dirname(inner); dirname(d) !== d && real(d) !== home; d = dirname(d)) {
+    if (existsSync(join(d, ".claude")) || existsSync(join(d, "cairn.json"))) roots.push(d);
+  }
+  return roots;
+}
+
 /** The repository's key; outside a repository, worktreeKey. */
 export function projectKey(projectDir) {
   const abs = resolve(projectDir);

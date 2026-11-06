@@ -6457,6 +6457,10 @@ describe("the folders the ship gate runs from are the harness guard's (#492)", (
     refused(hardenRun(wt, home, "Bash", { command: "echo x >> .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt, bare: true }), SCRIPTS_WHAT, "worktree, no variable");
     expect(hardenRun(p, home, "Bash", { command: "echo x > src.txt" }, { cwd: wt }).status).toBe(0);
     expect(hardenRun(p, home, "Bash", { command: "cat .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt }).status).toBe(0);
+    // the same shape on any folder: a relative core.hooksPath means each worktree's own
+    hardenGit(p, home, "config", "core.hooksPath", "scripts/hooks");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > scripts/hooks/pre-push" }, { cwd: wt }).status, "relative hooksPath, in the worktree").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > scripts/other.sh" }, { cwd: wt }).status).toBe(0);
   });
 
   it("the owner's session escape lets it through, and setup without the flag is not judged for what it writes there", () => {
@@ -6939,6 +6943,178 @@ describe("an agent-run cairn-setup --git-hooks needs the owner (#508)", () => {
     for (const c of ["/tmp/renamed claude --git-hooks", "node -e \"require('child_process').execSync('cairn-setup claude --git-hooks')\""]) {
       expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
     }
+  });
+});
+
+// #510: with no CLAUDE_PROJECT_DIR the root came from `git rev-parse
+// --show-toplevel`, so a shell standing in a nested repository (a submodule, a
+// scratch repo, a cloned dependency) judged a write to the outer project's
+// harness files against the inner repo, and it passed. The harness and write
+// guards now judge against the inner top level and any outer ancestor holding
+// .claude or cairn.json, stopping below the home folder, which holds .claude
+// too. With the variable set nothing changes, and a nested repo under no
+// project keeps its own root. The leak guard stays the inner repository's: the
+// commit lands there.
+describe("a nested repository is not the guards' whole root (#510)", () => {
+  /** An outer project (marked by `marker`), an ordinary src, a nested repo with a deeper folder, and an empty home. */
+  function fixture(marker: ".claude" | "cairn.json" | null = ".claude") {
+    const p = freshDir("cairn-hooks-nest-proj-");
+    const home = freshDir("cairn-hooks-nest-home-");
+    if (marker === ".claude") mkdirSync(join(p, ".claude"), { recursive: true });
+    if (marker === "cairn.json") writeFileSync(join(p, "cairn.json"), "{}\n");
+    mkdirSync(join(p, "src"), { recursive: true });
+    const nested = join(p, "vendor", "inner");
+    mkdirSync(join(nested, "deep"), { recursive: true });
+    hardenGit(nested, home, "init", "-q");
+    return { p, home, nested };
+  }
+
+  const OUTER_WRITES = ["echo x > ../../hooks/a.mjs", "echo x > ../../.mcp.json", "echo x > ../../.claude/settings.json",
+    "cp /tmp/x ../../.claude/skills/y/SKILL.md", "echo x >> ../../.cairn/harness/scripts/lib.mjs", "echo x > ../../.cairn/state/approvals/01-x.json"];
+
+  it("the issue's scenario: from the nested repo, with no variable, a write to the outer project's harness refuses, by the shell and by a tool", () => {
+    const { p, home, nested } = fixture();
+    const at = { cwd: nested, bare: true };
+    for (const c of OUTER_WRITES) expect(hardenRun(p, home, "Bash", { command: c }, at).status, c).toBe(2);
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".claude", "settings.json"), content: "{}" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Edit", { file_path: "../../hooks/a.mjs", old_string: "a", new_string: "b" }, at).status).toBe(2);
+    expect(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, ".mcp.json"), content: "{}" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "rm -rf ../.." }, at).status).toBe(2);
+  });
+
+  it("the harmless twins: the inner repo's own files, the outer's ordinary ones, and reading a protected one pass", () => {
+    const { p, home, nested } = fixture();
+    const at = { cwd: nested, bare: true };
+    for (const c of ["echo x > a.txt", "echo x > ../../src/a.ts", "rm -rf ../../src", "cat ../../hooks/a.mjs", "cat ../../.claude/settings.json"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }, at).status, c).toBe(0);
+    }
+    // the inner repo is a root of its own too
+    expect(hardenRun(p, home, "Bash", { command: "echo x > hooks/a.mjs" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > .claude/settings.json" }, at).status).toBe(2);
+  });
+
+  it("the nested-cwd variant: from a folder deeper in the inner repo, and an outer marked by cairn.json alone", () => {
+    const a = fixture();
+    expect(hardenRun(a.p, a.home, "Bash", { command: "echo x > ../../../hooks/a.mjs" }, { cwd: join(a.nested, "deep"), bare: true }).status).toBe(2);
+    expect(hardenRun(a.p, a.home, "Bash", { command: "echo x > ../../../src/a.ts" }, { cwd: join(a.nested, "deep"), bare: true }).status).toBe(0);
+    const b = fixture("cairn.json");
+    expect(hardenRun(b.p, b.home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: b.nested, bare: true }).status).toBe(2);
+    // an owner-only key in the outer project's config, from inside the inner repo
+    expect(hardenRun(b.p, b.home, "Bash", { command: `echo '{"verify":{"rerun":true}}' > ../../cairn.json` }, { cwd: b.nested, bare: true }).status).toBe(2);
+  });
+
+  it("hostile: an inner repo inside a protected folder is the outer's protected folder, whatever it calls its own root", () => {
+    const { p, home } = fixture();
+    const inside = join(p, "hooks", "vendored");
+    mkdirSync(inside, { recursive: true });
+    hardenGit(inside, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > a.mjs" }, { cwd: inside, bare: true }).status).toBe(2);
+    expect(hardenRun(p, home, "Write", { file_path: join(inside, "a.mjs"), content: "x" }, { cwd: inside, bare: true }).status).toBe(2);
+    const skill = join(p, ".claude", "skills", "y");
+    mkdirSync(skill, { recursive: true });
+    hardenGit(skill, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > SKILL.md" }, { cwd: skill, bare: true }).status).toBe(2);
+  });
+
+  it("hostile: what the outer project's own settings run, its own git hooks, and three levels of nesting", () => {
+    const { p, home, nested } = fixture();
+    mkdirSync(join(p, "scripts"), { recursive: true });
+    writeFileSync(join(p, ".claude", "settings.json"), JSON.stringify({
+      hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "node $CLAUDE_PROJECT_DIR/scripts/gate.mjs" }] }] },
+    }));
+    writeFileSync(join(p, "scripts", "gate.mjs"), "\n");
+    hardenGit(p, home, "init", "-q");
+    const at = { cwd: nested, bare: true };
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../scripts/gate.mjs" }, at).status, "a script the outer settings run").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../.git/hooks/pre-commit" }, at).status, "the outer's git hooks").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../scripts/other.mjs" }, at).status, "beside it").toBe(0);
+    const third = join(nested, "again");
+    mkdirSync(third, { recursive: true });
+    hardenGit(third, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../../.mcp.json" }, { cwd: third, bare: true }).status).toBe(2);
+  });
+
+  it("with the variable set nothing changes, and a nested repo under no project keeps its own root", () => {
+    const { p, home, nested } = fixture();
+    // the harness names the inner repo: the outer is outside the project, as it always was
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, root: nested }).status).toBe(0);
+    // ... and naming the outer refuses it, as it always did
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, root: p }).status).toBe(2);
+    const none = fixture(null);
+    expect(hardenRun(none.p, none.home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: none.nested, bare: true }).status).toBe(0);
+    expect(hardenRun(none.p, none.home, "Bash", { command: "echo x > hooks/a.mjs" }, { cwd: none.nested, bare: true }).status).toBe(2);
+  });
+
+  it("the walk stops below the home folder, which holds .claude too: a project under it isn't judged against it", () => {
+    const home = freshDir("cairn-hooks-nest-home-");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const repo = join(home, "work", "repo");
+    mkdirSync(repo, { recursive: true });
+    hardenGit(repo, home, "init", "-q");
+    const at = { cwd: repo, bare: true };
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, at).status, "home/hooks is nobody's hook directory").toBe(0);
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../other.txt" }, at).status).toBe(0);
+    // the home folder's own rules still stand, as they always did
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../../.claude/settings.json" }, at).status).toBe(2);
+    // and an outer project under the home folder still counts, below it
+    mkdirSync(join(home, "work", ".claude"), { recursive: true });
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../hooks/a.mjs" }, at).status).toBe(2);
+  });
+
+  it("the leak guard stays the inner repository's, per the panel: the commit lands there", () => {
+    const { p, home, nested } = fixture("cairn.json");
+    writeFileSync(join(p, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    writeFileSync(join(nested, "a.ts"), 'const p = ".cairn' + '/plans/x";\n');
+    hardenGit(nested, home, "add", "a.ts");
+    const env: Record<string, string | undefined> = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
+    delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [LEAKGUARD], {
+      cwd: nested, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "git commit -m x" }, cwd: nested }),
+    });
+    expect(r.status, r.stderr).toBe(0);
+  });
+
+  it("the measured gap, as the Not seen block says: an outer folder marked by neither is not a project the guards can name", () => {
+    const { p, home, nested } = fixture(null);
+    hardenGit(p, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, bare: true }).status).toBe(0);
+  });
+
+  describe("the write guard takes the same helper", () => {
+    const WRITEGUARD = join(SCRIPTS, "pretooluse-writeguard.mjs");
+    const POLICY = { tracker: { type: "github", config: { repo: "o/r" } }, guards: { writers: { readOnly: ["cairn-uat"] } } };
+
+    function run(cwd: string, home: string, tool: string, input: Record<string, unknown>, root?: string) {
+      const env: Record<string, string | undefined> = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
+      delete env.CLAUDE_PROJECT_DIR;
+      if (root) env.CLAUDE_PROJECT_DIR = root;
+      const r = spawnSync(process.execPath, [WRITEGUARD], {
+        cwd, env, encoding: "utf8", timeout: 5000,
+        input: JSON.stringify({ tool_name: tool, tool_input: input, cwd, agent_type: "cairn-uat" }),
+      });
+      return r.status;
+    }
+
+    it("the outer project's table holds from the nested repo; with the variable set, or under no project, the inner root is what it was", () => {
+      const { p, home, nested } = fixture("cairn.json");
+      writeFileSync(join(p, "cairn.json"), JSON.stringify(POLICY));
+      expect(run(nested, home, "Bash", { command: "echo x > ../../src/a.ts" }), "the outer's file").toBe(2);
+      expect(run(nested, home, "Write", { file_path: join(p, "src", "a.ts"), content: "x" }), "the outer's file, by a tool").toBe(2);
+      expect(run(nested, home, "Bash", { command: "echo x > a.txt" }), "the inner repo sits inside the outer's table").toBe(2);
+      expect(run(join(nested, "deep"), home, "Bash", { command: "echo x > ../a.txt" }), "nested-cwd").toBe(2);
+      expect(run(nested, home, "Bash", { command: "cat ../../src/a.ts" }), "a read").toBe(0);
+      // the harness names the inner repo, which has no table: not a project this guard judges
+      expect(run(nested, home, "Bash", { command: "echo x > ../../src/a.ts" }, nested)).toBe(0);
+      const none = fixture(null);
+      expect(run(none.nested, none.home, "Bash", { command: "echo x > ../../src/a.ts" })).toBe(0);
+      // a nested project with a table of its own is judged by the nearest one
+      writeFileSync(join(nested, "cairn.json"), JSON.stringify({
+        tracker: POLICY.tracker, guards: { writers: { readOnly: [], paths: { "cairn-uat": ["a.txt"] } } },
+      }));
+      expect(run(nested, home, "Bash", { command: "echo x > a.txt" }), "its own table grants this path").toBe(0);
+      expect(run(nested, home, "Bash", { command: "echo x > b.txt" }), "and no other").toBe(2);
+    });
   });
 });
 
