@@ -22,7 +22,9 @@
 //   5. with --git-hooks only: a pre-push git hook that applies the ship
 //      gate's default-branch rule to every process in the checkout, and
 //      core.hooksPath pointed at it (#456). Opt-in, never default: a git
-//      config write is the owner's ground, and the flag is the consent.
+//      config write is the owner's ground, and the flag is the consent. The
+//      consent is for this project: a core.hooksPath at global or system
+//      scope is never written into (#497).
 //
 // Every copied-artifact surface gets a version stamp (.cairn-manifest.json:
 // source version + install date) so `--check` can answer "what's actually
@@ -34,15 +36,30 @@
 // pre-push hook is installed and git still runs hooks from there (#456).
 //
 // Additive and idempotent: existing config entries are merged, never
-// clobbered; re-running produces byte-identical results.
+// clobbered; re-running produces byte-identical results. Every project-scoped
+// write goes through one link check: a link leaving the project, or one that
+// points at nothing, is the owner's file somewhere else and is refused (#498,
+// asserted: setup.test.ts, which also counts the raw writers' call sites).
 // Dependency-free node — builtins only.
+//
+// Not seen, dated 2026-11-05 (each pinned in server/test/setup.test.ts):
+//   - a local core.hooksPath naming a folder other repositories name in their
+//     own local configs is respected; git keeps no list of them (#497).
+//   - a hard link has no direction: one to a file outside the project is that
+//     file, by this name too, so it is written through (#498).
+//   - a link staying inside the project writes as today, wherever inside it
+//     lands, the .git folder included (#498).
+//   - a home-scoped write (~/.codex, ~/.copilot, ~/.gemini) follows a link on
+//     purpose: a dotfiles manager keeps those as links (#498).
+//   - a link swapped in between the check and the write: the check is one
+//     look per write, with no lock held across it (#498).
 
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BEGIN, READERS, insideDir, reachFrom, realOrNull, sameFile, spliceFragment, spliceImport,
@@ -74,6 +91,60 @@ const gitHooks = args.includes("--git-hooks");
 
 // --- helpers -----------------------------------------------------------------
 
+/** Does a project-scoped path reach through a link that leaves the project, or
+ *  one that points at nothing? Every name from the project down is looked at,
+ *  so a folder link above the file counts as much as a link at the file. A
+ *  path outside the project is a home-scoped write, not this check's (the Not
+ *  seen block above).
+ *  :returns { link, real } with real null when dangling, or null when clear */
+function linkOut(path) {
+  const rel = relative(projectDir, path);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  const root = realOrNull(projectDir);
+  let at = projectDir;
+  for (const name of rel.split(sep)) {
+    at = join(at, name);
+    try {
+      if (!lstatSync(at).isSymbolicLink()) continue;
+    } catch {
+      return null; // absent from here down: a fresh write lands inside
+    }
+    const real = realOrNull(at);
+    if (real === null || !insideDir(real, root)) return { link: at, real };
+  }
+  return null;
+}
+
+/** The refusal's one line (#429 wrote it for CLAUDE.md; #498 made it everyone's). */
+function linkRefusal({ link, real }, wayOut = "point the link inside the project, then re-run cairn-setup") {
+  return real === null
+    ? `  ${link}: is a symlink to a file that does not exist — refusing to write through it; fix the link, then re-run cairn-setup.`
+    : `  ${link}: resolves outside the project (${real}) — refusing to write through it; ${wayOut}.`;
+}
+
+/** The one check every write passes (#498): a link out stops setup, exit 1, the
+ *  way a config that does not parse does. What landed before it stays, and a
+ *  re-run is byte-identical. :returns path */
+function checkLinks(path) {
+  const out = linkOut(path);
+  if (out) {
+    console.error(linkRefusal(out));
+    process.exit(1);
+  }
+  return path;
+}
+
+// The only call sites of the fs writers in this file (asserted: setup.test.ts).
+function writeChecked(path, data) {
+  writeFileSync(checkLinks(path), data);
+}
+function copyChecked(src, path) {
+  copyFileSync(src, checkLinks(path));
+}
+function mkdirChecked(path) {
+  mkdirSync(checkLinks(path), { recursive: true });
+}
+
 /** The command that launches the server. Default is the portable npx form —
  *  the configs this script writes get committed and shared, and an absolute
  *  clone path breaks for every teammate who isn't this machine (CRN-75).
@@ -94,6 +165,7 @@ function serverCommand() {
  *  parse is never treated as absent — overwriting it would silently destroy
  *  whatever the user had in it (other MCP servers, settings). Stop instead. */
 function readJson(path) {
+  checkLinks(path);
   let raw;
   try {
     raw = readFileSync(path, "utf8");
@@ -123,13 +195,14 @@ function mergeMcpJson(path) {
     return;
   }
   const next = { ...existing, mcpServers: { ...servers, cairn: entry } };
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(next, null, 2) + "\n");
+  mkdirChecked(dirname(path));
+  writeChecked(path, JSON.stringify(next, null, 2) + "\n");
   console.log(`  ${path}: cairn MCP entry added.`);
 }
 
 /** Install/replace the marker-delimited cairn fragment inside a markdown file. */
 function installFragment(path, fragment) {
+  checkLinks(path);
   let body = "";
   try {
     body = readFileSync(path, "utf8");
@@ -145,8 +218,8 @@ function installFragment(path, fragment) {
     console.log(`  ${path}: cairn section already current...`);
     return;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, next);
+  mkdirChecked(dirname(path));
+  writeChecked(path, next);
   console.log(`  ${path}: cairn section installed.`);
 }
 
@@ -200,24 +273,13 @@ function installClaudeImport(path, { create }) {
 
   // A CLAUDE.md that is itself a symlink to something else: a link that
   // leaves the project (or points at nothing) is the owner's file somewhere
-  // else -- refused in one line, nothing written (#429).
-  let isLink = false;
-  try {
-    isLink = lstatSync(path).isSymbolicLink();
-  } catch { /* absent */ }
-  if (isLink) {
-    let real = null;
-    try {
-      real = realpathSync(path);
-    } catch { /* dangling */ }
-    if (real === null) {
-      console.log(`  ${path}: is a symlink to a file that does not exist — refusing to write through it; fix the link, then re-run cairn-setup.`);
-      return "refused";
-    }
-    if (!insideDir(real, realOrNull(projectDir))) {
-      console.log(`  ${path}: resolves outside the project (${real}) — refusing to write through it; point the link inside the project or add the @AGENTS.md import by hand.`);
-      return "refused";
-    }
+  // else -- refused in one line, nothing written (#429). The one check every
+  // other write takes, with the difference that this file is optional: the
+  // install goes on, the claude tail line says so and --check reports it.
+  const out = linkOut(path);
+  if (out) {
+    console.log(linkRefusal(out, "point the link inside the project or add the @AGENTS.md import by hand"));
+    return "refused";
   }
 
   const { next, note, error } = spliceImport(body ?? "");
@@ -229,7 +291,7 @@ function installClaudeImport(path, { create }) {
     console.log(`  ${path}: ${note}...`);
     return "installed";
   }
-  writeFileSync(path, next);
+  writeChecked(path, next);
   console.log(`  ${path}: @AGENTS.md ${note} (Claude Code reads the spine through it).`);
   return "installed";
 }
@@ -266,20 +328,20 @@ function helperClosure(dir, names) {
 function installVerbs() {
   const srcDir = join(repoRoot, "skills", "cairn-trailhead");
   const outDir = join(projectDir, ".cairn", "harness");
-  mkdirSync(join(outDir, "verbs"), { recursive: true });
-  mkdirSync(join(outDir, "scripts"), { recursive: true });
+  mkdirChecked(join(outDir, "verbs"));
+  mkdirChecked(join(outDir, "scripts"));
   // Verb text is re-pointed on the way in, never copied raw, so every
   // harness but claude reads a path that exists in its own install.
   const localize = (body) => (harness === "claude" ? body : body.replaceAll(PLUGIN_SCRIPTS, `"${SCRIPTS_REL}/`));
-  writeFileSync(join(outDir, "SKILL.md"), localize(readFileSync(join(srcDir, "SKILL.md"), "utf8")));
+  writeChecked(join(outDir, "SKILL.md"), localize(readFileSync(join(srcDir, "SKILL.md"), "utf8")));
   let n = 0;
   for (const f of readdirSync(join(srcDir, "verbs"))) {
     if (!f.endsWith(".md")) continue;
-    writeFileSync(join(outDir, "verbs", f), localize(readFileSync(join(srcDir, "verbs", f), "utf8")));
+    writeChecked(join(outDir, "verbs", f), localize(readFileSync(join(srcDir, "verbs", f), "utf8")));
     n++;
   }
   const helpers = helperClosure(join(repoRoot, "hooks", "scripts"), VERB_HELPERS);
-  for (const f of helpers) copyFileSync(join(repoRoot, "hooks", "scripts", f), join(outDir, "scripts", f));
+  for (const f of helpers) copyChecked(join(repoRoot, "hooks", "scripts", f), join(outDir, "scripts", f));
   stampInstall(outDir, "verb subroutines");
   console.log(`  .cairn/harness/: registry + ${n} verb subroutines installed (stamped v${sourceVersion}).`);
   console.log(`  ${SCRIPTS_REL}/: ${helpers.length} verb helpers installed (${helpers.join(", ")}); ${harness === "claude" ? "the verbs keep the plugin root" : "the copied verbs name them there"}.`);
@@ -315,8 +377,8 @@ function mergeCodexToml(path) {
     console.log(`  ${path}: cairn entry already current...`);
     return;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, next);
+  mkdirChecked(dirname(path));
+  writeChecked(path, next);
   console.log(`  ${path}: [mcp_servers.cairn] block written.`);
 }
 
@@ -339,19 +401,61 @@ const SH_SHEBANG = /^#!.*\b(?:sh|bash|dash|ksh|zsh)\b/;
 
 /** git's trimmed answer at `dir`, or null when it says no (no repository, no git on PATH). */
 function gitAt(dir, gitArgs) {
+  // GIT_CONFIG makes every plain `git config` read and write that one file, so
+  // a value the shell carried would turn this install's local write into a
+  // write on whatever it names (#497, asserted: setup.test.ts).
+  const { GIT_CONFIG: _ignored, ...env } = process.env;
   try {
     return execFileSync("git", gitArgs, {
       cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+      env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
     }).trim();
   } catch {
     return null;
   }
 }
 
+const expandHome = (value) => value.replace(/^~(?=\/|$)/, homedir());
+
 /** A hooks folder as git reads one: `~` expanded, a relative path from the worktree root. */
 function hooksDirOf(value) {
-  return resolve(projectDir, value.replace(/^~(?=\/|$)/, homedir()));
+  return resolve(projectDir, expandHome(value));
+}
+
+// The only scopes that are this repository's own. Anything else -- global,
+// system, the environment's GIT_CONFIG_COUNT or `git -c` (git calls that one
+// command), or a git too old to say -- names a folder --git-hooks has no
+// consent for, so it is never written into (#497, asserted: setup.test.ts).
+const OWN_SCOPES = ["local", "worktree"];
+
+/** The core.hooksPath git obeys here and the scope it comes from, include
+ *  files counted under the file that pulled them in. null when unset. A git
+ *  with no --show-scope (older than 2.26) still answers the plain read, and
+ *  that value reads as a scope it cannot name: refused, never guessed. */
+function hooksPathSetting() {
+  const scoped = gitAt(projectDir, ["config", "--show-scope", "--get", "core.hooksPath"]);
+  const tab = scoped === null ? -1 : scoped.indexOf("\t");
+  if (tab > 0) return { scope: scoped.slice(0, tab), value: scoped.slice(tab + 1) };
+  const plain = gitAt(projectDir, ["config", "--get", "core.hooksPath"]);
+  return plain ? { scope: null, value: plain } : null;
+}
+
+/** Why the folder a setting names is not this project's alone, or null: the
+ *  setting's scope, or a local setting spelling the very folder the global or
+ *  system config names. A relative value up there resolves per repository, so
+ *  it is no one folder to collide with. */
+function sharedFolderWhy(setting, dir) {
+  if (!OWN_SCOPES.includes(setting.scope)) {
+    return `core.hooksPath is set at ${setting.scope ? `${setting.scope} scope` : "a scope this git cannot name (git config --show-scope, git 2.26+)"}, to ${dir}`;
+  }
+  const real = (p) => realOrNull(p) ?? resolve(p);
+  for (const scope of ["global", "system"]) {
+    const value = gitAt(projectDir, ["config", `--${scope}`, "--includes", "--get", "core.hooksPath"]);
+    if (value && isAbsolute(expandHome(value)) && real(expandHome(value)) === real(dir)) {
+      return `core.hooksPath here names ${dir}, the folder the ${scope} config names`;
+    }
+  }
+  return null;
 }
 
 /** The marker-delimited block: the gate runs first, and the refs git handed
@@ -410,17 +514,29 @@ function spliceHook(body, block) {
   return { next: `${first}\n${block}${nl < 0 ? "" : body.slice(nl + 1)}` };
 }
 
-/** Where the hook goes: the folder core.hooksPath names when set (respected,
- *  the setting stays), else cairn's own, which the install then names --
- *  unless the folder git runs today holds live hooks a new hooksPath would
- *  silence: refused, the owner moves them or sets the path. */
+/** Where the hook goes: the folder a local or worktree core.hooksPath names
+ *  when set (respected, the setting stays), else cairn's own, which the
+ *  install then names. Refused: a folder the setting shares with other
+ *  repositories (#497), the install says why and writes nothing there; and
+ *  live hooks in the folder git runs today that a new hooksPath would
+ *  silence, the owner moves them or sets the path. */
 function gitHooksTarget() {
   if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
     return { error: "not a git repository -- nothing for a pre-push hook to guard" };
   }
   const ours = join(projectDir, GITHOOKS_REL);
-  const configured = gitAt(projectDir, ["config", "--get", "core.hooksPath"]);
-  if (configured) return { dir: hooksDirOf(configured), configured };
+  const setting = hooksPathSetting();
+  if (setting) {
+    const dir = hooksDirOf(setting.value);
+    const why = sharedFolderWhy(setting, dir);
+    if (why) {
+      const wayOut = setting.scope === "command"
+        ? "drop the setting from this environment"
+        : `to gate this project alone, run \`git config --local core.hooksPath ${GITHOOKS_REL}\` (the shared hooks then stop running in this repository)`;
+      return { error: `${why}: every repository it reaches runs hooks from that folder, and --git-hooks is consent for this project alone, so nothing was written there -- ${wayOut}, then re-run` };
+    }
+    return { dir, configured: setting.value };
+  }
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
   const todayDir = today ? hooksDirOf(today) : null;
   let live = [];
@@ -442,11 +558,11 @@ function installGitHooks() {
     console.error(`  --git-hooks: ${target.error}.`);
     process.exit(1);
   }
+  const path = checkLinks(join(target.dir, "pre-push"));
   const scriptsOut = join(projectDir, SCRIPTS_REL);
   for (const f of helperClosure(join(repoRoot, "hooks", "scripts"), [PREPUSH])) {
-    copyFileSync(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));
+    copyChecked(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));
   }
-  const path = join(target.dir, "pre-push");
   let body = "";
   try {
     body = readFileSync(path, "utf8");
@@ -456,10 +572,10 @@ function installGitHooks() {
     console.error(`  ${path}: ${error} -- then re-run cairn-setup.`);
     process.exit(1);
   }
-  mkdirSync(target.dir, { recursive: true });
-  if (next !== body) writeFileSync(path, next);
-  chmodSync(path, 0o755);
-  if (target.configured === null && gitAt(projectDir, ["config", "core.hooksPath", target.dir]) === null) {
+  mkdirChecked(target.dir);
+  if (next !== body) writeChecked(path, next);
+  chmodSync(checkLinks(path), 0o755);
+  if (target.configured === null && gitAt(projectDir, ["config", "--local", "core.hooksPath", target.dir]) === null) {
     console.error(`  core.hooksPath could not be set to ${target.dir} -- set it yourself, then re-run cairn-setup.`);
     process.exit(1);
   }
@@ -482,6 +598,13 @@ function gitLayerStatus() {
     }
   };
   if (carries(join(dir, "pre-push"))) {
+    // An older install wrote here before #497: setup never writes here now,
+    // and it never deletes, so the block stays until the owner takes it out.
+    const setting = hooksPathSetting();
+    const why = setting ? sharedFolderWhy(setting, dir) : null;
+    if (why) {
+      return { detail: `installed at ${dir}, but ${why}: every repository it reaches runs this project's gate -- take the cairn block out of that file`, lagging: true };
+    }
     return existsSync(script) ? { detail: `installed at ${dir}; git runs hooks from there` }
       : { detail: `installed at ${dir}, but ${script} is missing -- not reached; re-run with --git-hooks`, lagging: true };
   }
@@ -502,7 +625,7 @@ const sourceVersion = JSON.parse(readFileSync(join(repoRoot, "package.json"), "u
 
 /** Write the version stamp alongside a surface's installed artifacts. */
 function stampInstall(dir, surface) {
-  writeFileSync(join(dir, MANIFEST), JSON.stringify({
+  writeChecked(join(dir, MANIFEST), JSON.stringify({
     surface, harness, version: sourceVersion,
     installedAt: new Date().toISOString(), installedBy: "cairn-setup",
   }, null, 2) + "\n");
@@ -639,10 +762,10 @@ if (harness === "copilot") {
   installFragment(join(projectDir, ".github", "copilot-instructions.md"), fragment);
   const promptsSrc = join(repoRoot, "harness", "copilot", "prompts");
   const promptsOut = join(projectDir, ".github", "prompts");
-  mkdirSync(promptsOut, { recursive: true });
+  mkdirChecked(promptsOut);
   for (const f of readdirSync(promptsSrc)) {
     if (f.startsWith(".")) continue; // never ship stray dotfiles (.DS_Store) into a project
-    copyFileSync(join(promptsSrc, f), join(promptsOut, f));
+    copyChecked(join(promptsSrc, f), join(promptsOut, f));
   }
   stampInstall(promptsOut, "copilot prompts");
   console.log(`  .github/prompts/: cairn prompt files installed (stamped v${sourceVersion}).`);
@@ -654,10 +777,10 @@ if (harness === "gemini") {
   installFragment(join(projectDir, "GEMINI.md"), fragment);
   const cmdSrc = join(repoRoot, "harness", "gemini", "commands", "cairn");
   const cmdOut = join(projectDir, ".gemini", "commands", "cairn");
-  mkdirSync(cmdOut, { recursive: true });
+  mkdirChecked(cmdOut);
   for (const f of readdirSync(cmdSrc)) {
     if (f.startsWith(".")) continue; // never ship stray dotfiles (.DS_Store) into a project
-    copyFileSync(join(cmdSrc, f), join(cmdOut, f));
+    copyChecked(join(cmdSrc, f), join(cmdOut, f));
   }
   stampInstall(cmdOut, "gemini TOML commands");
   console.log(`  .gemini/commands/cairn/: TOML commands installed (/cairn:plan, /cairn:work, ...) (stamped v${sourceVersion}).`);
@@ -667,10 +790,10 @@ if (harness === "codex") {
   mergeCodexToml(join(homedir(), ".codex", "config.toml"));
   const promptsSrc = join(repoRoot, "harness", "codex", "prompts");
   const promptsOut = join(homedir(), ".codex", "prompts");
-  mkdirSync(promptsOut, { recursive: true });
+  mkdirChecked(promptsOut);
   for (const f of readdirSync(promptsSrc)) {
     if (f.startsWith(".")) continue; // never ship stray dotfiles (.DS_Store) into a project
-    copyFileSync(join(promptsSrc, f), join(promptsOut, f));
+    copyChecked(join(promptsSrc, f), join(promptsOut, f));
   }
   stampInstall(promptsOut, "codex prompts");
   console.log(`  ~/.codex/prompts/: cairn prompt files installed (Codex reads AGENTS.md from the project) (stamped v${sourceVersion}).`);
@@ -681,11 +804,11 @@ if (harness === "cursor") {
 
   // Hooks port: adapter + the cairn hook scripts, then hooks.json entries.
   const hooksOut = join(projectDir, ".cursor", "hooks", "cairn");
-  mkdirSync(hooksOut, { recursive: true });
-  copyFileSync(join(repoRoot, "harness", "cursor", "cursor-adapter.mjs"),
+  mkdirChecked(hooksOut);
+  copyChecked(join(repoRoot, "harness", "cursor", "cursor-adapter.mjs"),
     join(hooksOut, "cursor-adapter.mjs"));
   for (const f of readdirSync(join(repoRoot, "hooks", "scripts"))) {
-    if (f.endsWith(".mjs")) copyFileSync(join(repoRoot, "hooks", "scripts", f), join(hooksOut, f));
+    if (f.endsWith(".mjs")) copyChecked(join(repoRoot, "hooks", "scripts", f), join(hooksOut, f));
   }
   stampInstall(hooksOut, "cursor adapter + hook scripts");
   console.log(`  .cursor/hooks/cairn/: adapter + hook scripts installed (stamped v${sourceVersion}).`);
@@ -713,7 +836,7 @@ if (harness === "cursor") {
   if (serialized === prior) {
     console.log(`  ${hooksJsonPath}: cairn hooks already current...`);
   } else {
-    writeFileSync(hooksJsonPath, serialized);
+    writeChecked(hooksJsonPath, serialized);
     console.log(`  ${hooksJsonPath}: cairn hook entries merged (cost tracker stays Claude-only).`);
   }
 }
@@ -732,15 +855,15 @@ if (harness === "opencode") {
       console.log(`  ${cfgPath}: cairn entry already present...`);
     }
   } else {
-    writeFileSync(cfgPath, JSON.stringify({ ...existing, mcp: { ...mcp, cairn: entry } }, null, 2) + "\n");
+    writeChecked(cfgPath, JSON.stringify({ ...existing, mcp: { ...mcp, cairn: entry } }, null, 2) + "\n");
     console.log(`  ${cfgPath}: cairn MCP entry added.`);
   }
   const cmdSrc = join(repoRoot, "harness", "opencode", "commands");
   const cmdOut = join(projectDir, ".opencode", "commands");
-  mkdirSync(cmdOut, { recursive: true });
+  mkdirChecked(cmdOut);
   for (const f of readdirSync(cmdSrc)) {
     if (f.startsWith(".")) continue; // never ship stray dotfiles (.DS_Store) into a project
-    copyFileSync(join(cmdSrc, f), join(cmdOut, f));
+    copyChecked(join(cmdSrc, f), join(cmdOut, f));
   }
   stampInstall(cmdOut, "opencode commands");
   console.log(`  .opencode/commands/: cairn command files installed (/cairn-plan, /cairn-work, ...) (stamped v${sourceVersion}).`);
@@ -760,8 +883,8 @@ if (harness === "zed") {
       console.log(`  ${cfgPath}: cairn entry already present...`);
     }
   } else {
-    mkdirSync(dirname(cfgPath), { recursive: true });
-    writeFileSync(cfgPath, JSON.stringify({ ...existing, context_servers: { ...servers, cairn: entry } }, null, 2) + "\n");
+    mkdirChecked(dirname(cfgPath));
+    writeChecked(cfgPath, JSON.stringify({ ...existing, context_servers: { ...servers, cairn: entry } }, null, 2) + "\n");
     console.log(`  ${cfgPath}: cairn context server added (Zed reads AGENTS.md natively).`);
   }
 }

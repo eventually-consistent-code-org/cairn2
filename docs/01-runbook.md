@@ -1256,6 +1256,14 @@ checkout, not only the one harness that runs the run guard (section 10,
 "The git layer"). Opt-in, because it writes `core.hooksPath` into the
 repository's config.
 
+Setup writes nothing through a link that leaves the project or points at
+nothing, at the file or at any folder above it: it names the link and
+exits 1, and what landed before it stays, so fix the link and re-run. A
+`CLAUDE.md` link is the one exception to the exit, since that file is
+optional: it is left as written and the install goes on (#429, #498;
+asserted: `server/test/setup.test.ts`). Writes under your home folder
+follow a link on purpose, for dotfiles managers.
+
 Whichever harness drives it, cairn acts as you — the tracker token, the
 push credential, the browser session and any connected account are
 yours, `config_probe` says so as `identity: "owner"`, and so the runtime
@@ -2126,8 +2134,11 @@ and the default-branch names from the shared hook library, the refusal
 is the run guard's own text, and the same `CAIRN_ALLOW_UNSHIPPED_PUSH`
 escape is honoured, said aloud on stderr, and never spelled as a prefix.
 A project's own `pre-push` survives below the cairn markers and still
-reads its refs from stdin; a `core.hooksPath` already set is respected
-(the hook goes into that folder, the setting stays); live hooks in
+reads its refs from stdin; a `core.hooksPath` already set in this
+repository's own config is respected (the hook goes into that folder, the
+setting stays); one set at global or system scope refuses the install and
+names the folder, because other repositories run hooks from it (#497,
+asserted: `server/test/setup.test.ts`); live hooks in
 `.git/hooks` refuse the install in one line rather than go silent under
 a new path. `--check` reports whether the hook is installed and whether
 git still runs hooks from there, and `plan_drift` measures the layer as

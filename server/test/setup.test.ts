@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -30,6 +30,19 @@ function run(harness: string, project: string, home: string, ...extra: string[])
     // tests (it fails soft to "unknown" anyway; this skips the wait).
     encoding: "utf8", env: { ...process.env, HOME: home, CAIRN_SETUP_OFFLINE: "1" },
   });
+}
+
+type Attempt = { status: number | null; stdout: string; stderr: string; out: string };
+
+/** Setup through spawnSync, so a refusal's exit and both streams can be read:
+ *  `project` passes --project, `cwd` runs bare from that folder (the nested-cwd
+ *  variant), `env` adds to the fake home's environment. */
+function attempt(harness: string, home: string, at: { project?: string; cwd?: string; env?: Record<string, string> }, ...extra: string[]): Attempt {
+  const flags = at.project ? ["--project", at.project] : [];
+  const r = spawnSync(process.execPath, [SETUP, harness, ...flags, ...extra], {
+    cwd: at.cwd, encoding: "utf8", env: { ...process.env, HOME: home, CAIRN_SETUP_OFFLINE: "1", ...at.env },
+  });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
 /** Runs `--check` expecting a non-zero exit; returns its stdout for asserting. */
@@ -809,5 +822,534 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     }
     expect(err).toContain("not a git repository");
     expect(existsSync(join(proj, ".cairn", "harness", "SKILL.md"))).toBe(true);
+  });
+
+  // #497: the consent --git-hooks records is for this project's git config.
+  // A core.hooksPath at global or system scope names a folder every repository
+  // it reaches runs hooks from, so setup never writes there; the cairn block
+  // landing in it refused default-branch pushes in unrelated repositories.
+  describe("a folder other repositories run hooks from is never written into (#497)", () => {
+    const OWNER_HOOK = "#!/bin/sh\necho the owner hook\n";
+    const SCRIPT = join(".cairn", "harness", "scripts", "pre-push.mjs");
+    const shared = (home: string) => join(home, ".githooks");
+    const hooksLine = (value: string) => `[core]\n\thooksPath = ${value}\n`;
+    const localHooksPath = (proj: string) => spawnSync("git", ["config", "--local", "--get", "core.hooksPath"], { cwd: proj }).status;
+
+    /** A shared hooks folder holding the owner's own pre-push. */
+    function sharedFolder(home: string): string {
+      const dir = shared(home);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "pre-push"), OWNER_HOOK);
+      chmodSync(join(dir, "pre-push"), 0o755);
+      return dir;
+    }
+
+    function expectRefusedUntouched(r: Attempt, proj: string, home: string, scope: string): void {
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain(`at ${scope} scope`);
+      expect(r.stderr).toContain(shared(home));
+      expect(r.stdout).not.toContain("cairn-setup complete");
+      expect(readdirSync(shared(home))).toEqual(["pre-push"]);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+      expect(localHooksPath(proj)).toBe(1);
+      expect(existsSync(join(proj, SCRIPT))).toBe(false);
+    }
+
+    it("global scope: one line naming the folder, exit 1, nothing written there or set here; an unrelated repository still pushes main", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      expectRefusedUntouched(attempt("claude", home, { project: proj }, "--git-hooks"), proj, home, "global");
+      const other = repo().proj;
+      const p = push(other, home, ["origin", "main"]);
+      expect(p.status, p.stderr).toBe(0);
+      expect(p.stderr).not.toContain("cairn run guard");
+      expect(p.stdout + p.stderr).toContain("the owner hook");
+    });
+
+    const shapes: Record<string, { scope: string; lay: (home: string, proj: string) => Record<string, string> }> = {
+      "the system config": { scope: "system", lay: (home) => {
+        writeFileSync(join(home, "system.cfg"), hooksLine(shared(home)));
+        return { GIT_CONFIG_SYSTEM: join(home, "system.cfg") };
+      } },
+      "the XDG config, git's other global file": { scope: "global", lay: (home) => {
+        mkdirSync(join(home, "xdg", "git"), { recursive: true });
+        writeFileSync(join(home, "xdg", "git", "config"), hooksLine(shared(home)));
+        return { XDG_CONFIG_HOME: join(home, "xdg") };
+      } },
+      "GIT_CONFIG_GLOBAL carrying the global file elsewhere": { scope: "global", lay: (home) => {
+        writeFileSync(join(home, "moved.cfg"), hooksLine(shared(home)));
+        return { GIT_CONFIG_GLOBAL: join(home, "moved.cfg") };
+      } },
+      "an include the global config pulls in": { scope: "global", lay: (home) => {
+        writeFileSync(join(home, "dotfiles.cfg"), hooksLine(shared(home)));
+        writeFileSync(join(home, ".gitconfig"), `[include]\n\tpath = ${join(home, "dotfiles.cfg")}\n`);
+        return {};
+      } },
+      "an includeIf the global config pulls in for this folder": { scope: "global", lay: (home, proj) => {
+        writeFileSync(join(home, "work.cfg"), hooksLine(shared(home)));
+        writeFileSync(join(home, ".gitconfig"), `[includeIf "gitdir:${realpathSync(proj)}/"]\n\tpath = ${join(home, "work.cfg")}\n`);
+        return {};
+      } },
+      "the environment's GIT_CONFIG_COUNT, which is no repository's config": { scope: "command", lay: (home) => (
+        { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: shared(home) }
+      ) },
+    };
+    for (const [name, { scope, lay }] of Object.entries(shapes)) {
+      it(`${name} is refused the same way, the folder untouched`, () => {
+        const { proj, home } = repo();
+        sharedFolder(home);
+        const env = lay(home, proj);
+        expectRefusedUntouched(attempt("codex", home, { project: proj, env }, "--git-hooks"), proj, home, scope);
+      });
+    }
+
+    it("hostile: GIT_CONFIG in the environment turns the install's own config write into a write on that file; the setting lands in this repository's config instead", () => {
+      const { proj, home } = repo();
+      const global = join(home, ".gitconfig");
+      writeFileSync(global, "[user]\n\tname = owner\n");
+      const r = attempt("codex", home, { project: proj, env: { GIT_CONFIG: global } }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(readFileSync(global, "utf8")).toBe("[user]\n\tname = owner\n");
+      expect(git(proj, "config", "--local", "--get", "core.hooksPath")).toBe(join(proj, GITHOOKS));
+    });
+
+    it("a relative value at global scope is refused too: the decision is the scope, not the path", () => {
+      const { proj, home } = repo();
+      writeFileSync(join(home, ".gitconfig"), hooksLine(".githooks"));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("at global scope");
+      expect(existsSync(join(proj, ".githooks"))).toBe(false);
+    });
+
+    it("the hostile spelling: a local setting naming the very folder the global one names is that folder, and is refused", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      git(proj, "config", "core.hooksPath", shared(home));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("the folder the global config names");
+      expect(r.stderr).toContain(shared(home));
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("a git too old to name the scope (no --show-scope) is refused, never guessed; with nothing set it installs as usual", () => {
+      const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+      const shim = fresh("cairn-oldgit-");
+      writeFileSync(join(shim, "git"), `#!/bin/sh\ncase " $* " in *" --show-scope "*) exit 129;; esac\nexec "${real}" "$@"\n`);
+      chmodSync(join(shim, "git"), 0o755);
+      const env = { PATH: `${shim}:${process.env.PATH ?? ""}` };
+
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj, env }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("a scope this git cannot name");
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+
+      const plain = repo();
+      const ok = attempt("codex", plain.home, { project: plain.proj, env }, "--git-hooks");
+      expect(ok.status, ok.out).toBe(0);
+      expect(existsSync(join(plain.proj, GITHOOKS, "pre-push"))).toBe(true);
+    });
+
+    it("the harmless twin: local scope beats the global setting and is respected; the global folder stays untouched", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      mkdirSync(join(proj, "scripts", "hooks"), { recursive: true });
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+      expect(git(proj, "config", "--get", "core.hooksPath")).toBe("scripts/hooks");
+    });
+
+    it("the harmless twin: worktree scope is respected", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      git(proj, "config", "extensions.worktreeConfig", "true");
+      git(proj, "config", "--worktree", "core.hooksPath", "wt-hooks");
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "wt-hooks", "pre-push"))).toBe(true);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("the way out the line names works: a local core.hooksPath, then a re-run, gates this project alone", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.stderr).toContain("git config --local core.hooksPath");
+      git(proj, "config", "--local", "core.hooksPath", GITHOOKS);
+      const again = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(again.status, again.out).toBe(0);
+      expect(push(proj, home, ["origin", "main"]).stderr).toContain("cairn run guard: this push lands on the default branch");
+      expect(push(repo().proj, home, ["origin", "main"]).status).toBe(0);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("the nested-cwd variant: from a folder below the root the global setting is still refused; a local absolute one is still respected", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const sub = join(proj, "src");
+      const r = attempt("codex", home, { cwd: sub }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("at global scope");
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+
+      const hooks = join(proj, "scripts", "hooks");
+      mkdirSync(hooks, { recursive: true });
+      git(proj, "config", "core.hooksPath", hooks);
+      const ok = attempt("codex", home, { cwd: sub }, "--git-hooks");
+      expect(ok.status, ok.out).toBe(0);
+      expect(existsSync(join(hooks, "pre-push"))).toBe(true);
+    });
+
+    it("without the flag a global setting changes nothing: the install lands, exit 0, the folder untouched", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj });
+      expect(r.status, r.out).toBe(0);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("--check names a block an older install left in the shared folder, and lags; with no block a global setting is not a lag", () => {
+      const { proj, home } = repo();
+      run("codex", proj, home, "--git-hooks");
+      mkdirSync(shared(home));
+      writeFileSync(join(shared(home), "pre-push"), readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8"));
+      git(proj, "config", "--unset", "core.hooksPath");
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const out = runCheckFail("codex", proj, home);
+      expect(out).toContain("at global scope");
+      expect(out).toContain("every repository");
+
+      const clean = repo();
+      sharedFolder(clean.home);
+      writeFileSync(join(clean.home, ".gitconfig"), hooksLine("~/.githooks"));
+      const ok = attempt("codex", clean.home, { project: clean.proj }, "--check");
+      expect(ok.status, ok.out).toBe(0);
+      expect(ok.stdout).toContain("not installed");
+    });
+
+    it("Not seen: a local core.hooksPath naming a folder other repositories name in their own local configs is respected; git keeps no list of them", () => {
+      const { proj, home } = repo();
+      const folder = fresh("cairn-githooks-elsewhere-");
+      git(proj, "config", "core.hooksPath", folder);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(folder, "pre-push"))).toBe(true);
+      expect(readFileSync(SETUP, "utf8")).toContain("a local core.hooksPath naming a folder other");
+    });
+  });
+});
+
+describe("one link check on every project-scoped write (#498)", () => {
+  const REPO = join(dirname(SETUP), "..");
+  const CAIRN = ".cairn";
+  const first = (...p: string[]) => readdirSync(join(REPO, ...p)).filter((f) => !f.startsWith(".")).sort()[0];
+  const OWNER = "# the owner's file, somewhere else\n";
+
+  /** Every file and its bytes under a folder: what a refusal must leave as it found. */
+  function tree(dir: string, at = ""): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const f of readdirSync(join(dir, at), { withFileTypes: true })) {
+      const rel = join(at, f.name);
+      if (f.isDirectory()) Object.assign(out, tree(dir, rel));
+      else out[rel] = readFileSync(join(dir, rel), "utf8");
+    }
+    return out;
+  }
+
+  /** A project, a home, and a folder outside both holding the owner's file and a folder. */
+  function scene() {
+    const proj = fresh("cairn-links-proj-");
+    const home = fresh("cairn-links-home-");
+    const outside = fresh("cairn-links-outside-");
+    writeFileSync(join(outside, "victim"), OWNER);
+    mkdirSync(join(outside, "folder"));
+    writeFileSync(join(outside, "folder", "keep"), OWNER);
+    return { proj, home, outside };
+  }
+  function plant(proj: string, rel: string, target: string): void {
+    mkdirSync(dirname(join(proj, rel)), { recursive: true });
+    symlinkSync(target, join(proj, rel));
+  }
+
+  // Every project-scoped thing setup writes, by harness. A file row is a link
+  // where setup writes a file (the copied ones overwrite whole, so a link there
+  // erased the owner's file); a folder row is a link anywhere above the file.
+  const FILES: Array<[string, string]> = [
+    ["grok", "AGENTS.md"],
+    ["grok", ".mcp.json"],
+    ["grok", join(CAIRN, "harness", "SKILL.md")],
+    ["grok", join(CAIRN, "harness", "verbs", "help.md")],
+    ["grok", join(CAIRN, "harness", "scripts", "merge-overlap.mjs")],
+    ["grok", join(CAIRN, "harness", ".cairn-manifest.json")],
+    ["gemini", "GEMINI.md"],
+    ["gemini", join(".gemini", "commands", "cairn", first("harness", "gemini", "commands", "cairn"))],
+    ["copilot", join(".github", "copilot-instructions.md")],
+    ["copilot", join(".github", "prompts", first("harness", "copilot", "prompts"))],
+    ["cursor", join(".cursor", "mcp.json")],
+    ["cursor", join(".cursor", "hooks.json")],
+    ["cursor", join(".cursor", "hooks", "cairn", "cursor-adapter.mjs")],
+    ["opencode", "opencode.json"],
+    ["opencode", join(".opencode", "commands", first("harness", "opencode", "commands"))],
+    ["zed", join(".zed", "settings.json")],
+  ];
+  const FOLDERS: Array<[string, string]> = [
+    ["grok", CAIRN],
+    ["grok", join(CAIRN, "harness")],
+    ["grok", join(CAIRN, "harness", "verbs")],
+    ["grok", join(CAIRN, "harness", "scripts")],
+    ["gemini", ".gemini"],
+    ["copilot", ".github"],
+    ["copilot", join(".github", "prompts")],
+    ["cursor", ".cursor"],
+    ["cursor", join(".cursor", "hooks", "cairn")],
+    ["opencode", ".opencode"],
+    ["zed", ".zed"],
+  ];
+
+  for (const [harness, rel] of FILES) {
+    it(`${harness}: ${rel} as a link out is refused and the owner's file survives; dangling, nothing is created`, () => {
+      const { proj, home, outside } = scene();
+      const before = tree(outside);
+      plant(proj, rel, join(outside, "victim"));
+      const r = attempt(harness, home, { project: proj });
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("resolves outside the project");
+      expect(r.stderr).toContain("refusing to write through it");
+      expect(r.stderr).toContain(join(proj, rel));
+      expect(r.stdout).not.toContain("cairn-setup complete");
+      expect(tree(outside)).toEqual(before);
+
+      const again = scene();
+      plant(again.proj, rel, join(again.outside, "nowhere"));
+      const d = attempt(harness, again.home, { project: again.proj });
+      expect(d.status, d.out).toBe(1);
+      expect(d.stderr).toContain("is a symlink to a file that does not exist");
+      expect(d.stderr).toContain("refusing to write through it");
+      expect(existsSync(join(again.outside, "nowhere"))).toBe(false);
+    });
+  }
+
+  for (const [harness, rel] of FOLDERS) {
+    it(`${harness}: ${rel} as a folder link out is refused, nothing lands there; dangling, nothing is created`, () => {
+      const { proj, home, outside } = scene();
+      const before = tree(outside);
+      plant(proj, rel, join(outside, "folder"));
+      const r = attempt(harness, home, { project: proj });
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("resolves outside the project");
+      expect(tree(outside)).toEqual(before);
+
+      const again = scene();
+      plant(again.proj, rel, join(again.outside, "nowhere"));
+      const d = attempt(harness, again.home, { project: again.proj });
+      expect(d.status, d.out).toBe(1);
+      expect(d.stderr).toContain("is a symlink to a file that does not exist");
+      expect(existsSync(join(again.outside, "nowhere"))).toBe(false);
+    });
+  }
+
+  it("AGENTS.md refused: no CLAUDE.md is written importing it and no success line claims the spine", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join(outside, "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("claude", home, { project: proj });
+    expect(r.status, r.out).toBe(1);
+    expect(existsSync(join(proj, "CLAUDE.md"))).toBe(false);
+    expect(r.out).not.toContain("reads the spine");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+  });
+
+  it("the two spellings the issue reproduced: a relative link to a file beside the project, and a relative dangling one", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join("..", basename(outside), "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(1);
+    expect(r.stderr).toContain("resolves outside the project");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const b = scene();
+    symlinkSync("nowhere.md", join(b.proj, "AGENTS.md"));
+    const d = attempt("grok", b.home, { project: b.proj });
+    expect(d.status, d.out).toBe(1);
+    expect(existsSync(join(b.proj, "nowhere.md"))).toBe(false);
+  });
+
+  it("hostile: a chain that starts inside and ends outside, a folder link inside holding a link out, and a link to itself", () => {
+    const chain = scene();
+    symlinkSync(join(chain.outside, "victim"), join(chain.proj, "step.md"));
+    symlinkSync("step.md", join(chain.proj, "AGENTS.md"));
+    const a = attempt("grok", chain.home, { project: chain.proj });
+    expect(a.status, a.out).toBe(1);
+    expect(readFileSync(join(chain.outside, "victim"), "utf8")).toBe(OWNER);
+
+    const nest = scene();
+    const before = tree(nest.outside);
+    mkdirSync(join(nest.proj, "in-here"));
+    symlinkSync("in-here", join(nest.proj, CAIRN));
+    symlinkSync(join(nest.outside, "folder"), join(nest.proj, "in-here", "harness"));
+    const b = attempt("grok", nest.home, { project: nest.proj });
+    expect(b.status, b.out).toBe(1);
+    expect(b.stderr).toContain("resolves outside the project");
+    expect(tree(nest.outside)).toEqual(before);
+
+    const loop = scene();
+    symlinkSync("AGENTS.md", join(loop.proj, "AGENTS.md"));
+    const c = attempt("grok", loop.home, { project: loop.proj });
+    expect(c.status, c.out).toBe(1);
+    expect(c.stderr).toContain("refusing to write through it");
+  });
+
+  it("the git layer's writes go through it too: the hooks folder, the hook file, the script copy, and a folder a local core.hooksPath names", () => {
+    const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+    const shapes: Array<[string, (proj: string, outside: string) => void]> = [
+      ["the cairn hooks folder links out", (p, o) => plant(p, join(CAIRN, "githooks"), join(o, "folder"))],
+      ["the hook file links out", (p, o) => plant(p, join(CAIRN, "githooks", "pre-push"), join(o, "victim"))],
+      ["the copied script links out", (p, o) => plant(p, join(CAIRN, "harness", "scripts", "pre-push.mjs"), join(o, "victim"))],
+      ["a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks"), join(o, "folder")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
+      ["a hook in a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks", "pre-push"), join(o, "victim")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
+    ];
+    for (const [name, lay] of shapes) {
+      const { proj, home, outside } = scene();
+      git(proj, "init", "-q", "-b", "main");
+      lay(proj, outside);
+      const before = tree(outside);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, `${name}: ${r.out}`).toBe(1);
+      expect(r.stderr, name).toContain("refusing to write through it");
+      expect(tree(outside), name).toEqual(before);
+    }
+  });
+
+  it("the harmless twins: a link staying inside, a ../ climb that comes back, and a folder link inside all write as today, byte-identical on re-run", () => {
+    const { proj, home } = scene();
+    mkdirSync(join(proj, "docs"));
+    writeFileSync(join(proj, "docs", "agents.md"), "# house rules\n");
+    symlinkSync(join("docs", "agents.md"), join(proj, "AGENTS.md"));
+    mkdirSync(join(proj, "local-cairn"));
+    symlinkSync("local-cairn", join(proj, CAIRN));
+    writeFileSync(join(proj, "real.json"), "{}\n");
+    symlinkSync(join("..", basename(proj), "real.json"), join(proj, ".mcp.json"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    const spine = readFileSync(join(proj, "docs", "agents.md"), "utf8");
+    expect(spine).toContain("# house rules");
+    expect(spine).toContain("cairn:begin");
+    expect(JSON.parse(readFileSync(join(proj, "real.json"), "utf8")).mcpServers.cairn).toBeTruthy();
+    expect(existsSync(join(proj, "local-cairn", "harness", "SKILL.md"))).toBe(true);
+    const again = attempt("grok", home, { project: proj });
+    expect(again.status, again.out).toBe(0);
+    expect(readFileSync(join(proj, "docs", "agents.md"), "utf8")).toBe(spine);
+  });
+
+  it("the harmless twin: a project named through a link of its own, the way /tmp is on a Mac, is not a link out", () => {
+    const { proj, home, outside } = scene();
+    const via = join(outside, "via");
+    symlinkSync(proj, via);
+    writeFileSync(join(proj, "kept.md"), "# kept\n");
+    symlinkSync(join(proj, "kept.md"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: via });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(proj, "kept.md"), "utf8")).toContain("cairn:begin");
+  });
+
+  it("the nested-cwd variant: with the folder below the root as the project, a link out and a link climbing to the root refuse; a link inside it writes", () => {
+    const { proj, home, outside } = scene();
+    const sub = join(proj, "pkg");
+    mkdirSync(sub);
+    symlinkSync(join(outside, "victim"), join(sub, "AGENTS.md"));
+    const a = attempt("grok", home, { cwd: sub });
+    expect(a.status, a.out).toBe(1);
+    expect(a.stderr).toContain("resolves outside the project");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const b = scene();
+    const bsub = join(b.proj, "pkg");
+    mkdirSync(bsub);
+    writeFileSync(join(b.proj, "root.md"), OWNER);
+    symlinkSync(join("..", "root.md"), join(bsub, "AGENTS.md"));
+    const c = attempt("grok", b.home, { cwd: bsub });
+    expect(c.status, c.out).toBe(1);
+    expect(readFileSync(join(b.proj, "root.md"), "utf8")).toBe(OWNER);
+
+    const d = scene();
+    const dsub = join(d.proj, "pkg");
+    mkdirSync(dsub);
+    writeFileSync(join(dsub, "inner.md"), "# inner\n");
+    symlinkSync("inner.md", join(dsub, "AGENTS.md"));
+    const e = attempt("grok", d.home, { cwd: dsub });
+    expect(e.status, e.out).toBe(0);
+    expect(readFileSync(join(dsub, "inner.md"), "utf8")).toContain("cairn:begin");
+  });
+
+  it("CLAUDE.md keeps its own wording and its exit 0 (#429), through the same check; a dangling one too", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join(outside, "victim"), join(proj, "CLAUDE.md"));
+    const r = attempt("claude", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(r.stdout).toContain("resolves outside the project");
+    expect(r.stdout).toContain("add the @AGENTS.md import by hand");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const d = scene();
+    symlinkSync("nowhere.md", join(d.proj, "CLAUDE.md"));
+    const dr = attempt("claude", d.home, { project: d.proj });
+    expect(dr.status, dr.out).toBe(0);
+    expect(dr.stdout).toContain("is a symlink to a file that does not exist");
+    expect(existsSync(join(d.proj, "nowhere.md"))).toBe(false);
+  });
+
+  it("every write in setup goes through the one check: each fs writer has exactly one call site, and it runs the check", () => {
+    const src = readFileSync(SETUP, "utf8");
+    for (const writer of ["writeFileSync", "copyFileSync", "mkdirSync", "chmodSync"]) {
+      const calls = src.split("\n").filter((l) => l.includes(`${writer}(`));
+      expect(calls, writer).toHaveLength(1);
+      expect(calls[0], writer).toContain("checkLinks(");
+    }
+  });
+
+  it("the home-scoped writes keep following a dotfiles link, by decision, as the Not seen block says", () => {
+    const { proj, home, outside } = scene();
+    writeFileSync(join(outside, "gemini.json"), "{}\n");
+    mkdirSync(join(home, ".gemini"));
+    symlinkSync(join(outside, "gemini.json"), join(home, ".gemini", "settings.json"));
+    const r = attempt("gemini", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(JSON.parse(readFileSync(join(outside, "gemini.json"), "utf8")).mcpServers.cairn).toBeTruthy();
+    expect(readFileSync(SETUP, "utf8")).toContain("a home-scoped write");
+  });
+
+  it("Not seen: a hard link has no direction, so one to a file outside is written through; the block says so", () => {
+    const { proj, home, outside } = scene();
+    linkSync(join(outside, "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(outside, "victim"), "utf8")).toContain("cairn:begin");
+    expect(readFileSync(SETUP, "utf8")).toContain("a hard link has no direction");
+  });
+
+  it("Not seen: a link staying inside the project writes as today wherever inside it lands, and the swap race is named", () => {
+    const { proj, home } = scene();
+    mkdirSync(join(proj, ".git"));
+    writeFileSync(join(proj, ".git", "notes.md"), "# notes\n");
+    symlinkSync(join(".git", "notes.md"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(proj, ".git", "notes.md"), "utf8")).toContain("cairn:begin");
+    const src = readFileSync(SETUP, "utf8");
+    expect(src).toContain("a link staying inside the project");
+    expect(src).toContain("a link swapped in between the check and the write");
   });
 });

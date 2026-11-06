@@ -25,7 +25,8 @@ owner's ground, so the flag is the consent. The hook is a thin caller:
 the effect comes from the shared effect table, the stamp and the
 default-branch names from the shared hook library, the refusal text is
 the run guard's own, and the same escape is honoured and said aloud on
-stderr. An existing hooks path is respected, live hooks that would go
+stderr. A hooks path in the repository's own config is respected, one at
+global or system scope refuses the install (#497), live hooks that would go
 silent refuse the install in one line, a project's own pre-push survives
 below the cairn markers, and the check flag reports whether git still
 reaches the hook. The drift report measures the layer as a field, never
