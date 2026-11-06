@@ -7076,3 +7076,159 @@ describe("an owner-only key in cairn.json needs the owner: the harness guard (#2
     expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"]);
   });
 });
+
+// #509 -- #291 spelled a plain $NAME / ${NAME} of a same-line NAME=value and
+// nothing else, so an operator on the same variable -- ${HK:0}, ${HK#x},
+// ${HK/X/a}, ${!A}, an array element, or a printf -v, read, mapfile or +=
+// assignment -- read as a bare name the line never assigned, and the write
+// passed. Every one is unreadable now (shell-words.mjs UNREADABLE): at the
+// front of a write path it puts the write where the guard can't follow.
+describe("a write path built with an operator, array or read on a same-line variable is lost (#509)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-509-proj-");
+    const home = freshDir("cairn-hooks-509-home-");
+    const cairnHome = freshDir("cairn-hooks-509-cairnhome-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "src"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return { p, home, cairnHome };
+  }
+
+  function run(f: ReturnType<typeof fixture>, command: string, opts: { cwd?: string; bare?: boolean } = {}) {
+    const cwd = opts.cwd ?? f.p;
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: f.cairnHome };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "TMPDIR"]) delete env[k];
+    if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd, env, encoding: "utf8", timeout: 5000, input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  const LOST = (rel: string): string[] => [
+    `HK=${rel}hooks; echo x > \${HK:0}/hooks.json`,
+    `HK=x${rel}hooks; echo x > \${HK:1}/hooks.json`,
+    `HK=x${rel}hooks; echo x > \${HK#x}/hooks.json`,
+    `HK=${rel}hooksx; echo x > \${HK%x}/hooks.json`,
+    `HK=${rel}hoXks; echo x > \${HK/X/o}/hooks.json`,
+    `HK=${rel}hooks; echo x > \${HK^^}/hooks.json`,
+    `HK=${rel}hooks; echo x > \${HK:-x}/hooks.json`,
+    `HK=${rel}hooks/hooks.json; echo x > \${HK:0}`,
+    `HK=${rel}hooks; A=HK; echo x > \${!A}/hooks.json`,
+    `arr=(${rel}hooks); echo x > \${arr[0]}/hooks.json`,
+    `arr=(${rel}hooks); echo x > $arr/hooks.json`,
+    `declare -a arr=(${rel}hooks); echo x > \${arr[0]}/hooks.json`,
+    `arr[0]=${rel}hooks; echo x > \${arr[0]}/hooks.json`,
+    `printf -v HK ${rel}hooks; echo x > $HK/hooks.json`,
+    `printf -vHK ${rel}hooks; echo x > $HK/hooks.json`,
+    "read HK; echo x > $HK/hooks.json",
+    "IFS= read -r HK; echo x > $HK/hooks.json",
+    "read -p 'where' HK; echo x > $HK",
+    "read; echo x > $REPLY/hooks.json",
+    "mapfile -t arr; echo x > ${arr[0]}/hooks.json",
+    "readarray arr; rm ${arr[0]}/hooks.json",
+    "mapfile; echo x > ${MAPFILE[0]}/hooks.json",
+    `HK=${rel}ho; HK+=oks; echo x > $HK/hooks.json`,
+    "getopts a:b HK; echo x > $HK/hooks.json",
+    `declare -n R=HK; HK=${rel}hooks; echo x > $R/hooks.json`,
+    `declare -l HK=${rel}HOOKS; echo x > $HK/hooks.json`,
+    // built from one of these: as unreadable as what it's built from
+    `HK=${rel}hooks; D=\${HK:0}; echo x > $D/hooks.json`,
+    "read R; D=$R/hooks; rm $D/hooks.json",
+    `HK=${rel}hooks; rm \${HK:0}/hooks.json`,
+    `HK=${rel}hooks; cp /tmp/x \${HK:0}/hooks.json`,
+    `HK=${rel}hooks; eval 'echo x > \${HK:0}/hooks.json'`,
+    `HK=${rel}hooks; bash -c 'echo x > \${HK:0}/hooks.json'`,
+    "cd src; echo x > $OLDPWD/hooks/hooks.json",
+    `HK=${rel}hooks; rsync /tmp/x \${HK:0}/hooks.json`,
+    `HK=${rel}hooks; find \${HK:0} -delete`,
+    "read D; find $D -delete",
+  ];
+
+  // Judged as a write to the hook file, by name: spelled, not lost
+  const HIT = (rel: string): string[] => [
+    // hostile: a default in the word, a value that spells a flag and the path, a value that spells the command
+    `echo x > \${X:-${rel}hooks}/hooks.json`,
+    `echo x > \${X-${rel}hooks/hooks.json}`,
+    `F='-f ${rel}hooks/hooks.json'; rm $F`,
+    `C='rm ${rel}hooks/hooks.json'; $C`,
+    `C='rm ${rel}hooks/hooks.json'; eval "$C"`,
+    `R=rm; $R ${rel}hooks/hooks.json`,
+    `R=rm; sudo $R ${rel}hooks/hooks.json`,
+    // a later assignment doesn't take back an earlier one the shell may have kept
+    `D=${rel}hooks; false && D=${rel}src; echo x > $D/hooks.json`,
+    // a loop or a function body runs after what the line assigns below it
+    `for i in 1 2; do echo x > $D/hooks.json; D=${rel}hooks; done`,
+    `f() { echo x > $D/hooks.json; }; D=${rel}hooks; f`,
+    `eval 'D=${rel}hooks'; echo x > $D/hooks.json`,
+    `rm $'${rel}hooks/hooks.json'`,
+    `D=${rel}hooks; find $D | xargs rm`,
+    `D=${rel}hooks; ls $D/hooks.json | xargs rm`,
+    `E='echo x > ${rel}hooks/hooks.json'; eval "$E"`,
+    `E='echo x > ${rel}hooks/hooks.json'; bash -c "$E"`,
+  ];
+
+  const TWINS = (rel: string): string[] => [
+    // a name the line never assigned stays as typed, whatever is done to it
+    "echo x > ${TMPDIR:-/tmp}/x", "echo x > ${TMPDIR:-/tmp}/hooks.json", "echo x > ${X:1}/y", "echo x > ${X#a}/y",
+    "echo x > ${!X}/y", "echo x > ${X[0]}/y", "echo x > $X/y", `echo x > \${X:-${rel}src}/y`,
+    // under a folder the guard knows, judged there, as $(date) is
+    "N=abc; echo x > /tmp/${N:0}.log", "read N; echo x > /tmp/$N.log", `N=abc; echo x > ${rel}src/\${N:0}.json`,
+    "arr=(a b); echo x > /tmp/${arr[0]}", "printf -v N %s a; echo x > /tmp/$N",
+    // nothing written: the operators alone refuse nothing
+    "HK=hooks; echo ${HK:0}", "read X; echo $X", "mapfile -t a; echo ${a[0]}", "X=a; X+=b; echo $X",
+    "printf -v X %s a; echo $X", "arr=(a b); echo ${arr[0]}",
+    // the daily shapes #291 pinned, and the same operators on a harmless spelled path
+    "F=$(mktemp); echo x > $F", "D=$(mktemp -d); echo x > $D", `C='rm ${rel}src/x.json'; $C`, `R=rm; $R ${rel}src/x.json`,
+    `F='-f ${rel}src/x.json'; rm $F`, `D=${rel}src; false && D=/tmp; echo x > $D/x.json`, `rm $'${rel}src/x.json'`,
+    `f() { echo x > $D/x.json; }; D=${rel}src; f`,
+    "D=$(mktemp -d); find $D -delete", "find $X -delete", `D=${rel}src; find $D | xargs rm`, "rsync /tmp/x host:hooks/hooks.json",
+  ];
+
+  it("each is refused as a write the guard can't place, naming no path it invented; a spelled one is refused by file", () => {
+    const f = fixture();
+    for (const c of LOST("")) {
+      const r = run(f, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("couldn't tell");
+    }
+    for (const c of HIT("")) {
+      const r = run(f, c);
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain("file:");
+    }
+  });
+
+  it("the twins pass: an operator on a name the line never assigned stays as typed, and one under a known folder is judged there", () => {
+    const f = fixture();
+    for (const c of TWINS("")) {
+      const r = run(f, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      for (const c of [...LOST("../../"), ...HIT("../../")]) {
+        expect(run(f, c, { cwd: nested, bare }).status, `${c} bare=${bare}`).toBe(2);
+      }
+      for (const c of TWINS("../../")) {
+        expect(run(f, c, { cwd: nested, bare }).status, `${c} bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("what the Not seen block says is not seen, is not: a value from a file the line sources, and a value under a known folder that climbs out", () => {
+    const f = fixture();
+    expect(run(f, ". ./env.sh; echo x > $HK/hooks.json").status).toBe(0);
+    expect(run(f, "read N; echo x > /tmp/$N").status).toBe(0);
+    const header = readFileSync(HARNESSGUARD, "utf8");
+    const block = header.slice(0, header.indexOf("*/"));
+    expect(block).toContain("a file the line sources");
+    expect(block).toContain("under a folder the guard knows");
+  });
+});
