@@ -224,6 +224,16 @@
  *   guard can't read (from a stream, or a substitution) counts as the pointer,
  *   and so does an alias whose value it can't. Asserted: hooks.test.ts "(#506)".
  *
+ *   A template folder (#507): git copies the hooks/ of the folder an init
+ *   or clone names into the repository's .git/hooks, the third way to plant
+ *   one. `--template` in any abbreviation git's parser takes, init.templateDir
+ *   on any channel (-c, --config-env, GIT_CONFIG_COUNT, `git config` in any
+ *   scope, a line into a git config file), GIT_TEMPLATE_DIR on the line or in
+ *   the session (a submodule's clone inherits it), and a -c or --config that
+ *   clone writes into the new repository's config naming the pointer are all
+ *   refused. A plain init or clone, reading the key, and the same setting on
+ *   a command that copies nothing pass. Asserted: hooks.test.ts "(#507)".
+ *
  *   Not seen, dated 2026-11-05 (#506, by decision: the filed scope is the
  *   pointer, and refusing every key below would refuse daily configuration):
  *   a git config key other than the pointer that names a program git runs
@@ -275,7 +285,7 @@
  *   The program a hook or an MCP server starts by name off PATH. An MCP
  *   server that runs arbitrary code is that same class: gate it with the
  *   harness's own permission rules (ask or deny on its tools), not this.
- *   A hooksPath or include that reaches a git config file in content the
+ *   A hooksPath, include or templateDir that reaches a git config file in content the
  *   line doesn't spell (`cp evil.cfg .git/config`, an unreadable patch),
  *   and the editor `git config --edit` opens (#465).
  *   A protected path in a variable the line never assigns (#291, by
@@ -409,6 +419,10 @@ const GIT_WAIT_MS = 1500;
 // by command or by a line written into a config file.
 const HOOKS_PATH_KEY = "core.hookspath";
 const HOOKS_PATH_WHAT = "where git looks for its hooks (core.hooksPath)";
+// Where an init or clone copies its hooks from (#507), as git reads the key,
+// and what a refusal calls it.
+const TEMPLATE_KEY = "init.templatedir";
+const TEMPLATE_WHAT = "the template folder git copies hooks from (init.templateDir, --template)";
 // The other pointer: include.path and includeIf.<condition>.path name a
 // file git reads config from, which can carry the key (folded keys), and
 // the sections those keys live in.
@@ -435,8 +449,10 @@ const GIT_CONFIG_SECTIONS = new Set(["--remove-section", "--rename-section", "re
 const GIT_CONFIG_READS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
   "--get-colorbool", "-l", "--list", "-e", "--edit", "get", "list", "edit"]);
 // The words a call must spell before a write to a git config file is
-// judged (#465): the key, or an include that can carry it.
-const POINTER_WORDS = /hookspath|include/;
+// judged (#465): the key, an include that can carry it, or the template
+// folder (#507), which a refusal names on its own.
+const POINTER_WORDS = /hookspath|include|templatedir/;
+const HOOKS_POINTER_WORDS = /hookspath|include/;
 
 // Options whose value is the folder a runner works in (#316): uv's
 // --directory, npm's and pnpm's -C, bun's --cwd, as the next word or with
@@ -740,6 +756,7 @@ let UNLISTED = [];
 // call spells one (POINTER_WORDS), empty otherwise.
 let GIT_ANSWERS = null;
 let GIT_CONFIGS = [];
+let GIT_CONFIG_WHAT = HOOKS_PATH_WHAT;
 
 // Paths
 
@@ -1388,7 +1405,7 @@ function fileRule(abs) {
   }
   // a git config file, while the call spells a pointer git reads from it
   // (#465): the hooksPath that moves the folder #353 protects, or an include
-  if (GIT_CONFIGS.some((f) => same(abs, f))) return HOOKS_PATH_WHAT;
+  if (GIT_CONFIGS.some((f) => same(abs, f))) return GIT_CONFIG_WHAT;
   const zone = zoneOf(abs);
   if (zone) return zone;
   const rel = projectRelative(abs);
@@ -2374,9 +2391,15 @@ function gitConfigTargets(rest, seg, ctx, add, out) {
     if (keyed[1].startsWith("!")) out.push(...shellAliasTargets(keyed[1].slice(1), ctx.dir, ctx));
     else gitTargets(aliasWords(keyed[1]), seg, ctx, add, out);
   }
+  // a section renamed onto one holds the same key under the new name
+  const onto = section && keyed[1] !== undefined ? keyed[1] : null;
   const pointer = could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ||
-    (section && (could(key, "core") || POINTER_SECTION.test(fold(key))));
+    (section && (could(key, "core") || POINTER_SECTION.test(fold(key)))) ||
+    (onto !== null && (could(onto, "core") || POINTER_SECTION.test(fold(onto))));
   if (pointer) out.push({ raw: `${key} (a git config key)`, what: HOOKS_PATH_WHAT });
+  else if (could(key, TEMPLATE_KEY) || (onto !== null && could(onto, "init"))) {
+    out.push({ raw: `${key} (a git config key)`, what: TEMPLATE_WHAT });
+  }
 }
 
 /** True for a word the shell works out as the line runs, a substitution or a name the line set from one (#506). */
@@ -2438,6 +2461,50 @@ function gitInvocation(words, ctx) {
 }
 
 /**
+ * What a -c or --config value on `git clone` writes into the new repository's
+ * config (#507), as the hit it is: the template key, the pointer, or a key the
+ * guard can't read; any other is ordinary. Null for an ordinary one.
+ */
+function cloneSetting(value) {
+  const key = value.includes("=") ? value.slice(0, value.indexOf("=")) : value;
+  if (could(key, TEMPLATE_KEY)) return TEMPLATE_WHAT;
+  const open = /[$`]/.test(key) || STANDINS.some((m) => key.includes(m));
+  return open || could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ? HOOKS_PATH_WHAT : null;
+}
+
+/**
+ * The template an init, clone or submodule's clone is told to copy hooks from
+ * (#507), as hits: GIT_TEMPLATE_DIR and init.templateDir on any channel the
+ * invocation read, and for init and clone the flags themselves -- the long
+ * names as git's parser takes them, any shorter start of one -- and what
+ * clone's -c and --config write into the new repository.
+ */
+function gitSeedTargets(inv, ctx, out) {
+  const named = ctx.assigns?.some((a) => a.startsWith("GIT_TEMPLATE_DIR=")) || ctx.vars?.has("GIT_TEMPLATE_DIR")
+    || process.env.GIT_TEMPLATE_DIR !== undefined;
+  if (named) out.push({ raw: "GIT_TEMPLATE_DIR (a folder git copies hooks from)", what: TEMPLATE_WHAT });
+  const key = (c) => fold(c.includes("=") ? c.slice(0, c.indexOf("=")) : c);
+  const set = inv.configs.find((c) => key(c) === TEMPLATE_KEY);
+  if (set !== undefined) out.push({ raw: `${set} (a git config value)`, what: TEMPLATE_WHAT });
+  const unread = inv.unread.find((u) => u.key === "*" || fold(u.key) === TEMPLATE_KEY);
+  if (unread) out.push({ raw: `${unread.from} (a setting the guard can't read)`, what: TEMPLATE_WHAT });
+  if (inv.sub === "submodule") return;
+  const words = inv.args;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const long = /^(--[^=]+)(?:=(.*))?$/.exec(w);
+    const short = long || w.startsWith("--") ? null : /^-[A-Za-z]*?c(.*)$/.exec(w);
+    if (long && "--template".startsWith(long[1])) {
+      out.push({ raw: `${w} (a folder git copies hooks from)`, what: TEMPLATE_WHAT });
+    } else if (inv.sub === "clone" && ((long && "--config".startsWith(long[1])) || short)) {
+      const value = (long ? long[2] : short[1]) || words[i + 1] || "";
+      const what = cloneSetting(value);
+      if (what) out.push({ raw: `${value} (a setting clone writes)`, what });
+    }
+  }
+}
+
+/**
  * git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree
  * clone and kin plant (#317), the config key that moves the hooks folder
  * (#465) -- each read on the subcommand git runs, its aliases walked (#506)
@@ -2465,6 +2532,7 @@ function gitTargets(args, seg, ctx, add, out) {
     out.push({ raw: `${shown} (a git subcommand the guard can't read)`, what: HOOKS_PATH_WHAT });
     return;
   }
+  if (sub === "init" || sub === "clone" || sub === "submodule") gitSeedTargets(inv, ctx, out);
   const ops = plain(rest);
   if (sub === "checkout" || sub === "restore") for (const a of ops) add(a, "write", dir);
   else if (sub === "rm") for (const a of ops) add(a, "remove", dir);
@@ -3141,7 +3209,11 @@ try {
   // call spells one in what it writes or runs -- never in a path it names,
   // so a folder called hookspath makes no edit of .git/config a pointer: a
   // user.name line into .git/config stays ordinary work.
-  if (POINTER_WORDS.test(fold(JSON.stringify(withoutPaths(toolInput))))) GIT_CONFIGS = gitConfigFiles();
+  const spelled = fold(JSON.stringify(withoutPaths(toolInput)));
+  if (POINTER_WORDS.test(spelled)) {
+    GIT_CONFIGS = gitConfigFiles();
+    GIT_CONFIG_WHAT = HOOKS_POINTER_WORDS.test(spelled) ? HOOKS_PATH_WHAT : TEMPLATE_WHAT;
+  }
 
   // The approval stamp (#460): the flag itself is the write, so the hit is
   // made here -- the tool's input names no path for the loops below to judge.

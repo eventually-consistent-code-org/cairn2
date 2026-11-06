@@ -6706,6 +6706,131 @@ describe("an alias that runs git config core.hooksPath is the pointer: every cha
   });
 });
 
+// #507: a template folder's hooks/ is copied into .git/hooks by the init or
+// clone that names it, the third pointer-shaped way to plant a hook after the
+// folder (#353) and core.hooksPath (#465). Every way a line can name a
+// template is refused; a plain init, and reading the key, are ordinary.
+describe("a template folder copies hooks into .git/hooks: git init and clone (#507)", () => {
+  const WHAT = "the template folder git copies hooks from";
+  const POINTER = "where git looks for its hooks (core.hooksPath)";
+  const URL = "https://example.com/r.git";
+
+  const REFUSED: Array<[string, string]> = [
+    // the flag, in each spelling git's parser takes
+    ["git init --template=/tmp/t", WHAT],
+    ["git init --template /tmp/t", WHAT],
+    ["git init --temp=/tmp/t", WHAT],
+    ["git init -q --templ /tmp/t sub", WHAT],
+    [`git clone --template=/tmp/t ${URL} d`, WHAT],
+    [`git clone --template /tmp/t ${URL} d`, WHAT],
+    // init.templateDir on every channel
+    ["git -c init.templateDir=/tmp/t init", WHAT],
+    ["git -c INIT.TEMPLATEDIR=/tmp/t init", WHAT],
+    [`git -c init.templateDir=/tmp/t clone ${URL} d`, WHAT],
+    ["V=/tmp/t git --config-env=init.templateDir=V init", WHAT],
+    ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.templateDir GIT_CONFIG_VALUE_0=/tmp/t git init", WHAT],
+    ["git -c \"init.templateDir=$(cat /tmp/f)\" init", WHAT],
+    ["git -c \"$(cat /tmp/f)\" init", WHAT],
+    ["GIT_CONFIG_PARAMETERS=\"'init.templateDir=/tmp/t'\" git init", WHAT],
+    // saved, for the next init
+    ["git config init.templateDir /tmp/t", WHAT],
+    ["git config --global init.templateDir /tmp/t", WHAT],
+    ["git config --system init.templatedir /tmp/t", WHAT],
+    ["git config --file /tmp/c init.templateDir /tmp/t", WHAT],
+    ["git config set init.templateDir /tmp/t", WHAT],
+    ["git config --add INIT.TemplateDir /tmp/t", WHAT],
+    ["git config --rename-section evil init", WHAT],
+    ["git config --rename-section evil core", POINTER],
+    // the environment
+    ["GIT_TEMPLATE_DIR=/tmp/t git init", WHAT],
+    ["env GIT_TEMPLATE_DIR=/tmp/t git init", WHAT],
+    ["export GIT_TEMPLATE_DIR=/tmp/t; git init", WHAT],
+    ["export GIT_TEMPLATE_DIR=$(cat /tmp/f); git init", WHAT],
+    [`GIT_TEMPLATE_DIR=/tmp/t git clone ${URL} d`, WHAT],
+    [`GIT_TEMPLATE_DIR=/tmp/t git submodule add ${URL} d`, WHAT],
+    // a setting clone writes into the new repository's config
+    [`git clone -c core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --config core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --config=core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --conf=CORE.HOOKSPATH=/tmp/h ${URL} d`, POINTER],
+    [`git clone -ccore.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone -c include.path=/tmp/evil ${URL} d`, POINTER],
+    [`git clone -c init.templateDir=/tmp/t ${URL} d`, WHAT],
+    [`git clone -c "$(cat /tmp/f)" ${URL} d`, POINTER],
+    // through an alias, and through what nests a git line
+    ["git -c 'alias.i=init --template=/tmp/t' i", WHAT],
+    ["git config alias.i 'init --template=/tmp/t'", WHAT],
+    ["bash -c 'git init --template=/tmp/t'", WHAT],
+  ];
+
+  const TWINS = [
+    "git init", "git init -q", "git init sub", "git init --bare sub.git", "git init -b main sub",
+    `git clone ${URL} d`, `git clone -c user.name=x ${URL} d`, `git clone --tags ${URL} d`, `git clone --depth 1 ${URL} d`,
+    `git clone -c "user.name=$(whoami)" ${URL} d`,
+    // reading the key
+    "git config init.templateDir", "git config --get init.templateDir", "git config get init.templateDir", "git config --list",
+    // a one-command setting on a command that copies nothing
+    "git -c init.templateDir=/tmp/t status", "GIT_TEMPLATE_DIR=/tmp/t git status", "git -c core.hooksPath=/tmp/h status",
+    // the other keys in that section
+    "git config init.defaultBranch main", "git -c init.defaultBranch=main init",
+    "echo '[init] defaultBranch = main' >> .git/config",
+  ];
+
+  it("refuses each spelling and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("tpl");
+    for (const [c, what] of REFUSED) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(what);
+    }
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+  });
+
+  it("a templateDir line put into a git config file is the same write, by the shell or a tool", () => {
+    const { p, home } = hardenFixture("tpl-file");
+    const cfg = join(p, ".git", "config");
+    for (const c of ["echo '[init] templateDir = /tmp/t' >> .git/config", "printf '[init]\\n\\ttemplatedir = /tmp/t\\n' >> .git/config",
+      `echo '[init] templateDir = /tmp/t' >> ${join(home, ".gitconfig")}`]) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+    }
+    expect(hardenRun(p, home, "Edit", { file_path: cfg, old_string: "x", new_string: "templateDir = /tmp/t" }).status).toBe(2);
+    expect(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: cfg, content: "[init]\n\ttemplateDir = /tmp/t\n" }).status).toBe(2);
+    expect(hardenRun(p, home, "Edit", { file_path: cfg, old_string: "x", new_string: "name = y" }).status).toBe(0);
+    // the measured gap, as the Not seen block says: content the line doesn't spell
+    expect(hardenRun(p, home, "Bash", { command: "cp /tmp/evil.cfg .git/config" }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("tpl-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      for (const c of ["git init --template=/tmp/t", "GIT_TEMPLATE_DIR=/tmp/t git init", "git config init.templateDir /tmp/t",
+        "echo '[init] templateDir = /tmp/t' >> ../../.git/config"]) {
+        expect(hardenRun(p, home, "Bash", { command: c }, at).status, `${c}, bare=${bare}`).toBe(2);
+      }
+      for (const c of ["git init sub", "git config --get init.templateDir"]) {
+        expect(hardenRun(p, home, "Bash", { command: c }, at).status, `${c}, bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the scenario is real: git copies the template's hook into the repository the guard refuses to re-init", () => {
+    const { p, home } = hardenFixture("tpl-real");
+    const tpl = freshDir("cairn-hooks-tpl-dir-");
+    mkdirSync(join(tpl, "hooks"), { recursive: true });
+    writeFileSync(join(tpl, "hooks", "pre-commit"), "#!/bin/sh\n");
+    hardenGit(p, home, "init", "-q", `--template=${tpl}`);
+    expect(existsSync(join(p, ".git", "hooks", "pre-commit"))).toBe(true);
+    // and the abbreviation this guard reads is one git takes
+    const q = hardenFixture("tpl-real-abbrev");
+    hardenGit(q.p, q.home, "init", "-q", `--temp=${tpl}`);
+    expect(existsSync(join(q.p, ".git", "hooks", "pre-commit"))).toBe(true);
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with
