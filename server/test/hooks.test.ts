@@ -6431,6 +6431,12 @@ describe("the folders the ship gate runs from are the harness guard's (#492)", (
       expect(hardenRun(empty.p, empty.home, "Bash", { command: c }).status, c).toBe(2);
     }
     expect(hardenRun(empty.p, empty.home, "Bash", { command: "mkdir -p .cairn/notes" }).status).toBe(0);
+    // setup installs where it stands, so a package folder's own pair is the same thing
+    for (const c of ["echo x > pkg/.cairn/harness/scripts/pre-push.mjs", "echo x > pkg/.cairn/githooks/pre-push", "echo x > pkg/.cairn/state/approvals/01-x.json"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(p, home, "Write", { file_path: join(p, "pkg/lib/.cairn/harness/scripts/lib.mjs"), content: "x" }).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > pkg/.cairn/notes/a.md" }).status).toBe(0);
   });
 
   it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {

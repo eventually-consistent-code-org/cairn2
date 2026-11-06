@@ -275,6 +275,8 @@
  *   since the hook looks in the worktree it runs from first; a folder on the
  *   way to one (.cairn), while it isn't there as a folder, counts, and so
  *   does a folder's unknown contents copied onto it (`cp -r src/. .cairn/`).
+ *   A package folder's own pair counts at any depth in the project, since
+ *   setup installs where it stands.
  *   Reading and running what's there is ordinary work, and setup is a process
  *   of its own that no guard judges the writes of: only the agent's calls
  *   are. Asserted: hooks.test.ts "(#492)".
@@ -740,6 +742,12 @@ const CAIRN_ZONES = [
   [[".cairn", "githooks"], "the folder cairn's git hooks live in"],
   [[".cairn", "state", "approvals"], APPROVAL_WHAT],
 ];
+// Setup installs where it stands, so a package folder of the project can hold
+// the same three, and its hook names its own script: matched at any depth
+// inside the project, like a nested .claude.
+for (const [names, what] of CAIRN_ZONES) {
+  PROTECTED.push({ re: new RegExp(`^(?:.*/)?${names.join("/").replace(/\./g, "\\.")}/`, "i"), what });
+}
 
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
