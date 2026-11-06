@@ -3155,7 +3155,7 @@ describe("run guard: the push action by another route meets the push gates (#483
     [`gh api -X PUT ${MERGE}`, `gh api ${MERGE}`],
     ["gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
       "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 1) { merged } } }'"],
-    ["gh api graphql -F query=@merge.graphql", "gh api graphql -f query='mutation { addComment(input: {subjectId: \"x\", body: \"hi\"}) { clientMutationId } }'"],
+    // a GraphQL body from a file left this table with #505: it may be a protection delete, so no stamp covers it (runguard-sidedoors.test.ts)
     ["gh release create v1.0 --notes x", "gh release list"],
     ["gh repo delete o/r --yes", "gh repo view o/r"],
     [`curl -X PUT ${MERGE} -H "Authorization: token x"`, `curl ${MERGE} -H "Authorization: token x"`],

@@ -441,6 +441,9 @@ describe("side doors: the control the Not seen block relies on can't be removed 
     ["gh repo edit --default-branch dev", "`gh repo edit --default-branch`", "gh repo edit --description x"],
     ["gh api graphql -f query='mutation { deleteBranchProtectionRule(input: {branchProtectionRuleId: \"x\"}) { clientMutationId } }'",
       "a `gh api` GraphQL protection mutation", "gh api graphql -f query='query { viewer { login } }'"],
+    // the row moved here from the #483 table: a body the guard can't read may be any of the above, so a stamp doesn't cover it
+    ["gh api graphql -F query=@merge.graphql", "a `gh api` GraphQL mutation request from a file",
+      "gh api graphql -f query='mutation { addComment(input: {subjectId: \"x\", body: \"hi\"}) { clientMutationId } }'"],
   ];
 
   it("each refuses with a clean stamp and no run, from the root and a nested folder, naming the route and the owner's escape; its twin passes", () => {
