@@ -6831,6 +6831,117 @@ describe("a template folder copies hooks into .git/hooks: git init and clone (#5
   });
 });
 
+// #508: `--git-hooks` writes core.hooksPath and arms whatever the folder
+// holds, and the flag was the consent any process could pass. Run by the
+// agent it is a harness write under the same escape as every other; setup's
+// own refusal of a folder holding hooks it did not write is setup.test.ts
+// "(#508)", for the harnesses where no guard runs.
+describe("an agent-run cairn-setup --git-hooks needs the owner (#508)", () => {
+  const WHAT = "where git looks for its hooks (core.hooksPath)";
+  const PKG = "@eventually-consistent/cairn";
+
+  const REFUSED = [
+    "node setup/cairn-setup.mjs claude --git-hooks",
+    "node ./setup/cairn-setup.mjs codex --git-hooks",
+    "node /opt/cairn/setup/cairn-setup.mjs claude --project . --git-hooks",
+    "node --no-warnings setup/cairn-setup.mjs claude --git-hooks",
+    "bun setup/cairn-setup.mjs claude --git-hooks",
+    "deno run -A setup/cairn-setup.mjs claude --git-hooks",
+    "npx cairn-setup codex --git-hooks",
+    `npx ${PKG} claude --git-hooks`,
+    // the sibling the plan names, and the runners around it
+    `npx --yes ${PKG}@latest claude --git-hooks`,
+    `npx -y -p ${PKG} cairn-setup claude --git-hooks`,
+    `npx --package=${PKG} cairn-setup claude --git-hooks`,
+    `pnpm dlx ${PKG} claude --git-hooks`,
+    `yarn dlx ${PKG} claude --git-hooks`,
+    `bunx ${PKG} claude --git-hooks`,
+    "npm exec -- cairn-setup claude --git-hooks",
+    "npm run setup -- claude --git-hooks",
+    // by name, a path, or a letter case the volume doesn't count
+    "cairn-setup claude --git-hooks",
+    "./node_modules/.bin/cairn-setup claude --git-hooks",
+    "CAIRN-SETUP claude --git-hooks",
+    // through what nests a command
+    "bash -c 'npx cairn-setup claude --git-hooks'",
+    "env X=1 cairn-setup claude --git-hooks",
+    "op run -- cairn-setup claude --git-hooks",
+    "eval cairn-setup claude --git-hooks",
+    "nohup cairn-setup claude --git-hooks",
+    "tsx setup/cairn-setup.mjs claude --git-hooks",
+    // the flag spelled from what the line gave it, or where the guard can't read it
+    "F=--git-hooks; cairn-setup claude $F",
+    "cairn-setup claude --git-{hooks,x}",
+    "cairn-setup claude $(echo --git-hooks)",
+    "F=$(echo --git-hooks); node setup/cairn-setup.mjs claude $F",
+    "cairn-setup claude $F",
+    "echo --git-hooks | xargs cairn-setup claude",
+    "echo --git-hooks | xargs node setup/cairn-setup.mjs claude",
+    "cairn-setup claude --git-h*",
+  ];
+
+  const TWINS = [
+    "node setup/cairn-setup.mjs claude",
+    "node ./setup/cairn-setup.mjs codex --local",
+    "npx cairn-setup claude",
+    `npx --yes ${PKG}@latest claude`,
+    "cairn-setup claude --check",
+    'cairn-setup claude --project "$PWD"',
+    "cairn-setup claude --project /tmp/x --local",
+    'node setup/cairn-setup.mjs "--project=$PWD" claude',
+    // naming it is not running it
+    "grep -n -- --git-hooks setup/cairn-setup.mjs",
+    "rg -- --git-hooks docs",
+    "cat setup/cairn-setup.mjs",
+    "echo cairn-setup claude --git-hooks",
+    "sed -n 1,5p setup/cairn-setup.mjs",
+    // a runner running something else, and a package with the name inside its own
+    "npx vitest run test/setup.test.ts",
+    "npm test",
+    "npx @eventually-consistent/cairn-server --help",
+  ];
+
+  it("refuses every spelling of the install and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("setup");
+    for (const c of REFUSED) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+      expect(r.stderr, c).toContain("--git-hooks");
+    }
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    // an MCP tool's command line reads the same
+    expect(hardenRun(p, home, `${HARDEN_DC}start_process`, { command: "npx cairn-setup claude --git-hooks" }).status).toBe(2);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("setup-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude --git-hooks" }, at).status, `bare=${bare}`).toBe(2);
+      expect(hardenRun(p, home, "Bash", { command: "npx cairn-setup claude --git-hooks" }, at).status, `bare=${bare}`).toBe(2);
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude" }, at).status, `bare=${bare}`).toBe(0);
+    }
+  });
+
+  it("the owner's escape lets it through: the session's, and the inline prefix every harness write honours (#265)", () => {
+    const { p, home } = hardenFixture("setup-escape");
+    const c = "node setup/cairn-setup.mjs claude --git-hooks";
+    expect(hardenRun(p, home, "Bash", { command: c }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 ${c}` }).status).toBe(0);
+    // ... and it exempts only its own command
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 true; ${c}` }).status).toBe(2);
+  });
+
+  it("the measured gap, as the Not seen block says: a renamed copy run directly, or setup started from an interpreter, passes", () => {
+    const { p, home } = hardenFixture("setup-gap");
+    for (const c of ["/tmp/renamed claude --git-hooks", "node -e \"require('child_process').execSync('cairn-setup claude --git-hooks')\""]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with
