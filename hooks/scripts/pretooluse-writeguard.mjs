@@ -51,7 +51,7 @@
  *
  * Coverage -- what the Bash leg reads, through shell-words.mjs (shared with
  *   the run and harness guards, so a shape closed there closes here): the
- *   `>` `>>` `&>` `>|` redirect targets of every simple command, a heredoc
+ *   `>` `>>` `&>` `>|` `>& file` redirect targets of every simple command, a heredoc
  *   redirected onto a file, the body of each `$(...)` and backtick, `tee`'s
  *   operands, and the file a wrapper itself writes (`time -o`). Each
  *   relative target is resolved from the call's cwd and from every folder
@@ -109,10 +109,9 @@
  *     the written spelling is judged, not the inode.
  *   - dated 2026-11-05 (#512): a value only the run knows, in a path whose
  *     literal head sits off to the side (`/opt/$X/y`, X holding a climb);
- *     `>&` onto a file, which the reader takes for a descriptor; a quoted
- *     `'$HOME/x'`, read as spelled, since a target carries no quoting past
- *     the parser. Pinned, with the /tmp link spelling of the line above, by
- *     "the Not seen shapes stay passing" under "a target is spelled".
+ *     a quoted `'$HOME/x'`, read as spelled, since a target carries no quoting
+ *     past the parser. Pinned, with the /tmp link spelling of the line above,
+ *     by "the Not seen shapes stay passing" under "a target is spelled".
  *   - dated 2026-11-05 (#521): a command more than three runner guesses in,
  *     past eight bare words each (`foo w1 ... w30 tee x`), since a guess is no
  *     nest and refusing there would refuse every long word list. Pinned by

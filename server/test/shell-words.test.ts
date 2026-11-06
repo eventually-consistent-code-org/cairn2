@@ -1026,3 +1026,30 @@ describe("the reader's one budget and its linear cost (#522)", () => {
     expect(assignVars([], start, {})).toBe(start);
   });
 });
+
+// #523: the reader took anything after `>&` for a descriptor, but bash and zsh
+// write a word that is no number or `-` as a file.
+describe("`>&` is a descriptor only for a number or `-`; anything else is a redirect target (#523)", () => {
+  const READ = { redirects: true };
+  const redirects = (line: string) => shellSegments(line, READ)[0].redirects;
+
+  it("a word that is no number or `-` is a file, in every spelling", () => {
+    for (const line of ["echo x >& f", "echo x >&f", 'echo x >&"f"', "echo x >>& f", "echo x >&! f", "echo x >&| f",
+      "echo x >! f", "echo x >>! f", "echo x >>| f", "echo x 1>&f", "echo x &>f", "echo x &>>f"]) {
+      expect(redirects(line), line).toEqual(["f"]);
+      expect(shellSegments(line, READ)[0].words, line).toEqual(["echo", "x"]);
+    }
+  });
+
+  it("twins: a number or `-` is a descriptor and no file, spaced, quoted or moved", () => {
+    for (const line of ["echo x >&2", "echo x >& 2", "echo x 2>&1", "echo x >&-", "echo x 2>&-", 'echo x >&"2"', "echo x >&3-", "echo x 2>&1 >&2"]) {
+      expect(redirects(line), line).toEqual([]);
+      expect(shellSegments(line, READ)[0].words, line).toEqual(["echo", "x"]);
+    }
+  });
+
+  it("a descriptor beside a file keeps the file", () => {
+    expect(redirects("echo x >&2 > f 2>&1")).toEqual(["f"]);
+    expect(redirects("echo x >& f >&2")).toEqual(["f"]);
+  });
+});

@@ -8243,3 +8243,54 @@ describe("harness guard: a line built to outlast the hook is refused inside its 
     expect(run("TypeError")).toBe(0);
   });
 });
+
+// #523: `>&` onto a file writes it, in bash and zsh, and the reader took it for a descriptor.
+describe("harness guard: `>&` onto a protected file is a write (#523)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-523-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const HOOK = "hooks/hooks.json";
+
+  it("every spelling is refused from the root, and from a nested cwd by its climb", () => {
+    const p = fixture();
+    for (const [cwd, f] of [[p, HOOK], [join(p, "pkg", "lib"), `../../${HOOK}`]] as const) {
+      for (const line of [`echo x >& ${f}`, `echo x >&${f}`, `echo x >>& ${f}`, `echo x >&"${f}"`, `echo x 1>&${f}`,
+        `echo x >&! ${f}`, `echo x >&| ${f}`, `echo x >! ${f}`, `echo x >>! ${f}`,
+        `sh -c 'echo x >& ${f}'`, `echo $(echo x >& ${f})`]) {
+        const r = judge(p, line, cwd);
+        expect(r.status, `${line} from ${cwd}`).toBe(2);
+        expect(r.stderr, line).toContain("hook directory");
+      }
+    }
+    // a variable the line spelled, as the plain `>` form reads it
+    expect(judge(p, "D=hooks; echo x >&$D/hooks.json").status).toBe(2);
+  });
+
+  it("twins: a descriptor passes, and so does `>&` onto a harmless file", () => {
+    const p = fixture();
+    for (const line of ["echo x >&2", "echo x >& 2", "echo x 2>&1", "echo x >&-", "echo x 2>&-", 'echo x >&"2"',
+      "echo x >&3-", "echo x >& /tmp/out.txt", "echo x >&/dev/null", "npm test >& /tmp/test.log"]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("the guard reads what real shells do: `>& f` writes f, and `>&2` writes no file (asserted against the shells on this machine)", () => {
+    const shells = ["bash", "zsh"].filter((s) => spawnSync(s, ["-c", "true"]).status === 0);
+    expect(shells).toContain("bash");
+    for (const shell of shells) {
+      const d = freshDir(`cairn-hooks-523-${shell}-`);
+      spawnSync(shell, ["-c", "echo x >& written; echo y >&written2; echo z >&2; echo w >&-"], { cwd: d });
+      expect(existsSync(join(d, "written")), shell).toBe(true);
+      expect(existsSync(join(d, "written2")), shell).toBe(true);
+      expect(readdirSync(d).sort(), shell).toEqual(["written", "written2"]);
+    }
+  });
+});
