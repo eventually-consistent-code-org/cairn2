@@ -1,8 +1,8 @@
 // #396: probe_start owns its "investigation started" mirror comment, the way
 // trace_start has since #367. Asserted against the fake tracker. draft_start and
 // thread_start share the registration but keep today's behavior (no comment).
-import { describe, it, expect, beforeAll } from "vitest";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -152,6 +152,108 @@ describe("config_probe reports branchProtection (#485)", () => {
     const res = await probeWith(new FakeTracker());
     expect(res.json.tracker).toEqual({ verdict: "ok" });
     expect(res.json.branchProtection).toBeUndefined();
+  });
+});
+
+// #495: the block above injects its tracker, which index.ts binds unwrapped, so
+// it stayed green while production -- CachedTracker around whatever makeTracker
+// built -- never reported the field. No tracker is injected here: the server
+// builds its own from cairn.json, and only the network is a fixture.
+describe("config_probe reports branchProtection on the production path (#495)", () => {
+  let routes: Record<string, { status: number; body: unknown }>;
+  const repo = { status: 200, body: { full_name: "o/r", default_branch: "main" } };
+  const unprotected = {
+    "/repos/o/r": repo,
+    "/repos/o/r/rules/branches/main": { status: 200, body: [] },
+    "/repos/o/r/branches/main/protection": { status: 404, body: { message: "Branch not protected" } },
+  };
+
+  beforeEach(() => {
+    vi.stubEnv("GITHUB_TOKEN", "tok");
+    vi.stubGlobal("fetch", async (url: unknown) => {
+      const u = String(url);
+      const hit = Object.keys(routes).find((suffix) => u.endsWith(suffix));
+      if (!hit) throw new Error(`unexpected url in test: ${u}`);
+      return new Response(JSON.stringify(routes[hit].body), { status: routes[hit].status });
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  const githubProject = (dir: string) =>
+    writeFileSync(
+      join(dir, "cairn.json"),
+      JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }),
+    );
+  async function connect(projectDir: string) {
+    const server = buildServer({ projectDir, fetchLatestVersion: async () => "9.9.9" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "test", version: "0.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    return async () => {
+      const res = await c.callTool({ name: "config_probe", arguments: {} });
+      return JSON.parse((res.content as Array<{ type: string; text: string }>)[0].text);
+    };
+  }
+  const freshProject = () => {
+    const dir = mkdtempSync(join(tmpdir(), "cairn-probe-prod-"));
+    githubProject(dir);
+    return dir;
+  };
+
+  it("a repository with no rule at all reports the measured empty list ship prints the line on", async () => {
+    routes = unprotected;
+    const probe = await connect(freshProject());
+    const out = await probe();
+    expect(out.tracker).toEqual({ verdict: "ok" });
+    expect(out.branchProtection).toEqual({ default: "main", rules: [], source: "legacy" });
+  });
+
+  it("twin: a protected repository reports its rules through the same path", async () => {
+    routes = {
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [{ type: "non_fast_forward" }] },
+    };
+    const probe = await connect(freshProject());
+    expect((await probe()).branchProtection).toEqual({
+      default: "main", rules: ["non_fast_forward"], source: "rulesets",
+    });
+  });
+
+  it("twin: a tracker that does not hold the repository still leaves the field absent", async () => {
+    routes = {};
+    const dir = mkdtempSync(join(tmpdir(), "cairn-probe-prod-local-"));
+    writeFileSync(join(dir, "cairn.json"), JSON.stringify({ tracker: { type: "local", config: {} } }));
+    const probe = await connect(dir);
+    const out = await probe();
+    expect(out.tracker).toEqual({ verdict: "ok" });
+    expect(out.branchProtection).toBeUndefined();
+  });
+
+  it("nested route: a workspace-root session the focus points at a member reads that member's protection", async () => {
+    routes = unprotected;
+    const root = mkdtempSync(join(tmpdir(), "cairn-probe-prod-ws-"));
+    writeFileSync(join(root, "cairn-workspace.json"),
+      JSON.stringify({ workspace: "acme", members: [{ name: "a", path: "a" }] }));
+    mkdirSync(join(root, "a"));
+    githubProject(join(root, "a"));
+    mkdirSync(join(root, ".cairn", "basecamp"), { recursive: true });
+    writeFileSync(join(root, ".cairn", "basecamp", "focus.json"), JSON.stringify({ focus: "a" }));
+    const probe = await connect(root);
+    expect((await probe()).branchProtection).toEqual({ default: "main", rules: [], source: "legacy" });
+  });
+
+  it("hostile: a rule removed between two probes is reported, so the read cache can never keep saying protected", async () => {
+    routes = {
+      "/repos/o/r": repo,
+      "/repos/o/r/rules/branches/main": { status: 200, body: [{ type: "non_fast_forward" }] },
+    };
+    const probe = await connect(freshProject());
+    expect((await probe()).branchProtection.rules).toEqual(["non_fast_forward"]);
+    routes = unprotected;
+    expect((await probe()).branchProtection).toEqual({ default: "main", rules: [], source: "legacy" });
   });
 });
 

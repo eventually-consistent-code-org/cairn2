@@ -10,9 +10,13 @@ export class CachedTracker {
     cache;
     // Optional on Tracker — present only when the inner adapter has it, so the
     // caller's "capabilities.hasWorklog && tracker.logWork" gate keeps working.
+    // A method missing here is missing on every real server, since production
+    // wraps every tracker in this class (#495) -- contract-cached.test.ts walks
+    // the SPI out of types.ts and fails on any method this class drops.
     logWork;
     resolveSelf;
     probe;
+    branchProtection;
     stateCategory;
     linkIssues;
     unlinkIssues;
@@ -35,6 +39,10 @@ export class CachedTracker {
         }
         if (inner.probe) {
             this.probe = () => this.inner.probe();
+        }
+        if (inner.branchProtection) {
+            // never cached: a rule removed a minute ago must not read as protected
+            this.branchProtection = () => this.inner.branchProtection();
         }
         if (inner.stateCategory) {
             // a pure lookup: nothing to cache, nothing to invalidate
