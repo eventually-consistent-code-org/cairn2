@@ -215,12 +215,16 @@ export class JiraTracker {
     // Status names Jira has shown this instance, lowercased, with the
     // category Jira itself gave them -- filled by every issue read and every
     // transition list, so the pre-write question below answers from data
-    // already fetched and never fetches for itself (#471).
+    // already fetched and never fetches for itself (#471). A status with no
+    // category, or a key the map does not hold (the "undefined" key, No Category,
+    // a dated claim as of 2026-11-05, unverified against a live site), is NOT
+    // learned (#496): "open" is the one answer the freeze gate lets through, and
+    // a default is not Jira saying so. Asserted by tracker-contract.test.ts.
     seenStatuses = new Map();
     learnStatus(name, categoryKey) {
-        if (!name)
-            return;
-        this.seenStatuses.set(name.toLowerCase(), STATUS_CATEGORY_MAP[categoryKey ?? "new"] ?? "open");
+        const category = categoryKey === undefined ? undefined : STATUS_CATEGORY_MAP[categoryKey];
+        if (name && category)
+            this.seenStatuses.set(name.toLowerCase(), category);
     }
     /** The SPI's pre-write question (#427, #471): the category a requested
      *  state name would land in. The canonical three by name; the two

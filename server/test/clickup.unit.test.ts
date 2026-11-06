@@ -398,9 +398,10 @@ describe("ClickUpTracker.stateCategory -- the pre-write question, from the statu
     expect(t.stateCategory("Finito")).toBeUndefined();
     await t.getIssue("abc123");
     await t.getIssue("abc124");
-    // a custom-type status that is not the configured in_progress buckets to open, as normalize does
-    expect(t.stateCategory("review")).toBe("open");
-    expect(t.stateCategory("code review")).toBe("open");
+    // a custom-type status that is not the configured in_progress has no type
+    // that places it, so it is not learned and falls closed at the gate (#496)
+    expect(t.stateCategory("review")).toBeUndefined();
+    expect(t.stateCategory("code review")).toBeUndefined();
     expect(t.stateCategory("archived")).toBe("closed");
     expect(t.stateCategory("Finito")).toBeUndefined();
   });

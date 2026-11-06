@@ -520,4 +520,63 @@ describe("AzureBoardsTracker.stateCategory -- the pre-write question, from the s
     expect(t.stateCategory("Removed")).toBe("closed");
     expect(t.stateCategory("Finito")).toBeUndefined();
   });
+
+  // #496: a read with no category field used to teach the adapter that any
+  // state outside the three required entries was "open", and "open" is the one
+  // answer the freeze gate lets through.
+  it("a state read with no category and no mapping is not learned: the read's own bucket stays open, the gate's answer stays undefined", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: wi({ fields: { "System.State": "Shipped" } }) },
+      { status: 200, body: wi({ fields: { "System.State": "Removed" } }) },
+    ]);
+    const t = new AzureBoardsTracker({ ...cfg, states: { ...cfg.states, ship: "Shipped" } }, f, () => "pat123");
+    expect((await t.getIssue("7")).category).toBe("open");
+    await t.getIssue("8");
+    expect(t.stateCategory("Shipped")).toBeUndefined();
+    expect(t.stateCategory("ship")).toBeUndefined();
+    expect(t.stateCategory("Removed")).toBeUndefined();
+  });
+
+  it("the batch read route teaches nothing either", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: { workItems: [{ id: 7 }] } },
+      { status: 200, body: { value: [wi({ fields: { "System.State": "Shipped" } })] } },
+    ]);
+    const t = makeAzure(f);
+    expect(await t.listIssues()).toHaveLength(1);
+    expect(t.stateCategory("Shipped")).toBeUndefined();
+  });
+
+  it("twin: a category the wire carries, and a state the map places, are still answered", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: wi({ fields: { "System.State": "Triage", "System.StateCategory": "Proposed" } }) },
+      { status: 200, body: wi({ fields: { "System.State": "Doing" } }) },
+    ]);
+    const t = makeAzure(f);
+    await t.getIssue("7");
+    await t.getIssue("8");
+    expect(t.stateCategory("Triage")).toBe("open");
+    expect(t.stateCategory("Doing")).toBe("in_progress");
+  });
+
+  it("hostile: a later read that drops the category cannot downgrade a name Azure already showed as completed", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: wi({ fields: { "System.State": "Shipped", "System.StateCategory": "Completed" } }) },
+      { status: 200, body: wi({ fields: { "System.State": "Shipped" } }) },
+    ]);
+    const t = makeAzure(f);
+    await t.getIssue("7");
+    expect(t.stateCategory("Shipped")).toBe("closed");
+    await t.getIssue("7");
+    expect(t.stateCategory("Shipped")).toBe("closed");
+  });
+
+  it("hostile: a category value Azure's vocabulary does not hold places nothing", async () => {
+    const { f } = fixtureFetch([
+      { status: 200, body: wi({ fields: { "System.State": "Shipped", "System.StateCategory": "Bogus" } }) },
+    ]);
+    const t = makeAzure(f);
+    await t.getIssue("7");
+    expect(t.stateCategory("Shipped")).toBeUndefined();
+  });
 });

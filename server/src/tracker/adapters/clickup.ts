@@ -171,29 +171,33 @@ export class ClickUpTracker implements Tracker {
     }
   }
 
-  private normalizeState(status: CuStatus): StateCategory {
+  /** The category a status's type places it in; undefined for a custom status
+   *  that is not the configured in_progress, or a type this code does not
+   *  know, and the caller decides what that means (#496). */
+  private placeStatus(status: CuStatus): StateCategory | undefined {
     if (status.type === "open") return "open";
     if (status.type === "done" || status.type === "closed") return "closed";
     // custom: compare to the configured in_progress status name, case-insensitively
-    return status.status.toLowerCase() ===
-      this.cfg.statuses.in_progress.toLowerCase()
+    return status.status.toLowerCase() === this.cfg.statuses.in_progress.toLowerCase()
       ? "in_progress"
-      : "open";
+      : undefined;
   }
 
-  // Status names ClickUp has shown this instance, lowercased, with the
-  // category their type buckets to -- filled by every task read, so the
-  // pre-write question below answers from data already fetched and never
-  // fetches for itself (#471).
+  // Status names ClickUp has shown this instance, lowercased, with a category
+  // their type placed them in -- filled by every task read, so the pre-write
+  // question below answers from data already fetched and never fetches for
+  // itself (#471). A status its type cannot place is NOT learned (#496): the
+  // read's own bucket defaults to open, and "open" is the one answer the
+  // freeze gate lets through. Asserted by tracker-contract.test.ts.
   private readonly seenStatuses = new Map<string, StateCategory>();
 
   /** The SPI's pre-write question (#427, #471): the canonical three by
    *  name; a statuses-map key by the native status it writes, and a native
    *  status by itself -- the three required entries carry their category,
-   *  any other only once ClickUp has shown it with its type. undefined
-   *  otherwise: the freeze gate then falls closed rather than letting the
-   *  name through. Case-insensitive, as normalizeState compares. Asserted
-   *  by clickup.unit.test.ts and tracker-contract.test.ts. */
+   *  any other only once ClickUp has shown it with a type that places it.
+   *  undefined otherwise: the freeze gate then falls closed rather than
+   *  letting the name through. Case-insensitive, as placeStatus compares.
+   *  Asserted by clickup.unit.test.ts and tracker-contract.test.ts. */
   stateCategory(state: IssueState): StateCategory | undefined {
     if (state === "open" || state === "in_progress" || state === "closed") return state;
     const { statuses } = this.cfg;
@@ -205,8 +209,9 @@ export class ClickUpTracker implements Tracker {
   }
 
   private normalize(raw: CuTask): Issue {
-    const category = this.normalizeState(raw.status);
-    if (raw.status?.status) this.seenStatuses.set(raw.status.status.toLowerCase(), category);
+    const placed = this.placeStatus(raw.status);
+    const category = placed ?? "open";
+    if (raw.status?.status && placed) this.seenStatuses.set(raw.status.status.toLowerCase(), placed);
     return {
       id: raw.id,
       title: raw.name,
