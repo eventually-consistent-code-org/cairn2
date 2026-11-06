@@ -3585,6 +3585,7 @@ describe("a flag, path or command the shell builds from a same-line variable mee
       "F=--hard; git reset $F", 'F=--hard; git reset "$F"', "F='a b'; git x $F", "F='a b'; git x \"$F\"",
       "F='a b'; git x p$F", "F=; git x $F y", 'F=; git x "$F" y', "F=--hard; git x '$F'", "F=--hard; git x \\$F",
       "F=--hard; git x \"\\$F\"", "git x $'--hard'", "git x $'a\\tb'", "git x {a,b}c", "git x${IFS}y", "unset X; git x ${X:-a b}",
+      "git x $UNSET_A y", 'git x "$UNSET_A" y', "git $UNSET_A x", "git x p$UNSET_A", "$UNSET_A git x",
       "F=b; G=a$F; git x $G", "for F in a b; do git x $F; done", 'F=a; git x "p${F}s"', 'git x $"q"',
       'F=a; git x "$F"s', "F=a; git x $F's'", 'F=a; G=b; git x "$F"$G', "F='a b'; git x \"$F\"$F",
     ];
@@ -3602,6 +3603,43 @@ describe("a flag, path or command the shell builds from a same-line variable mee
     }
   });
 
+  // An unset name is the shape the reader has to model, because the shell does: `git $X reset --hard`
+  // with X unset runs `git reset --hard`. The reading with the name gone is judged beside the typed one.
+  const VANISHED = ["git $X reset --hard", "$X git reset --hard", "git $X rm -rf .", "git $X clean -fd", "git checkout $X .",
+    "git rm -rf $X.", "git ${X}reset --hard", "git reset$X --hard", "sh -c 'git $X reset --hard'", "eval git '$X' reset --hard"];
+  const VANISHED_TWINS = ["git log $X", "git add $X", 'git commit -m "$X"', 'git stash push -m "$X"', "git status $X", 'git diff "$X"',
+    "git reset $F", "git checkout $X", "git $X log", 'git add "$f"', "echo git $X reset --hard"];
+
+  it("a name the line never assigned may be unset: the line is judged without it too, from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const c of VANISHED) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("refused in every session");
+      }
+    }
+  });
+
+  it("the twins: a name that vanishes into nothing destructive passes, and its value from the environment stays not seen", () => {
+    const { proj, home, sub } = nested();
+    for (const c of VANISHED_TWINS) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("the hostile twin: a default in the word still counts, and $HOME and $PWD never vanish", () => {
+    const { proj, home } = nested();
+    // $PWD is always set, so it is the repository root, never nothing
+    expect(guard(proj, home, 'git rm -rf -- "$PWD"').status).toBe(2);
+    // an operator on a never-assigned name vanishes the same way
+    expect(guard(proj, home, "git ${X:+--soft} reset --hard").status).toBe(2);
+    expect(guard(proj, home, 'git log "$HOME"').status).toBe(0);
+  });
+
   it("what the Not seen block says is not seen, is not: each passes, and a deleted line is red", () => {
     const { proj, home } = nested();
     const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0];
@@ -3611,7 +3649,6 @@ describe("a flag, path or command the shell builds from a same-line variable mee
       ["C=$(which git); $C reset --hard", "a command word only the shell can work out", {}],
       ["$GIT reset --hard", "a command word only the shell can work out", { GIT: "git" }],
       ['C=$(cat x); eval "$C"', "a command word only the shell can work out", {}],
-      ["git $X reset --hard", "a variable the line never assigns", {}],
       ["echo --hard | xargs git reset", "the words xargs reads from stdin", {}],
       ["N=$(echo --no-cached); git rm -f --cached . $N", "a flag on the line that keeps the write off the work tree", {}],
     ];

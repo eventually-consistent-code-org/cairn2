@@ -246,10 +246,10 @@
  *   and the editor `git config --edit` opens (#465).
  *   A protected path in a variable the line never assigns (#291, by
  *   decision, phase 31: the session's environment, a file it sources, a value a
- *   caller computed) -- `$HK/hooks.json` is judged as typed, measured by
- *   hooks.test.ts "(#291)"; one the line assigns is spelled out before
- *   judgment, and one it assigns from a substitution is refused as a
- *   write the guard can't place.
+ *   caller computed) -- `$HK/hooks.json` is judged as typed and with the name
+ *   gone, measured by hooks.test.ts "(#291)", "(#509)"; one the line assigns is
+ *   spelled out before judgment, and one it assigns from a substitution is
+ *   refused as a write the guard can't place.
  *   An owner-only cairn.json key (#281) arriving in content the line
  *   doesn't spell (`cp evil.json cairn.json`, `mv`, `cat evil.json >
  *   cairn.json`, a patch): the file lands with the key set and the server

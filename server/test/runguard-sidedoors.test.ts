@@ -245,6 +245,7 @@ describe("side-door matrix, table two: the routes the guard does not see are an 
 // push. A URL from the environment or a substitution stays Not seen by decision.
 describe("a refspec or API URL built from a variable meets the two push gates (#501)", () => {
   const GATED = [
+    "git $X push origin main",
     "B=main; git push origin $B", 'B=main; git push origin "$B"', "B=main; git push origin ${B}", "S=HEAD:main; git push origin $S",
     "B=main; git push origin $B:$B", "R=origin; B=main; git push $R $B", "B=refs/heads/main; git push origin HEAD:$B",
     "C='git push origin main'; $C", 'C=\'git push origin main\'; eval "$C"',
@@ -253,9 +254,11 @@ describe("a refspec or API URL built from a variable meets the two push gates (#
     'H=https://api.github.com; curl -X PUT "$H/repos/o/r/pulls/1/merge"',
     `C='curl -X PUT ${MERGE}'; $C`, "N=1; gh pr merge $N",
     // hostile: a scheme-carrying URL split across two variables; a default in the word
-    "H=https://api.github.com; P=/repos/o/r/pulls/1/merge; curl -X PUT $H$P", "git push origin ${X:-main}", `curl -X PUT \${X:-${MERGE}}`,
+    "H=https://api.github.com; P=/repos/o/r/pulls/1/merge; curl -X PUT $H$P", `curl -X PUT \${X:-${MERGE}}`,
   ];
   const UNREADABLE: Array<[string, string]> = [
+    ["git push origin $B", "$B"], ['git push origin "$B"', "$B"], ["git push $R main", "$R"], ["git push origin feature$B", "feature$B"],
+    ["git push -u origin ${B}", "${B}"], ["git push origin ${X:-main}", "${X:-main}"], ["git push origin ${X:-feature}", "${X:-feature}"],
     ['git push origin "$(git branch --show-current)"', "$(git branch --show-current)"],
     ["git push origin `git branch --show-current`", "`git branch --show-current`"],
     ['B=$(git branch --show-current); git push origin "$B"', "$B"],
@@ -271,7 +274,7 @@ describe("a refspec or API URL built from a variable meets the two push gates (#
   const TWINS = [
     "B=feature; git push origin $B", 'B=feature; git push origin "$B"', "S=HEAD:feature; git push origin $S",
     `U=${MERGE}; curl $U`, `U=${MERGE}; curl -X GET "$U"`, "U=https://example.com/x; curl -X PUT $U", "E=repos/o/r/pulls/1/merge; gh api $E",
-    'O=$(date); git push -o "$O" origin feature', 'R=$(cat x); git push --repo "$R" origin feature', "git push origin ${X:-feature}",
+    'O=$(date); git push -o "$O" origin feature', 'R=$(cat x); git push --repo "$R" origin feature',
     "N=1; gh pr view $N", "git ls-remote origin $B", "B=main; echo $B", "B=$(cat x); git log $B",
   ];
 
@@ -326,13 +329,12 @@ describe("a refspec or API URL built from a variable meets the two push gates (#
     }
   });
 
-  it("the Not seen lines hold: a URL from the environment or a substitution, and a refspec in a name the line never assigns, pass as typed; a deleted line is red", () => {
+  it("the Not seen lines hold: a URL from the environment or a substitution passes as typed; a deleted line is red", () => {
     const f = fixture(false, false);
     const rows: Array<[string, string]> = [
       ['curl -X PUT "$URL"', "a URL from the environment or a substitution"],
       ['curl -X PUT "$(cat url)"', "a URL from the environment or a substitution"],
       ['U=$(cat url); curl -X PUT "$U"', "a URL from the environment or a substitution"],
-      ["git push origin $B", "a refspec in a variable the line never assigns"],
     ];
     const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0];
     for (const [c, line] of rows) {

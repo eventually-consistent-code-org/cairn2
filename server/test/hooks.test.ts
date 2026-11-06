@@ -7149,6 +7149,11 @@ describe("a write path built with an operator, array or read on a same-line vari
 
   // Judged as a write to the hook file, by name: spelled, not lost
   const HIT = (rel: string): string[] => [
+    // a name the line never assigned may be unset, and then it is no part of the path at all
+    `rm \${X}${rel}hooks/hooks.json`, `$X rm ${rel}hooks/hooks.json`,
+    // a name its quoting ends stops there, on a redirect as on a command word: this one read as a name H-o-k-s and passed
+    `H=${rel}ho; echo x > "$H"oks/hooks.json`, `H=${rel}ho; echo x >> "$H"oks/hooks.json`,
+    `echo x > "$X"${rel}hooks/hooks.json`, `echo x > \${X}${rel}hooks/hooks.json`,
     // hostile: a default in the word, a value that spells a flag and the path, a value that spells the command
     `echo x > \${X:-${rel}hooks}/hooks.json`,
     `echo x > \${X-${rel}hooks/hooks.json}`,
@@ -7184,7 +7189,7 @@ describe("a write path built with an operator, array or read on a same-line vari
     "F=$(mktemp); echo x > $F", "D=$(mktemp -d); echo x > $D", `C='rm ${rel}src/x.json'; $C`, `R=rm; $R ${rel}src/x.json`,
     `F='-f ${rel}src/x.json'; rm $F`, `D=${rel}src; false && D=/tmp; echo x > $D/x.json`, `rm $'${rel}src/x.json'`,
     `f() { echo x > $D/x.json; }; D=${rel}src; f`,
-    "D=$(mktemp -d); find $D -delete", "find $X -delete", `D=${rel}src; find $D | xargs rm`, "rsync /tmp/x host:hooks/hooks.json",
+    "D=$(mktemp -d); find $D -delete", `D=${rel}src; find $D | xargs rm`, "rsync /tmp/x host:hooks/hooks.json",
   ];
 
   it("each is refused as a write the guard can't place, naming no path it invented; a spelled one is refused by file", () => {
@@ -7199,6 +7204,12 @@ describe("a write path built with an operator, array or read on a same-line vari
       expect(r.status, c).toBe(2);
       expect(r.stderr, c).toContain("file:");
     }
+  });
+
+  it("a name the line never assigned may be unset: `find $X -delete` is `find -delete`, which GNU find runs on the folder it stands in", () => {
+    const f = fixture();
+    const r = run(f, "find $X -delete");
+    expect(r.status, r.stderr).toBe(2);
   });
 
   it("the twins pass: an operator on a name the line never assigned stays as typed, and one under a known folder is judged there", () => {

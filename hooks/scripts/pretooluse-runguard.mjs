@@ -212,9 +212,6 @@
  *   a URL from the environment or a substitution (`curl -X PUT "$URL"`,
  *   `U=$(cat url); curl -X PUT "$U"`): that route needs a token and has its
  *   line above, and refusing every `curl -X POST "$URL"` would over-refuse.
- *   a refspec in a variable the line never assigns (`git push origin $B`):
- *   as typed, the decision of #291, though the shell may hand git the value
- *   the session holds, or nothing and a bare push.
  *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
@@ -299,9 +296,13 @@
  *
  *   Not seen, dated 2026-11-05 (#494; the guard reads what a line spells, and
  *   each line below is pinned by runguard-guards.test.ts (#494) "Not seen"):
- *   a variable the line never assigns -- the session's environment, a file
- *   it sources, a caller's value -- stays as typed in every guard, by the
- *   decision of #291 (`git reset $F`).
+ *   the value of a variable the line never assigns -- the session's
+ *   environment, a file it sources, a caller's value -- stays as typed in
+ *   every guard, by the decision of #291 (`git reset $F` with F=--hard in the
+ *   environment). The name being unset IS read: the line is judged again with
+ *   it gone, as the shell runs it (`git $X reset --hard` is `git reset --hard`,
+ *   runguard-guards.test.ts #494), and a push holding one refuses as unreadable,
+ *   since with no value it is a bare push (runguard-sidedoors.test.ts #501).
  *   a command word only the shell can work out (`C=$(which git); $C reset
  *   --hard`, `$GIT reset --hard`), which is the substitution-output line
  *   above: there is no command to read the row from.
@@ -515,7 +516,7 @@ function readLine(line) {
       const firstStep = out.steps.length;
       const stepsRead = [];
       const foldSteps = () => out.steps.splice(firstStep).forEach((moves, k) => { stepsRead[k] ||= moves; });
-      for (const { words: spelled, wild } of spellWords(seg, vars, { wild: inherit.wild })) {
+      for (const { words: spelled, wild, open } of spellWords(seg, vars, { wild: inherit.wild })) {
         foldSteps();
         const segWords = afterDescriptor && /^(\d+|-)$/.test(spelled[0] ?? "") ? spelled.slice(1) : spelled;
         // Assignments and wrappers come off the front, flag values and all, so
@@ -617,6 +618,7 @@ function readLine(line) {
           envAssigns: env.assigns,
           envCleared: env.cleared,
           wild,
+          open,
         };
         resolveAlias(inv);
         out.steps.push(movesRefs(inv) || writesFile(words));

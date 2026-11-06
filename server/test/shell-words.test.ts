@@ -807,3 +807,15 @@ describe("evalCommandString (#283)", () => {
     expect(evalCommandString(["  "])).toBeNull();
   });
 });
+
+describe("a redirect target keeps the end of a name its quoting closes (#494)", () => {
+  it("braces the name, so no guard reads past the closing quote", async () => {
+    const { shellSegments } = await import("../../hooks/scripts/shell-words.mjs");
+    const read = (c: string) => shellSegments(c, { redirects: true })[0].redirects[0];
+    expect(read('echo x > "$H"oks/y')).toBe("${H}oks/y");
+    expect(read('echo x > "$H"/y')).toBe("$H/y");
+    expect(read("echo x > $H/y")).toBe("$H/y");
+    expect(read('echo x > "${H}"oks/y')).toBe("${H}oks/y");
+    expect(read("echo x > '$H'oks/y")).toBe("$Hoks/y");
+  });
+});

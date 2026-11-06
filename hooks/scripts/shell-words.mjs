@@ -355,7 +355,7 @@ export function shellSegments(command, read = {}, depth = 0) {
 
   const pushWord = () => {
     if (cur === null) return;
-    if (next === "redirect") redirects.push(cur);
+    if (next === "redirect") redirects.push(boundNames(cur, spans));
     else if (next === "heredoc") {
       const doc = { delim: cur, body: "", quoted };
       heredocs.push(doc);
@@ -790,6 +790,9 @@ export function unwrap(words, read = {}) {
 // The most spellings of one word before the rest count as lost.
 const SPELL_CAP = 16;
 
+// Names the shell always holds, so neither can be read as nothing.
+const ALWAYS_SET = new Set(["HOME", "PWD"]);
+
 /**
  * What a variable holds when the line assigned it from something the guard
  * can't read and no folder can be said to be safe from it (#509): a `read`,
@@ -806,6 +809,23 @@ const isWild = (v) => v === null || v === UNREADABLE;
 
 // Set while a word is spelled, and never in a word: a place an unquoted value splits.
 const BREAK = "\0";
+
+/**
+ * A redirect target carries no spans past the parser, so a name its quoting
+ * ends is braced here (#494): `"$H"oks` is ${H}oks, never a name H-o-k-s, and
+ * every guard reading seg.redirects then spells it right. Without this, `H=ho;
+ * echo x > "$H"oks/hooks.json` reads as an unknown name and passes, while the
+ * same word on `cp` is refused (hooks.test.ts #509, shell-words.test.ts).
+ */
+function boundNames(word, spans) {
+  if (!spans.length) return word;
+  let out = word;
+  for (const ref of expansions(word, spans).reverse()) {
+    if (ref.kind !== "name" || word[ref.start + 1] === "{" || !/\w/.test(word[ref.end] ?? "")) continue;
+    out = `${out.slice(0, ref.start)}\${${ref.name}}${out.slice(ref.end)}`;
+  }
+  return out;
+}
 
 /** Index of the `}` closing a `${` whose body starts at `i`, nesting-aware. */
 function closeBrace(word, i) {
@@ -906,13 +926,23 @@ function refValue(ref, vars) {
  * a path (#319) do; elsewhere in the path it stays as typed, judged under
  * the folder before it, as `/tmp/$(date).bak` is. An UNREADABLE one at the
  * front is `lost` with or without a folder after it (#509). A variable the
- * line never assigned stays as typed (the guard's Not seen block), but a
- * default written in the word is a value too (`${X:-hooks}`), so it is
- * judged as well. Past `cap` values the rest is lost too.
+ * line never assigned stays as typed (the guard's Not seen block), and is also
+ * read with the name gone, since an unset name is no part of the path at all
+ * (`> $X.claude/settings.json`, #494), but a default written in the word is a
+ * value too (`${X:-hooks}`), so it is judged as well. Past `cap` values the
+ * rest is lost too.
  */
 export function expandAssigned(raw, vars, cap = SPELL_CAP) {
+  const typed = spellRaw(raw, vars, cap, false);
+  if (!typed.open) return { raws: typed.raws, lost: typed.lost };
+  const gone = spellRaw(raw, vars, cap, true);
+  return { raws: [...new Set([...typed.raws, ...gone.raws.filter(Boolean)])], lost: typed.lost || gone.lost };
+}
+
+function spellRaw(raw, vars, cap, vanish) {
   let raws = [""];
   let lost = false;
+  let open = false;
   let at = 0;
   for (const ref of expansions(raw)) {
     const text = raw.slice(at, ref.start);
@@ -920,12 +950,16 @@ export function expandAssigned(raw, vars, cap = SPELL_CAP) {
     const front = /^(?:\.\/)*$/.test(raw.slice(0, ref.start));
     at = ref.end;
     const vals = ref.kind === "sub" || ref.kind === "positional" ? undefined : refValue(ref, vars);
+    // a substitution or positional stays as typed, never read as nothing: it has its own rules
+    const unset = ref.kind !== "sub" && ref.kind !== "positional" && vals === undefined && !ALWAYS_SET.has(ref.name);
+    open ||= unset;
+    const asTyped = unset && vanish ? "" : typed;
     if (vals === undefined && ref.def !== undefined) { // never assigned, with a default in the word
       const inner = expandAssigned(ref.def, vars, cap);
       lost ||= inner.lost;
-      raws = raws.flatMap((r) => [r + text + typed, ...inner.raws.map((v) => r + text + v)]);
+      raws = raws.flatMap((r) => [r + text + asTyped, ...inner.raws.map((v) => r + text + v)]);
     } else if (vals === undefined) { // never assigned on the line
-      raws = raws.map((r) => r + text + typed);
+      raws = raws.map((r) => r + text + asTyped);
     } else if (isWild(vals)) { // assigned from something the guard can't read
       if (front && (vals === UNREADABLE || raw.slice(at).includes("/"))) lost = true;
       raws = raws.map((r) => r + text + typed);
@@ -934,7 +968,7 @@ export function expandAssigned(raw, vars, cap = SPELL_CAP) {
     }
     if (raws.length > cap) { lost = true; raws = raws.slice(0, cap); }
   }
-  return { raws: raws.map((r) => r + raw.slice(at)), lost };
+  return { raws: raws.map((r) => r + raw.slice(at)), lost, open };
 }
 
 /**
@@ -1100,44 +1134,48 @@ export function seedVars(segs, vars, opts = {}) {
  * braces spelled (`{--hard,}`), as the shell does first, unless `braces` is
  * off: a guard that spells them itself keeps its own marker for "anything".
  */
-function spellWord(word, spans, vars, { cap, braces }) {
+function spellWord(word, spans, vars, { cap, braces, vanish = false }) {
   const refs = expansions(word, spans);
   const assign = ASSIGNMENT.test(word);
-  if (!refs.length) return { alts: [spans || assign || !braces ? [word] : braceExpand(word)], wild: false };
+  if (!refs.length) return { alts: [spans || assign || !braces ? [word] : braceExpand(word)], wild: false, open: false };
   const fill = (v, dq) => (dq || assign ? v : v.split(/\s+/).join(BREAK));
   let raws = [""];
   let wild = false;
+  let open = false;
   let at = 0;
   for (const ref of refs) {
     const text = word.slice(at, ref.start);
     const typed = word.slice(ref.start, ref.end);
     at = ref.end;
     const vals = ref.kind === "sub" || ref.kind === "positional" ? null : refValue(ref, vars);
+    const unset = vals === undefined && !ALWAYS_SET.has(ref.name);
+    open ||= unset;
+    const asTyped = unset && vanish ? "" : typed;
     if (vals === undefined && ref.name === "IFS" && ref.kind === "name") {
       raws = raws.map((r) => r + text + (ref.dq ? " " : BREAK));
     } else if (vals === undefined && ref.def !== undefined) {
-      const inner = spellWord(ref.def, null, vars, { cap, braces });
+      const inner = spellWord(ref.def, null, vars, { cap, braces, vanish });
       wild ||= inner.wild;
       const defs = inner.alts.map((list) => list.map((v) => fill(v, ref.dq)).join(ref.dq ? " " : BREAK));
-      raws = raws.flatMap((r) => [r + text + typed, ...defs.map((v) => r + text + v)]);
+      raws = raws.flatMap((r) => [r + text + asTyped, ...defs.map((v) => r + text + v)]);
     } else if (vals === undefined) {
-      raws = raws.map((r) => r + text + typed);
+      raws = raws.map((r) => r + text + asTyped);
     } else if (isWild(vals)) {
       wild = true;
       raws = raws.map((r) => r + text + typed);
     } else {
       raws = raws.flatMap((r) => vals.map((v) => r + text + fill(v, ref.dq)));
     }
-    if (raws.length > cap) return { alts: [[word]], wild: true };
+    if (raws.length > cap) return { alts: [[word]], wild: true, open };
   }
   raws = raws.map((r) => r + word.slice(at));
-  if (assign) return { alts: [raws.length === 1 ? [raws[0].split(BREAK).join(" ")] : [word]], wild };
+  if (assign) return { alts: [raws.length === 1 ? [raws[0].split(BREAK).join(" ")] : [word]], wild, open };
   // quoting can leave an empty word (`""`); a bare value that was empty leaves none
   const alts = raws.map((r) => {
     const list = r.split(BREAK).filter((x) => x !== "");
     return list.length || !spans ? list : [""];
   });
-  return { alts, wild };
+  return { alts, wild, open };
 }
 
 /**
@@ -1147,26 +1185,37 @@ function spellWord(word, spans, vars, { cap, braces }) {
  * reset; do git $s --hard; done` is read as both. `wild` is the Set of the
  * words -- as typed -- the reader can't spell: a substitution, a positional,
  * a variable assigned from something it can't read, any operator on a name
- * the line assigned. A name the line never assigned stays as typed and is not
- * wild, in every guard: the Not seen decision of #291. `opts.wild` carries
- * the wild words of a line a runner re-reads, its words requoted (#311). Past
- * SPELL_CAP readings a word stays as typed, wild.
+ * the line assigned. A name the line never assigned is not wild: it is read
+ * twice, because the shell gives it one of two things. Its value, which only
+ * the session knows, stays as typed (the Not seen decision of #291, and `open`
+ * lists those words for a guard that can't afford to not know, #501). Or
+ * nothing, which the reader does know: `git $X reset --hard` with X unset is
+ * `git reset --hard`, so a second set of readings has the name gone, a bare
+ * word dropped and a quoted one left empty, as bash does (asserted against
+ * bash by runguard-guards.test.ts #494). $HOME and $PWD are always set and
+ * never vanish. `opts.wild` carries the wild words of a line a runner re-reads,
+ * its words requoted (#311). Past SPELL_CAP readings a word stays as typed, wild.
  */
 export function spellWords(seg, vars, opts = {}) {
   const cap = opts.cap ?? SPELL_CAP;
   const braces = opts.braces ?? true;
-  let readings = [{ words: [], wild: new Set() }];
-  seg.words.forEach((word, k) => {
-    let { alts, wild } = spellWord(word, seg.quotes?.[k] ?? null, vars, { cap, braces });
-    if (readings.length * alts.length > cap) { alts = [[word]]; wild = true; }
-    if (opts.wild?.has(word)) wild = true;
-    readings = readings.flatMap((r) => alts.map((list) => {
-      const out = { words: [...r.words, ...list], wild: new Set(r.wild) };
-      if (wild) for (const w of list) out.wild.add(w);
-      return out;
-    }));
-  });
-  return readings;
+  const read = (vanish) => {
+    let readings = [{ words: [], wild: new Set(), open: new Set() }];
+    seg.words.forEach((word, k) => {
+      let { alts, wild, open } = spellWord(word, seg.quotes?.[k] ?? null, vars, { cap, braces, vanish });
+      if (readings.length * alts.length > cap) { alts = [[word]]; wild = true; }
+      if (opts.wild?.has(word)) wild = true;
+      readings = readings.flatMap((r) => alts.map((list) => {
+        const out = { words: [...r.words, ...list], wild: new Set(r.wild), open: new Set(r.open) };
+        if (wild) for (const w of list) out.wild.add(w);
+        if (open && !vanish) for (const w of list) out.open.add(w);
+        return out;
+      }));
+    });
+    return readings;
+  };
+  const typed = read(false);
+  return typed.some((r) => r.open.size) ? [...typed, ...read(true)] : typed;
 }
 
 /**

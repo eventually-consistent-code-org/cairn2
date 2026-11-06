@@ -628,8 +628,10 @@ export const pushArgs = (inv) => (inv.push ??= readArgs([...inv.args, ...inv.pat
  * The first word of a push the reader can't spell (#501): its remote, a
  * refspec, or a flag a value doesn't hide. Any of them could send it anywhere,
  * so it's the ship gate's to refuse as an unreadable push; undefined for none.
+ * That includes a word holding a name the line never assigned (`inv.open`):
+ * the session may hold any value for it, and with none the push is a bare push.
  */
-export const pushWild = (inv) => pushArgs(inv).own.find((w) => inv.wild?.has(w));
+export const pushWild = (inv) => pushArgs(inv).own.find((w) => inv.wild?.has(w) || inv.open?.has(w));
 
 /**
  * A git command's words (from `git` on, wrappers already peeled) as an
