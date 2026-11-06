@@ -78,10 +78,13 @@ const BREAKER = await import("./breaker.mjs").catch(() => null);
 // (&&, ||, ;, |, &) while keeping quoted strings intact. Only used to decide
 // whether a `git commit` invocation is "widened" (see isWidenedCommit); not
 // a general-purpose shell parser, and this whole module fails open on its
-// own error. That is the guard's half only: since Claude Code 2.1.299 the
-// platform fails closed when it cannot reach the guard or read its answer
-// (onFailure stays unset in hooks.json by design, ADR 0016; dated claim
-// about the harness, 2026-10-14, #371).
+// own error. A guard that gives no answer blocks nothing either: with onFailure
+// unset in hooks.json (by design and the owner's to change, ADR 0016), the Claude
+// Code hooks reference says a hook that "exits with any other code, or fails in
+// some other way, such as not starting or printing invalid JSON. The action goes
+// ahead". A dated claim, read 2026-11-06 (#528). It corrects this comment's "since
+// 2.1.299 the platform fails closed", dated 2026-10-14 (#371), which the reference
+// does not say.
 function tokenizeShell(command) {
   const re = /"(?:[^"\\]|\\.)*"|'[^']*'|&&|\|\||[;|&]|\S+/g;
   const tokens = [];

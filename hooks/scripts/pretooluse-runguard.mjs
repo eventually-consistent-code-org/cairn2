@@ -3,11 +3,18 @@
 /**
  * Purpose: PreToolUse run guard -- classifies every git invocation by what
  *   it does, and refuses by effect. Exit 2 blocks; ANY internal error exits
- *   0 -- a broken guard (or classifier) never blocks work. That is the
- *   guard's own half of "fails open" only: since Claude Code 2.1.299 the
- *   platform fails closed when it cannot reach the guard or read its
- *   answer (onFailure stays unset in hooks.json by design, ADR 0016;
- *   dated claim about the harness, 2026-10-14, #371).
+ *   0 -- a broken guard (or classifier) never blocks work. And a guard that
+ *   gives no answer blocks nothing either. With onFailure unset in hooks.json
+ *   (by design and the owner's to change, ADR 0016), the Claude Code hooks
+ *   reference says a hook that "exits with any other code, or fails in some other
+ *   way, such as not starting or printing invalid JSON. The action goes ahead", and
+ *   "a timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
+ *   call". The one exception it names is a shell-form hook on Windows without Git
+ *   Bash, which "can instead block the tool call". So a heap crash is a pass, and
+ *   a line that can crash the guard is a bypass (#528). A dated claim, read
+ *   2026-11-06. It corrects this header's "since 2.1.299 the platform fails
+ *   closed", dated 2026-10-14 (#371), which the reference does not say. The page
+ *   names no signal, so what the harness does with a killed guard is unmeasured.
  *
  * Effects (git-effects.mjs classifies; its EFFECT_TABLE is the data):
  *   discards-work           uncommitted or unpushed work lost with no undo.
@@ -354,7 +361,12 @@
  *   there would refuse every long word list.
  *   a flag on the line that keeps the write off the work tree, taken back by
  *   a wild word after it (`git rm -f --cached . $(echo --no-cached)`): the
- *   typed flag wins, or `git rm --cached "$f"` could never pass.
+ *   typed flag wins, or `git rm --cached "$f"` could never pass. By the same
+ *   rule a soft or mixed reset, dated 2026-11-06 (#528): `git reset --soft
+ *   "$(echo --hard)"` passes though git takes the last mode it's given, or `git
+ *   reset --soft "$(git rev-parse HEAD~1)"` could never pass. A bare `git reset
+ *   "$X"` names no mode, and stays refused by decision. Pinned by
+ *   runguard-guards.test.ts "a soft or mixed reset".
  *   the words xargs reads from stdin (`echo --hard | xargs git reset`): a
  *   pipe's content, which no word on the line spells.
  *
@@ -389,7 +401,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
   MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, freshGuess,
-  lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
+  holdsBraceList, lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
   shellSegments, spellWords, tooDeep, toolCommandLines, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import {
@@ -816,7 +828,7 @@ function pathWord(raw, from) {
     base = (m[1] ?? m[2]) === "PWD" ? from : homedir();
     rest = rest.slice(m[0].length).replace(/^\/+/, "");
   }
-  if (/[$`*?[]|^~|\{[^}]*(?:,|\.\.)[^}]*\}/.test(rest)) return LOST;
+  if (/[$`*?[]|^~/.test(rest) || holdsBraceList(rest)) return LOST;
   if (isAbsolute(rest)) return resolve(rest);
   return base === LOST ? LOST : resolve(base, rest || ".");
 }
@@ -835,7 +847,7 @@ function cdTargets(move, from, cdpaths) {
   if (ops[0] === "-" || /^[+-]\d+$/.test(ops[0])) return [LOST];
   const out = [pathWord(ops[0], from)];
   if (!/^(?:\/|\.\.?(?:\/|$)|~|\$)/.test(ops[0])) {
-    for (const entry of cdpaths.flatMap((v) => v.split(":"))) out.push(pathWord(join(entry || ".", ops[0]), from));
+    for (const entry of cdpaths) out.push(pathWord(join(entry, ops[0]), from));
   }
   return out;
 }
@@ -848,18 +860,24 @@ function cdTargets(move, from, cdpaths) {
  * so none ever takes a folder away, and every git command is judged from
  * all of them. In a loop or function body a cd can run again, so the
  * moves apply until nothing new turns up; a line still growing then, or
- * past MAX_TARGETS, has gone somewhere the guard can't follow -- LOST.
+ * past MAX_TARGETS, has gone somewhere the guard can't follow -- LOST. The
+ * cap is read per folder, inside the round (#528): each cd doubles what came
+ * before it, so a cap read between rounds let 18 of them build 2^18 paths.
+ * Asserted: runguard-guards.test.ts "(#528)".
  */
 function linePlaces(line, start) {
-  const cdpaths = [...(process.env.CDPATH ? [process.env.CDPATH] : []), ...line.cdpaths];
+  // each folder a CDPATH names once, however it is spelled, however often (#528)
+  const cdpaths = [...new Set([...(process.env.CDPATH ? [process.env.CDPATH] : []), ...line.cdpaths]
+    .flatMap((v) => v.split(":")).map((entry) => join(entry || ".")))];
   const places = [start];
-  const add = (more) => { for (const p of more) if (!places.includes(p)) places.push(p); };
   for (let round = 0; ; round++) {
     const before = places.length;
     for (const m of line.moves) {
-      add(places.flatMap((p) => (m.cmd ? cdTargets(m, p, cdpaths) : [pathWord(m.raw, p)])));
+      for (const p of places.slice()) {
+        for (const q of m.cmd ? cdTargets(m, p, cdpaths) : [pathWord(m.raw, p)]) if (!places.includes(q)) places.push(q);
+        if (places.length > MAX_TARGETS) return [...places.slice(0, MAX_TARGETS), LOST];
+      }
     }
-    if (places.length > MAX_TARGETS) return [...places.slice(0, MAX_TARGETS), LOST];
     if (!line.repeats || places.length === before) return places;
     if (round === 3) return [...places, LOST];
   }
@@ -898,11 +916,17 @@ function envChoices(inv, lineEnv) {
  * environment it runs under, with GIT_DIR, GIT_WORK_TREE and
  * GIT_COMMON_DIR resolved from that folder the way git resolves them --
  * or LOST where the guard can't tell. One per folder the shell may be in
- * and per value each variable may hold.
+ * and per value each variable may hold, counted as they are built (#528): 200
+ * values of each variable is eight million environments, which ran the guard
+ * out of heap, and a crash is no refusal (this file's header). Unreadable values
+ * all land on one key, so what's tried is counted too, not just what's found.
+ * Asserted: runguard-guards.test.ts "(#528)".
  */
 function invTargets(inv, places, lineEnv) {
   const choices = envChoices(inv, lineEnv);
   const found = new Map();
+  const past = () => [...[...found.values()].slice(0, MAX_TARGETS), LOST];
+  let tried = 0;
   for (const place of places) {
     let dir = place;
     for (const d of [...inv.wrapDirs, ...inv.dirs]) dir = pathWord(d, dir);
@@ -910,6 +934,7 @@ function invTargets(inv, places, lineEnv) {
     for (const gitDir of choices[0]) {
       for (const workTree of choices[1]) {
         for (const common of choices[2]) {
+          if (found.size > MAX_TARGETS || ++tried > MAX_TARGETS * MAX_TARGETS) return past();
           const env = { ...process.env };
           let lost = false;
           [gitDir, workTree, common].forEach((v, k) => {
@@ -925,8 +950,7 @@ function invTargets(inv, places, lineEnv) {
       }
     }
   }
-  const targets = [...found.values()];
-  return targets.length > MAX_TARGETS ? [...targets.slice(0, MAX_TARGETS), LOST] : targets;
+  return found.size > MAX_TARGETS ? past() : [...found.values()];
 }
 
 /** A path with its links resolved, or as given when it doesn't exist. */
@@ -2099,8 +2123,10 @@ try {
  *   #319  an unquoted $(...) is one word of its command
  *   #320  process substitution and arithmetic bodies run
  *   #321  a line nested past the reader's depth is refused unread
- *   #522  the reading is linear, one read budget in the reader, a line past it
- *         refused unread, and a reader that runs out of stack refuses too.
+ *   #522  one read budget in the reader, a line past it refused unread, and a
+ *         reader that runs out of stack refuses too. What's asserted is each
+ *         shape runguard-guards.test.ts "(#522)" and "(#528)" time against the
+ *         budget, not that every path through the guard is linear (#528).
  *   #521  one depth for a shell, an eval, a heredoc fed to a shell, a pager and
  *         a runner's line, the write guard's; past it, refused unread. A runner's
  *         guesses in a row stop at RUNNER_HOPS, since a word list is no nest.

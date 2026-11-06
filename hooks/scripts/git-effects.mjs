@@ -86,7 +86,8 @@ const PUSH_SWEEPS = ["--all", "--branches", "--mirror", "--tags", "--delete"];
 // How each subcommand's args are read: short letters that take a value, long
 // options git may see shortened, which of those take a value, short aliases.
 const READS = {
-  reset: { longs: ["--hard", "--merge", "--keep"] },
+  // a typed mode that keeps the write off the work tree spares the rows a wild word could fire (#528)
+  reset: { longs: ["--hard", "--merge", "--keep", "--soft", "--mixed"], sparesWild: ["--soft", "--mixed"] },
   checkout: { short: "bB", alias: { f: "--force" },
     longs: ["--force", "--orphan", "--conflict", "--pathspec-from-file"],
     valued: ["--orphan", "--conflict", "--pathspec-from-file"] },
@@ -186,9 +187,10 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  * an `action`, and the refusal names the word. A row that always fires reads
  * no word, so merge and its kin are judged as they always were. A push has its
  * own answer, the ship gate's (pushWild). A flag on the line that keeps the
- * write off the work tree still spares the row, and `unlessOn` still reads what
- * was typed: the guard's Not seen block says so, dated. Asserted by
- * runguard-guards.test.ts (#494).
+ * write off the work tree still spares the row, a typed `--soft` or `--mixed`
+ * spares a reset's rows from the wild word alone (a typed `--hard` still fires,
+ * #528), and `unlessOn` still reads what was typed: the guard's Not seen block
+ * says so, dated. Asserted by runguard-guards.test.ts (#494, #528).
  * Rows are read in order; the first DISCARDS_WORK row that matches is the
  * one a refusal names. The everyday neighbours have no discards-work row
  * because they are routine or recoverable: a single-path checkout/restore
@@ -807,6 +809,7 @@ function rowCause(row, inv, probe) {
   // flag or a bare word, or, for a row that wants a path, one past a `--`
   const wildCause = (paths = []) => {
     if (!inv.wild?.size || inv.sub === "push") return null;
+    if (READS[inv.sub]?.sparesWild?.some((n) => parsed().on.get(n) === true)) return null;
     return [...parsed().own, ...paths].find((w) => inv.wild.has(w)) ?? null;
   };
   switch (row.when) {

@@ -3783,6 +3783,9 @@ describe("a flag, path or command the shell builds from a same-line variable mee
       "git x $UNSET_A y", 'git x "$UNSET_A" y', "git $UNSET_A x", "git x p$UNSET_A", "$UNSET_A git x",
       "F=b; G=a$F; git x $G", "for F in a b; do git x $F; done", 'F=a; git x "p${F}s"', 'git x $"q"',
       'F=a; git x "$F"s', "F=a; git x $F's'", 'F=a; G=b; git x "$F"$G', "F='a b'; git x \"$F\"$F",
+      // #527: a quoted brace in a default closes nothing, so the git after it is the git bash runs
+      ": ${X:-'{}'}; git x y", "BODY=${X:-'{}'}; git x y", ": ${X:-'}'}; git x y", ': "${X:-"}"}"; git x y',
+      ": ${X:-\\}}; git x y", ": ${X:-${Y:-'}'}}; git x y",
     ];
     for (const line of lines) {
       const out = execFileSync("bash", ["-c", `git() { printf '%s\\n' "$@"; echo =; }; ${line}`], { encoding: "utf8" });
@@ -4320,5 +4323,223 @@ describe("the pre-push hook: a rewrite of the default branch is the table's forc
     // the same line with the remote at a real ancestor, and with no ref there yet, passes
     expect(hook(`refs/heads/main ${head} refs/heads/main ${git(f.proj, "rev-parse", "HEAD~1")}`).status).toBe(0);
     expect(hook(`refs/heads/main ${head} refs/heads/main ${"0".repeat(40)}`).status).toBe(0);
+  });
+});
+
+/**
+ * #527: a quoted brace in a `${...}` default swallowed the rest of the line, so a
+ * destructive tail read as text and the shell still ran it. shell-words.test.ts
+ * holds the reader against real bash; this holds the guard, end to end.
+ */
+describe("run guard: a command after a quoted brace in a default is read and judged (#527)", () => {
+  const FRONTS = [
+    "echo ${J:-'{}'}", "BODY=${J:-'{}'}", "echo ${J:-'}'}", `echo "\${J:-'}'}"`, 'echo ${J:-"}"}', "echo ${J:-\\}}",
+    'echo "${J:-"}"}"', `echo "\${J:-"'"}"`, `echo "\${J:-'"'}"`, "echo ${J:-${K:-'}'}}", "echo ${J:-$'}'}", "echo ${J#'}'}",
+    "echo $(echo ${J:-')'})", 'echo "$(echo "${J:-"}"}")"',
+  ];
+  const TAILS: Array<[string, string]> = [
+    ["git reset --hard", "git reset --hard"], ["git push --force origin x", "git push --force"],
+    ["git push origin main", "moves-shared-ref"], ["gh pr merge 1", "gh pr merge"],
+  ];
+  function nested() {
+    const f = fixture(undefined, false);
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+
+  it("every destructive tail after every front is refused, from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const front of FRONTS) {
+      for (const [tail, names] of TAILS) {
+        for (const cwd of [proj, sub]) {
+          const c = `${front}; ${tail}`;
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain(names);
+        }
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same fronts with nothing destructive after them, and a tail the default really holds, pass", () => {
+    const { proj, home, sub } = nested();
+    for (const front of FRONTS) {
+      for (const cwd of [proj, sub]) {
+        const c = `${front}; git status; git log -1`;
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const c of ["echo ${J:-'; git reset --hard; '}", 'echo ${J:-"; git reset --hard; "}', `echo \${J:-'}; git reset --hard; '}`,
+      'git commit -m "${M:-a}"', `git commit -m "\${M:-'a}b'}"`, 'git commit -m "${M:-"a}b"}"']) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("hostile: a nested shell, an eval, a pipe, a substitution in the default, a default that is the flag, a line shells part over", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      `sh -c 'echo \${J:-"}"}; git reset --hard'`, `bash -c "echo \\\${J:-\\"}\\"}; git reset --hard"`,
+      `eval 'echo \${J:-"}"}; git reset --hard'`, "echo ${J:-'}'} | git reset --hard", "echo ${J:-'}'} && git reset --hard",
+      "echo ${J:-'}'}\ngit reset --hard", "echo ${J:-'}'$(git reset --hard)}", 'echo "${J:-$(git reset --hard)}"',
+      "echo ${J:-`git reset --hard`}", "git reset ${J:-'--hard'}", 'git reset "${J:-"--hard"}"', "git reset ${J:-${K:-'--hard'}}",
+      // bash keeps the reset in one word and a POSIX sh or zsh runs it: judged either way
+      `echo "\${J:-'}"; git reset --hard; echo "'}"`,
+      // the same, one level down
+      `echo "$(echo "\${J:-'}"; git reset --hard; echo "'}")"`,
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      }
+    }
+  });
+
+  it("a thousand nested defaults, and defaults in substitutions past the reader's depth, cost what a long word does: refused in time", () => {
+    const { proj, home } = nested();
+    for (const [shape, line] of [
+      ["defaults", `echo ${"${a:-".repeat(1000)}'}'${"}".repeat(1000)}; git reset --hard`],
+      ["quoted defaults", `echo "${'${a:-"'.repeat(1000)}'}'${'"}'.repeat(1000)}"; git reset --hard`],
+      ["defaults in substitutions", `git reset --hard; echo ${"${a:-$(".repeat(40000)}`],
+      ["quoted defaults in substitutions", `git reset --hard; echo ${'"${a:-$('.repeat(40000)}`],
+    ] as const) {
+      const t0 = Date.now();
+      const r = guard(proj, home, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(Date.now() - t0, shape).toBeLessThan(3000);
+    }
+  });
+});
+
+/**
+ * #528: three paths the read budget never checks. A round of cds doubled its
+ * folders before the cap was read, so 18 of them stalled the guard and more never
+ * came back. A line's git locations multiplied with no cap at all, so 200 values
+ * each ran the guard out of heap, and a crash is an exit other than 0 or 2, which
+ * lets the call go ahead (the dated claim in the guard's header).
+ */
+describe("run guard: where a command may run is bounded inside the round, never after it (#528)", () => {
+  const RESET = "git reset --hard";
+  const n = (k: number, f: (i: number) => string, sep = "; ") => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+  const SHAPES: Array<[string, (end: string) => string]> = [
+    ["18 cds", (end) => `${n(18, (i) => `cd d${i}`)}; ${end}`],
+    ["200 cds", (end) => `${n(200, (i) => `cd d${i}`)}; ${end}`],
+    ["pushd and cd, in a loop body", (end) => `while true; do ${n(40, (i) => `pushd d${i}; cd e${i}`)}; done; ${end}`],
+    ["env -C after env -C", (end) => `${n(40, (i) => `env -C d${i}`, " ")} true; ${end}`],
+    ["a CDPATH of 5000 folders", (end) => `CDPATH=${n(5000, (i) => `p${i}`, ":")}; cd x; cd y; ${end}`],
+    ["one folder in a CDPATH, 5000 times, under 300 cds", (end) => `CDPATH=${n(5000, () => "p", ":")}; ${n(300, () => "cd x")}; ${end}`],
+    ["200 values of each git location", (end) =>
+      `${["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"].map((k) => n(200, (i) => `${k}=/v${i}`)).join("; ")}; ${end}`],
+    ["200 unreadable values of each", (end) =>
+      `${["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"].map((k) => n(200, (i) => `${k}=$v${i}`)).join("; ")}; ${end}`],
+    ["a cd word of 100000 open braces", (end) => `cd ${"{".repeat(100000)}; ${end}`],
+  ];
+
+  function nested() {
+    const f = fixture();
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+  const inTime = (run: () => { status: number | null; stderr: string }, label: string, status: number) => {
+    const t0 = Date.now();
+    const r = run();
+    expect(r.status, `${label}: ${r.stderr.split("\n")[0]}`).toBe(status);
+    expect(Date.now() - t0, label).toBeLessThan(3000);
+    return r;
+  };
+
+  it("every shape ending in a reset is refused inside the budget, from the root and a nested folder, and never crashes", () => {
+    const { proj, home, sub } = nested();
+    for (const [shape, line] of SHAPES) {
+      for (const cwd of [proj, sub]) {
+        const r = inTime(() => guard(proj, home, line(RESET), {}, cwd), `${shape} from ${cwd === sub ? "sub" : "root"}`, 2);
+        expect(r.stderr, shape).not.toContain("heap out of memory");
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same shapes ending in reading git pass, in the same time", () => {
+    const { proj, home, sub } = nested();
+    for (const [shape, line] of SHAPES) {
+      for (const cwd of [proj, sub]) inTime(() => guard(proj, home, line("git status"), {}, cwd), `${shape} from ${cwd === sub ? "sub" : "root"}`, 0);
+    }
+  }, 120_000);
+
+  it("the bound changes no answer below it: four cds and two git locations are followed as they were", () => {
+    const { proj, home } = nested();
+    expect(guard(proj, home, `cd a; cd b; cd c; cd d; ${RESET}`).status).toBe(2);
+    expect(guard(proj, home, "cd a; cd b; cd c; cd d; git status").status).toBe(0);
+    expect(guard(proj, home, `GIT_DIR=/a; GIT_DIR=/b; GIT_WORK_TREE=/c; ${RESET}`).status).toBe(2);
+    expect(guard(proj, home, "GIT_DIR=/a; GIT_DIR=/b; GIT_WORK_TREE=/c; git log -1").status).toBe(0);
+  });
+
+  it("a gated command past the bound is refused as lost, which is what the cap always meant", () => {
+    const { proj, home } = nested();
+    const r = guard(proj, home, `${n(18, (i) => `cd d${i}`)}; git push origin main`);
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain("cd, pushd");
+  });
+});
+
+/**
+ * #528: `git reset --soft "$X"` is the everyday way to move a branch to a commit a
+ * substitution names, and #494's wild word refused it, though the flag keeps the
+ * write off the work tree: the over-refusal that phase brought in. The rule is the
+ * Not seen line that already holds for `git rm --cached "$f"`: the typed flag wins.
+ */
+describe("run guard: a soft or mixed reset with a word it can't spell passes, a bare one doesn't (#528)", () => {
+  const PASS = [
+    'git reset --soft "$X"', 'T=$(cat x); git reset --soft "$T"', 'git reset --soft "$(git rev-parse HEAD~1)"', 'git reset --soft "$(cat x)"',
+    'git reset --mixed "$(cat x)"', 'git reset -q --soft "$(cat x)"', 'git reset --sof "$(cat x)"', 'git reset --mix "$(cat x)"', 'git reset "$(cat x)" --soft',
+    'F=--soft; git reset $F "$(cat x)"', 'git -C . reset --soft "$(cat x)"', 'sh -c \'git reset --soft "$(cat x)"\'',
+  ];
+  const REFUSE = [
+    'git reset "$(cat x)"', 'T=$(cat x); git reset "$T"', 'git reset --hard "$(cat x)"', 'git reset --soft "$(cat x)" --hard', 'git reset --hard --soft "$(cat x)"',
+    "git reset --soft --hard", "git reset --hard --soft", 'git reset --no-soft "$(cat x)"', "git reset --soft$(cat x)", 'git $(cat x) --soft "$(cat y)"',
+    'for S in --soft --hard; do git reset $S "$(cat x)"; done', 'F=--hard; git reset --soft "$(cat x)" $F', "git reset --soft ${X:---hard}",
+    'sh -c \'git reset "$(cat x)"\'',
+  ];
+  function nested() {
+    const f = fixture();
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+
+  it("passes, from the root and a nested folder, with a typed mode that keeps the write off the work tree", () => {
+    const { proj, home, sub } = nested();
+    for (const c of PASS) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("refuses, from the root and a nested folder, with no such mode, or with --hard typed anywhere beside it", () => {
+    const { proj, home, sub } = nested();
+    for (const c of REFUSE) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+      }
+    }
+  });
+
+  it("the Not seen line: a wild word after the typed mode may take it back, and git really does take the last one", () => {
+    const { proj, home } = nested();
+    expect(guard(proj, home, 'git reset --soft "$(echo --hard)"').status).toBe(0);
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n\s*\*/g, " ").replace(/\s+/g, " ");
+    expect(header).toContain('a soft or mixed reset, dated 2026-11-06 (#528): `git reset --soft "$(echo --hard)"` passes');
+    // git's own reading, which is why the line has to be written down: the last mode wins
+    writeFileSync(join(proj, "seed.txt"), "changed\n");
+    git(proj, "add", "seed.txt");
+    git(proj, "reset", "--hard", "--soft");
+    expect(readFileSync(join(proj, "seed.txt"), "utf8")).toBe("changed\n");
+    git(proj, "reset", "--soft", "--hard");
+    expect(readFileSync(join(proj, "seed.txt"), "utf8")).not.toBe("changed\n");
   });
 });

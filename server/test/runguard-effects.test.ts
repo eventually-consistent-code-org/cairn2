@@ -1372,3 +1372,22 @@ describe("side doors: the writes that move a ref or the repository, one test per
     expect(block).toContain("read 2026-11-06");
   });
 });
+
+describe("a typed soft or mixed reset spares every reset row from a wild word, and no row from a typed flag (#528)", () => {
+  const wild = (command: string) => ({ ...inv(command), wild: new Set(["$T"]) });
+
+  it("no effect at all, so a live run's owner-checkout rows spare it too", () => {
+    for (const c of ["git reset --soft $T", "git reset --mixed $T", "git reset --sof $T", "git reset $T --soft"]) {
+      expect(classify(wild(c)), c).toEqual([]);
+    }
+  });
+
+  it("a bare one fires both effects through the word, and a typed --hard, --merge or --keep beside --soft fires by name", () => {
+    expect(classify(wild("git reset $T")).map((c: Cause) => c.effect)).toEqual(expect.arrayContaining([DISCARDS_WORK, TOUCHES_OWNER_CHECKOUT]));
+    expect(classify(wild("git reset $T"))[0].flag).toBe("$T");
+    for (const [c, flag] of [["git reset --soft --hard $T", "--hard"], ["git reset --hard --soft $T", "--hard"],
+      ["git reset --soft --merge $T", "--merge"], ["git reset --mixed --keep $T", "--keep"]]) {
+      expect(classify(wild(c))[0]?.flag, c).toBe(flag);
+    }
+  });
+});

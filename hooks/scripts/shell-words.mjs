@@ -165,8 +165,8 @@ const MAX_QUOTED = 256;
 
 /**
  * Index of the `)` closing a `$(` whose body starts at `i` -- nesting-aware,
- * so parens inside quotes, inner substitutions and backticks don't close it
- * early. Unterminated runs to the end of the line.
+ * so parens inside quotes, inner substitutions, a `${...}` (#527) and backticks
+ * don't close it early. Unterminated runs to the end of the line.
  */
 function closeParen(line, i, quoted = 0) {
   // nested past the reader's own depth anyway: runs to the end, and the reader marks it (#522)
@@ -177,10 +177,12 @@ function closeParen(line, i, quoted = 0) {
     if (c === "\\") { i++; continue; }
     if (c === "'") { const j = line.indexOf("'", i + 1); i = j < 0 ? line.length : j; continue; }
     if (c === "`") { i = closeTick(line, i + 1); continue; }
+    if (c === "$" && line[i + 1] === "{") { i = closeBrace(line, i + 2, false, quoted + 1); continue; }
     if (c === '"') {
       for (i++; i < line.length && line[i] !== '"'; i++) {
         if (line[i] === "\\") i++;
         else if (line[i] === "$" && line[i + 1] === "(") i = closeParen(line, i + 2, quoted + 1);
+        else if (line[i] === "$" && line[i + 1] === "{") i = closeBrace(line, i + 2, true, quoted + 1);
         else if (line[i] === "`") i = closeTick(line, i + 1);
       }
       continue;
@@ -354,6 +356,9 @@ function ansiQuoted(body) {
  *                  being read: its characters and the clock count, its segments
  *                  don't, or every line of a long `python -c` would spend the
  *                  budget of a command count on words that are no commands.
+ *   plainQuote     a `'` in a double-quoted `${...}` is plain text, as a POSIX sh
+ *                  and zsh read it. Off: it pairs, as bash reads it. Set only by
+ *                  the reader, on a line whose reading depends on it (#527).
  */
 export function shellSegments(command, read = {}, depth = 0) {
   const budget = read.budget ?? null;
@@ -429,6 +434,14 @@ export function shellSegments(command, read = {}, depth = 0) {
     cur = (cur ?? "") + command.slice(i, end + 1);
     i = end + 1;
   };
+  // Where a `${` closes, noting a line whose shells part over a `'` in it: the
+  // line is then read their way too, so what either runs reaches the guard (#527).
+  let parted = false;
+  const braceEnd = (at, dq) => {
+    const end = closeBrace(command, at, dq, 0, read.plainQuote);
+    if (!read.plainQuote && closeBrace(command, at, dq, 0, true) !== end) parted = true;
+    return end;
+  };
 
   let i = 0;
   while (i < command.length) {
@@ -496,6 +509,15 @@ export function shellSegments(command, read = {}, depth = 0) {
           i = end + 1;
           continue;
         }
+        // "${ ... }" has quoting of its own, so a `"` in its default closes nothing out here (#527)
+        if (d === "$" && e === "{") {
+          const end = braceEnd(i + 2, true);
+          const text = command.slice(i, end + 1);
+          if (read.substitutions) for (const body of heredocBodies(text)) subs.push(body);
+          s += text;
+          i = end + 1;
+          continue;
+        }
         s += d;
         i++;
       }
@@ -511,7 +533,7 @@ export function shellSegments(command, read = {}, depth = 0) {
     // (#494): `${X:-a b}` is one expansion, never `${X:-a` and `b}`, and a
     // substitution in it runs like any other
     if (c === "$" && n === "{") {
-      const end = closeBrace(command, i + 2);
+      const end = braceEnd(i + 2, false);
       const text = command.slice(i, end + 1);
       if (read.substitutions) for (const body of heredocBodies(text)) subs.push(body);
       cur = (cur ?? "") + text;
@@ -638,6 +660,7 @@ export function shellSegments(command, read = {}, depth = 0) {
     budget.chars += Math.max(0, command.length - data);
     if (overBudget(budget)) { segs.push(deepSegment()); return segs; }
   }
+  if (parted) for (const seg of shellSegments(command, { ...read, plainQuote: true }, depth)) segs.push(seg);
   // Each body is read once, as a line of its own, one level deeper. Past
   // SUBSTITUTION_DEPTH levels the rest is not read at all (#321): a deep
   // segment stands in for it, and the guards refuse the line on sight.
@@ -688,7 +711,9 @@ export const RUNNER_HOPS = 3;
  * asserted by shell-words.test.ts, runguard-guards.test.ts and hooks.test.ts
  * "(#522)". A heredoc's body is data and never counts against MAX_READ, only
  * against MAX_RAW, the most text a line can hold at all. A body fed to a shell is
- * read as a line, and counts then.
+ * read as a line, and counts then. This charges reading and git questions, not what
+ * a guard does with what it read, which is bounded where it happens (#528): the
+ * folders and locations in the run guard, a typed pattern in the harness guard.
  */
 export const MAX_READ = 1_000_000;
 export const MAX_SEGMENTS = 4096;
@@ -792,6 +817,24 @@ function braceAt(word) {
     return { start: i, end, alts };
   }
   return null;
+}
+
+/**
+ * True when a word holds a `{...}` with a comma or a `..` in it, a list the shell
+ * may spell out. One pass, where the regular expression it replaced walked to the
+ * end of the word from every `{`, so a `cd` word of open braces held a guard (#528).
+ */
+export function holdsBraceList(word) {
+  let from = 0;
+  for (let close = word.indexOf("}"); close >= 0; close = word.indexOf("}", from)) {
+    const open = word.indexOf("{", from);
+    if (open >= 0 && open < close) {
+      const body = word.slice(open + 1, close);
+      if (body.includes(",") || body.includes("..")) return true;
+    }
+    from = close + 1;
+  }
+  return false;
 }
 
 /**
@@ -1026,13 +1069,48 @@ function boundNames(word, spans) {
   return out + word.slice(at);
 }
 
-/** Index of the `}` closing a `${` whose body starts at `i`, nesting-aware. */
-function closeBrace(word, i) {
-  let depth = 1;
+// What closeBrace has open: a `${` outside double quotes, one inside them, and a `"` inside a `${`.
+const IN_BRACE = 0;
+const IN_QUOTED_BRACE = 1;
+const IN_QUOTE = 2;
+
+/**
+ * Index of the `}` closing a `${` whose body starts at `i`, read as the shell
+ * reads it (#527): a brace inside quotes or a substitution closes nothing, and
+ * every level keeps its own quoting. `dq` says the `${` itself stands inside
+ * double quotes. There a `"` still opens a quote, and shells part over a `'`: bash
+ * pairs it, so `"${X:-'"'}"` is one word, while a POSIX sh and zsh read it as plain
+ * text (`plain`), and the reader reads such a line both ways (shellSegments). One
+ * pass with no stack of its own, so a thousand nested defaults cost what one long
+ * word does. Before #527 a quoted `}` closed the `${`, its partner quote opened a
+ * string to the end of the line, and every command after it read as text: `echo
+ * ${J:-'{}'}; git reset --hard`. Asserted against the shells themselves by
+ * shell-words.test.ts "(#527)".
+ */
+function closeBrace(word, i, dq = false, quoted = 0, plain = false) {
+  const open = [dq ? IN_QUOTED_BRACE : IN_BRACE];
   for (; i < word.length; i++) {
-    if (word[i] === "\\") i++;
-    else if (word[i] === "$" && word[i + 1] === "{") { depth++; i++; }
-    else if (word[i] === "}" && --depth === 0) return i;
+    const c = word[i];
+    const n = word[i + 1];
+    const at = open[open.length - 1];
+    if (c === "\\") i++;
+    else if (c === "`") i = closeTick(word, i + 1);
+    else if (c === "$" && n === "(") i = closeParen(word, i + 2, quoted + 1);
+    else if (c === "$" && n === "{") {
+      open.push(at === IN_BRACE ? IN_BRACE : IN_QUOTED_BRACE);
+      i++;
+    } else if (at === IN_QUOTE) {
+      if (c === '"') open.pop();
+    } else if (c === '"') open.push(IN_QUOTE);
+    else if (c === "}") {
+      open.pop();
+      if (!open.length) return i;
+    } else if (at === IN_BRACE && c === "$" && n === "'") {
+      for (i += 2; i < word.length && word[i] !== "'"; i++) if (word[i] === "\\") i++;
+    } else if (c === "'" && (at === IN_BRACE || !plain)) {
+      const j = word.indexOf("'", i + 1);
+      i = j < 0 ? word.length : j;
+    }
   }
   return word.length;
 }
@@ -1104,7 +1182,7 @@ function expansions(word, spans) {
       if (word[i + 2] !== "(") out.push({ start: i, end: end + 1, kind: "sub", dq });
       i = end;
     } else if (n === "{") {
-      const end = closeBrace(word, i + 2);
+      const end = closeBrace(word, i + 2, dq);
       const ref = braceRef(word.slice(i + 2, end));
       if (ref) out.push({ start: i, end: end + 1, dq, ...ref });
       i = end;

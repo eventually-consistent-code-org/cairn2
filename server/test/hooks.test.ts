@@ -8437,3 +8437,176 @@ describe("harness guard: a slash before a variable no longer reads as outside th
     expect(header).toContain("a temp root");
   });
 });
+
+describe("harness guard: a write after a quoted brace in a default is read and judged (#527)", () => {
+  const FRONTS = ["echo ${J:-'{}'}", "BODY=${J:-'{}'}", "echo ${J:-'}'}", 'echo ${J:-"}"}', "echo ${J:-\\}}", 'echo "${J:-"}"}"',
+    `echo "\${J:-"'"}"`, "echo ${J:-${K:-'}'}}"];
+  function fixture() {
+    const p = freshDir("cairn-hooks-527-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const TAILS = (up: string) => [`rm -rf ${up}hooks`, `cp evil.sh ${up}.git/hooks/pre-commit`, "git config core.hooksPath /tmp/h", `echo x > ${up}hooks/hooks.json`];
+
+  it("every protected write after every front is refused, from the root and a nested folder", () => {
+    const p = fixture();
+    for (const front of FRONTS) {
+      for (const [cwd, up] of [[p, ""], [join(p, "pkg", "lib"), "../../"]] as const) {
+        for (const tail of TAILS(up)) {
+          const line = `${front}; ${tail}`;
+          const r = judge(p, line, cwd);
+          expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+        }
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same fronts with an everyday tail, and a write the default only spells, pass", () => {
+    const p = fixture();
+    for (const front of FRONTS) {
+      for (const cwd of [p, join(p, "pkg", "lib")]) {
+        const line = `${front}; ls; echo x > note.txt`;
+        const r = judge(p, line, cwd);
+        expect(r.status, `${line}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const line of ["echo ${J:-'; rm -rf hooks; '}", 'echo ${J:-"; rm -rf hooks; "}', "echo ${J:-'}; rm -rf hooks; '}"]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("hostile: the default is the path, the write sits in a substitution or a nested shell, or the line is one shells part over", () => {
+    const p = fixture();
+    for (const line of [
+      "echo x > ${J:-'hooks/hooks.json'}", 'echo x > "${J:-"hooks/hooks.json"}"', "rm -rf ${J:-${K:-'hooks'}}",
+      "echo ${J:-'}'$(rm -rf hooks)}", 'echo "${J:-$(rm -rf hooks)}"', `sh -c 'echo \${J:-"}"}; rm -rf hooks'`,
+      "echo ${J:-'}'} > hooks/hooks.json", `echo "\${J:-'}"; rm -rf hooks; echo "'}"`,
+    ]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+    }
+  });
+});
+
+/**
+ * #528: a pattern the line typed was compiled into a RegExp, so `find . -regex
+ * '(.*.*.*.*)*z' -delete` held the guard past any budget, and a glob of stars did
+ * the same by the same road. No typed pattern is compiled now; these hold the
+ * answers it gave, in the time it should give them.
+ */
+describe("harness guard: no pattern the line typed is compiled, and its answers stand (#528)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-528-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const inTime = (p: string, line: string, status: number, cwd = p) => {
+    const t0 = Date.now();
+    const r = judge(p, line, cwd);
+    expect(r.status, `${line.slice(0, 80)}: ${r.stderr.split("\n")[0]}`).toBe(status);
+    expect(Date.now() - t0, line.slice(0, 80)).toBeLessThan(3000);
+  };
+  const stars = (k: number) => "*".repeat(k);
+
+  it("a pattern built to backtrack costs what a plain one does, and is answered, from the root and a nested folder", () => {
+    const p = fixture();
+    for (const cwd of [p, join(p, "pkg", "lib")]) {
+      const start = cwd === p ? "." : "../..";
+      for (const [line, status] of [
+        // the regex forms: unreadable, so they select, and find reaches the hook folder
+        [`find ${start} -regex '(.*.*.*.*)*z' -delete`, 2], [`find ${start} -iregex '(a|a)*(a|a)*(a|a)*z' -delete`, 2],
+        [`find ${start} -regex '\\(.*.*.*\\)*z' -delete`, 2],
+        // the plain regex forms, read: nothing here ends in z, so nothing protected is selected
+        [`find ${start} -regex '${".*".repeat(64)}z' -delete`, 0], [`find ${start} -regex '${"[a-z]*".repeat(64)}z' -delete`, 0],
+        // the same road through a glob
+        [`find ${start} -name '${stars(64)}z' -delete`, 0], [`find ${start} -path '${stars(64)}z' -delete`, 0],
+        [`find ${start} -iname '${"*a".repeat(64)}' -delete`, 0], [`find ${start} -name '${"*?".repeat(40)}z' -delete`, 0],
+        [`find ${start} -name '${stars(64)}hooks.json' -delete`, 2], [`find ${start} -path '${stars(64)}hooks/${stars(64)}' -delete`, 2],
+      ] as const) inTime(p, line, status, cwd);
+    }
+  }, 120_000);
+
+  it("a glob on a path word, the same: built to backtrack, and answered", () => {
+    const p = fixture();
+    inTime(p, `rm -rf ${stars(300)}z`, 0);
+    inTime(p, `rm -rf ${stars(300)}s`, 2);
+    inTime(p, `rm -rf ${"*?".repeat(150)}z`, 0);
+    inTime(p, `echo x > hooks/${stars(300)}.json`, 2);
+    inTime(p, `rm -rf ${stars(5000)}z`, 2); // longer than any name, so it's read as any name
+    inTime(p, `cd ${stars(300)}z; rm -rf x`, 0);
+  });
+
+  it("a thousand tests on one find, and a cd word of open braces, stay in the budget", () => {
+    const p = fixture();
+    inTime(p, `find . ${"-name x ".repeat(50000)}-delete`, 0);
+    inTime(p, `find . ${"-regex x ".repeat(50000)}-delete`, 0);
+    inTime(p, `cd ${"{".repeat(100000)}; rm -rf hooks`, 2);
+    const cds = Array.from({ length: 200 }, (_, i) => `cd d${i}`).join("; ");
+    inTime(p, `${cds}; rm -rf hooks`, 2);
+    inTime(p, `${cds}; ls`, 0);
+  });
+
+  it("twins: a -regex reads as find reads it, in any letter case, and only an unplain one selects by default", () => {
+    const p = fixture();
+    for (const [line, status] of [
+      ["find . -regex 'nothing' -delete", 0], ["find . -regex '.*\\.tmp' -delete", 0], ["find . -regex '.*/build/[a-z]*' -delete", 0],
+      ["find . -regex '.*/hooks/.*' -delete", 2], ["find . -regex '.*HOOKS.JSON' -delete", 2], ["find . -iregex '.*hooks.json' -delete", 2],
+      ["find . -regex '.*/hook[s]/hooks\\.json' -delete", 2], ["find . -regex '\\./hooks' -delete", 2], ["find . -regex '.*/hooks[^x]*' -delete", 2],
+      // what the guard won't read selects, as an unreadable test always has: a refusal, and a dated line in the Not seen block
+      ["find . -regex '.*\\.\\(tmp\\|log\\)' -delete", 2], ["find . -regex '.*tmp$' -delete", 2], ["find . -regex '[[:alpha:]]*' -delete", 2],
+      // a find that writes nothing is no write, whatever its test
+      ["find . -regex '(.*.*.*.*)*z'", 0], ["find . -regex '.*' -print", 0],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(status);
+    }
+  });
+
+  it("twins: every glob spelling keeps its answer: the dot rule, a class, a negated class, an escape, a letter case", () => {
+    const p = fixture();
+    for (const [line, status] of [
+      ["find . -name 'hook*' -delete", 2], ["find . -name 'HOOK*' -delete", 2], ["find . -iname 'HOOKS.JS?N' -delete", 2], ["find . -name '[g-i]ooks' -delete", 2],
+      ["find . -name '[!a-g]ooks' -delete", 2], ["find . -name 'hooks\\.json' -delete", 2], ["find . -name '*.tmp' -delete", 0], ["find . -name '[!h]ooks' -delete", 0],
+      ["find . -path './hooks/*' -delete", 2], ["find . -path './build/*' -delete", 0],
+      ["rm -rf h*", 2], ["rm -rf ho?ks", 2], ["rm -rf [g-i]ooks", 2], ["rm -rf [!a-g]ooks", 2], ["rm -rf x*", 0], ["rm -rf *.tmp", 0], ["rm -rf .c*", 2],
+      ["echo x > hooks/h*.json", 2], ["echo x > hook?/x", 2], ["echo x > build/*.log", 0],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(status);
+    }
+  });
+
+  it("the decision on an unplain -regex is in the header", () => {
+    const header = readFileSync(HARNESSGUARD, "utf8").split("\nimport ")[0];
+    expect(header).toContain("Patterns, dated 2026-11-06 (#528");
+  });
+});
+
+describe("no guard says the platform fails closed: the sentence the hooks reference does not hold (#528)", () => {
+  // a claim about a third party, so it is dated and read from the page; this holds what each file says, not what the platform does
+  const GUARDS = [RUNGUARD, HARNESSGUARD, LEAKGUARD];
+
+  it("each guard quotes the page, dated, and none keeps the old sentence", () => {
+    expect(GUARDS.length).toBe(3);
+    for (const file of GUARDS) {
+      const source = readFileSync(file, "utf8").replace(/\n\s*(?:\*|\/\/)/g, " ").replace(/\s+/g, " ");
+      // the old sentence stands only as the correction's quote of itself, with its date beside it
+      expect(source, file).not.toMatch(/fails closed when it cannot reach/);
+      expect(source, file).toContain('"since 2.1.299 the platform fails closed", dated 2026-10-14 (#371), which the reference does not say');
+      expect(source, file).toContain('or fails in some other way, such as not starting or printing invalid JSON. The action goes ahead"');
+      expect(source, file).toContain("read 2026-11-06");
+      expect(source, file).toContain("onFailure");
+    }
+  });
+});

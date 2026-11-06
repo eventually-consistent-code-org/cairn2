@@ -7,6 +7,10 @@
  * Author(s): John Reed
  */
 
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
@@ -1052,4 +1056,135 @@ describe("`>&` is a descriptor only for a number or `-`; anything else is a redi
     expect(redirects("echo x >&2 > f 2>&1")).toEqual(["f"]);
     expect(redirects("echo x >& f >&2")).toEqual(["f"]);
   });
+});
+
+/**
+ * #527: the reader walks a `${...}` the way bash does, or whatever follows it on
+ * the line reads as text and runs unjudged. Every spelling below goes through
+ * every context below, and real bash decides: a tail bash ran is a tail the reader
+ * has to hand a guard, under each guard's read options, and a tail bash kept in
+ * quotes is one it must not. A line bash won't parse runs nothing, so it holds the
+ * reader to nothing. Empty is a failure: the table has to reach bash and find tails.
+ */
+describe("a quote or brace in a ${...} is read as real bash reads it (#527)", () => {
+  const READS: Record<string, Record<string, boolean>> = {
+    run: { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+    harness: { redirects: true, subshells: true, substitutions: true, comments: true },
+    write: { redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+  };
+  const SPELLINGS = [
+    // the issue's, and the plain controls
+    "${X:-'}'}", "${X:-'{}'}", '${X:-"}"}', "${X:-\\}}", "${X}", "${X:-}", "${X:-x}", "${#X}",
+    // nested defaults, each level with its own quoting
+    "${X:-${Y:-'}'}}", '${X:-${Y:-"}"}}', "${X:-\"${Y:-'}'}\"}", '${X:-"${Y:-"}"}"}', "${X:-${Y:-${Z:-'}'}}}", "${X:-${Y:-\\}}}",
+    // ANSI-C and locale quoting in a default
+    "${X:-$'}'}", "${X:-$'\\'}'}", '${X:-$"}"}',
+    // a substitution in a default holds its own brace
+    "${X:-$(echo })}", "${X:-$(echo '}')}", "${X:-`echo }`}", '${X:-$(echo "}")}', "${X:-$((1+1))}",
+    // the other operators
+    "${X-'}'}", "${X:='}'}", "${X:+'}'}", '${X+"}"}', "${X:?'}'}", "${X#'}'}", '${X%"}"}', "${X##\\}}", "${X/'}'/y}", "${X/a/'}'}",
+    // one kind of quote holding the other, an escaped quote, and runs of them
+    "${X:-'\"'}", '${X:-"\'"}', "${X:-\\'}", '${X:-\\"}', "${X:-'\\'}", '${X:-"\\""}', '${X:-"\\}"}', "${X:-'a'b'}'}", "${X:-a'}'b\"}\"c\\}d}",
+    // what breaks a line elsewhere, held by the default
+    "${X:-;}", "${X:-';'}", "${X:-'; echo MID; '}", '${X:-"; echo MID; "}', "${X:-)}", "${X:-(}", "${X:-')'}", "${X:-#}", "${X:-&}",
+  ];
+  const CONTEXTS: Array<(e: string) => string> = [
+    (e) => `echo A ${e} B; echo TAIL`,
+    (e) => `echo A "${e}" B; echo TAIL`,
+    (e) => `echo A "p${e}s" B; echo TAIL`,
+    (e) => `BODY=${e}; echo TAIL`,
+    (e) => `BODY="${e}"; echo TAIL`,
+    (e) => `echo $(echo ${e}); echo TAIL`,
+    (e) => `echo "$(echo ${e})"; echo TAIL`,
+    (e) => `echo "$(echo "${e}")"; echo TAIL`,
+    (e) => `${e} && echo TAIL`,
+    (e) => `echo ${e}\necho TAIL`,
+  ];
+  const sees = (segs: Seg[], name: string) => segs.some((s) => s.words.join(" ") === `echo ${name}`);
+  const cwd = mkdtempSync(join(tmpdir(), "cairn-527-"));
+  const shell = (exe: string, line: string) => {
+    const r = spawnSync(exe, ["-c", line], { cwd, encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+    const out = (r.stdout ?? "").split("\n");
+    return { status: r.status, tail: out.includes("TAIL"), mid: out.includes("MID") };
+  };
+  // the other shells a line can land in: macOS's old bash, a POSIX sh, and zsh, where each is installed
+  const OTHERS = ["/bin/bash", "/bin/dash", "/bin/sh", "/bin/zsh"].filter((p) => existsSync(p));
+
+  it("every spelling in every context: the reader's commands are the ones bash ran", () => {
+    const wrong: string[] = [];
+    let ran = 0;
+    for (const spelling of SPELLINGS) {
+      for (const context of CONTEXTS) {
+        const line = context(spelling);
+        const b = shell("bash", line);
+        if (b.tail) ran++;
+        for (const [name, read] of Object.entries(READS)) {
+          const segs = shellSegments(line, read) as Seg[];
+          if (b.tail && !sees(segs, "TAIL")) wrong.push(`${name}: bash ran the tail, the reader missed it: ${line}`);
+          if (b.status === 0 && !b.tail && sees(segs, "TAIL")) wrong.push(`${name}: bash kept the tail in quotes, the reader split it: ${line}`);
+          if (b.status === 0 && b.mid !== sees(segs, "MID")) wrong.push(`${name}: bash ${b.mid ? "ran" : "kept"} the middle, the reader did not: ${line}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    // a table that stopped reaching bash would pass above forever
+    expect(ran).toBeGreaterThan(SPELLINGS.length * 4);
+  }, 120_000);
+
+  // Where shells part: bash pairs a `'` in a double-quoted ${...}, a POSIX sh and zsh don't, so
+  // the same line runs a different tail in each. The reader reads such a line both ways.
+  const PARTED = [
+    `echo "\${X:-'}"; echo TAIL; echo "'}"`,
+    `echo "\${X:-'}" ; echo MID ; echo "'}" ; echo TAIL`,
+    `echo "a\${X:-b'}c"; echo TAIL; echo "d'e}f"`,
+    `echo "\${X:-\${Y:-'}}"; echo TAIL; echo "'}}"`,
+    `echo "$(echo "\${X:-'}"; echo TAIL; echo "'}")"`,
+    `BODY="\${X:-'}"; echo TAIL; BODY="'}"`,
+    `echo "\${X:-it's}"; echo TAIL`,
+  ];
+
+  it("a line shells part over: whatever bash or any installed shell runs, the reader hands a guard", () => {
+    const wrong: string[] = [];
+    const ranBy = new Set<string>();
+    for (const line of PARTED) {
+      for (const exe of ["bash", ...OTHERS]) {
+        const b = shell(exe, line);
+        if (b.tail) ranBy.add(exe);
+        for (const [name, read] of Object.entries(READS)) {
+          const segs = shellSegments(line, read) as Seg[];
+          if (b.tail && !sees(segs, "TAIL")) wrong.push(`${name}: ${exe} ran the tail, the reader missed it: ${line}`);
+          if (b.mid && !sees(segs, "MID")) wrong.push(`${name}: ${exe} ran the middle, the reader missed it: ${line}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    // the point of the table: on a machine with a POSIX sh or zsh, some shell really did run a tail
+    if (OTHERS.some((p) => p.endsWith("dash") || p.endsWith("zsh"))) expect(ranBy.size).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("twins: one reading only, for a line every shell reads alike", () => {
+    for (const line of [`echo "\${X:-'a'}"; echo TAIL`, `echo "\${X:-a}"; echo TAIL`, `echo "\${X}" 'it''s'; echo TAIL`]) {
+      const tails = (shellSegments(line, READS.run) as Seg[]).filter((s) => s.words.join(" ") === "echo TAIL");
+      expect(tails.length, line).toBe(1);
+    }
+  });
+
+  it("a tail or a middle any installed shell runs, the reader hands a guard", () => {
+    const wrong: string[] = [];
+    let ran = 0;
+    for (const exe of OTHERS) {
+      for (const spelling of SPELLINGS) {
+        for (const context of CONTEXTS) {
+          const line = context(spelling);
+          const b = shell(exe, line);
+          if (b.tail) ran++;
+          const segs = shellSegments(line, READS.run) as Seg[];
+          if (b.tail && !sees(segs, "TAIL")) wrong.push(`${exe} ran the tail, the reader missed it: ${line}`);
+          if (b.mid && !sees(segs, "MID")) wrong.push(`${exe} ran the middle, the reader missed it: ${line}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    if (OTHERS.length) expect(ran).toBeGreaterThan(SPELLINGS.length);
+  }, 240_000);
 });
