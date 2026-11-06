@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, utimesSync,
-  copyFileSync,
+  copyFileSync, cpSync,
 } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -8052,5 +8052,388 @@ describe("a write path built with an operator, array or read on a same-line vari
     const block = header.slice(0, header.indexOf("*/"));
     expect(block).toContain("a file the line sources");
     expect(block).toContain("under a folder the guard knows");
+  });
+});
+
+// #521: the harness half. Past a fixed depth a nested shell's write was never
+// read and the line passed; one depth in the reader now, and past it, refused.
+describe("harness guard: a shell nested past the reader's depth is refused unread, never passed (#521)", () => {
+  const shells = (line: string, n: number): string =>
+    n === 0 ? line : `sh -c '${shells(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const evals = (line: string, n: number): string =>
+    n === 0 ? line : `eval '${evals(line, n - 1).replace(/'/g, "'\\''")}'`;
+  const WRITE = "echo x > hooks/hooks.json";
+  function fixture() {
+    const p = freshDir("cairn-hooks-521-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+
+  it("one to eight levels are judged, and the write inside is the write, from the root and a nested cwd", () => {
+    const p = fixture();
+    for (const n of [1, 2, 3, 4, 8]) {
+      for (const [cwd, write] of [[p, WRITE], [join(p, "pkg", "lib"), "echo x > ../../hooks/hooks.json"]] as const) {
+        const r = judge(p, shells(write, n), cwd);
+        expect(r.status, `${n} levels from ${cwd}`).toBe(2);
+        expect(r.stderr, `${n} levels from ${cwd}`).toContain("hook directory");
+        expect(judge(p, shells("echo hi", n), cwd).status, `twin, ${n} levels`).toBe(0);
+      }
+    }
+    expect(judge(p, "sh -c 'echo hi'").status).toBe(0);
+  });
+
+  it("past eight levels the line is refused unread, whatever is inside", () => {
+    const p = fixture();
+    for (const cwd of [p, join(p, "pkg", "lib")]) {
+      for (const c of [shells(WRITE, 9), shells("echo hi", 9), evals(WRITE, 9),
+        `bash -lc ${JSON.stringify(shells(WRITE, 9))}`, `nohup ${shells(WRITE, 9)}`]) {
+        const r = judge(p, c, cwd);
+        expect(r.status, c.slice(0, 40)).toBe(2);
+        expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
+      }
+      // twelve levels of this quoting run to megabytes, so the budget may get there first: refused either way
+      expect(judge(p, shells(WRITE, 12), cwd).status).toBe(2);
+    }
+  });
+
+  it("the shapes beside a nested shell hold the same depth: eval, a heredoc fed to a shell, a pager, a runner, a shell alias", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["eval four deep", evals(WRITE, 4)],
+      ["eval inside shells", shells(evals(WRITE, 2), 3)],
+      ["a heredoc fed to a shell, four deep", shells(`sh <<'EOF'\n${WRITE}\nEOF`, 4)],
+      ["a pager value, four deep", shells(`GIT_PAGER="${WRITE}" git log`, 4)],
+      ["a runner four deep", shells(`uv run ${WRITE}`, 4)],
+      ["a runner at the limit", shells("uv run rm hooks/hooks.json", 8)],
+      ["npm exec four deep", shells("npm exec -- rm hooks/hooks.json", 4)],
+      ["a shell alias four deep", shells(`git -c alias.x="!${WRITE}" x`, 4)],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(2);
+    }
+  });
+
+  it("a runner's long word list is not a nest: it is read as before and never refused for its length of words", () => {
+    const p = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    expect(judge(p, `foo ${words}`).status).toBe(0);
+    expect(judge(p, "foo a b c rm hooks/hooks.json").status).toBe(2);
+    expect(judge(p, `foo ${Array(20).fill("w").join(" ")} rm hooks/hooks.json`).status).toBe(2);
+  });
+
+  it("the Not seen line holds: a command past three runner guesses stays unread, and the header names it", () => {
+    const p = fixture();
+    const words = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+    expect(judge(p, `foo ${words} rm hooks/hooks.json`).status).toBe(0);
+    const header = readFileSync(HARNESSGUARD, "utf8");
+    expect(header.slice(0, header.indexOf("*/"))).toContain("more than three runner guesses");
+  });
+});
+
+// #522: the harness half. A line built long enough runs the guard past its hook
+// timeout, and a hook that times out may let the call by.
+describe("harness guard: a line built to outlast the hook is refused inside its time (#522)", () => {
+  const WRITE = "echo x > hooks/hooks.json";
+  const TIMEOUT = 3000; // the figure hooks.json gives; asserted as a budget, not a benchmark
+  function fixture() {
+    const p = freshDir("cairn-hooks-522-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const inTime = (run: () => { status: number | null; stderr: string }, label: string) => {
+    const t0 = Date.now();
+    const r = run();
+    const ms = Date.now() - t0;
+    expect(r.status, `${label}: ${r.stderr.split("\n")[0]}`).toBe(2);
+    expect(ms, label).toBeLessThan(TIMEOUT);
+    return r;
+  };
+  const n = (k: number, f: (i: number) => string, sep = " ") => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+
+  it("20000 assignments in front of the write are refused inside the budget, from the root and a nested cwd", () => {
+    const p = fixture();
+    const line = `${n(20000, (i) => `A${i}=1`, "; ")}; `;
+    for (const [cwd, write] of [[p, WRITE], [join(p, "pkg", "lib"), "echo x > ../../hooks/hooks.json"]] as const) {
+      const r = inTime(() => judge(p, line + write, cwd), `from ${cwd}`);
+      expect(r.stderr).toContain("longer than the guard reads");
+    }
+  });
+
+  it("every shape that held or crashed the guard is refused: its write is never let by", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["a stack overflow in a substitution", `${WRITE}; echo ${'"$('.repeat(40000)}`],
+      ["a stack overflow in a default", `${WRITE}; echo ${"${X:-".repeat(60000)}y${"}".repeat(60000)}`],
+      ["more spans than a call can spread", `${WRITE}; echo ${"''$b".repeat(130000)}`],
+      ["one word of quoted expansions", `echo ${'"$a"'.repeat(100000)}; ${WRITE}`],
+      ["nested braces", `echo ${"{".repeat(100000)}a${"}".repeat(100000)}; ${WRITE}`],
+      ["brace lists", `echo ${"{a,}".repeat(100000)}; ${WRITE}`],
+      ["a redirect target of quoted names", `echo x > ${'"$H"x'.repeat(100000)}; ${WRITE}`],
+      ["wrappers in a row", `${"nice ".repeat(150000)}rm hooks/hooks.json`],
+      ["eval in a row", `${"eval ".repeat(30000)}${WRITE}`],
+      ["distinct aliases, each one asked of git", `${n(2000, (i) => `git frob${i}`, "; ")}; ${WRITE}`],
+      ["a pipeline of thousands", `${n(4000, () => "true", " | ")} | ${WRITE}`],
+      ["a shell per segment", `${n(1500, (i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`, ";")};${WRITE}`],
+      ["distinct quoted arguments", `foo ${n(150000, (i) => `'a ${i}'`)}; ${WRITE}`],
+      ["a very long unknown program", `foo ${n(150000, (i) => `w${i}`)}; ${WRITE}`],
+      ["an rm of thousands of files", `rm ${n(100000, (i) => `w${i}`)}; ${WRITE}`],
+      ["a value doubled per assignment", `A0=x; ${n(60, (i) => `A${i + 1}=$A${i}$A${i}`, "; ")}; ${WRITE}`],
+      ["env -S in a row", `${"env -S 'env -S x' ".repeat(40000)}rm hooks/hooks.json`],
+    ] as const) {
+      inTime(() => judge(p, line), shape);
+    }
+  }, 120_000);
+
+  it("twin: a 300 KB heredoc into a harmless file passes, quoted or not, naming the write as prose", () => {
+    const p = fixture();
+    const body = `never run ${WRITE} here\n`.repeat(9000);
+    expect(body.length).toBeGreaterThan(300_000);
+    for (const delim of ["'EOF'", "EOF", '"EOF"']) {
+      for (const cwd of [p, join(p, "pkg", "lib")]) {
+        const r = judge(p, `cat > notes.txt <<${delim}\n${body}EOF`, cwd);
+        expect(r.status, `${delim}: ${r.stderr.split("\n")[0]}`).toBe(0);
+      }
+    }
+  });
+
+  it("the heredoc is still judged when it lands on a protected file, or feeds a shell", () => {
+    const p = fixture();
+    const body = "plain\n".repeat(60000);
+    expect(judge(p, `cat > hooks/hooks.json <<'EOF'\n${body}EOF`).status).toBe(2);
+    expect(judge(p, `sh <<'EOF'\n${"echo pad\n".repeat(1000)}${WRITE}\nEOF`).status).toBe(2);
+  });
+
+  it("twins: a long line of plain work stays judged and passes", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["a thousand assignments", n(1000, (i) => `A${i}=1`, "; ")],
+      ["a thousand commands", n(1000, () => "true", " && ")],
+      ["an unknown program's 5 KB of words", `foo ${n(800, (i) => `w${i}`)}`],
+      ["a 40 KB quoted argument", `foo '${"word ".repeat(8000)}'`],
+      ["a 400-line script handed to an interpreter", `python3 -c '${Array.from({ length: 400 }, (_, k) => `value_${k} = compute(first, second) + ${k}  # a note about this line`).join("\n")}'`],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  }, 60_000);
+
+  it("a budget spent at any point of the read refuses the line, however little was left to read", () => {
+    const p = fixture();
+    const copy = freshDir("cairn-hooks-522-spent-");
+    cpSync(SCRIPTS, copy, { recursive: true });
+    const words = join(copy, "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function overBudget(budget) {";
+    expect(source).toContain(entry);
+    for (let k = 1; k <= 5; k++) {
+      writeFileSync(words, source.replace(entry, `let calls = 0;\n${entry}\n  if (budget && ++calls >= ${k}) budget.over = true;`));
+      const r = runHookRaw(join(copy, basename(HARNESSGUARD)), p, JSON.stringify({ tool_name: "Bash", tool_input: { command: "nice" }, cwd: p }), { CAIRN_HOME: join(p, ".nope") });
+      expect(r.status, `spent at check ${k}`).toBe(2);
+    }
+  });
+
+  it("a reader that runs out of stack refuses, while any other error of the guard's own stays fail-open (ADR 0016)", () => {
+    const p = fixture();
+    const copy = freshDir("cairn-hooks-522-rangeerror-");
+    cpSync(SCRIPTS, copy, { recursive: true });
+    const words = join(copy, "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function shellSegments(command, read = {}, depth = 0) {";
+    expect(source).toContain(entry);
+    const run = (error: string) => {
+      writeFileSync(words, source.replace(entry, `${entry} throw new ${error}("boom");`));
+      return runHookRaw(join(copy, basename(HARNESSGUARD)), p, JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" }, cwd: p }), { CAIRN_HOME: join(p, ".nope") }).status;
+    };
+    expect(run("RangeError")).toBe(2);
+    expect(run("TypeError")).toBe(0);
+  });
+});
+
+// #523: `>&` onto a file writes it, in bash and zsh, and the reader took it for a descriptor.
+describe("harness guard: `>&` onto a protected file is a write (#523)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-523-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const HOOK = "hooks/hooks.json";
+
+  it("every spelling is refused from the root, and from a nested cwd by its climb", () => {
+    const p = fixture();
+    for (const [cwd, f] of [[p, HOOK], [join(p, "pkg", "lib"), `../../${HOOK}`]] as const) {
+      for (const line of [`echo x >& ${f}`, `echo x >&${f}`, `echo x >>& ${f}`, `echo x >&"${f}"`, `echo x 1>&${f}`,
+        `echo x >&! ${f}`, `echo x >&| ${f}`, `echo x >! ${f}`, `echo x >>! ${f}`,
+        `sh -c 'echo x >& ${f}'`, `echo $(echo x >& ${f})`]) {
+        const r = judge(p, line, cwd);
+        expect(r.status, `${line} from ${cwd}`).toBe(2);
+        expect(r.stderr, line).toContain("hook directory");
+      }
+    }
+    // a variable the line spelled, as the plain `>` form reads it
+    expect(judge(p, "D=hooks; echo x >&$D/hooks.json").status).toBe(2);
+  });
+
+  it("twins: a descriptor passes, and so does `>&` onto a harmless file", () => {
+    const p = fixture();
+    for (const line of ["echo x >&2", "echo x >& 2", "echo x 2>&1", "echo x >&-", "echo x 2>&-", 'echo x >&"2"',
+      "echo x >&3-", "echo x >& /tmp/out.txt", "echo x >&/dev/null", "npm test >& /tmp/test.log"]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("the guard reads what real shells do: `>& f` writes f, and `>&2` writes no file (asserted against the shells on this machine)", () => {
+    const shells = ["bash", "zsh"].filter((s) => spawnSync(s, ["-c", "true"]).status === 0);
+    expect(shells).toContain("bash");
+    for (const shell of shells) {
+      const d = freshDir(`cairn-hooks-523-${shell}-`);
+      spawnSync(shell, ["-c", "echo x >& written; echo y >&written2; echo z >&2; echo w >&-"], { cwd: d });
+      expect(existsSync(join(d, "written")), shell).toBe(true);
+      expect(existsSync(join(d, "written2")), shell).toBe(true);
+      expect(readdirSync(d).sort(), shell).toEqual(["written", "written2"]);
+    }
+  });
+});
+
+// #524: `/$PWD/...` and `/$X/...` read as a path outside the project, and the shell
+// collapses the slash and writes the protected file. The rule #512 gave the write
+// guard: what the guard knows is spelled wherever it stands, and what it can't spell
+// with a root below the literal folder before it can't be placed.
+describe("harness guard: a slash before a variable no longer reads as outside the project (#524)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-524-proj-");
+    const home = freshDir("cairn-hooks-524-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return { p, home };
+  }
+  const judge = (f: { p: string; home: string }, command: string, cwd = f.p) => {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: join(f.home, ".cairn") };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CONFIG_DIR"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: f.p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  };
+
+  it("$PWD and $HOME are spelled wherever they stand, and slashes collapse: the protected file is named as itself", () => {
+    const f = fixture();
+    for (const [line, what] of [
+      ["echo x > /$PWD/hooks/hooks.json", "hook directory"],
+      ["echo x > /${PWD}/hooks/hooks.json", "hook directory"],
+      ["echo x > //$PWD//hooks//hooks.json", "hook directory"],
+      ["echo x > /./$PWD/./hooks/hooks.json", "hook directory"],
+      ["cd hooks && echo x > /$PWD/hooks.json", "hook directory"],
+      ["cp a /$PWD/hooks/hooks.json", "hook directory"],
+      ["rm -f /$PWD/hooks/hooks.json", "hook directory"],
+      ["tee /$PWD/hooks/hooks.json", "hook directory"],
+      ["sh -c 'echo x > /$PWD/hooks/hooks.json'", "hook directory"],
+      ["echo x >& /$PWD/hooks/hooks.json", "hook directory"],
+      ["echo x > /$HOME/.claude/settings.json", "settings"],
+    ] as const) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(r.stderr, line).toContain(what);
+    }
+  });
+
+  it("from a nested cwd, $PWD is that folder, and so its climb lands where the shell lands it", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    expect(judge(f, "echo x > /$PWD/../../hooks/hooks.json", nested).status).toBe(2);
+    expect(judge(f, "echo x > /$X/hooks/hooks.json", nested).status).toBe(2);
+    expect(judge(f, "echo x > /$PWD/notes.txt", nested).status).toBe(0);
+  });
+
+  it("what the guard can't spell, with a root below the literal folder before it, can't be placed: refused", () => {
+    const f = fixture();
+    const parent = dirname(f.p);
+    for (const line of [
+      "echo x > /$X/hooks/hooks.json",
+      "echo x > //$X//hooks/hooks.json",
+      "echo x > /${X}/hooks/hooks.json",
+      "echo x > /$(pwd)/hooks/hooks.json",
+      "echo x > /`pwd`/hooks/hooks.json",
+      "echo x > /*/hooks/hooks.json",
+      // a project under a temp root (a Linux runner's /tmp) sits under the carve the Not seen block names
+      ...(/^(?:\/private)?\/(?:tmp|var\/tmp)(?:\/|$)/.test(parent) ? [] : [
+        `echo x > ${parent}/$X/hooks/hooks.json`,
+        `echo x > ${parent}/*/hooks/hooks.json`,
+        "echo x > ../$X/hooks/hooks.json",
+      ]),
+      "cp a /$X/hooks/hooks.json",
+      "rm -f /$X/hooks/hooks.json",
+      "mv a /$X/hooks/hooks.json",
+      "sh -c 'echo x > /$X/hooks/hooks.json'",
+      "echo x > /$CAIRN_HOME/x",
+      // the line made the name unreadable: no folder can be said for it
+      "PWD=$(mktemp -d); echo x > /$PWD/hooks/hooks.json",
+      "read HOME; echo x > /$HOME/.claude/settings.json",
+    ]) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(r.stderr, line).toContain("goes somewhere the guard couldn't tell");
+    }
+  });
+
+  it("twins: a folder off to the side, a temp root, a project file named through $PWD, and #291's value at the front all pass", () => {
+    const f = fixture();
+    for (const line of [
+      "echo x > /tmp/$X/y",
+      "echo x > /tmp/$(date +%s).bak",
+      "echo x > /private/tmp/$X/y",
+      "echo x > /var/tmp/$X/y",
+      "echo x > /tmp/*.log",
+      "echo x > /opt/$X/y",
+      "echo x > $X/y",
+      // the shell gives a name it never heard of nothing, but a folder in that reading isn't what the line says
+      "echo x > $OUT/log-$(date +%s).txt",
+      "echo x > ${OUT}/run-$RUN.log",
+      "echo x > $OUT/*.log",
+      "cp a $OUT/`date`.bak",
+      'sh -c "echo x > $OUT/$(date).log"',
+      "rm -f $OUT/*.tmp",
+      "echo x > $PWD/$X.log",
+      "echo x > /$PWD/src/a.ts",
+      "echo x > //$PWD//notes.txt",
+      "echo x > $PWD/tmp/$X",
+      "echo x > $HOME/notes.md",
+      "echo x > /$HOME/notes.md",
+      "echo x > /dev/null",
+      // the line assigned it, so the value is the line's and not this folder
+      "PWD=/tmp; echo x > /$PWD/y",
+      "X=/tmp; echo x > /$X/y",
+    ]) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("the Not seen lines hold: a value in a path whose head sits to the side, or under a temp root, stays as typed, and the header names both", () => {
+    const f = fixture();
+    expect(judge(f, "X=$(cat where); echo x > /opt/$X/y").status).toBe(0);
+    expect(judge(f, "echo x > /tmp/$X/../../hooks/hooks.json").status).toBe(0);
+    const header = readFileSync(HARNESSGUARD, "utf8").split("\nimport ")[0];
+    expect(header).toContain("Not seen, dated 2026-11-05 (#524");
+    expect(header).toContain("a temp root");
   });
 });

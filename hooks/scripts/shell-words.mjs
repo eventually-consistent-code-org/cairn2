@@ -43,6 +43,9 @@ const SHELL_VALUE_OPTS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-fi
 // `X+=y` and `a[0]=y` too (#494), which the shell reads the same way.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
 
+// What follows `>&` when it is no file (#523): `>&2`, a close `>&-`, a move `>&3-`.
+const DESCRIPTOR = /^(?:\d+-?|-)$/;
+
 // Reserved words that open, continue or close a compound command; the
 // command word comes after them (#285).
 const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until",
@@ -155,12 +158,19 @@ export function commandName(word) {
   return String(word ?? "").split("/").pop().toUpperCase().toLowerCase();
 }
 
+// How many `"$(` inside each other closeParen follows on the stack: well past
+// SUBSTITUTION_DEPTH, and well short of a stack overflow, which a guard would
+// have read as its own error and failed open on (#522).
+const MAX_QUOTED = 256;
+
 /**
  * Index of the `)` closing a `$(` whose body starts at `i` -- nesting-aware,
  * so parens inside quotes, inner substitutions and backticks don't close it
  * early. Unterminated runs to the end of the line.
  */
-function closeParen(line, i) {
+function closeParen(line, i, quoted = 0) {
+  // nested past the reader's own depth anyway: runs to the end, and the reader marks it (#522)
+  if (quoted > MAX_QUOTED) return line.length;
   let depth = 1;
   for (; i < line.length; i++) {
     const c = line[i];
@@ -170,7 +180,7 @@ function closeParen(line, i) {
     if (c === '"') {
       for (i++; i < line.length && line[i] !== '"'; i++) {
         if (line[i] === "\\") i++;
-        else if (line[i] === "$" && line[i + 1] === "(") i = closeParen(line, i + 2);
+        else if (line[i] === "$" && line[i + 1] === "(") i = closeParen(line, i + 2, quoted + 1);
         else if (line[i] === "`") i = closeTick(line, i + 1);
       }
       continue;
@@ -233,8 +243,8 @@ function heredocBodies(body) {
  * `repeat N`. Before #285 the first word was the command, so `if git reset
  * --hard; then` read as a command named `if` and nothing refused it.
  */
-function commandStart(words) {
-  let i = 0;
+function commandStart(words, from = 0) {
+  let i = from;
   while (i < words.length) {
     const w = words[i];
     if (RESERVED.has(w)) i++;
@@ -294,8 +304,10 @@ function ansiQuoted(body) {
  * `|&` `||` `&&` `;` `&`, a newline, a subshell character, or null at the
  * end), so a reader can tell a pipeline from a list (#258):
  *
- *   redirects      `>` `>>` `&>` `>|` targets go to `redirects` (`N>&M` names
- *                  a descriptor, not a file); `<` operands go to `inputs` and
+ *   redirects      `>` `>>` `&>` `>|` and zsh's `>!` targets go to `redirects`,
+ *                  and so does what follows `>&` unless it is a number or `-`, a
+ *                  descriptor: bash and zsh write any other word as a file (#523,
+ *                  asserted against both by hooks.test.ts). `<` operands go to `inputs` and
  *                  `<<<` text to `herestrings` -- read, never words; a `<<`
  *                  heredoc body is data -- skipped through its delimiter line
  *                  and kept on its segment (see heredocs). Off: those
@@ -335,8 +347,23 @@ function ansiQuoted(body) {
  *                  escapes any character.
  *   anyWhitespace  every whitespace character separates words. Off: only
  *                  space and tab do.
+ *   budget         one call's readBudget (#522): every read is charged to it,
+ *                  a heredoc body excepted, and once it is spent a `deep`
+ *                  segment stands in for whatever was left (tooDeep). Off: the
+ *                  line is read whatever it costs. `guess` marks a runner's guess
+ *                  being read: its characters and the clock count, its segments
+ *                  don't, or every line of a long `python -c` would spend the
+ *                  budget of a command count on words that are no commands.
  */
 export function shellSegments(command, read = {}, depth = 0) {
+  const budget = read.budget ?? null;
+  if (budget) {
+    budget.raw += command.length;
+    if (overBudget(budget)) return [deepSegment()];
+  }
+  // what this read may still charge, and the heredoc text it has skipped: data, and never charged
+  const room = budget ? MAX_READ - budget.chars : Infinity;
+  let data = 0;
   const segs = [];
   const subs = []; // bodies of command substitutions, split at the end
   const pending = []; // heredocs whose bodies start on the next line
@@ -348,7 +375,7 @@ export function shellSegments(command, read = {}, depth = 0) {
   let inputs = [];
   let cur = null;
   let spans = []; // the same, for the word being read
-  // what the next completed word is: word | redirect | skip | heredoc | herestring | input
+  // what the next completed word is: word | redirect | dup | heredoc | herestring | input
   let next = "word";
   let strip = false; // `<<-` strips leading tabs before matching the delimiter
   let quoted = false; // any quote or backslash in the delimiter word keeps the body literal
@@ -356,7 +383,9 @@ export function shellSegments(command, read = {}, depth = 0) {
   const pushWord = () => {
     if (cur === null) return;
     if (next === "redirect") redirects.push(boundNames(cur, spans));
-    else if (next === "heredoc") {
+    else if (next === "dup") {
+      if (!DESCRIPTOR.test(cur)) redirects.push(boundNames(cur, spans));
+    } else if (next === "heredoc") {
       const doc = { delim: cur, body: "", quoted };
       heredocs.push(doc);
       pending.push({ doc, strip });
@@ -383,6 +412,7 @@ export function shellSegments(command, read = {}, depth = 0) {
       const at = commandStart(words);
       segs.push({ words: words.slice(at), quotes: quotes.slice(at), reserved: words.slice(0, at), redirects, heredocs,
         herestrings, inputs, op });
+      if (budget && !read.guess) budget.segments++;
     }
     words = [];
     quotes = [];
@@ -402,6 +432,12 @@ export function shellSegments(command, read = {}, depth = 0) {
 
   let i = 0;
   while (i < command.length) {
+    if (budget && (i - data > room || budget.segments > MAX_SEGMENTS)) {
+      budget.chars += i - data;
+      budget.over = true;
+      segs.push(deepSegment());
+      return segs;
+    }
     const c = command[i];
     const n = command[i + 1];
 
@@ -477,7 +513,7 @@ export function shellSegments(command, read = {}, depth = 0) {
     if (c === "$" && n === "{") {
       const end = closeBrace(command, i + 2);
       const text = command.slice(i, end + 1);
-      if (read.substitutions) subs.push(...heredocBodies(text));
+      if (read.substitutions) for (const body of heredocBodies(text)) subs.push(body);
       cur = (cur ?? "") + text;
       i = end + 1;
       continue;
@@ -533,7 +569,8 @@ export function shellSegments(command, read = {}, depth = 0) {
           const done = (tabs ? line.replace(/^\t+/, "") : line) === doc.delim;
           if (done || nl < 0) {
             doc.body = command.slice(start, done ? k : command.length);
-            if (!doc.quoted && read.substitutions) subs.push(...heredocBodies(doc.body));
+            data += doc.body.length;
+            if (!doc.quoted && read.substitutions) for (const body of heredocBodies(doc.body)) subs.push(body);
             i = nl < 0 ? command.length : nl;
             break;
           }
@@ -550,9 +587,14 @@ export function shellSegments(command, read = {}, depth = 0) {
       // a bare number right before `>` is the descriptor, not a word
       if (cur !== null && /^\d+$/.test(cur)) { cur = null; spans = []; } else pushWord();
       let j = i + (c === "&" ? 2 : 1);
-      if (command[j] === ">" || command[j] === "|") j++;
-      if (command[j] === "&") { next = "skip"; i = j + 1; continue; } // >&2: a descriptor
+      if (command[j] === ">") j++;
+      if (command[j] === "|" || command[j] === "!") j++; // >|, and zsh's >! and >>!
       next = "redirect";
+      if (command[j] === "&") {
+        next = "dup"; // a descriptor (>&2) or a file (>& f): the word says which
+        j++;
+        if (command[j] === "|" || command[j] === "!") j++; // zsh's >&| and >&!
+      }
       i = j;
       continue;
     }
@@ -592,12 +634,16 @@ export function shellSegments(command, read = {}, depth = 0) {
     i++;
   }
   endSeg();
+  if (budget) {
+    budget.chars += Math.max(0, command.length - data);
+    if (overBudget(budget)) { segs.push(deepSegment()); return segs; }
+  }
   // Each body is read once, as a line of its own, one level deeper. Past
   // SUBSTITUTION_DEPTH levels the rest is not read at all (#321): a deep
   // segment stands in for it, and the guards refuse the line on sight.
   for (const body of subs) {
     if (depth >= SUBSTITUTION_DEPTH) { segs.push(deepSegment()); break; }
-    segs.push(...shellSegments(body, read, depth + 1));
+    for (const seg of shellSegments(body, read, depth + 1)) segs.push(seg);
   }
   return segs;
 }
@@ -611,6 +657,88 @@ export function shellSegments(command, read = {}, depth = 0) {
  * a marked line is refused unread (tooDeep).
  */
 export const SUBSTITUTION_DEPTH = 8;
+
+/**
+ * How many lines within lines a guard reads, the one depth all three hold
+ * (#521): a shell's -c string, an eval, a heredoc fed to a shell, a pager
+ * value, a runner's inner line. Past it the line is refused unread, the way a
+ * body past SUBSTITUTION_DEPTH is. Before #521 the run and harness guards just
+ * stopped reading at three, and passed what they had not read, so four `sh -c`
+ * around a hard reset was the bypass. Asserted: runguard-guards.test.ts and
+ * hooks.test.ts "(#521)", writeguard.test.ts "a nest deeper than the guard reads".
+ */
+export const MAX_NEST = SUBSTITUTION_DEPTH;
+
+/**
+ * How many runner guesses in a row a guard re-reads (#521). runnerCommands is a
+ * guess at which later word is the command, so each bare word of `foo a b c`
+ * opens another line that is no nest at all, and a long word list reaches any
+ * depth: that is a limit to stop at, never one to refuse at. A shell string
+ * starts the count again, so a runner at the bottom of a nest is still read. What
+ * this leaves unread is in each guard's Not seen block (asserted: "(#521)").
+ */
+export const RUNNER_HOPS = 3;
+
+/**
+ * What one tool call may cost to read, nested re-reads included, so a line
+ * built to outlast a guard's hook timeout is refused rather than read. On
+ * `PreToolUse`, a timed-out command hook doesn't block the call (a dated claim:
+ * read 2026-11-06 from the Claude Code hooks reference, Timeouts section), so a
+ * limit a line can run past is a bypass, and every guard holds this one (#522):
+ * asserted by shell-words.test.ts, runguard-guards.test.ts and hooks.test.ts
+ * "(#522)". A heredoc's body is data and never counts against MAX_READ, only
+ * against MAX_RAW, the most text a line can hold at all. A body fed to a shell is
+ * read as a line, and counts then.
+ */
+export const MAX_READ = 1_000_000;
+export const MAX_SEGMENTS = 4096;
+const MAX_RAW = 16 * MAX_READ;
+
+/**
+ * When a line that has done real work stops being read, in ms since the guard's
+ * process started: half of a 3000 ms timeout, so the refusal lands with room on a
+ * loaded machine, where the counts above can't promise a time and a git process
+ * per question costs the most. hooks.json says 3000, and the Claude Code hooks
+ * reference reads that field in seconds (a dated claim, read 2026-11-06), so there
+ * a stall may hold the session instead of timing out; a refusal this early is right
+ * on either reading. Under the WORK figures the clock is never read, so an `ls` on
+ * a loaded machine can't be refused for the load: it has too little to do to overrun.
+ */
+const READ_MS = 1500;
+const WORK = { chars: 20_000, segments: 128, asks: 32 };
+
+/** One call's budget: the guard's READ carries it, and every read and git question is charged to it. */
+export function readBudget(deadline = READ_MS) {
+  return { chars: 0, segments: 0, raw: 0, asks: 0, deadline, over: false };
+}
+
+/** True once a call has spent its budget, and from then on: a spent budget is never unspent. */
+export function overBudget(budget) {
+  if (!budget || budget.over) return Boolean(budget?.over);
+  const worked = budget.chars >= WORK.chars || budget.segments >= WORK.segments || budget.asks >= WORK.asks;
+  budget.over = budget.chars > MAX_READ || budget.segments > MAX_SEGMENTS || budget.raw > MAX_RAW
+    || (worked && performance.now() > budget.deadline);
+  return budget.over;
+}
+
+/** Why a line went unread, for a guard's refusal: past the budget, or past the depth. */
+export function unreadWhy(budget) {
+  return budget?.over
+    ? `runs longer than the guard reads in a hook's time (${MAX_READ} characters, ${MAX_SEGMENTS} commands)`
+    : `nests commands deeper than the guard reads (${MAX_NEST} levels)`;
+}
+
+/**
+ * True the first time a runner's guess is read this close to the runner (#522):
+ * its later words re-read as suffixes of each other, so each is read once, and
+ * again only if it turns up with more guesses left. `family` is one runner's.
+ */
+export function freshGuess(family, key, hops) {
+  const had = family.get(key);
+  if (had !== undefined && had <= hops) return false;
+  family.set(key, hops);
+  return true;
+}
 
 /** The segment that stands in for the bodies the reader stopped at. */
 const deepSegment = () => ({ words: [], quotes: [], reserved: [], redirects: [], heredocs: [], herestrings: [],
@@ -631,16 +759,19 @@ const BRACE_CAP = 64;
  * `alts` is null for a sequence too long to spell out.
  */
 function braceAt(word) {
-  for (let i = word.indexOf("{"); i >= 0; i = word.indexOf("{", i + 1)) {
+  // one pass, every brace matched as it closes: a scan per `{` is quadratic on `{{{{...}}}}` (#522)
+  const braces = [];
+  const open = [];
+  for (let j = word.indexOf("{"); j >= 0 && j < word.length; j++) {
+    if (word[j] === "{") {
+      const b = { i: j, end: -1, commas: [] };
+      braces.push(b);
+      open.push(b);
+    } else if (word[j] === "}" && open.length) open.pop().end = j;
+    else if (word[j] === "," && open.length) open.at(-1).commas.push(j);
+  }
+  for (const { i, end, commas } of braces) {
     if (word[i - 1] === "$") continue;
-    let depth = 0;
-    const commas = [];
-    let end = -1;
-    for (let j = i; j < word.length && end < 0; j++) {
-      if (word[j] === "{") depth++;
-      else if (word[j] === "}" && --depth === 0) end = j;
-      else if (word[j] === "," && depth === 1) commas.push(j);
-    }
     if (end < 0) return null;
     const body = word.slice(i + 1, end);
     if (commas.length) {
@@ -670,8 +801,19 @@ function braceAt(word) {
  * `wild` -- a stand-in the caller treats as any name.
  */
 export function braceExpand(word, wild = "*") {
+  // more braces than BRACE_CAP words could ever spell, read as such without walking them (#522)
+  let braces = 0;
+  for (let i = word.indexOf("{"); i >= 0; i = word.indexOf("{", i + 1)) {
+    if (++braces > BRACE_CAP) return [wild];
+  }
   const out = [];
+  // past this many steps a word has more braces than BRACE_CAP words can spell (#522)
+  let steps = 0;
   const walk = (w) => {
+    if (++steps > 2 * BRACE_CAP) {
+      if (steps === 2 * BRACE_CAP + 1) out.push(wild);
+      return;
+    }
     const b = braceAt(w);
     if (!b) { out.push(w); return; }
     const alts = b.alts && out.length + b.alts.length <= BRACE_CAP ? b.alts : [wild];
@@ -702,20 +844,22 @@ function splitWords(str, read) {
  * leaves `sh -c LINE` as the command, which both guards already read.
  */
 export function unwrap(words, read = {}) {
-  let w = words.slice();
+  // `w` is read from `at` and never shifted: a shift per word is quadratic on a long line (#522)
+  let w = words;
+  let at = 0;
   const assigns = [];
   const writes = [];
   const wrappers = [];
   const dirs = [];
   for (;;) {
-    while (w.length && ASSIGNMENT.test(w[0])) assigns.push(w.shift());
-    if (!w.length) break;
-    const spec = WRAPPERS.get(commandName(w[0]));
+    while (at < w.length && ASSIGNMENT.test(w[at])) assigns.push(w[at++]);
+    if (at >= w.length || overBudget(read.budget)) break;
+    const spec = WRAPPERS.get(commandName(w[at]));
     if (!spec) break;
-    const name = spec.as ?? commandName(w[0]);
-    w.shift();
+    const name = spec.as ?? commandName(w[at]);
+    at++;
     const args = [];
-    const take = () => { const x = w.shift(); args.push(x); return x; };
+    const take = () => { const x = w[at++]; args.push(x); return x; };
     wrappers.push({ name, args });
     let positional = spec.positional ?? 0;
     let line = null; // a command line the wrapper hands a shell
@@ -725,15 +869,15 @@ export function unwrap(words, read = {}) {
       if (val === null) return;
       // script -t 30 is a flush interval; only util-linux's -tFILE names a file
       const numeric = flag.length === 2 && spec.num?.includes(flag[1]) && /^\d+$/.test(val);
-      if (spec.split?.includes(flag)) w = splitWords(val, read).concat(w);
+      if (spec.split?.includes(flag)) { w = splitWords(val, read).concat(w.slice(at)); at = 0; }
       if (spec.writes?.includes(flag) && !numeric) writes.push(val);
       if (spec.dir?.includes(flag)) dirs.push(val);
       if (spec.assign?.includes(flag)) assigns.push(val);
       if (spec.cmd?.includes(flag)) line = val;
     };
     // Read the wrapper's own options, stopping at its first bare word.
-    while (w.length) {
-      const a = w[0];
+    while (at < w.length) {
+      const a = w[at];
       if (a === "--") { take(); break; }
       if (a === "-") { take(); continue; } // `env -` is `env -i`
       const eq = a.indexOf("=");
@@ -741,7 +885,7 @@ export function unwrap(words, read = {}) {
       if (a.startsWith("--") || (a.startsWith("-") && spec.long.includes(flag))) {
         take();
         let val = eq < 0 ? null : a.slice(eq + 1);
-        if (eq < 0 && spec.long.includes(flag) && w.length) val = take();
+        if (eq < 0 && spec.long.includes(flag) && at < w.length) val = take();
         if (spec.reads?.includes(flag)) reading = true;
         act(flag, val);
         continue;
@@ -756,7 +900,7 @@ export function unwrap(words, read = {}) {
           if (spec.reads?.includes(`-${a[k]}`)) reading = true;
           if (spec.opt?.includes(a[k])) break;
           if (!spec.short.includes(a[k])) continue;
-          const next = spec.num?.includes(a[k]) && !/^\d/.test(w[0] ?? "") ? null : w[0];
+          const next = spec.num?.includes(a[k]) && !/^\d/.test(w[at] ?? "") ? null : w[at];
           const val = k + 1 < a.length ? a.slice(k + 1) : (next !== undefined && next !== null ? take() : null);
           act(`-${a[k]}`, val);
           break;
@@ -765,30 +909,49 @@ export function unwrap(words, read = {}) {
       }
       break;
     }
-    while (positional-- > 0 && w.length) {
+    while (positional-- > 0 && at < w.length) {
       const x = take();
       if (spec.record && !reading) writes.push(x);
     }
     // flock LOCK -c 'cmd': the command line comes after the lock file
-    if (spec.cmd && w.length) {
-      const eq = w[0].indexOf("=");
-      if (spec.cmd.includes(w[0])) {
+    if (spec.cmd && at < w.length) {
+      const eq = w[at].indexOf("=");
+      if (spec.cmd.includes(w[at])) {
         take();
-        if (w.length) line = take();
-      } else if (eq > 0 && spec.cmd.includes(w[0].slice(0, eq))) line = take().slice(eq + 1);
+        if (at < w.length) line = take();
+      } else if (eq > 0 && spec.cmd.includes(w[at].slice(0, eq))) line = take().slice(eq + 1);
     }
-    if (line !== null) w = ["sh", "-c", line, ...w];
-    else if (spec.joins && w.length) w = ["sh", "-c", w.join(" ")];
+    if (line !== null) { w = ["sh", "-c", line, ...w.slice(at)]; at = 0; }
+    else if (spec.joins && at < w.length) { w = ["sh", "-c", w.slice(at).join(" ")]; at = 0; }
     // `time` is a keyword too: `time { git reset --hard; }` times the group (#285)
-    if (name === "time") w = w.slice(commandStart(w));
+    if (name === "time") at = commandStart(w, at);
   }
-  return { words: w, assigns, writes, wrappers, dirs };
+  return { words: w.slice(at), assigns, writes, wrappers, dirs };
 }
 
 // Spelling a line's variables (#291, #494, #509)
 
+// In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob.
+const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
+
+/**
+ * The literal folder in front of the first thing only the run can fill in, with
+ * its slash, or null for a target with none (#512, #524): `/` for `/$X/a`,
+ * `/opt/` for `/opt/$X/a`, and "" for `$X/a`. Whether a root sits at or below it
+ * is the guard's to say, since what the shell fills in then decides where the
+ * write lands (writeguard.test.ts "a target is spelled", hooks.test.ts "(#524)").
+ */
+export function literalHead(target) {
+  const at = target.search(UNSPELLED);
+  return at < 0 ? null : target.slice(0, target.lastIndexOf("/", at) + 1);
+}
+
 // The most spellings of one word before the rest count as lost.
 const SPELL_CAP = 16;
+
+// The longest a spelled value or word is carried: `B=$A$A; C=$B$B ...` doubles a
+// value per assignment, in a few characters each, and past this it is unreadable (#522).
+const MAX_VALUE = 65536;
 
 // Names the shell always holds, so neither can be read as nothing.
 const ALWAYS_SET = new Set(["HOME", "PWD"]);
@@ -803,6 +966,40 @@ const ALWAYS_SET = new Set(["HOME", "PWD"]);
  * Both are wild to spellWords.
  */
 export const UNREADABLE = Symbol("unreadable");
+
+/**
+ * The variables one line holds, over the ones its caller stood in (#522): writes
+ * land here and the caller's stay as they were, which a copy of the map per
+ * assignment used to promise at a cost that grew with the square of the line. A
+ * read walks up, at most one step per level of nesting. An entry deleted here
+ * hides the caller's.
+ */
+class Scope {
+  constructor(parent) {
+    this.parent = parent ?? null;
+    this.own = new Map();
+  }
+
+  get(name) {
+    return this.own.has(name) ? this.own.get(name) : this.parent?.get(name);
+  }
+
+  has(name) {
+    return this.get(name) !== undefined;
+  }
+
+  set(name, value) {
+    this.own.set(name, value);
+    return this;
+  }
+
+  delete(name) {
+    this.own.set(name, undefined);
+  }
+}
+
+/** A scope of its own for a line or command under `vars`, which it never writes to. */
+export const childVars = (vars) => new Scope(vars);
 
 /** True for a `vars` entry the guard can't spell: assigned from a substitution, or UNREADABLE. */
 const isWild = (v) => v === null || v === UNREADABLE;
@@ -819,12 +1016,14 @@ const BREAK = "\0";
  */
 function boundNames(word, spans) {
   if (!spans.length) return word;
-  let out = word;
-  for (const ref of expansions(word, spans).reverse()) {
+  let out = "";
+  let at = 0;
+  for (const ref of expansions(word, spans)) {
     if (ref.kind !== "name" || word[ref.start + 1] === "{" || !/\w/.test(word[ref.end] ?? "")) continue;
-    out = `${out.slice(0, ref.start)}\${${ref.name}}${out.slice(ref.end)}`;
+    out += `${word.slice(at, ref.start)}\${${ref.name}}`;
+    at = ref.end;
   }
-  return out;
+  return out + word.slice(at);
 }
 
 /** Index of the `}` closing a `${` whose body starts at `i`, nesting-aware. */
@@ -866,11 +1065,26 @@ function braceRef(body) {
  */
 function expansions(word, spans) {
   const out = [];
-  const quoteAt = (i) => spans?.find(([a, b]) => i >= a && i < b)?.[2];
-  // a name stops where its quoting does: `"$F"x` is $F, then an x
+  // what each character's quoting says, the first span covering it winning, worked
+  // out once for the word: a search of the spans per `$` is quadratic on one long word (#522)
+  let quoting = null;
+  const quoted = () => {
+    if (quoting) return quoting;
+    const kind = new Array(word.length);
+    const end = new Array(word.length);
+    for (const [a, b, k] of spans ?? []) {
+      for (let i = a; i < b; i++) if (kind[i] === undefined) { kind[i] = k; end[i] = b; }
+    }
+    quoting = { kind, end, starts: (spans ?? []).map(([a]) => a).sort((a, b) => a - b), next: 0 };
+    return quoting;
+  };
+  const quoteAt = (i) => quoted().kind[i];
+  // a name stops where its quoting does: `"$F"x` is $F, then an x. `i` only grows, so `next` only does
   const nameEnd = (i) => {
-    const inside = spans?.find(([a, b]) => i >= a && i < b);
-    return inside ? inside[1] : Math.min(word.length, ...(spans ?? []).map(([a]) => a).filter((a) => a > i));
+    const q = quoted();
+    if (q.end[i] !== undefined) return q.end[i];
+    while (q.next < q.starts.length && q.starts[q.next] <= i) q.next++;
+    return q.next < q.starts.length ? Math.min(word.length, q.starts[q.next]) : word.length;
   };
   for (let i = 0; i < word.length; i++) {
     const c = word[i];
@@ -930,16 +1144,16 @@ function refValue(ref, vars) {
  * read with the name gone, since an unset name is no part of the path at all
  * (`> $X.claude/settings.json`, #494), but a default written in the word is a
  * value too (`${X:-hooks}`), so it is judged as well. Past `cap` values the
- * rest is lost too.
+ * rest is lost too. `typed` lists the readings with every name still as typed.
  */
-export function expandAssigned(raw, vars, cap = SPELL_CAP) {
-  const typed = spellRaw(raw, vars, cap, false);
-  if (!typed.open) return { raws: typed.raws, lost: typed.lost };
-  const gone = spellRaw(raw, vars, cap, true);
-  return { raws: [...new Set([...typed.raws, ...gone.raws.filter(Boolean)])], lost: typed.lost || gone.lost };
+export function expandAssigned(raw, vars, cap = SPELL_CAP, nest = 0) {
+  const typed = spellRaw(raw, vars, cap, false, nest);
+  if (!typed.open) return { raws: typed.raws, typed: typed.raws, lost: typed.lost };
+  const gone = spellRaw(raw, vars, cap, true, nest);
+  return { raws: [...new Set([...typed.raws, ...gone.raws.filter(Boolean)])], typed: typed.raws, lost: typed.lost || gone.lost };
 }
 
-function spellRaw(raw, vars, cap, vanish) {
+function spellRaw(raw, vars, cap, vanish, nest) {
   let raws = [""];
   let lost = false;
   let open = false;
@@ -954,8 +1168,11 @@ function spellRaw(raw, vars, cap, vanish) {
     const unset = ref.kind !== "sub" && ref.kind !== "positional" && vals === undefined && !ALWAYS_SET.has(ref.name);
     open ||= unset;
     const asTyped = unset && vanish ? "" : typed;
-    if (vals === undefined && ref.def !== undefined) { // never assigned, with a default in the word
-      const inner = expandAssigned(ref.def, vars, cap);
+    if (vals === undefined && ref.def !== undefined && nest >= MAX_NEST) { // defaults in defaults, past the depth (#522)
+      lost = true;
+      raws = raws.map((r) => r + text + typed);
+    } else if (vals === undefined && ref.def !== undefined) { // never assigned, with a default in the word
+      const inner = expandAssigned(ref.def, vars, cap, nest + 1);
       lost ||= inner.lost;
       raws = raws.flatMap((r) => [r + text + asTyped, ...inner.raws.map((v) => r + text + v)]);
     } else if (vals === undefined) { // never assigned on the line
@@ -967,6 +1184,7 @@ function spellRaw(raw, vars, cap, vanish) {
       raws = raws.flatMap((r) => vals.map((v) => r + text + v));
     }
     if (raws.length > cap) { lost = true; raws = raws.slice(0, cap); }
+    if (raws.some((r) => r.length > MAX_VALUE)) return { raws: [raw], lost: true, open };
   }
   return { raws: raws.map((r) => r + raw.slice(at)), lost, open };
 }
@@ -986,7 +1204,7 @@ function valueOf(v, vars, { known = (x) => x, cap = SPELL_CAP } = {}) {
   if (held.includes(null)) return null;
   if (held.includes(UNREADABLE)) return UNREADABLE;
   const { raws, lost } = expandAssigned(v, vars, cap);
-  return lost ? null : raws.map((x) => known(x));
+  return lost ? null : v.length > MAX_VALUE ? UNREADABLE : raws.map((x) => known(x));
 }
 
 /**
@@ -1012,7 +1230,15 @@ function remember(vars, name, vals, cap = SPELL_CAP) {
  * won't work out: UNREADABLE (#509).
  */
 export function assignVars(assigns, vars, opts = {}) {
-  const out = new Map(vars);
+  // no assignment, nothing to scope: only a prefix on a command needs a scope of its own (#522)
+  if (!assigns.length) return vars ?? new Scope(null);
+  const out = new Scope(vars);
+  assignInto(out, assigns, opts);
+  return out;
+}
+
+/** Each NAME=value of `assigns` written into `out`, in order, each read through the ones before it. */
+function assignInto(out, assigns, opts) {
   for (const a of assigns) {
     const eq = a.indexOf("=");
     if (eq <= 0) continue;
@@ -1020,7 +1246,6 @@ export function assignVars(assigns, vars, opts = {}) {
     if (!m) continue;
     remember(out, m[1], m[2] || m[3] ? UNREADABLE : valueOf(a.slice(eq + 1), out, opts), opts.cap);
   }
-  return out;
 }
 
 // The letters of `read` and `mapfile` that take a value, which is no variable's name.
@@ -1076,24 +1301,25 @@ function readNames(w) {
  */
 export function lineVars(seg, vars, opts = {}) {
   const { words: w, assigns } = unwrap(seg.words, opts.read);
-  let out = vars;
+  // the scope seedVars made for this line is written in place, so a line's cost
+  // grows with its length (#522); a plain map stays as it was, a scope over it coming back
+  const out = vars instanceof Scope ? vars : new Scope(vars);
   const unreadable = (names) => {
-    out = new Map(out);
     for (const n of names) remember(out, n, UNREADABLE, opts.cap);
   };
   // `a=(x y)`: the reader ends the word at the `(`, so the value is never in it
   const array = (word) => seg.op === "(" && word === seg.words.at(-1) && /^[A-Za-z_]\w*\+?=$/.test(word);
   if (!w.length) {
-    out = assignVars(assigns.filter((a) => !array(a)), out, opts);
+    assignInto(out, assigns.filter((a) => !array(a)), opts);
     unreadable(assigns.filter(array).map((a) => a.replace(/\+?=$/, "")));
   } else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
     const given = w.slice(1).filter((a) => ASSIGNMENT.test(a));
     const transforms = w.slice(1).some((a) => /^-[a-zA-Z]*[aAinluc]/.test(a));
-    const plain = transforms ? [] : given.filter((a) => !array(a));
-    out = assignVars(plain, out, opts);
-    unreadable(given.filter((a) => !plain.includes(a)).map((a) => a.slice(0, a.indexOf("=")).replace(/(\[.*\])?\+?$/, "")));
+    const plain = new Set(transforms ? [] : given.filter((a) => !array(a)));
+    assignInto(out, plain, opts);
+    unreadable(given.filter((a) => !plain.has(a)).map((a) => a.slice(0, a.indexOf("=")).replace(/(\[.*\])?\+?$/, "")));
   } else if (w[0] === "eval") {
-    for (const inner of shellSegments(evalCommandString(w.slice(1)) ?? "", opts.read ?? {})) out = lineVars(inner, out, opts);
+    for (const inner of shellSegments(evalCommandString(w.slice(1)) ?? "", opts.read ?? {})) lineVars(inner, out, opts);
   } else {
     unreadable(readNames(w));
   }
@@ -1102,7 +1328,6 @@ export function lineVars(seg, vars, opts = {}) {
   if (at >= 0 && r[at + 1] !== undefined) {
     if (r[at + 2] === "in") {
       const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out, opts));
-      out = new Map(out);
       remember(out, r[at + 1], vals.includes(UNREADABLE) ? UNREADABLE : vals.includes(null) ? null : vals.flat(), opts.cap);
     } else unreadable([r[at + 1]]);
   }
@@ -1115,12 +1340,16 @@ const LOOPS = new Set(["while", "until", "for", "select", "repeat", "function", 
 /**
  * The variables a line starts from (#494): `vars`, and when a loop or a
  * function body can run after what the line assigns below it (`f() { git
- * reset $F; }; F=--hard; f`), everything the line assigns anywhere.
+ * reset $F; }; F=--hard; f`), everything the line assigns anywhere. A scope of
+ * the line's own over `vars`, or `vars` itself under `opts.shared`, as an eval
+ * has it: what it assigns is its caller's (#522).
  */
 export function seedVars(segs, vars, opts = {}) {
+  const out = opts.shared && vars instanceof Scope ? vars : new Scope(vars);
   const repeats = segs.some((s) => (s.reserved ?? []).some((w) => LOOPS.has(w))
     || (s.op === "(" && s.words.length === 1 && /^[A-Za-z_][\w.:-]*$/.test(s.words[0])));
-  return repeats ? segs.reduce((out, s) => lineVars(s, out, opts), vars) : vars;
+  if (repeats) for (const s of segs) lineVars(s, out, opts);
+  return out;
 }
 
 /**
@@ -1134,7 +1363,7 @@ export function seedVars(segs, vars, opts = {}) {
  * braces spelled (`{--hard,}`), as the shell does first, unless `braces` is
  * off: a guard that spells them itself keeps its own marker for "anything".
  */
-function spellWord(word, spans, vars, { cap, braces, vanish = false }) {
+function spellWord(word, spans, vars, { cap, braces, vanish = false, nest = 0 }) {
   const refs = expansions(word, spans);
   const assign = ASSIGNMENT.test(word);
   if (!refs.length) return { alts: [spans || assign || !braces ? [word] : braceExpand(word)], wild: false, open: false };
@@ -1153,8 +1382,11 @@ function spellWord(word, spans, vars, { cap, braces, vanish = false }) {
     const asTyped = unset && vanish ? "" : typed;
     if (vals === undefined && ref.name === "IFS" && ref.kind === "name") {
       raws = raws.map((r) => r + text + (ref.dq ? " " : BREAK));
+    } else if (vals === undefined && ref.def !== undefined && nest >= MAX_NEST) { // defaults in defaults, past the depth (#522)
+      wild = true;
+      raws = raws.map((r) => r + text + typed);
     } else if (vals === undefined && ref.def !== undefined) {
-      const inner = spellWord(ref.def, null, vars, { cap, braces, vanish });
+      const inner = spellWord(ref.def, null, vars, { cap, braces, vanish, nest: nest + 1 });
       wild ||= inner.wild;
       const defs = inner.alts.map((list) => list.map((v) => fill(v, ref.dq)).join(ref.dq ? " " : BREAK));
       raws = raws.flatMap((r) => [r + text + asTyped, ...defs.map((v) => r + text + v)]);
@@ -1166,7 +1398,7 @@ function spellWord(word, spans, vars, { cap, braces, vanish = false }) {
     } else {
       raws = raws.flatMap((r) => vals.map((v) => r + text + fill(v, ref.dq)));
     }
-    if (raws.length > cap) return { alts: [[word]], wild: true, open };
+    if (raws.length > cap || raws.some((r) => r.length > MAX_VALUE)) return { alts: [[word]], wild: true, open };
   }
   raws = raws.map((r) => r + word.slice(at));
   if (assign) return { alts: [raws.length === 1 ? [raws[0].split(BREAK).join(" ")] : [word]], wild, open };
@@ -1205,17 +1437,30 @@ export function spellWords(seg, vars, opts = {}) {
       let { alts, wild, open } = spellWord(word, seg.quotes?.[k] ?? null, vars, { cap, braces, vanish });
       if (readings.length * alts.length > cap) { alts = [[word]]; wild = true; }
       if (opts.wild?.has(word)) wild = true;
+      const note = (reading, list) => {
+        for (const w of list) {
+          reading.words.push(w);
+          if (wild) reading.wild.add(w);
+          if (open && !vanish) reading.open.add(w);
+        }
+      };
+      // a reading copied only where a word really has several values, so a word per
+      // copy of everything before it stays off a long line (#522); the cap bounds the rest
+      if (alts.length === 1) {
+        for (const r of readings) note(r, alts[0]);
+        return;
+      }
       readings = readings.flatMap((r) => alts.map((list) => {
-        const out = { words: [...r.words, ...list], wild: new Set(r.wild), open: new Set(r.open) };
-        if (wild) for (const w of list) out.wild.add(w);
-        if (open && !vanish) for (const w of list) out.open.add(w);
+        const out = { words: [...r.words], wild: new Set(r.wild), open: new Set(r.open) };
+        note(out, list);
         return out;
       }));
     });
     return readings;
   };
   const typed = read(false);
-  return typed.some((r) => r.open.size) ? [...typed, ...read(true)] : typed;
+  // `gone` marks the readings with the name gone, for a guard that must tell a word from what the line wrote (#524)
+  return typed.some((r) => r.open.size) ? [...typed, ...read(true).map((r) => ({ ...r, gone: true }))] : typed;
 }
 
 /**
@@ -1378,8 +1623,11 @@ export function argCommands(words) {
   if (!Array.isArray(words) || words.length < 2) return [];
   const name = commandName(words[0]);
   const rest = words.slice(1);
+  const held = new Set(); // a Set here and below: a search of `out` per word is quadratic on a long line (#522)
   const out = [];
-  const push = (line) => { if (typeof line === "string" && line.trim() && !out.includes(line)) out.push(line); };
+  const push = (line) => {
+    if (typeof line === "string" && line.trim() && !held.has(line)) { held.add(line); out.push(line); }
+  };
   if (name === "man") {
     for (const v of optionValues(rest, { long: "--pager", min: 5, letter: "P", short: MAN_VALUE })) push(v);
     for (const v of optionValues(rest, { long: "--html", min: 4, letter: "H", short: MAN_VALUE, optional: true })) push(v);
@@ -1408,13 +1656,15 @@ export function argCommands(words) {
  */
 export function pagerCommands(assigns, words) {
   const declared = /^(export|declare|typeset|readonly|local)$/.test(words?.[0] ?? "") ? words.slice(1) : [];
-  const out = [];
-  for (const a of [...(assigns ?? []), ...declared]) {
-    const eq = a.indexOf("=");
-    const v = a.slice(eq + 1);
-    if (eq > 0 && PAGER_VARS.has(a.slice(0, eq)) && v.trim() && !out.includes(v)) out.push(v);
+  const out = new Set();
+  for (const list of [assigns ?? [], declared]) {
+    for (const a of list) {
+      const eq = a.indexOf("=");
+      const v = a.slice(eq + 1);
+      if (eq > 0 && PAGER_VARS.has(a.slice(0, eq)) && v.trim()) out.add(v);
+    }
   }
-  return out;
+  return [...out];
 }
 
 // An option whose value is a command line a runner hands a shell (strace has
@@ -1444,8 +1694,11 @@ export function runnerCommands(words) {
   const name = commandName(words[0]);
   if (ARG_SAFE.has(name)) return argCommands(words);
   const rest = words.slice(1);
+  const held = new Set();
   const out = [];
-  const push = (line) => { if (typeof line === "string" && line && !out.includes(line)) out.push(line); };
+  const push = (line) => {
+    if (typeof line === "string" && line && !held.has(line)) { held.add(line); out.push(line); }
+  };
 
   // osascript's AppleScript runs a shell command inside `do shell script "X"`
   if (name === "osascript") {

@@ -138,8 +138,10 @@
  *   knows the folder -- `$(pwd)/x` is the shell's, from every folder a cd
  *   before it can reach, `$(git rev-parse --show-toplevel)/x` the repo
  *   root above each of those (#321) -- and refused otherwise.
- *   Substitutions nest SUBSTITUTION_DEPTH levels deep; a line nested
- *   deeper is refused unread (#321). A command
+ *   Substitutions and the lines a shell is handed nest MAX_NEST levels deep;
+ *   a line nested deeper is refused unread (#321, #521; hooks.test.ts), and so is
+ *   one past the call's read budget, or one that runs the reader out of stack
+ *   (#522; hooks.test.ts: a heredoc's body never counts). A command
  *   that plants a whole tree is judged by where it lands, like a mkdir of
  *   it (#317): git clone, worktree add, submodule add and init, gh repo
  *   clone and fork --clone, npx degit, and the create-* initializers npm,
@@ -343,6 +345,23 @@
  *   sentence above is about what this guard reads. Pinned by hooks.test.ts
  *   "(#500)".
  *
+ *   A target is spelled before it is judged (#524, the rule #512 gave the write
+ *   guard): $PWD and $HOME wherever they stand, so `/$PWD/hooks/x` is the project's
+ *   file. What stays unspelled, or a glob, with a project, a home or a zone strictly
+ *   below the literal folder before it can't be placed, and is refused:
+ *   `/$X/hooks/x`, `/$(pwd)/hooks/x`, `/*\/hooks/x`, `../$X/hooks/x`. Asserted:
+ *   hooks.test.ts "(#524)".
+ *
+ *   Not seen, dated 2026-11-05 (#524, pinned by hooks.test.ts "(#524)"): a value
+ *   only the run knows, in a path whose literal head sits off to the side or under
+ *   a temp root (`/opt/$X/y`, `/tmp/$X/y`, X holding a climb), since `/tmp/$(date)`
+ *   is a daily shape and a climb in a value is #291's.
+ *
+ *   Not seen, dated 2026-11-05 (#521, pinned by hooks.test.ts "(#521)"): a
+ *   command more than three runner guesses in, past eight bare words each
+ *   (`foo w1 ... w30 rm hooks/x`), since a guess is no nest and refusing there
+ *   would refuse every long word list.
+ *
  *   Not seen, dated 2026-11-05 (#509, by the decision of #291; both pinned by
  *   hooks.test.ts "(#509)"): a value from a file the line sources, which reads
  *   as a name the line never assigned (`. ./env.sh; echo x > $HK/y`). A value
@@ -363,9 +382,9 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
-  quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
-  suCommandString, toolCommandLines, tooDeep, unwrap,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, lineVars, literalHead,
+  overBudget, pagerCommands, quoteWord, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments,
+  spellWords, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
 import { projectRoots } from "./lib.mjs";
@@ -525,6 +544,12 @@ const HAS_STANDIN = /[*?[\u0001-\u0003]/;
 // `$1`, `${2}`, `$@`, `$*` -- a nested shell's positional arguments.
 const POSITIONAL = /\$\{?[0-9@*]\}?/g;
 
+// What headReaches measures a literal folder against (#524). Set once, on first use, by the one line read.
+let ANCHORS = null;
+
+// The shared temp roots, where a computed name is a daily shape (#524).
+const TEMP_ROOT = /^(?:\/private)?\/(?:tmp|var\/tmp)(?:\/|$)/;
+
 // The folder after a directory change the guard can't follow (#258). Paths
 // resolved from it stay under it, so a write there is told apart and refused.
 const LOST = join(sep, "\u0004");
@@ -562,7 +587,10 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * hooks/hooks.json # note` is the write; a quoted `#`, or one inside a
  * word, is text.
  */
-const READ = { redirects: true, subshells: true, substitutions: true, comments: true };
+const READ = { redirects: true, subshells: true, substitutions: true, comments: true, budget: readBudget() };
+
+// The same, for a runner's guess at its later words (#522), on the same budget.
+const GUESS = { ...READ, guess: true };
 
 // find: name tests, the primaries that take a value, and the ones that act.
 const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
@@ -1350,6 +1378,10 @@ function gitHookDirs() {
 
 /** One git command from the project, or `cwd`, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
 function askGit(args, cwd = ROOTS[0]) {
+  // #522 -- a git process per question is what a line of many git commands costs
+  // most in: past the budget's clock it says nothing, and lineTargets refuses the line
+  READ.budget.asks++;
+  if (overBudget(READ.budget)) return "";
   try {
     const r = spawnSync("git", args, {
       cwd, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
@@ -2481,7 +2513,7 @@ function unspelled(word, ctx) {
  * stands in, under the variables the line gave it.
  */
 function shellAliasTargets(line, dir, ctx) {
-  if (ctx.depth >= 3) return [];
+  if (ctx.depth >= MAX_NEST) return [{ deep: true }];
   const out = [];
   for (const at of new Set([dir, gitRoot(dir)])) {
     out.push(...lineTargets(line, at, ctx.depth + 1, { walk: ctx.walk, vars: assignVars(ctx.assigns ?? [], ctx.vars, SPELL) }));
@@ -2733,7 +2765,7 @@ function runnerTargets(cmd, args, ctx, add, out) {
     const a = args[i];
     const line = ["-c", "--call", "--shell-mode"].includes(a) ? args[i + 1]
       : a.startsWith("--call=") ? a.slice(7) : undefined;
-    if (line !== undefined && ctx.depth < 3) out.push(...lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    if (line !== undefined) out.push(...deeper(line, ctx));
   }
   const at = args.findIndex((a) => CLAUDE_PKG.test(a) || /^claude(?:\.[cm]?js)?$/.test(cmdName(a)));
   if (at >= 0) claudeTargets(args.slice(at + 1), ctx, add);
@@ -2741,11 +2773,11 @@ function runnerTargets(cmd, args, ctx, add, out) {
   // words after the subcommand (past any `--`) as a command line, read like
   // bash. `run` scripts a package.json entry the guard can't see, so it stays out.
   const sub = args.findIndex((a) => ["exec", "x", "dlx"].includes(cmdName(a)));
-  if (sub >= 0 && ctx.depth < 3) {
+  if (sub >= 0) {
     let rest = args.slice(sub + 1);
     const dd = rest.indexOf("--");
     if (dd >= 0) rest = rest.slice(dd + 1);
-    if (rest.length) out.push(...lineTargets(rest.join(" "), ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
+    if (rest.length) out.push(...deeper(rest.join(" "), ctx));
   }
 }
 
@@ -2794,13 +2826,13 @@ function writeTargets(seg, ctx) {
     // #291 -- a variable the line assigned earlier is spelled out first, in
     // every value a loop gave it; one assigned from a substitution, leading
     // the path, puts the write where the guard can't follow
-    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
+    const { raws, typed, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
     for (const one of raws) {
       // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
-      // sees them (#258, #263), and a folder it computes in front of the path
-      // when the guard knows which: $(pwd) and the repo root (#321)
-      const r = expandVars(computedDir(one
-        .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
+      // sees them (#258, #263), $PWD and $HOME wherever they stand (#524), and a
+      // folder it computes in front of the path when the guard knows which:
+      // $(pwd) and the repo root (#321)
+      const r = expandVars(computedDir(spellKnown(one, ctx.vars, ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
       const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
       // a path with nothing in front of any other substitution to anchor it
       // (`$(somecmd)/notes.txt`, `\`dirname x\`/y`) lands where the guard can't
@@ -2809,7 +2841,8 @@ function writeTargets(seg, ctx) {
       // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
       // judged there, as a $NAME the line never assigned is
       const abs = lost || /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
-      out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
+      // only as typed: with $OUT gone, `$OUT/$(date).log` has a `/` in front that the line never wrote (#524)
+      out.push({ raw: r, abs, mode, feed, walk: ctx.walk, reaches: !ctx.gone && typed.includes(one) && headReaches(r, dir) });
     }
   };
   if (ctx.chdir) {
@@ -2834,11 +2867,7 @@ function writeTargets(seg, ctx) {
   }
   // #315 -- a pager variable set here (PAGER=, MANPAGER=, GIT_PAGER= ...)
   // names a program man, git or gh runs: its value is a command line too
-  if (ctx.depth < 3) {
-    for (const inner of pagerCommands(assigns, w0)) {
-      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
-    }
-  }
+  for (const inner of pagerCommands(assigns, w0)) out.push(...deeper(inner, ctx));
   const w = xargs && w0.length ? withStdin(w0, xargs.args) : w0;
   if (!w.length) return out;
   const cmd = cmdName(w[0]); // `TEE` and `/BIN/RM` run tee and rm on a Mac (#295)
@@ -2849,13 +2878,15 @@ function writeTargets(seg, ctx) {
   // eval's line is its words joined by one space (#283), through the
   // function the run guard reads it with, so the two guards agree on it.
   if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
-    if (ctx.depth >= 3) return out;
     const nest = (text, rest = []) => {
+      // #521 -- past the reader's depth a line is refused unread, never passed
+      if (ctx.depth >= MAX_NEST) { out.push({ deep: true }); return; }
       const marker = rest.join(" ").split("").find((c) => c === STDIN || c === WALK);
       out.push(...lineTargets(text, ctx.dir, ctx.depth + 1, {
         positional: marker,
         argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
         walk: ctx.walk,
+        gone: ctx.gone,
         vars: assignVars(assigns, ctx.vars, SPELL), // the line's variables, and this command's own prefix (#291)
       }));
     };
@@ -2919,12 +2950,60 @@ function writeTargets(seg, ctx) {
   // ordinary line that merely names a protected path passes -- all but the
   // one option that runs a program (man -P, rg --pre, gh alias set --shell,
   // #315), which runnerCommands hands back as a line of its own.
-  else if (ctx.depth < 3) {
-    for (const inner of runnerCommands(w)) {
-      out.push(...lineTargets(inner, ctx.dir, ctx.depth + 1, { walk: ctx.walk }));
-    }
+  // #521 -- a guess in a row stops at RUNNER_HOPS, since a long word list is no
+  // nest; a guess the depth would leave unread refuses like a shell.
+  else if ((ctx.hops ?? 0) < RUNNER_HOPS) {
+    const hops = ctx.hops ?? 0;
+    // all of a runner's guesses marked before any is read, so none is read twice
+    const family = ctx.family ?? new Map();
+    const fresh = runnerCommands(w).filter((inner) => freshGuess(family, `${ctx.dir}\0${inner}`, hops));
+    for (const inner of fresh) gather(out, deeper(inner, { ...ctx, hops: hops + 1, family }));
   }
   return out;
+}
+
+/** Appends a nested line's targets: a spread of them all would throw past a few score thousand (#522). */
+function gather(out, more) {
+  for (const t of more) out.push(t);
+}
+
+/**
+ * One line a command hands on, read one level down; past the reader's depth
+ * it stands for a line nobody read, and is refused (#521).
+ */
+function deeper(line, ctx) {
+  if (ctx.depth >= MAX_NEST) return [{ deep: true }];
+  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops, family: ctx.family, gone: ctx.gone });
+}
+
+/**
+ * $PWD and $HOME spelled wherever they stand in a word (#524), since a shell holds
+ * both: `/$PWD/hooks/x` is the project's file, its slashes collapsed by resolveIn.
+ * A name the line assigned was spelled by the reader, or left as typed because it
+ * can't be: this folder is no answer for either.
+ */
+function spellKnown(word, vars, here) {
+  const pwd = vars?.has("PWD") ? word : word.replace(/\$PWD\b|\$\{PWD\}/g, () => here);
+  return vars?.has("HOME") ? pwd : pwd.replace(/\$HOME\b|\$\{HOME\}/g, () => resolve(homedir()));
+}
+
+/**
+ * True when what the shell fills in decides whether a write lands somewhere this
+ * guard protects (#524, the rule #512 gave the write guard): a project, a home or
+ * a zone sits below the literal folder before the first thing it can't spell, so
+ * `/$X/hooks/x`, `/U*\/me/proj/hooks/x` and `../$X/hooks/x` can each be the file.
+ * Strictly below: a value right under a root is #291's `$X/y`, which stays as
+ * typed, as `$PWD/$X.log` does. A temp root is off to the side wherever a test or a
+ * scratch project happens to sit under it.
+ */
+function headReaches(target, dir) {
+  const head = literalHead(target);
+  if (!head) return false;
+  const folder = resolveIn(dir, head);
+  if (isLost(folder) || TEMP_ROOT.test(folder)) return false;
+  // a zone counts on its own only outside the roots: one under a project is that project's
+  ANCHORS ??= [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir).filter((d) => ![...ROOTS, ...HOMES].some((a) => holds(a, d)))];
+  return ANCHORS.some((a) => holds(folder, a) && !same(folder, a));
 }
 
 /** True when the segment's own leading assignments carry the override. */
@@ -3117,7 +3196,7 @@ function linePlaces(segs, dir) {
  * (#265).
  */
 function lineTargets(command, dir, depth, extra = {}) {
-  const segs = shellSegments(command, READ);
+  const segs = shellSegments(command, extra.hops ? GUESS : READ);
   // a line nested past what the reader reads holds commands the guard never
   // saw (#321): refused unread, unless the human's override prefixes it
   if (tooDeep(segs)) return depth > 0 || !exempt(segs[0]?.words ?? []) ? [{ deep: true }] : [];
@@ -3127,27 +3206,55 @@ function lineTargets(command, dir, depth, extra = {}) {
   // the ones before it (#291); a nested line starts with its caller's, and
   // a loop or function body runs under all the line assigns (#494, seedVars)
   let vars = seedVars(segs, extra.vars ?? new Map(), SPELL);
+  // each command's readings, spelled once, as it was reached: a pipeline re-spelling
+  // everything before each stage is quadratic on a long one (#522)
+  let upstream = [];
   for (let k = 0; k < segs.length; k++) {
+    if (overBudget(READ.budget)) { out.push({ deep: true }); return out; }
     // the commands piping into this one, nearest last
-    const up = [];
     // (#509) spelled like the command itself, so `D=hooks; find $D | xargs rm` feeds what it walks
-    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) {
-      up.unshift(...spellWords(segs[j], vars, SPELL).map(({ words }) => ({ ...segs[j], words })));
-    }
+    if (k === 0 || !PIPE.has(segs[k - 1].op)) upstream = [];
+    else for (const { words } of spellWords(segs[k - 1], vars, SPELL)) upstream.push({ ...segs[k - 1], words });
+    const up = upstream.slice();
     // the prefix counts on a command the human typed, not inside a quoted string
     if (depth > 0 || !exempt(segs[k].words)) {
       // #509 -- the words spelled first, by the pass the run guard reads
       // through, so a value that holds the command or a flag and its path is
       // read as them (`C='rm hooks/x'; $C`). A word it can't spell stays as
       // typed, for writeTargets' add to place or call lost.
-      for (const { words } of spellWords(segs[k], vars, SPELL)) {
+      for (const { words, gone } of spellWords(segs[k], vars, SPELL)) {
         const seg = { ...segs[k], words };
-        for (const d of places) out.push(...writeTargets(seg, { ...extra, dir: d, depth, up, vars }));
+        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars, gone: gone || extra.gone }));
       }
     }
     vars = lineVars(segs[k], vars, SPELL);
   }
+  if (overBudget(READ.budget)) out.push({ deep: true });
   return out;
+}
+
+/**
+ * lineTargets from the top of a line, and the first thing in it to refuse. Out of
+ * stack or past a string's length is the line's doing, not a bug here, so it is a
+ * line the guard couldn't read (#522): failing open on it was a bypass any long
+ * enough line could reach. Any other error stays the guard's own (ADR 0016).
+ */
+function lineHit(line, dir) {
+  let targets;
+  try {
+    targets = lineTargets(line, dir, 0);
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e;
+    READ.budget.over = true;
+    return { deep: true };
+  }
+  for (const t of targets) {
+    const hit = judgeTarget(t);
+    if (hit) return hit;
+    if (overBudget(READ.budget)) return { deep: true };
+  }
+  // #281 -- a write onto cairn.json the guard can't run: judged by the key word it spells
+  return ownerLineHit(targets, line);
 }
 
 /**
@@ -3174,7 +3281,9 @@ function judgeTarget(t) {
   }
   if (isLost(t.abs)) return lost;
   const what = judge(t.abs, t.mode);
-  return what ? { path: t.raw, what } : null;
+  if (what) return { path: t.raw, what };
+  // nothing it can name, and what the shell fills in decides where it lands (#524)
+  return t.reaches ? lost : null;
 }
 
 // MCP tools (#310)
@@ -3315,14 +3424,7 @@ try {
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
     // ordinary work and must stay frictionless (#240).
-    const command = payload?.tool_input?.command ?? "";
-    const targets = lineTargets(command, cwd, 0);
-    for (const t of targets) {
-      hit = judgeTarget(t);
-      if (hit) break;
-    }
-    // #281 -- a write onto cairn.json the guard can't run: judged by the key word it spells
-    if (!hit) hit = ownerLineHit(targets, command);
+    hit = lineHit(payload?.tool_input?.command ?? "", cwd);
   } else if (core) {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
     const abs = p ? resolveIn(cwd, expandHome(String(p))) : null;
@@ -3343,13 +3445,7 @@ try {
     }
     // a command line is read like Bash, from the folder the input names for it
     for (const { line, cwd: at } of hit ? [] : mcpLines) {
-      const dir = at ? resolveIn(cwd, expandHome(at)) : cwd;
-      const targets = lineTargets(line, dir, 0);
-      for (const t of targets) {
-        hit = judgeTarget(t);
-        if (hit) break;
-      }
-      if (!hit) hit = ownerLineHit(targets, line); // #281
+      hit = lineHit(line, at ? resolveIn(cwd, expandHome(at)) : cwd);
       if (hit) break;
     }
   }
@@ -3359,8 +3455,7 @@ try {
   if (hit.deep) {
     // #321: substitutions nested past what the reader reads -- fail closed
     console.error(
-      `cairn harness guard: this line nests substitutions deeper than the guard reads (${SUBSTITUTION_DEPTH} ` +
-      "levels), so what runs inside them can't be judged.",
+      `cairn harness guard: this line ${unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
     );
     console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
   } else if (hit.lost) {
@@ -3398,7 +3493,7 @@ try {
   // lines: a breaker that loaded but misbehaves must not reach the outer catch,
   // whose fail-open exit 0 would turn this refusal into an allow
   // (asserted: hooks.test.ts, "missing, broken or misbehaving").
-  const reason = hit.deep ? "a line nested past the reader's depth"
+  const reason = hit.deep ? (READ.budget.over ? "a line past the read budget" : "a line nested past the reader's depth")
     : hit.lost ? "a write past a folder the guard can't follow" : `a write to ${hit.what}`;
   let more = [];
   try {

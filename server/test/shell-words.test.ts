@@ -11,7 +11,8 @@ import { describe, it, expect } from "vitest";
 import {
   WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
   shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
-  toolCommandLines, tooDeep, evalCommandString,
+  toolCommandLines, tooDeep, evalCommandString, MAX_NEST, MAX_READ, MAX_SEGMENTS, assignVars, lineVars, seedVars,
+  overBudget, readBudget, spellWords, expandAssigned,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -817,5 +818,238 @@ describe("a redirect target keeps the end of a name its quoting closes (#494)", 
     expect(read("echo x > $H/y")).toBe("$H/y");
     expect(read('echo x > "${H}"oks/y')).toBe("${H}oks/y");
     expect(read("echo x > '$H'oks/y")).toBe("$Hoks/y");
+  });
+});
+
+// #522: every PreToolUse guard reads through here, and a line that runs one
+// past its hook timeout may pass unjudged (a dated claim in the phase's context,
+// read 2026-11-06 from the Claude Code hooks reference). So the reading stays
+// linear, one budget lives here, and past it a line is marked, never read on.
+describe("the reader's one budget and its linear cost (#522)", () => {
+  const FULL = { subshells: true, comments: true, substitutions: true, heredocs: true, redirects: true,
+    continuation: true, posixEscapes: true, anyWhitespace: true };
+  const budgeted = () => ({ ...FULL, budget: readBudget() });
+
+  it("the three limits live here, the values the write guard held", () => {
+    expect([MAX_NEST, MAX_READ, MAX_SEGMENTS]).toEqual([8, 1_000_000, 4096]);
+  });
+
+  it("a line past the character budget is marked and not read on; one inside it is read whole", () => {
+    const read = budgeted();
+    const under = shellSegments(`echo ${"a".repeat(MAX_READ - 100)}`, read);
+    expect(tooDeep(under)).toBe(false);
+    expect(overBudget(read.budget)).toBe(false);
+    const over = budgeted();
+    expect(tooDeep(shellSegments(`echo ${"a".repeat(MAX_READ + 1)}`, over))).toBe(true);
+    expect(overBudget(over.budget)).toBe(true);
+    // the budget is the call's, so a second line after it is not read at all
+    expect(tooDeep(shellSegments("echo hi", over))).toBe(true);
+  });
+
+  it("a line past the segment budget is marked; the count is across every read of the call", () => {
+    const line = Array(MAX_SEGMENTS + 1).fill("true").join(";");
+    expect(tooDeep(shellSegments(line, budgeted()))).toBe(true);
+    const half = Array(MAX_SEGMENTS / 2 + 1).fill("true").join(";");
+    const read = budgeted();
+    expect(tooDeep(shellSegments(half, read))).toBe(false);
+    expect(tooDeep(shellSegments(half, read))).toBe(true);
+  });
+
+  it("a heredoc's body is data and never counts; a body fed back as a line does", () => {
+    const body = "plain words of no consequence\n".repeat(50_000);
+    const read = budgeted();
+    const segs = shellSegments(`cat > out.txt <<'EOF'\n${body}EOF\necho done`, read);
+    expect(body.length).toBeGreaterThan(MAX_READ);
+    expect(tooDeep(segs)).toBe(false);
+    expect(segs.at(-1).words).toEqual(["echo", "done"]);
+    expect(read.budget.chars).toBeLessThan(100);
+    expect(tooDeep(shellSegments(body, read))).toBe(true);
+  });
+
+  it("past the most text a line can hold, a heredoc's body counts after all", () => {
+    const read = budgeted();
+    expect(tooDeep(shellSegments(`cat <<'EOF'\n${"x\n".repeat(9_000_000)}EOF`, read))).toBe(true);
+    expect(overBudget(read.budget)).toBe(true);
+  });
+
+  it("a read without a budget is what it always was, however long", () => {
+    expect(tooDeep(shellSegments(`echo ${"a".repeat(MAX_READ + 1)}`, FULL))).toBe(false);
+  });
+
+  it("the clock counts once a line has done real work, never on a short one, so a loaded machine can't refuse an `ls`", () => {
+    const short = budgeted();
+    short.budget.deadline = 0;
+    expect(tooDeep(shellSegments("ls -la", short))).toBe(false);
+    expect(overBudget(short.budget)).toBe(false);
+    const long = budgeted();
+    long.budget.deadline = 0;
+    expect(tooDeep(shellSegments(`echo ${"a ".repeat(50_000)}`, long))).toBe(true);
+    expect(overBudget(long.budget)).toBe(true);
+    expect(tooDeep(shellSegments("echo next", long))).toBe(true);
+  });
+
+  /** Everything a guard does per segment, without the guard. */
+  function walk(line: string) {
+    const opts = { read: FULL };
+    const segs = shellSegments(line, FULL);
+    let vars = seedVars(segs, new Map(), opts);
+    let words = 0;
+    for (const seg of segs) {
+      for (const { words: spelled } of spellWords(seg, vars, opts)) {
+        const { words: w, assigns } = unwrap(spelled, FULL);
+        words += w.length;
+        assignVars(assigns, vars, opts);
+        for (const r of runnerCommands(w)) words += r.length > 0 ? 1 : 0;
+      }
+      for (const r of seg.redirects) words += expandAssigned(r, vars).raws.length;
+      vars = lineVars(seg, vars, opts);
+    }
+    return words;
+  }
+
+  /** How many map entries reading a line copies, counted through the global the reader reaches for. */
+  function mapEntriesCopied(run: () => void): number {
+    const Real = globalThis.Map;
+    let copied = 0;
+    class Counting<K, V> extends Real<K, V> {
+      constructor(from?: Iterable<readonly [K, V]> | null) {
+        super(from as Iterable<readonly [K, V]>);
+        if (from) copied += this.size;
+      }
+    }
+    globalThis.Map = Counting as MapConstructor;
+    try { run(); } finally { globalThis.Map = Real; }
+    return copied;
+  }
+
+  it("reading assignments copies no map per assignment: the count stays linear, on an injected counter and no stopwatch", () => {
+    const assigns = (n: number) => Array.from({ length: n }, (_, k) => `A${k}=1`).join("; ");
+    const prefixes = (n: number) => `${assigns(n)}; ${Array.from({ length: n }, (_, k) => `P${k}=1 true`).join("; ")}`;
+    const exports = (n: number) => Array.from({ length: n }, (_, k) => `export A${k}=1`).join("; ");
+    for (const [shape, line] of [["bare", assigns], ["prefix", prefixes], ["export", exports]] as const) {
+      const copied = mapEntriesCopied(() => walk(line(4000)));
+      expect(copied, shape).toBeLessThan(4000);
+    }
+  });
+
+  it("the counter can fail: a copy per assignment reads as millions", () => {
+    const copied = mapEntriesCopied(() => {
+      let vars = new Map<string, string[]>();
+      for (let k = 0; k < 2000; k++) { vars = new Map(vars); vars.set(`A${k}`, ["1"]); }
+    });
+    expect(copied).toBeGreaterThan(1_000_000);
+  });
+
+  /** The best of three, in ms, so a load spike in one run is not read as a shape. */
+  const best = (run: () => void): number => {
+    let out = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const t0 = performance.now();
+      run();
+      out = Math.min(out, performance.now() - t0);
+    }
+    return out;
+  };
+
+  // Each is a line an attacker can write in under the budget, and each was quadratic or worse.
+  const SHAPES: ReadonlyArray<readonly [string, (n: number) => string]> = [
+    ["assignments on a line of their own", (n) => Array.from({ length: n }, (_, k) => `A${k}=1`).join("; ")],
+    ["prefix assignments on one command", (n) => `${Array.from({ length: n }, (_, k) => `A${k}=1`).join(" ")} true`],
+    ["export of many names", (n) => `export ${Array.from({ length: n }, (_, k) => `A${k}=1`).join(" ")}`],
+    ["wrappers in a row", (n) => `${"nice ".repeat(n)}true`],
+    ["time in a row", (n) => `${"time ".repeat(n)}true`],
+    ["an unknown program's bare words", (n) => `foo ${Array.from({ length: n }, (_, k) => `w${k}`).join(" ")}`],
+    ["quoted arguments, each distinct", (n) => `foo ${Array.from({ length: n }, (_, k) => `'a ${k}'`).join(" ")}`],
+    ["one word of quoted expansions", (n) => `echo ${'"$a"'.repeat(n)}`],
+    ["one word of empty quotes and names", (n) => `echo ${"''$b".repeat(n)}`],
+    ["a redirect target of quoted names", (n) => `echo x > ${'"$H"x'.repeat(n)}`],
+    ["nested braces", (n) => `echo ${"{".repeat(n)}a${"}".repeat(n)}`],
+    ["brace lists in one word", (n) => `echo ${"{a,}".repeat(n)}`],
+    ["ansi quotes", (n) => `echo ${"$'\\x41'".repeat(n)}`],
+  ];
+
+  for (const [shape, line] of SHAPES) {
+    it(`${shape}: eight times the line costs well under sixty-four times the read, by ratio`, () => {
+      const small = line(4000);
+      const large = line(32000);
+      walk(small); // warmed, so the first run's compile isn't the small size's cost
+      const ratio = best(() => walk(large)) / Math.max(best(() => walk(small)), 1);
+      expect(ratio, `${shape}: ${ratio.toFixed(1)}x`).toBeLessThan(28);
+    }, 60_000);
+  }
+
+  it("the ratio can fail: a quadratic loop over the same sizes reads past the bar", () => {
+    const quad = (n: number) => { let s = 0; for (let a = 0; a < n; a++) for (let b = 0; b < n; b++) s += a ^ b; return s; };
+    const ratio = best(() => quad(32000)) / Math.max(best(() => quad(4000)), 1);
+    expect(ratio).toBeGreaterThan(28);
+  }, 60_000);
+
+  it("a substitution nested past the stack reads as too deep rather than throwing", () => {
+    const segs = shellSegments(`echo ${'"$('.repeat(40_000)}`, FULL);
+    expect(tooDeep(segs)).toBe(true);
+    expect(() => shellSegments(`echo ${"$(".repeat(200_000)}`, FULL)).not.toThrow();
+  });
+
+  it("a default nested past the reader's depth is wild and lost rather than a stack overflow", () => {
+    const word = `${"${X:-".repeat(60_000)}y${"}".repeat(60_000)}`;
+    const [seg] = shellSegments(`echo ${word}`, FULL);
+    const [reading] = spellWords(seg, new Map(), { read: FULL });
+    expect(reading.wild.size).toBeGreaterThan(0);
+    expect(expandAssigned(word, new Map()).lost).toBe(true);
+    // a default a few levels in is still a value
+    expect(expandAssigned("${X:-${Y:-hooks}}", new Map()).raws).toContain("hooks");
+  });
+
+  it("a value that doubles per assignment stops growing: past the longest carried it is unreadable, never a longer string", () => {
+    const line = `A0=x; ${Array.from({ length: 40 }, (_, i) => `A${i + 1}=$A${i}$A${i}`).join("; ")}; echo $A40`;
+    const segs = shellSegments(line, FULL);
+    let vars = seedVars(segs, new Map(), { read: FULL });
+    for (const seg of segs) vars = lineVars(seg, vars, { read: FULL });
+    const held = vars.get("A40");
+    expect(Array.isArray(held)).toBe(false);
+    const [reading] = spellWords(segs.at(-1), vars, { read: FULL });
+    expect(reading.wild.size).toBe(1);
+    // small ones are still spelled
+    expect(vars.get("A3")).toEqual(["xxxxxxxx"]);
+  });
+
+  it("assignVars and lineVars never touch the map they were handed, and a child hides what it deletes", () => {
+    const start = new Map([["A", ["1"]]]);
+    const child = assignVars(["B=2"], start, {});
+    expect(child.get("A")).toEqual(["1"]);
+    expect(child.get("B")).toEqual(["2"]);
+    expect(start.has("B")).toBe(false);
+    const after = lineVars(shellSegments("C=3", FULL)[0], start, { read: FULL });
+    expect(after.get("C")).toEqual(["3"]);
+    expect(start.has("C")).toBe(false);
+    // no assignment on a command: nothing to scope, so nothing is built
+    expect(assignVars([], start, {})).toBe(start);
+  });
+});
+
+// #523: the reader took anything after `>&` for a descriptor, but bash and zsh
+// write a word that is no number or `-` as a file.
+describe("`>&` is a descriptor only for a number or `-`; anything else is a redirect target (#523)", () => {
+  const READ = { redirects: true };
+  const redirects = (line: string) => shellSegments(line, READ)[0].redirects;
+
+  it("a word that is no number or `-` is a file, in every spelling", () => {
+    for (const line of ["echo x >& f", "echo x >&f", 'echo x >&"f"', "echo x >>& f", "echo x >&! f", "echo x >&| f",
+      "echo x >! f", "echo x >>! f", "echo x >>| f", "echo x 1>&f", "echo x &>f", "echo x &>>f"]) {
+      expect(redirects(line), line).toEqual(["f"]);
+      expect(shellSegments(line, READ)[0].words, line).toEqual(["echo", "x"]);
+    }
+  });
+
+  it("twins: a number or `-` is a descriptor and no file, spaced, quoted or moved", () => {
+    for (const line of ["echo x >&2", "echo x >& 2", "echo x 2>&1", "echo x >&-", "echo x 2>&-", 'echo x >&"2"', "echo x >&3-", "echo x 2>&1 >&2"]) {
+      expect(redirects(line), line).toEqual([]);
+      expect(shellSegments(line, READ)[0].words, line).toEqual(["echo", "x"]);
+    }
+  });
+
+  it("a descriptor beside a file keeps the file", () => {
+    expect(redirects("echo x >&2 > f 2>&1")).toEqual(["f"]);
+    expect(redirects("echo x >& f >&2")).toEqual(["f"]);
   });
 });

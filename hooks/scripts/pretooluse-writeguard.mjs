@@ -51,7 +51,7 @@
  *
  * Coverage -- what the Bash leg reads, through shell-words.mjs (shared with
  *   the run and harness guards, so a shape closed there closes here): the
- *   `>` `>>` `&>` `>|` redirect targets of every simple command, a heredoc
+ *   `>` `>>` `&>` `>|` `>& file` redirect targets of every simple command, a heredoc
  *   redirected onto a file, the body of each `$(...)` and backtick, `tee`'s
  *   operands, and the file a wrapper itself writes (`time -o`). Each
  *   relative target is resolved from the call's cwd and from every folder
@@ -69,8 +69,8 @@
  *   (runnerCommands: `op run --`, `find -exec`, `trap`). Refused unread, since
  *   each hands a shell a line nobody can see: a shell string holding a word the
  *   reader calls wild (`eval "$(cmd)"`), a pipe into a shell (`cmd | sh`), a
- *   nest past MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (too costly to
- *   read inside the hook's timeout), a substitution past the reader's depth,
+ *   nest past the reader's MAX_NEST, a line past its budget, MAX_READ or MAX_SEGMENTS (too costly to
+ *   read inside the hook's timeout, #522), a substitution past the reader's depth,
  *   and tee fed by xargs. Asserted: writeguard.test.ts, "a redirect inside a
  *   nested shell". TEXT_ARGS names the programs whose words are code or text,
  *   never a line (`awk '$1 > 5'` passes); a quoted argument of a program off
@@ -109,10 +109,13 @@
  *     the written spelling is judged, not the inode.
  *   - dated 2026-11-05 (#512): a value only the run knows, in a path whose
  *     literal head sits off to the side (`/opt/$X/y`, X holding a climb);
- *     `>&` onto a file, which the reader takes for a descriptor; a quoted
- *     `'$HOME/x'`, read as spelled, since a target carries no quoting past
- *     the parser. Pinned, with the /tmp link spelling of the line above, by
- *     "the Not seen shapes stay passing" under "a target is spelled".
+ *     a quoted `'$HOME/x'`, read as spelled, since a target carries no quoting
+ *     past the parser. Pinned, with the /tmp link spelling of the line above,
+ *     by "the Not seen shapes stay passing" under "a target is spelled".
+ *   - dated 2026-11-05 (#521): a command more than eight runner guesses in,
+ *     past eight bare words each (`foo w1 ... w100 tee x`), since a guess is no
+ *     nest and refusing there would refuse every long word list. Pinned by
+ *     "the Not seen shapes stay passing" under "a redirect inside a nested shell".
  *   - a harness that sends no agent_type (Cursor and the rest): allowed, as
  *     the issue scopes it; a per-harness field mapping is a later issue.
  *   - a verifier or seat dispatched as a general-purpose subagent
@@ -132,8 +135,8 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { projectRoot, projectRoots, readCairnConfig } from "./lib.mjs";
 import {
-  SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
-  shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
+  MAX_NEST, RUNNER_HOPS, SHELLS, argCommands, assignVars, braceExpand, childVars, commandName, evalCommandString, expandAssigned, freshGuess, lineVars, literalHead,
+  overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
 } from "./shell-words.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -148,8 +151,11 @@ const CORE = new Set(["Edit", "Write", "NotebookEdit"]);
 /** What the shell reader is asked to read: the run guard's set plus redirects. */
 const READ = {
   redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true,
-  continuation: true, posixEscapes: true, anyWhitespace: true,
+  continuation: true, posixEscapes: true, anyWhitespace: true, budget: readBudget(),
 };
+
+/** The same, for a runner's guess at its later words (#522), on the same budget. */
+const GUESS = { ...READ, guess: true };
 
 /** Descriptors and devices -- never a file this guard cares about. */
 const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
@@ -157,26 +163,11 @@ const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
 /** A folder word the shell works out at run time: a variable, a substitution, `-`, `~user`. */
 const COMPUTED = /[$`]|^-$|^~[^/]/;
 
-/** In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob. */
-const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
-
 /** Past this many candidate folders a line counts as unreadable. */
 const MAX_PLACES = 16;
 
 /** How the reader spells a line's variables here. */
 const SPELL = { read: READ, cap: MAX_PLACES };
-
-/** How many shells within shells are read; a shell past this is refused unread, a runner's candidate left alone. */
-const MAX_NEST = 8;
-
-/**
- * What one call may cost, nested re-reads included, so a line built to outlast
- * the 3000ms hooks.json gives this hook is refused rather than read. What the
- * harness does with a hook that times out is unverified (a dated claim,
- * 2026-11-06, read from no doc and run by no test): assume it lets the call by.
- */
-const MAX_READ = 1_000_000;
-const MAX_SEGMENTS = 4096;
 
 /**
  * Programs whose words are code in another language, a pattern, or text --
@@ -277,20 +268,19 @@ function spellTilde(raw, vars) {
  * (`/opt/$X/y`, `/tmp/$(date).log`) it can't, short of a climb in the value.
  */
 function headReaches(target, dir, roots) {
-  const at = target.search(UNSPELLED);
-  if (at < 0) return false;
-  const folder = resolve(dir, target.slice(0, target.lastIndexOf("/", at) + 1));
+  const head = literalHead(target);
+  if (head === null) return false;
+  const folder = resolve(dir, head);
   return roots.some((root) => underRoot(root, [folder]) !== null);
 }
 
-/** `vars` with $PWD every folder the shell may stand in: gone once a cd the guard can't read has run, left alone if the line made it wild. */
+/** `vars`, written in place, with $PWD every folder the shell may stand in: gone once a cd the guard can't read has run, left alone if the line made it wild. */
 function standing(vars, dirs) {
   const held = vars.get("PWD");
   if (held !== undefined && !Array.isArray(held)) return vars;
-  const out = new Map(vars);
-  if (dirs === null) out.delete("PWD");
-  else out.set("PWD", [...new Set([...(held ?? []), ...dirs])]);
-  return out;
+  if (dirs === null) vars.delete("PWD");
+  else vars.set("PWD", [...new Set([...(held ?? []), ...dirs])]);
+  return vars;
 }
 
 /**
@@ -302,13 +292,10 @@ function standing(vars, dirs) {
  *
  * Every nested line is walked here too (#511), from the folders and the
  * variables its caller stood in, the same way the run guard and the harness
- * guard walk one. One pass, single writer: `out` and `seen` are this call's.
+ * guard walk one. One pass, single writer: `out` is this call's.
  */
 function shellWrites(command, cwd) {
   const out = [];
-  const seen = new Set();
-  let chars = 0;
-  let count = 0;
   const unread = (what) => out.push({ raw: what, dirs: null, lost: true });
   // a redirect target carries no spans past the parser, so it is spelled here, name by name
   const place = (raw, dirs, vars) => {
@@ -321,16 +308,15 @@ function shellWrites(command, cwd) {
   };
 
   /** One line read from `from` ({ dirs, vars }): what it leaves the shell with, which only eval's caller keeps. */
-  const walk = (line, from, depth, wilds) => {
-    chars += line.length;
-    const segs = chars > MAX_READ ? null : shellSegments(line, READ);
-    count += segs?.length ?? 0;
-    if (segs === null || count > MAX_SEGMENTS) { unread("a line longer than the guard reads"); return from; }
+  const walk = (line, from, depth, wilds, spell = SPELL) => {
+    const segs = shellSegments(line, from.hops ? GUESS : READ);
+    if (overBudget(READ.budget)) { unread("a line longer than the guard reads"); return from; }
     if (tooDeep(segs)) { unread("a line nested deeper than the guard reads"); return from; }
     let { dirs } = from;
-    let vars = seedVars(segs, from.vars, SPELL);
+    let vars = seedVars(segs, from.vars, spell);
     let upstream = null;
     for (const seg of segs) {
+      if (overBudget(READ.budget)) { unread("a line longer than the guard reads"); return from; }
       const piped = upstream;
       upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
       // a redirect is the shell's, from where it stands
@@ -349,16 +335,13 @@ function shellWrites(command, cwd) {
         for (const f of own) for (const target of spellTilde(f, vars)) out.push({ raw: target, dirs: there });
         if (name === "tee" && wrappers.some((w) => commandName(w.name) === "xargs")) unread("the files xargs hands tee");
 
-        const below = { dirs: there, vars: standing(assignVars(assigns, vars, SPELL), there) };
+        const below = { dirs: there, vars: standing(childVars(assignVars(assigns, vars, SPELL)), there) };
         const deeper = new Set([...wilds, ...wild]);
-        const nest = (inner) => {
-          // a program's later words re-read as suffixes of each other, so each is read once per place and per spelling
-          const key = JSON.stringify([inner, there, [...below.vars], [...deeper]], (_, v) => (typeof v === "symbol" ? "?" : v));
-          if (seen.has(key)) return;
-          seen.add(key);
-          walk(inner, below, depth + 1, deeper);
-        };
-        if (depth < MAX_NEST) for (const inner of pagerCommands(assigns, words)) nest(inner);
+        const nest = (inner, more = {}) => walk(inner, { ...below, ...more }, depth + 1, deeper);
+        // #521 -- a line past the reader's depth is refused unread, whoever hands it on
+        const pagers = pagerCommands(assigns, words);
+        if (pagers.length && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
+        else for (const inner of pagers) nest(inner);
 
         if (SHELLS.has(name) || name === "eval" || name === "su") {
           const script = name === "eval" ? evalCommandString(args)
@@ -369,7 +352,7 @@ function shellWrites(command, cwd) {
           else if (script && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
           else if (script && name === "eval") {
             // eval runs in this shell: its cd and its assignments are the line's own
-            ({ dirs: moves, vars } = walk(script, { dirs: moves, vars }, depth + 1, deeper));
+            ({ dirs: moves, vars } = walk(script, { dirs: moves, vars }, depth + 1, deeper, { ...SPELL, shared: true }));
           } else if (script) nest(script);
           else if (name === "su" || shellReadsStdin(args)) {
             // no string: its own heredoc or the one piped in, else whatever a pipe feeds it
@@ -386,10 +369,22 @@ function shellWrites(command, cwd) {
               : [...new Set([...moves, ...spots.flatMap((s) => moves.map((d) => resolve(d, s)))])];
             moves = next === null || next.length > MAX_PLACES ? null : next;
           }
-        } else if (depth < MAX_NEST) {
+        } else {
           // the program's later words may be the real command (#311); only the
-          // option that runs one, on a program whose words are text
-          for (const inner of TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words)) nest(inner);
+          // option that runs one, on a program whose words are text. A long word
+          // list is no nest, so its guesses just stop at the depth (RUNNER_HOPS in a
+          // row); any fewer, and a line the depth would leave unread refuses (#521)
+          const inner = TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words);
+          if (depth >= MAX_NEST) {
+            if (inner.length && (from.hops ?? 0) < RUNNER_HOPS) unread("a line nested deeper than the guard reads");
+          } else {
+            // a program's later words re-read as suffixes of each other, so each is read once per
+            // place: all of them marked before any is read
+            const hops = from.hops ?? 0;
+            const family = from.family ?? new Map();
+            const fresh = inner.filter((line) => freshGuess(family, `${there?.join("\0")}\0${line}`, hops));
+            for (const line of fresh) nest(line, { hops: hops + 1, family });
+          }
         }
       }
       dirs = moves;
@@ -398,7 +393,15 @@ function shellWrites(command, cwd) {
     return { dirs, vars };
   };
   // $HOME and $PWD are known to every guard (the phase's reader decision), so they spell like what the line assigned
-  walk(command, { dirs: [cwd], vars: new Map([["HOME", [resolve(homedir())]], ["PWD", [cwd]]]) }, 0, new Set());
+  try {
+    walk(command, { dirs: [cwd], vars: new Map([["HOME", [resolve(homedir())]], ["PWD", [cwd]]]) }, 0, new Set());
+    // spent on the last command, unwrap stopped with words unread and nothing has looked since
+    if (overBudget(READ.budget)) unread("a line longer than the guard reads");
+  } catch (e) {
+    // #522 -- out of stack or past a string's length is the line's doing, not a bug here
+    if (!(e instanceof RangeError)) throw e;
+    unread("a line longer than the guard reads");
+  }
   return out;
 }
 
