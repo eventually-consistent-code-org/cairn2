@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -441,13 +441,19 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
     }
   });
 
-  it("a line built to run the guard out of time is refused, not waved through by the hook's timeout", () => {
+  it("a line built to run the guard out of time is refused, not waved through by the hook's timeout: nothing in these writes, only their cost does it", () => {
     const c = at(fixture(), "root");
-    const padded = Array.from({ length: 4000 }, (_, i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`).join(";");
-    const started = Date.now();
-    const r = judge(c, sh(`${padded}; sh -c 'echo x > src/a.ts'`));
-    expect(r.status, r.stderr.split("\n")[0]).toBe(2);
-    expect(Date.now() - started, "stays inside the hook's 3000ms").toBeLessThan(3000);
+    const long = Array.from({ length: 1700 }, (_, i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`).join(";");
+    const wide = Array.from({ length: 5000 }, (_, i) => `A${i}=1`).join(";");
+    for (const line of [long, wide]) {
+      const started = Date.now();
+      const r = judge(c, sh(line));
+      expect(r.status, r.stderr.split("\n")[0]).toBe(2);
+      expect(r.stderr.split("\n")[0]).toContain("can't read");
+      expect(Date.now() - started, "stays inside the hook's 3000ms").toBeLessThan(3000);
+    }
+    // the twin: a long ordinary line is read, whole
+    expect(judge(c, sh(Array.from({ length: 200 }, (_, i) => `sh -c 'echo ${i}'`).join(";"))).status).toBe(0);
   });
 
   it("tee fed its file names by xargs writes what the pipe says, which the guard can't read: refused", () => {
@@ -456,6 +462,131 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
     expect(r.status).toBe(2);
     expect(r.stderr.split("\n")[0]).toContain("can't read");
     expect(judge(c, sh("printf 'x' | xargs echo")).status).toBe(0);
+  });
+});
+
+describe("a target is spelled through the reader before it is judged, and a head the guard can't spell is unreadable (#512)", () => {
+  const BOTH: readonly Cwd[] = ["root", "nested"];
+  type Line = (c: Ctx) => string;
+  type Row = { shape: string; refused: Line; twin: Line };
+  /** The project root spelled from the fixture's home, which sits beside it. */
+  const climb = (c: Ctx) => `../${basename(c.root)}`;
+
+  const TABLE: readonly Row[] = [
+    { shape: "a leading slash before $PWD", refused: (c) => `echo x > /$PWD/${c.rel}src/a.ts`, twin: () => "echo x > /tmp/x" },
+    { shape: "a leading slash before ${PWD}", refused: (c) => `echo x > /\${PWD}/${c.rel}src/a.ts`, twin: () => "echo x > /tmp/x" },
+    { shape: "two slashes before $PWD", refused: (c) => `echo x > //$PWD/${c.rel}src/a.ts`, twin: () => "echo x > //tmp/x" },
+    { shape: "a dot folder before $PWD", refused: (c) => `echo x > /./$PWD/${c.rel}src/a.ts`, twin: () => "echo x > /./tmp/x" },
+    { shape: "a quoted $PWD behind a slash", refused: (c) => `echo x > /"$PWD"/${c.rel}src/a.ts`, twin: (c) => `echo x > /"$PWD"/${c.rel}../../out.txt` },
+    { shape: "$PWD in the middle of a path", refused: (c) => `echo x > /tmp/../$PWD/${c.rel}src/a.ts`, twin: () => "echo x > /tmp/../tmp/x" },
+    { shape: "a leading slash before $HOME", refused: (c) => `echo x > /$HOME/${climb(c)}/src/a.ts`, twin: () => "echo x > /$HOME/notes.md" },
+    { shape: "a leading slash before ${HOME}", refused: (c) => `echo x > /\${HOME}/${climb(c)}/src/a.ts`, twin: () => "echo x > /${HOME}/notes.md" },
+    { shape: "$HOME with no slash", refused: (c) => `echo x > $HOME/${climb(c)}/src/a.ts`, twin: () => "echo x > $HOME/notes.md" },
+    { shape: "~ climbing back", refused: (c) => `echo x > ~/${climb(c)}/src/a.ts`, twin: () => "echo x > ~/notes.md" },
+    { shape: "tee's operand behind a slash", refused: (c) => `echo x | tee /$PWD/${c.rel}src/a.ts`, twin: () => "echo x | tee /tmp/x" },
+    { shape: "tee's operand with a quoted name", refused: (c) => `echo x | tee "/$PWD"/${c.rel}src/a.ts`, twin: () => `echo x | tee "/tmp"/x` },
+    { shape: "a nested shell's target", refused: (c) => `sh -c 'echo x > /$PWD/${c.rel}src/a.ts'`, twin: () => "sh -c 'echo x > /tmp/x'" },
+    { shape: "eval's target", refused: (c) => `eval 'echo x > /$PWD/${c.rel}src/a.ts'`, twin: () => "eval 'echo x > /tmp/x'" },
+    { shape: "a variable holding $PWD", refused: (c) => `D=$PWD/${c.rel}src; echo x > /$D/a.ts`, twin: () => "D=/tmp; echo x > $D/x" },
+    { shape: "a variable holding the slash", refused: (c) => `B=/; echo x > \${B}$PWD/${c.rel}src/a.ts`, twin: () => "B=/; echo x > ${B}tmp/x" },
+    { shape: "a variable a prefix hands a nested shell", refused: (c) => `D=$PWD/${c.rel}src sh -c 'echo x > /$D/a.ts'`, twin: () => `D=/tmp sh -c 'echo x > /$D/a.ts'` },
+    { shape: "a variable holding the folder, read after a cd", refused: (c) => `D=$PWD; cd /tmp; echo x > /$D/${c.rel}src/a.ts`, twin: () => "D=/opt; cd /tmp; echo x > /$D/a.ts" },
+    { shape: "HOME reassigned, then ~", refused: (c) => `HOME=$PWD; echo x > ~/${c.rel}src/a.ts`, twin: () => "HOME=/tmp; echo x > ~/x" },
+    { shape: "HOME reassigned, then $HOME", refused: (c) => `HOME=$PWD; echo x > /$HOME/${c.rel}src/a.ts`, twin: () => "HOME=/tmp; echo x > /$HOME/x" },
+    { shape: "a name the line never assigned, at the head", refused: () => "echo x > /$X/src/a.ts", twin: () => "echo x > /opt/$X/y" },
+    { shape: "a braced name the line never assigned, at the head", refused: () => "echo x > /${X}/src/a.ts", twin: () => "echo x > /opt/${X}/y" },
+    { shape: "two slashes before a name", refused: () => "echo x > //$X/src/a.ts", twin: () => "echo x > //opt/$X/y" },
+    { shape: "a climb back to / before a name", refused: () => "echo x > /opt/../$X/src/a.ts", twin: () => "echo x > /opt/../opt/$X/y" },
+    { shape: "a substitution at the head", refused: () => "echo x > /$(pwd)/src/a.ts", twin: () => "echo x > /opt/$(date +%s).log" },
+    { shape: "a backtick at the head", refused: () => "echo x > /`pwd`/src/a.ts", twin: () => "echo x > /opt/`date +%s`.log" },
+    { shape: "a positional at the head", refused: () => `sh -c 'echo x > /$1/src/a.ts' _ "$PWD"`, twin: () => `sh -c 'echo x > /opt/$1.log' _ y` },
+    { shape: "an operator on $PWD at the head", refused: () => "echo x > /${PWD%/}/src/a.ts", twin: () => "echo x > /opt/${PWD##*/}.log" },
+    { shape: "a variable a substitution set, at the head", refused: () => "F=$(pwd); echo x > /$F/src/a.ts", twin: () => "F=$(date); echo x > /opt/$F" },
+    { shape: "a variable the line read, at the head", refused: () => "read D; echo x > /$D/src/a.ts", twin: () => "read D; echo x > /opt/y" },
+    { shape: "a name in a folder above the project", refused: (c) => `echo x > ${dirname(c.root)}/$X/src/a.ts`, twin: (c) => `echo x > ${c.home}/$X/y` },
+    { shape: "a name partway through a folder above the project", refused: (c) => `echo x > ${dirname(c.root)}/x$X/src/a.ts`, twin: (c) => `echo x > ${c.home}/x$X/y` },
+    { shape: "a relative climb, then a name", refused: (c) => `echo x > ${c.rel}../$X/src/a.ts`, twin: (c) => `echo x > ${c.home}/$X.log` },
+    { shape: "a glob in a folder above the project", refused: (c) => `echo x > ${dirname(c.root)}/*/src/a.ts`, twin: (c) => `echo x > ${c.home}/*.log` },
+    { shape: "a ? at the head", refused: () => "echo x > /?*/src/a.ts", twin: () => "echo x > /opt/?.log" },
+    { shape: "a brace spelling the project", refused: (c) => `echo x > /{opt,${c.root.slice(1)}}/src/a.ts`, twin: () => "echo x > /{opt,srv}/x" },
+    { shape: "a folder name that starts with two dots", refused: (c) => `echo x > ${c.rel}..foo/a.ts`, twin: (c) => `echo x > ${c.home}/..foo/a.ts` },
+    { shape: "a file name that starts with two dots", refused: (c) => `echo x > ${c.rel}..a.ts`, twin: (c) => `echo x > ${c.home}/..a.ts` },
+    { shape: "the same nested line with the variable moved", refused: (c) => `D=/tmp; sh -c 'echo x > /$D/a.ts'; D=$PWD/${c.rel}src; sh -c 'echo x > /$D/a.ts'`,
+      twin: () => `D=/tmp; sh -c 'echo x > /$D/a.ts'; D=/opt; sh -c 'echo x > /$D/a.ts'` },
+    { shape: "a default in the word", refused: (c) => `echo x > /\${X:-$PWD}/${c.rel}src/a.ts`, twin: () => "echo x > /opt/${X:-y}/z" },
+  ];
+
+  for (const row of TABLE) {
+    it(`${row.shape} -- refused from the root and from pkg/lib, with and without CLAUDE_PROJECT_DIR; its twin passes`, () => {
+      const f = fixture();
+      for (const where of BOTH) {
+        const c = at(f, where);
+        for (const withVar of [true, false]) {
+          const r = judge(c, sh(row.refused(c)), withVar);
+          expect(r.status, `${row.shape}: refused from ${where} (var ${withVar}) -- ${r.stderr.split("\n")[0]}`).toBe(2);
+          const twin = judge(c, sh(row.twin(c)), withVar);
+          expect(twin.status, `${row.shape}: twin from ${where} (var ${withVar}) -- ${twin.stderr.split("\n")[0]}`).toBe(0);
+        }
+      }
+    });
+  }
+
+  it("$PWD is every folder the shell may stand in: a cd moves it, and only that reading lands inside", () => {
+    const c = at(fixture(), "root");
+    // read from the root alone, this climb leaves the project
+    expect(judge(c, sh("cd pkg/lib && echo x > /$PWD/../../src/a.ts")).status).toBe(2);
+    expect(judge(c, sh("cd pkg/lib && sh -c 'echo x > /$PWD/../../src/a.ts'")).status).toBe(2);
+    expect(judge(c, sh("env -C pkg/lib sh -c 'echo x > /$PWD/../../src/a.ts'")).status).toBe(2);
+    // after a cd it can't read, $PWD is no folder at all, with or without the slash
+    for (const line of ['cd "$X" && echo x > $PWD/a.ts', 'cd "$X" && echo x > /$PWD/a.ts']) {
+      const r = judge(c, sh(line));
+      expect(r.status, line).toBe(2);
+      expect(r.stderr.split("\n")[0], line).toContain("can't read");
+    }
+  });
+
+  it("a cd spelled through a variable the guard can read is followed, not called lost", () => {
+    const c = at(fixture(), "root");
+    expect(judge(c, sh("D=pkg/lib; cd $D && echo x > ../../src/a.ts")).status).toBe(2);
+    expect(judge(c, sh("cd $PWD/pkg/lib && echo x > ../../src/a.ts")).status).toBe(2);
+    expect(judge(c, sh(`cd "$HOME" && echo x > /tmp/x`)).status).toBe(0);
+    expect(judge(c, sh("HOME=$(pwd); cd ~ && echo x > y.ts")).stderr.split("\n")[0]).toContain("can't read");
+  });
+
+  it("the designer's grant is judged on the spelled path: a variable or $PWD into its draft folder passes, one out of it is refused", () => {
+    const c = at(fixture(), "root");
+    expect(judge(c, sh(`D=${DRAFT_DIR}/d1; echo x > $D/a.html`, DESIGNER)).status).toBe(0);
+    expect(judge(c, sh(`echo x > /$PWD/${DRAFT_DIR}/d1/a.html`, DESIGNER)).status).toBe(0);
+    expect(judge(c, sh(`echo x > $PWD/${DRAFT_DIR}/d1/a.html`, DESIGNER)).status).toBe(0);
+    expect(judge(c, sh("D=src; echo x > $D/a.ts", DESIGNER)).status).toBe(2);
+    expect(judge(c, sh("echo x > /$PWD/src/a.ts", DESIGNER)).status).toBe(2);
+    expect(judge(c, sh(`echo x > ${DRAFT_DIR}/\${X:-../../src}/a.ts`, DESIGNER)).status).toBe(2);
+    expect(judge(c, sh(`echo x > ${DRAFT_DIR}/$X/../../../src/a.ts`, DESIGNER)).status).toBe(2);
+  });
+
+  it("the tools' own paths: a name starting with two dots under the project is the project's", () => {
+    const c = at(fixture(), "root");
+    expect(judge(c, file("Write", join(c.root, "..a.ts"))).status).toBe(2);
+    expect(judge(c, file("Write", join(c.root, "..foo", "a.ts"))).status).toBe(2);
+    expect(judge(c, file("Write", join(c.root, "..", "out.txt"))).status).toBe(0);
+  });
+
+  it("the Not seen shapes stay passing, so a change in what the guard reads shows up here", () => {
+    const c = at(fixture(), "root");
+    // a link's written spelling is judged, not the inode (the /tmp spelling of a project under /private/tmp is this one)
+    symlinkSync(c.root, join(c.home, "link"));
+    for (const line of [
+      `echo x > ${c.home}/link/src/x.ts`,
+      // a value only the run knows, in the middle of a path whose head sits outside
+      "echo x > /opt/$X/y", "echo x > /opt/$(cat where)/src/a.ts", "F=$(cat where); echo x > /opt/$F/src/a.ts",
+      // the reader takes this as a descriptor (see the block): a test that goes red the day it stops
+      "echo x >& src/a.ts", "echo x >&src/a.ts",
+    ]) {
+      const r = judge(c, sh(line));
+      expect(r.status, `${line} -- ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+    // a quoted name is literal to the shell, and the reader's target carries no quoting: read as spelled
+    expect(judge(c, sh("echo x > '$HOME/notes.md'")).status).toBe(0);
   });
 });
 
@@ -571,8 +702,12 @@ describe("the write guard's header: Not seen block, sunset, axiom, and the rule 
       "a line in a name only the session holds",
       "a command word the shell computes",
       "a git alias that runs a shell",
+      "dated 2026-11-05 (#512)",
+      "a value only the run knows",
+      "`>&` onto a file",
+      "a quoted",
     ]) expect(block, phrase).toContain(phrase);
-    expect(block.split("\n").length, block).toBe(26);
+    expect(block.split("\n").length, block).toBe(32);
   });
 
   it("the header carries removeWhen: inside the 40-line window and derives: naming an axiom", () => {

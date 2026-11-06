@@ -77,6 +77,15 @@
  *   that list reads as a line, so `npx x --grep 'a > b'` is refused, visibly,
  *   by decision (asserted: "an unknown program's quoted argument").
  *
+ *   A target is spelled through the reader before it is judged (#512): what
+ *   the line assigned, every value of it; $HOME, ~ and $PWD anywhere in the
+ *   word, $PWD once per folder the shell may stand in; a brace; a name the
+ *   line never assigned both typed and gone. Slashes then collapse, so
+ *   `/$PWD/src/a.ts` is the project file it is. What stays unspelled, or a
+ *   glob, with a root at or below the literal folder before it (headReaches)
+ *   is unreadable and refused: `/$X/a`, `/$(pwd)/a`, `/U*\/proj/a`, `../$X/a`.
+ *   Asserted: writeguard.test.ts, "a target is spelled through the reader".
+ *
  *   Not seen, dated 2026-11-04 (#454), closed by decision under ADR 0016 --
  *   each is a shape the guard knows it does not read, written here rather
  *   than half-guarded; a test pins this block so a deleted line is red:
@@ -98,6 +107,12 @@
  *     be added under `mcp__.*` by a later issue.
  *   - a symlink inside the project that points outside it, or the reverse:
  *     the written spelling is judged, not the inode.
+ *   - dated 2026-11-05 (#512): a value only the run knows, in a path whose
+ *     literal head sits off to the side (`/opt/$X/y`, X holding a climb);
+ *     `>&` onto a file, which the reader takes for a descriptor; a quoted
+ *     `'$HOME/x'`, read as spelled, since a target carries no quoting past
+ *     the parser. Pinned, with the /tmp link spelling of the line above, by
+ *     "the Not seen shapes stay passing" under "a target is spelled".
  *   - a harness that sends no agent_type (Cursor and the rest): allowed, as
  *     the issue scopes it; a per-harness field mapping is a later issue.
  *   - a verifier or seat dispatched as a general-purpose subagent
@@ -117,7 +132,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { projectRoot, readCairnConfig } from "./lib.mjs";
 import {
-  SHELLS, argCommands, assignVars, commandName, evalCommandString, lineVars, pagerCommands, runnerCommands, seedVars,
+  SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
   shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
 } from "./shell-words.mjs";
 
@@ -141,6 +156,9 @@ const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
 
 /** A folder word the shell works out at run time: a variable, a substitution, `-`, `~user`. */
 const COMPUTED = /[$`]|^-$|^~[^/]/;
+
+/** In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob. */
+const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
 
 /** Past this many candidate folders a line counts as unreadable. */
 const MAX_PLACES = 16;
@@ -237,9 +255,41 @@ function underRoot(abs, roots) {
   for (const root of roots) {
     const rel = relative(root, abs);
     if (rel === "") return ".";
-    if (!rel.startsWith("..") && !isAbsolute(rel)) return rel.split("\\").join("/");
+    // a name that merely starts with two dots (`..foo`) is under the root (#512)
+    if (!/^\.\.(?:[/\\]|$)/.test(rel) && !isAbsolute(rel)) return rel.split("\\").join("/");
   }
   return null;
+}
+
+/** `~` in front of a path, in every value $HOME holds on the line; as typed when the line made $HOME unreadable. */
+function spellTilde(raw, vars) {
+  if (!/^~(?=\/|$)/.test(raw)) return [raw];
+  const homes = vars.get("HOME");
+  return Array.isArray(homes) ? homes.map((h) => h + raw.slice(1)) : [raw];
+}
+
+/**
+ * True when what the shell fills in decides whether a path lands under a
+ * root (#512): the literal folder before the first unspelled thing is a root
+ * or above one, so `/$X/src/a.ts`, `/Users/$USER/proj/a.ts`, `/U*\/proj/a.ts`
+ * and `../$X/a.ts` can each be a project file. Under a folder off to the side
+ * (`/opt/$X/y`, `/tmp/$(date).log`) it can't, short of a climb in the value.
+ */
+function headReaches(target, dir, roots) {
+  const at = target.search(UNSPELLED);
+  if (at < 0) return false;
+  const folder = resolve(dir, target.slice(0, target.lastIndexOf("/", at) + 1));
+  return roots.some((root) => underRoot(root, [folder]) !== null);
+}
+
+/** `vars` with $PWD every folder the shell may stand in: gone once a cd the guard can't read has run, left alone if the line made it wild. */
+function standing(vars, dirs) {
+  const held = vars.get("PWD");
+  if (held !== undefined && !Array.isArray(held)) return vars;
+  const out = new Map(vars);
+  if (dirs === null) out.delete("PWD");
+  else out.set("PWD", [...new Set([...(held ?? []), ...dirs])]);
+  return out;
 }
 
 /**
@@ -259,6 +309,15 @@ function shellWrites(command, cwd) {
   let chars = 0;
   let count = 0;
   const unread = (what) => out.push({ raw: what, dirs: null, lost: true });
+  // a redirect target carries no spans past the parser, so it is spelled here, name by name
+  const place = (raw, dirs, vars) => {
+    for (const word of braceExpand(raw)) {
+      const { raws, lost } = expandAssigned(word, vars, MAX_PLACES);
+      for (const one of raws) {
+        for (const target of spellTilde(one, vars)) if (!DEVICE.test(target)) out.push({ raw: target, dirs, lost });
+      }
+    }
+  };
 
   /** One line read from `from` ({ dirs, vars }): what it leaves the shell with, which only eval's caller keeps. */
   const walk = (line, from, depth, wilds) => {
@@ -274,7 +333,7 @@ function shellWrites(command, cwd) {
       const piped = upstream;
       upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
       // a redirect is the shell's, from where it stands
-      for (const r of seg.redirects) if (r && !r.startsWith("&") && !DEVICE.test(r)) out.push({ raw: r, dirs });
+      for (const r of seg.redirects) if (r && !r.startsWith("&")) place(r, dirs, vars);
       let moves = dirs;
       // each way the words can read, spelled through what the line assigned
       for (const { words: spelled, wild } of spellWords(seg, vars, { cap: MAX_PLACES, wild: wilds })) {
@@ -284,12 +343,12 @@ function shellWrites(command, cwd) {
         // a wrapper's own write and tee's operands land where the wrapper
         // moved the command (env -C DIR), and so does a line it nests
         const there = dirs === null ? null
-          : [...new Set([...dirs, ...moved.flatMap((d) => dirs.map((b) => resolve(b, expandHome(d))))])];
+          : [...new Set([...dirs, ...moved.flatMap((d) => spellTilde(d, vars).flatMap((m) => dirs.map((b) => resolve(b, m))))])];
         const own = [...writes, ...(name === "tee" ? args.filter((a) => !a.startsWith("-")) : [])];
-        for (const f of own) out.push({ raw: f, dirs: there });
+        for (const f of own) for (const target of spellTilde(f, vars)) out.push({ raw: target, dirs: there });
         if (name === "tee" && wrappers.some((w) => commandName(w.name) === "xargs")) unread("the files xargs hands tee");
 
-        const below = { dirs: there, vars: assignVars(assigns, vars, SPELL) };
+        const below = { dirs: there, vars: standing(assignVars(assigns, vars, SPELL), there) };
         const deeper = new Set([...wilds, ...wild]);
         const nest = (inner) => {
           // a program's later words re-read as suffixes of each other, so each is read once per place and per spelling
@@ -321,7 +380,9 @@ function shellWrites(command, cwd) {
         } else if (name === "cd" || name === "pushd") {
           if (moves !== null) {
             const arg = args.find((a) => !a.startsWith("-") || a === "-") ?? "~";
-            const next = COMPUTED.test(arg) ? null : [...new Set([...moves, ...moves.map((d) => resolve(d, expandHome(arg)))])];
+            const spots = spellTilde(arg, vars);
+            const next = spots.some((s) => COMPUTED.test(s) || s.startsWith("~")) ? null
+              : [...new Set([...moves, ...spots.flatMap((s) => moves.map((d) => resolve(d, s)))])];
             moves = next === null || next.length > MAX_PLACES ? null : next;
           }
         } else if (depth < MAX_NEST) {
@@ -331,11 +392,12 @@ function shellWrites(command, cwd) {
         }
       }
       dirs = moves;
-      vars = lineVars(seg, vars, SPELL);
+      vars = standing(lineVars(seg, vars, SPELL), dirs);
     }
     return { dirs, vars };
   };
-  walk(command, { dirs: [cwd], vars: new Map() }, 0, new Set());
+  // $HOME and $PWD are known to every guard (the phase's reader decision), so they spell like what the line assigned
+  walk(command, { dirs: [cwd], vars: new Map([["HOME", [resolve(homedir())]], ["PWD", [cwd]]]) }, 0, new Set());
   return out;
 }
 
@@ -370,11 +432,11 @@ try {
   let hit = null;
   if (tool === "Bash") {
     for (const { raw, dirs, lost } of shellWrites(payload?.tool_input?.command ?? "", cwd)) {
-      const target = expandHome(raw);
-      if (lost || (dirs === null && !isAbsolute(target))) { hit = { rel: raw, why: "unreadable" }; break; }
-      for (const dir of isAbsolute(target) ? [cwd] : dirs) {
-        const rel = underRoot(resolve(dir, target), roots);
+      if (lost || (dirs === null && !isAbsolute(raw))) { hit = { rel: raw, why: "unreadable" }; break; }
+      for (const dir of isAbsolute(raw) ? [cwd] : dirs) {
+        const rel = underRoot(resolve(dir, raw), roots);
         if (rel !== null) hit = judge(rel);
+        else if (headReaches(raw, dir, roots)) hit = { rel: raw, why: "unreadable" };
         if (hit) break;
       }
       if (hit) break;
