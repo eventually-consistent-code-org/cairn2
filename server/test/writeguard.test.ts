@@ -673,6 +673,21 @@ describe("the write guard ships, counts toward the breaker, and fails open on it
     }
   });
 
+  it("a budget spent at any point of the read refuses the line, however little was left to read (#522)", () => {
+    const c = at(fixture(), "root");
+    const copy = freshDir("cairn-writeguard-spent-");
+    cpSync(SCRIPTS, join(copy, "scripts"), { recursive: true });
+    const words = join(copy, "scripts", "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function overBudget(budget) {";
+    expect(source).toContain(entry);
+    for (let k = 1; k <= 5; k++) {
+      writeFileSync(words, source.replace(entry, `let calls = 0;\n${entry}\n  if (budget && ++calls >= ${k}) budget.over = true;`));
+      const r = judge(c, sh("nice"), true, join(copy, "scripts", "pretooluse-writeguard.mjs"));
+      expect(r.status, `spent at check ${k}`).toBe(2);
+    }
+  });
+
   it("a lib.mjs that throws at import makes the guard exit 0, never a stack trace: the fail-open contract (ADR 0016)", () => {
     const c = at(fixture(), "root");
     const copy = freshDir("cairn-writeguard-plugin-");

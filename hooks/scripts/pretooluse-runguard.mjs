@@ -693,6 +693,8 @@ function readLine(line) {
     flush();
   };
   walk(line, 0, { assigns: [], cleared: false, vars: new Map(), wild: new Set() });
+  // #522 -- spent on the last command, unwrap stopped with words unread and nothing has looked since
+  if (overBudget(READ.budget)) out.deep = true;
   return out;
 }
 

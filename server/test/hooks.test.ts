@@ -8227,6 +8227,21 @@ describe("harness guard: a line built to outlast the hook is refused inside its 
     }
   }, 60_000);
 
+  it("a budget spent at any point of the read refuses the line, however little was left to read", () => {
+    const p = fixture();
+    const copy = freshDir("cairn-hooks-522-spent-");
+    cpSync(SCRIPTS, copy, { recursive: true });
+    const words = join(copy, "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function overBudget(budget) {";
+    expect(source).toContain(entry);
+    for (let k = 1; k <= 5; k++) {
+      writeFileSync(words, source.replace(entry, `let calls = 0;\n${entry}\n  if (budget && ++calls >= ${k}) budget.over = true;`));
+      const r = runHookRaw(join(copy, basename(HARNESSGUARD)), p, JSON.stringify({ tool_name: "Bash", tool_input: { command: "nice" }, cwd: p }), { CAIRN_HOME: join(p, ".nope") });
+      expect(r.status, `spent at check ${k}`).toBe(2);
+    }
+  });
+
   it("a reader that runs out of stack refuses, while any other error of the guard's own stays fail-open (ADR 0016)", () => {
     const p = fixture();
     const copy = freshDir("cairn-hooks-522-rangeerror-");

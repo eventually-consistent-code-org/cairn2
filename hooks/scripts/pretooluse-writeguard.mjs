@@ -395,6 +395,8 @@ function shellWrites(command, cwd) {
   // $HOME and $PWD are known to every guard (the phase's reader decision), so they spell like what the line assigned
   try {
     walk(command, { dirs: [cwd], vars: new Map([["HOME", [resolve(homedir())]], ["PWD", [cwd]]]) }, 0, new Set());
+    // spent on the last command, unwrap stopped with words unread and nothing has looked since
+    if (overBudget(READ.budget)) unread("a line longer than the guard reads");
   } catch (e) {
     // #522 -- out of stack or past a string's length is the line's doing, not a bug here
     if (!(e instanceof RangeError)) throw e;
