@@ -1052,3 +1052,304 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     });
   });
 });
+
+describe("one link check on every project-scoped write (#498)", () => {
+  const REPO = join(dirname(SETUP), "..");
+  const CAIRN = ".cairn";
+  const first = (...p: string[]) => readdirSync(join(REPO, ...p)).filter((f) => !f.startsWith(".")).sort()[0];
+  const OWNER = "# the owner's file, somewhere else\n";
+
+  /** Every file and its bytes under a folder: what a refusal must leave as it found. */
+  function tree(dir: string, at = ""): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const f of readdirSync(join(dir, at), { withFileTypes: true })) {
+      const rel = join(at, f.name);
+      if (f.isDirectory()) Object.assign(out, tree(dir, rel));
+      else out[rel] = readFileSync(join(dir, rel), "utf8");
+    }
+    return out;
+  }
+
+  /** A project, a home, and a folder outside both holding the owner's file and a folder. */
+  function scene() {
+    const proj = fresh("cairn-links-proj-");
+    const home = fresh("cairn-links-home-");
+    const outside = fresh("cairn-links-outside-");
+    writeFileSync(join(outside, "victim"), OWNER);
+    mkdirSync(join(outside, "folder"));
+    writeFileSync(join(outside, "folder", "keep"), OWNER);
+    return { proj, home, outside };
+  }
+  function plant(proj: string, rel: string, target: string): void {
+    mkdirSync(dirname(join(proj, rel)), { recursive: true });
+    symlinkSync(target, join(proj, rel));
+  }
+
+  // Every project-scoped thing setup writes, by harness. A file row is a link
+  // where setup writes a file (the copied ones overwrite whole, so a link there
+  // erased the owner's file); a folder row is a link anywhere above the file.
+  const FILES: Array<[string, string]> = [
+    ["grok", "AGENTS.md"],
+    ["grok", ".mcp.json"],
+    ["grok", join(CAIRN, "harness", "SKILL.md")],
+    ["grok", join(CAIRN, "harness", "verbs", "help.md")],
+    ["grok", join(CAIRN, "harness", "scripts", "merge-overlap.mjs")],
+    ["grok", join(CAIRN, "harness", ".cairn-manifest.json")],
+    ["gemini", "GEMINI.md"],
+    ["gemini", join(".gemini", "commands", "cairn", first("harness", "gemini", "commands", "cairn"))],
+    ["copilot", join(".github", "copilot-instructions.md")],
+    ["copilot", join(".github", "prompts", first("harness", "copilot", "prompts"))],
+    ["cursor", join(".cursor", "mcp.json")],
+    ["cursor", join(".cursor", "hooks.json")],
+    ["cursor", join(".cursor", "hooks", "cairn", "cursor-adapter.mjs")],
+    ["opencode", "opencode.json"],
+    ["opencode", join(".opencode", "commands", first("harness", "opencode", "commands"))],
+    ["zed", join(".zed", "settings.json")],
+  ];
+  const FOLDERS: Array<[string, string]> = [
+    ["grok", CAIRN],
+    ["grok", join(CAIRN, "harness")],
+    ["grok", join(CAIRN, "harness", "verbs")],
+    ["grok", join(CAIRN, "harness", "scripts")],
+    ["gemini", ".gemini"],
+    ["copilot", ".github"],
+    ["copilot", join(".github", "prompts")],
+    ["cursor", ".cursor"],
+    ["cursor", join(".cursor", "hooks", "cairn")],
+    ["opencode", ".opencode"],
+    ["zed", ".zed"],
+  ];
+
+  for (const [harness, rel] of FILES) {
+    it(`${harness}: ${rel} as a link out is refused and the owner's file survives; dangling, nothing is created`, () => {
+      const { proj, home, outside } = scene();
+      const before = tree(outside);
+      plant(proj, rel, join(outside, "victim"));
+      const r = attempt(harness, home, { project: proj });
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("resolves outside the project");
+      expect(r.stderr).toContain("refusing to write through it");
+      expect(r.stderr).toContain(join(proj, rel));
+      expect(r.stdout).not.toContain("cairn-setup complete");
+      expect(tree(outside)).toEqual(before);
+
+      const again = scene();
+      plant(again.proj, rel, join(again.outside, "nowhere"));
+      const d = attempt(harness, again.home, { project: again.proj });
+      expect(d.status, d.out).toBe(1);
+      expect(d.stderr).toContain("is a symlink to a file that does not exist");
+      expect(d.stderr).toContain("refusing to write through it");
+      expect(existsSync(join(again.outside, "nowhere"))).toBe(false);
+    });
+  }
+
+  for (const [harness, rel] of FOLDERS) {
+    it(`${harness}: ${rel} as a folder link out is refused, nothing lands there; dangling, nothing is created`, () => {
+      const { proj, home, outside } = scene();
+      const before = tree(outside);
+      plant(proj, rel, join(outside, "folder"));
+      const r = attempt(harness, home, { project: proj });
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("resolves outside the project");
+      expect(tree(outside)).toEqual(before);
+
+      const again = scene();
+      plant(again.proj, rel, join(again.outside, "nowhere"));
+      const d = attempt(harness, again.home, { project: again.proj });
+      expect(d.status, d.out).toBe(1);
+      expect(d.stderr).toContain("is a symlink to a file that does not exist");
+      expect(existsSync(join(again.outside, "nowhere"))).toBe(false);
+    });
+  }
+
+  it("AGENTS.md refused: no CLAUDE.md is written importing it and no success line claims the spine", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join(outside, "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("claude", home, { project: proj });
+    expect(r.status, r.out).toBe(1);
+    expect(existsSync(join(proj, "CLAUDE.md"))).toBe(false);
+    expect(r.out).not.toContain("reads the spine");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+  });
+
+  it("the two spellings the issue reproduced: a relative link to a file beside the project, and a relative dangling one", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join("..", basename(outside), "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(1);
+    expect(r.stderr).toContain("resolves outside the project");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const b = scene();
+    symlinkSync("nowhere.md", join(b.proj, "AGENTS.md"));
+    const d = attempt("grok", b.home, { project: b.proj });
+    expect(d.status, d.out).toBe(1);
+    expect(existsSync(join(b.proj, "nowhere.md"))).toBe(false);
+  });
+
+  it("hostile: a chain that starts inside and ends outside, a folder link inside holding a link out, and a link to itself", () => {
+    const chain = scene();
+    symlinkSync(join(chain.outside, "victim"), join(chain.proj, "step.md"));
+    symlinkSync("step.md", join(chain.proj, "AGENTS.md"));
+    const a = attempt("grok", chain.home, { project: chain.proj });
+    expect(a.status, a.out).toBe(1);
+    expect(readFileSync(join(chain.outside, "victim"), "utf8")).toBe(OWNER);
+
+    const nest = scene();
+    const before = tree(nest.outside);
+    mkdirSync(join(nest.proj, "in-here"));
+    symlinkSync("in-here", join(nest.proj, CAIRN));
+    symlinkSync(join(nest.outside, "folder"), join(nest.proj, "in-here", "harness"));
+    const b = attempt("grok", nest.home, { project: nest.proj });
+    expect(b.status, b.out).toBe(1);
+    expect(b.stderr).toContain("resolves outside the project");
+    expect(tree(nest.outside)).toEqual(before);
+
+    const loop = scene();
+    symlinkSync("AGENTS.md", join(loop.proj, "AGENTS.md"));
+    const c = attempt("grok", loop.home, { project: loop.proj });
+    expect(c.status, c.out).toBe(1);
+    expect(c.stderr).toContain("refusing to write through it");
+  });
+
+  it("the git layer's writes go through it too: the hooks folder, the hook file, the script copy, and a folder a local core.hooksPath names", () => {
+    const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+    const shapes: Array<[string, (proj: string, outside: string) => void]> = [
+      ["the cairn hooks folder links out", (p, o) => plant(p, join(CAIRN, "githooks"), join(o, "folder"))],
+      ["the hook file links out", (p, o) => plant(p, join(CAIRN, "githooks", "pre-push"), join(o, "victim"))],
+      ["the copied script links out", (p, o) => plant(p, join(CAIRN, "harness", "scripts", "pre-push.mjs"), join(o, "victim"))],
+      ["a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks"), join(o, "folder")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
+      ["a hook in a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks", "pre-push"), join(o, "victim")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
+    ];
+    for (const [name, lay] of shapes) {
+      const { proj, home, outside } = scene();
+      git(proj, "init", "-q", "-b", "main");
+      lay(proj, outside);
+      const before = tree(outside);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, `${name}: ${r.out}`).toBe(1);
+      expect(r.stderr, name).toContain("refusing to write through it");
+      expect(tree(outside), name).toEqual(before);
+    }
+  });
+
+  it("the harmless twins: a link staying inside, a ../ climb that comes back, and a folder link inside all write as today, byte-identical on re-run", () => {
+    const { proj, home } = scene();
+    mkdirSync(join(proj, "docs"));
+    writeFileSync(join(proj, "docs", "agents.md"), "# house rules\n");
+    symlinkSync(join("docs", "agents.md"), join(proj, "AGENTS.md"));
+    mkdirSync(join(proj, "local-cairn"));
+    symlinkSync("local-cairn", join(proj, CAIRN));
+    writeFileSync(join(proj, "real.json"), "{}\n");
+    symlinkSync(join("..", basename(proj), "real.json"), join(proj, ".mcp.json"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    const spine = readFileSync(join(proj, "docs", "agents.md"), "utf8");
+    expect(spine).toContain("# house rules");
+    expect(spine).toContain("cairn:begin");
+    expect(JSON.parse(readFileSync(join(proj, "real.json"), "utf8")).mcpServers.cairn).toBeTruthy();
+    expect(existsSync(join(proj, "local-cairn", "harness", "SKILL.md"))).toBe(true);
+    const again = attempt("grok", home, { project: proj });
+    expect(again.status, again.out).toBe(0);
+    expect(readFileSync(join(proj, "docs", "agents.md"), "utf8")).toBe(spine);
+  });
+
+  it("the harmless twin: a project named through a link of its own, the way /tmp is on a Mac, is not a link out", () => {
+    const { proj, home, outside } = scene();
+    const via = join(outside, "via");
+    symlinkSync(proj, via);
+    writeFileSync(join(proj, "kept.md"), "# kept\n");
+    symlinkSync(join(proj, "kept.md"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: via });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(proj, "kept.md"), "utf8")).toContain("cairn:begin");
+  });
+
+  it("the nested-cwd variant: with the folder below the root as the project, a link out and a link climbing to the root refuse; a link inside it writes", () => {
+    const { proj, home, outside } = scene();
+    const sub = join(proj, "pkg");
+    mkdirSync(sub);
+    symlinkSync(join(outside, "victim"), join(sub, "AGENTS.md"));
+    const a = attempt("grok", home, { cwd: sub });
+    expect(a.status, a.out).toBe(1);
+    expect(a.stderr).toContain("resolves outside the project");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const b = scene();
+    const bsub = join(b.proj, "pkg");
+    mkdirSync(bsub);
+    writeFileSync(join(b.proj, "root.md"), OWNER);
+    symlinkSync(join("..", "root.md"), join(bsub, "AGENTS.md"));
+    const c = attempt("grok", b.home, { cwd: bsub });
+    expect(c.status, c.out).toBe(1);
+    expect(readFileSync(join(b.proj, "root.md"), "utf8")).toBe(OWNER);
+
+    const d = scene();
+    const dsub = join(d.proj, "pkg");
+    mkdirSync(dsub);
+    writeFileSync(join(dsub, "inner.md"), "# inner\n");
+    symlinkSync("inner.md", join(dsub, "AGENTS.md"));
+    const e = attempt("grok", d.home, { cwd: dsub });
+    expect(e.status, e.out).toBe(0);
+    expect(readFileSync(join(dsub, "inner.md"), "utf8")).toContain("cairn:begin");
+  });
+
+  it("CLAUDE.md keeps its own wording and its exit 0 (#429), through the same check; a dangling one too", () => {
+    const { proj, home, outside } = scene();
+    symlinkSync(join(outside, "victim"), join(proj, "CLAUDE.md"));
+    const r = attempt("claude", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(r.stdout).toContain("resolves outside the project");
+    expect(r.stdout).toContain("add the @AGENTS.md import by hand");
+    expect(readFileSync(join(outside, "victim"), "utf8")).toBe(OWNER);
+
+    const d = scene();
+    symlinkSync("nowhere.md", join(d.proj, "CLAUDE.md"));
+    const dr = attempt("claude", d.home, { project: d.proj });
+    expect(dr.status, dr.out).toBe(0);
+    expect(dr.stdout).toContain("is a symlink to a file that does not exist");
+    expect(existsSync(join(d.proj, "nowhere.md"))).toBe(false);
+  });
+
+  it("every write in setup goes through the one check: each fs writer has exactly one call site, and it runs the check", () => {
+    const src = readFileSync(SETUP, "utf8");
+    for (const writer of ["writeFileSync", "copyFileSync", "mkdirSync", "chmodSync"]) {
+      const calls = src.split("\n").filter((l) => l.includes(`${writer}(`));
+      expect(calls, writer).toHaveLength(1);
+      expect(calls[0], writer).toContain("checkLinks(");
+    }
+  });
+
+  it("the home-scoped writes keep following a dotfiles link, by decision, as the Not seen block says", () => {
+    const { proj, home, outside } = scene();
+    writeFileSync(join(outside, "gemini.json"), "{}\n");
+    mkdirSync(join(home, ".gemini"));
+    symlinkSync(join(outside, "gemini.json"), join(home, ".gemini", "settings.json"));
+    const r = attempt("gemini", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(JSON.parse(readFileSync(join(outside, "gemini.json"), "utf8")).mcpServers.cairn).toBeTruthy();
+    expect(readFileSync(SETUP, "utf8")).toContain("a home-scoped write");
+  });
+
+  it("Not seen: a hard link has no direction, so one to a file outside is written through; the block says so", () => {
+    const { proj, home, outside } = scene();
+    linkSync(join(outside, "victim"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(outside, "victim"), "utf8")).toContain("cairn:begin");
+    expect(readFileSync(SETUP, "utf8")).toContain("a hard link has no direction");
+  });
+
+  it("Not seen: a link staying inside the project writes as today wherever inside it lands, and the swap race is named", () => {
+    const { proj, home } = scene();
+    mkdirSync(join(proj, ".git"));
+    writeFileSync(join(proj, ".git", "notes.md"), "# notes\n");
+    symlinkSync(join(".git", "notes.md"), join(proj, "AGENTS.md"));
+    const r = attempt("grok", home, { project: proj });
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(proj, ".git", "notes.md"), "utf8")).toContain("cairn:begin");
+    const src = readFileSync(SETUP, "utf8");
+    expect(src).toContain("a link staying inside the project");
+    expect(src).toContain("a link swapped in between the check and the write");
+  });
+});

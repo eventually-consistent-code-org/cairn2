@@ -1256,6 +1256,14 @@ checkout, not only the one harness that runs the run guard (section 10,
 "The git layer"). Opt-in, because it writes `core.hooksPath` into the
 repository's config.
 
+Setup writes nothing through a link that leaves the project or points at
+nothing, at the file or at any folder above it: it names the link and
+exits 1, and what landed before it stays, so fix the link and re-run. A
+`CLAUDE.md` link is the one exception to the exit, since that file is
+optional: it is left as written and the install goes on (#429, #498;
+asserted: `server/test/setup.test.ts`). Writes under your home folder
+follow a link on purpose, for dotfiles managers.
+
 Whichever harness drives it, cairn acts as you — the tracker token, the
 push credential, the browser session and any connected account are
 yours, `config_probe` says so as `identity: "owner"`, and so the runtime
