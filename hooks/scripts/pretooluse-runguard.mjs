@@ -50,7 +50,9 @@
  * The rules, by effect
  *
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
- *   force, mirror and prune pushes, or one deleting the default branch;
+ *   force, mirror and prune pushes, or one deleting the default branch; a
+ *   leading `+` in the `remote.<r>.push` a push follows, on the line, through
+ *   --config-env or GIT_CONFIG_*, or saved, is the same force, #502;
  *   forced or whole-tree checkout/restore; a discarding switch; clean; a
  *   forced whole-tree rm, #434; stash clear; a forced worktree remove; a
  *   stash pop, apply, drop or branch while more than one worktree shares
@@ -63,13 +65,25 @@
  *   `update-ref --stdin` batch's delete lines, and a gc.pruneExpire set in
  *   the repository's or the user's config),
  *   options shortened as git allows (--har is --hard). A whole-tree
- *   pathspec is `.`, `..`, a bare glob, `:/`, `:(top)`, a lone `:` or any
+ *   pathspec is `.`, `..`, a spelling that normalizes to them (`src/..`,
+ *   `./src/../`, `.//`), a path with no literal character (`*`, `?*`, `*?`,
+ *   `[a-z]*`, `:(glob)**`, `:/?*`, #493), `:/`, `:(top)`, a lone `:` or any
  *   magic with nothing after it (#464: git reads `:` as everything), or the
- *   repository root as an absolute path (#288, the repoRoot probe); a
+ *   repository root as an absolute path, a glob after it or not (#288, the
+ *   repoRoot probe). A pathspec with a glob or a `..` that still shows a
+ *   literal character is asked of git: when `git ls-files` lists every
+ *   tracked file for the line's words, it is whole-tree too (`*.*`, `:!x*`);
+ *   zero tracked files is never a match, and if git can't answer the word's
+ *   own spelling stands. Asserted by runguard-guards.test.ts (#493). A
  *   colon-prefixed real path (`:/src`) is that path. Not seen, by decision
  *   (phase 31, 2026-11-04): an exclude-only pathspec (`:!src`,
  *   `:(exclude)src`) stays a path here, though git reads it as everything
- *   but the excluded (measured, git 2.56). Their everyday
+ *   but the excluded (measured, git 2.56). Not seen, by decision, dated
+ *   2026-11-05 (#493; each pinned by runguard-guards.test.ts (#493) "Not
+ *   seen"): a glob like `*.ts` reaching some of the tracked files stays a path,
+ *   however many, since refusing it would refuse the everyday restore; and so
+ *   do several plain paths that happen to name every file one by one, which
+ *   hold no glob or `..` for git to be asked about. Their everyday
  *   neighbours carry no such effect and stay allowed; a stash push with
  *   worktrees sharing the stash proceeds with an advisory (additionalContext,
  *   stdout). Escape:
@@ -169,7 +183,9 @@
  *   updateRef and kin; a request whose body is a file is refused unread);
  *   `gh release create`; `gh repo delete`; and a curl or wget write (a
  *   method, data, a form, an upload) to the same paths at api.github.com
- *   or an enterprise /api/v3/ path. git-effects.mjs's SIDE_DOOR_TABLE
+ *   or an enterprise /api/v3/ path, the host parsed as curl parses it, so a
+ *   port, a user, a trailing dot or no scheme hides nothing (#504, asserted
+ *   by runguard-sidedoors.test.ts). git-effects.mjs's SIDE_DOOR_TABLE
  *   classifies them, and the two moves-shared-ref gates above apply as to
  *   a push, the refusal naming the route ("a `gh api` pull request merge
  *   is a push"). A route naming a branch (--target, a ref path, a `base`
@@ -206,12 +222,38 @@
  *   handed to a program the guard can't read) -- covered by the token's
  *   scope and the service's log, read instead of the agent's claim (#485).
  *
+ *   The control those lines rest on is a route too (#505). A write to branch
+ *   protection, to a repository's, an organization's or an enterprise's
+ *   ruleset, or to the repository's default branch -- `gh api`, curl, wget,
+ *   a GraphQL mutation, `gh repo edit --default-branch`, or a body from a file
+ *   that may be any of those -- is refused in every session, stamp or no
+ *   stamp, under the same escape as `gh repo delete`; a repository DELETE and
+ *   a rename of the default branch never pass the gate. Their GETs, a PATCH of
+ *   any other field and `gh repo edit --description` pass. What such a write
+ *   does at the service is a dated claim, 2026-11-05: the panel left it
+ *   PLAUSIBLE, since it can't be reproduced in scratch. Asserted by
+ *   runguard-effects.test.ts and runguard-sidedoors.test.ts (#505).
+ *
+ *   Not seen, dated 2026-11-05 (#505, by decision; pinned by
+ *   runguard-sidedoors.test.ts (#505)): the same settings changed by a browser
+ *   tool, an MCP tool or a script with the owner's token, the routes the block
+ *   above already names. The one layer left for those is the agent's token
+ *   carrying no administration scope (#485); ADR 0037 says why the service
+ *   can't tell the agent from the owner.
+ *
  *   Not seen, dated 2026-11-05 (#501, by decision; a same-line URL or refspec
  *   is spelled and judged, and these two are pinned by
  *   runguard-sidedoors.test.ts (#501)):
  *   a URL from the environment or a substitution (`curl -X PUT "$URL"`,
  *   `U=$(cat url); curl -X PUT "$U"`): that route needs a token and has its
  *   line above, and refusing every `curl -X POST "$URL"` would over-refuse.
+ *
+ *   Not seen, dated 2026-11-05 (#504, by decision; pinned by
+ *   runguard-sidedoors.test.ts (#504)): a request whose host no word on the line
+ *   names -- an address with a Host header, a `--connect-to` or `--resolve`
+ *   that sends another name to GitHub, a URL in a config or input file (`curl
+ *   -K`, `wget -i`). The host is parsed from a URL the line spells, and these
+ *   spell none; each needs a token, so the token's line above covers it.
  *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
@@ -348,8 +390,8 @@ import {
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
-  envConfig, ghAliasSet, longNames, parseInvocation, pushArgs, pushWild, readArgs, resolveAlias, sideDoor,
-  sideEffectLine, truthy,
+  envConfig, ghAliasSet, longNames, parseInvocation, pushArgs, pushWild, readArgs, resolveAlias, rootSpelling,
+  sideDoor, sideEffectLine, truthy,
 } from "./git-effects.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
@@ -1066,10 +1108,10 @@ function refuseDestructive(inv, cause) {
  * and GIT_COMMON_DIR it runs under (#306) -- or null when git says no.
  * Never throws.
  */
-function gitOut(at, args) {
+function gitOut(at, args, maxBuffer = undefined) {
   try {
     return execFileSync("git", args,
-      { cwd: at.dir, env: at.env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      { cwd: at.dir, env: at.env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer }).trim();
   } catch {
     return null;
   }
@@ -1416,6 +1458,19 @@ function branchSources(inv, at) {
 }
 
 /**
+ * True when a remote this push goes to has a `+` push refspec (#502): git
+ * applies it as a force, so a plain `git push origin main` rewrites the remote.
+ * Reads the saved settings, includes followed, and the session's GIT_CONFIG_*
+ * through git, plus this command's own: the same list a push's landing is read
+ * from. The table's pushSetting row asks only where git would follow it.
+ */
+function forcePushConfigured(inv, at) {
+  const current = gitOut(at, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const remote = pushRemote(inv, at, pushArgs(inv).words, current);
+  return remotePushSpecs(inv, at, remote).some((s) => s.startsWith("+"));
+}
+
+/**
  * True when a push's remote is configured to mirror already (`git remote
  * add --mirror=push`, `git config remote.<r>.mirror true`), which turns a
  * plain `git push <r>` into one that force-updates and deletes every
@@ -1450,17 +1505,18 @@ function linkedWorktrees(at) {
 /**
  * The repository root at `at`, when `word` is its absolute path (#288, the
  * whole-tree rows' repoRoot probe): `git rev-parse --show-toplevel`, links
- * resolved, read once per target. The answer is the word's own spelling with
- * its trailing `/`, `/.` or `/*` dropped -- `/tmp/repo` for a root git
- * reports as `/private/tmp/repo` -- so the classifier's string compare
- * meets it. A relative word, a path under the root, another repository's
- * root (git refuses a path outside the work tree itself), or a target git
- * can't read is undefined: a path, like the other probes' no. ~ and $HOME
- * are spelled the way the shell does (#494). Asserted by
- * runguard-guards.test.ts (#464, #494, the #288 rows).
+ * resolved, read once per target. The answer is the word's own spelling
+ * normalized by git-effects.mjs rootSpelling (#493) -- `/tmp/repo` for a root
+ * git reports as `/private/tmp/repo`, and for `/tmp/repo/src/..` or
+ * `/tmp/repo/?*` -- so the classifier's string compare meets it. A relative
+ * word, a path under the root, another repository's root (git refuses a path
+ * outside the work tree itself), or a target git can't read is undefined: a
+ * path, like the other probes' no. ~ and $HOME are spelled the way the shell
+ * does (#494). Asserted by runguard-guards.test.ts (#464, #493, #494, the #288
+ * rows).
  */
 function repoRoot(at, word) {
-  const typed = word.replace(/(?:\/\.|\/\*+|\/)+$/, "") || "/";
+  const typed = rootSpelling(word) || "/";
   const bare = /^(?:\$|~)/.test(typed) ? pathWord(typed, at.dir) : typed;
   if (bare === LOST || !isAbsolute(bare)) return undefined;
   if (at.top === undefined) {
@@ -1471,18 +1527,49 @@ function repoRoot(at, word) {
   return realPath(bare) === at.top ? typed : undefined;
 }
 
+// A tracked-file listing can be long, so it gets more room than the 1 MB gitOut's default holds.
+const LS_FILES_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * How many tracked files `git ls-files` lists at `at` for `specs` (#493), or
+ * null when git says no: not a repository, a pathspec it refuses, a listing
+ * too long to hold. The listing is run where the command runs, so a nested
+ * folder's `*` is that folder's, and paths are compared by count because every
+ * pathspec's set is part of the one whole set.
+ */
+function trackedCount(at, specs) {
+  const out = gitOut(at, ["ls-files", "-z", "--full-name", "--", ...specs], LS_FILES_BUFFER);
+  return out === null ? null : out.split("\0").filter(Boolean).length;
+}
+
+/**
+ * True when `specs` reach every tracked file at `at` (#493, the whole-tree
+ * rows' second leg): `git ls-files` lists as many for them as for `:/`, the
+ * whole tracked set. Zero tracked files is never a match, and a target or a
+ * pathspec git won't answer for is false: the word's own spelling stands.
+ * Asked only for a word with a glob or a `..` (git-effects.mjs pathspecAsks).
+ * Asserted by runguard-guards.test.ts (#493).
+ */
+function reachesEveryFile(at, specs) {
+  const whole = trackedCount(at, [":/"]);
+  if (!whole) return false;
+  return trackedCount(at, specs) === whole;
+}
+
 /**
  * The repository's answers the classifier asks for at the target `at`
  * (#359): a remote that mirrors, a push that deletes the default branch --
  * defaultBranchSources reads which branches that is -- a second worktree
- * sharing the stash (#363), and whether an absolute path is this
- * repository's root (#288).
+ * sharing the stash (#363), whether an absolute path is this repository's
+ * root (#288), and whether a pathspec reaches every tracked file (#493).
  */
 const repoProbe = (at) => ({
   mirrorConfigured: (inv) => mirrorConfigured(inv, at),
+  forcePushConfigured: (inv) => forcePushConfigured(inv, at),
   deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
   linkedWorktrees: () => linkedWorktrees(at),
   repoRoot: (word) => repoRoot(at, word),
+  reachesEveryFile: (specs) => reachesEveryFile(at, specs),
 });
 
 // The subcommands the effect table knows: builtins, never aliases (#430).
@@ -1710,6 +1797,14 @@ function judgeSideDoor(inv, prefixed, ctx) {
   const here = { dir: ctx.cwd };
   const at = repoOf(here) === null ? ctx.project : here;
   if (process.env[UNSHIPPED_ENV] !== "1" && !prefixed(UNSHIPPED_ENV)) {
+    // #505 -- a write to the control the Not seen block rests on: no stamp covers it
+    if (cause.control) {
+      refuse([
+        `cairn run guard: ${cause.what} is refused in every session -- ${cause.why}`,
+        `  ${cause.control} is the owner's to change, at the service or from their own terminal.`,
+        tail,
+      ], UNSHIPPED_ENV, { effect: MOVES_SHARED_REF, reason: "a write to the control a push answers to" });
+    }
     const why = sideGateRefusal(inv, at, ctx);
     if (why) {
       const target = cause.branch === undefined ? "The guard takes its target as the default branch"
@@ -2073,4 +2168,17 @@ try {
  *         harness guard's reader turns its `#` comment switch on in the
  *         same change; the heredoc and substitution gaps the issue named
  *         closed earlier (#322, #319-#321).
+ *   #493  a pathspec is normalized before it is judged (`src/..`, `.//`), one
+ *         with no literal character is everything (`?*`, `[a-z]*`, `:/?*`, the
+ *         root plus a glob), and one with a glob or `..` is asked of git, so a
+ *         word that shows a literal character and still lists every tracked
+ *         file (`*.*`) is whole-tree too.
+ *   #502  a leading + in a remote's push setting is the force row, on every
+ *         channel the guard reads; with no + it is judged for where it lands.
+ *   #504  the API host is parsed rather than matched: a port, a user, a trailing
+ *         dot, escapes or no scheme at all still reach GitHub's table, and the
+ *         path is walked first; the same merge path at another host passes.
+ *   #505  writes to branch protection, rulesets and the default branch are table
+ *         rows, refused in every session under gh repo delete's escape, so the
+ *         control the Not seen block cites can't be removed by a route it reads.
  */
