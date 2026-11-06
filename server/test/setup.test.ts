@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -30,6 +30,19 @@ function run(harness: string, project: string, home: string, ...extra: string[])
     // tests (it fails soft to "unknown" anyway; this skips the wait).
     encoding: "utf8", env: { ...process.env, HOME: home, CAIRN_SETUP_OFFLINE: "1" },
   });
+}
+
+type Attempt = { status: number | null; stdout: string; stderr: string; out: string };
+
+/** Setup through spawnSync, so a refusal's exit and both streams can be read:
+ *  `project` passes --project, `cwd` runs bare from that folder (the nested-cwd
+ *  variant), `env` adds to the fake home's environment. */
+function attempt(harness: string, home: string, at: { project?: string; cwd?: string; env?: Record<string, string> }, ...extra: string[]): Attempt {
+  const flags = at.project ? ["--project", at.project] : [];
+  const r = spawnSync(process.execPath, [SETUP, harness, ...flags, ...extra], {
+    cwd: at.cwd, encoding: "utf8", env: { ...process.env, HOME: home, CAIRN_SETUP_OFFLINE: "1", ...at.env },
+  });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
 /** Runs `--check` expecting a non-zero exit; returns its stdout for asserting. */
@@ -809,5 +822,233 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     }
     expect(err).toContain("not a git repository");
     expect(existsSync(join(proj, ".cairn", "harness", "SKILL.md"))).toBe(true);
+  });
+
+  // #497: the consent --git-hooks records is for this project's git config.
+  // A core.hooksPath at global or system scope names a folder every repository
+  // it reaches runs hooks from, so setup never writes there; the cairn block
+  // landing in it refused default-branch pushes in unrelated repositories.
+  describe("a folder other repositories run hooks from is never written into (#497)", () => {
+    const OWNER_HOOK = "#!/bin/sh\necho the owner hook\n";
+    const SCRIPT = join(".cairn", "harness", "scripts", "pre-push.mjs");
+    const shared = (home: string) => join(home, ".githooks");
+    const hooksLine = (value: string) => `[core]\n\thooksPath = ${value}\n`;
+    const localHooksPath = (proj: string) => spawnSync("git", ["config", "--local", "--get", "core.hooksPath"], { cwd: proj }).status;
+
+    /** A shared hooks folder holding the owner's own pre-push. */
+    function sharedFolder(home: string): string {
+      const dir = shared(home);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "pre-push"), OWNER_HOOK);
+      chmodSync(join(dir, "pre-push"), 0o755);
+      return dir;
+    }
+
+    function expectRefusedUntouched(r: Attempt, proj: string, home: string, scope: string): void {
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain(`at ${scope} scope`);
+      expect(r.stderr).toContain(shared(home));
+      expect(r.stdout).not.toContain("cairn-setup complete");
+      expect(readdirSync(shared(home))).toEqual(["pre-push"]);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+      expect(localHooksPath(proj)).toBe(1);
+      expect(existsSync(join(proj, SCRIPT))).toBe(false);
+    }
+
+    it("global scope: one line naming the folder, exit 1, nothing written there or set here; an unrelated repository still pushes main", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      expectRefusedUntouched(attempt("claude", home, { project: proj }, "--git-hooks"), proj, home, "global");
+      const other = repo().proj;
+      const p = push(other, home, ["origin", "main"]);
+      expect(p.status, p.stderr).toBe(0);
+      expect(p.stderr).not.toContain("cairn run guard");
+      expect(p.stdout + p.stderr).toContain("the owner hook");
+    });
+
+    const shapes: Record<string, { scope: string; lay: (home: string, proj: string) => Record<string, string> }> = {
+      "the system config": { scope: "system", lay: (home) => {
+        writeFileSync(join(home, "system.cfg"), hooksLine(shared(home)));
+        return { GIT_CONFIG_SYSTEM: join(home, "system.cfg") };
+      } },
+      "the XDG config, git's other global file": { scope: "global", lay: (home) => {
+        mkdirSync(join(home, "xdg", "git"), { recursive: true });
+        writeFileSync(join(home, "xdg", "git", "config"), hooksLine(shared(home)));
+        return { XDG_CONFIG_HOME: join(home, "xdg") };
+      } },
+      "GIT_CONFIG_GLOBAL carrying the global file elsewhere": { scope: "global", lay: (home) => {
+        writeFileSync(join(home, "moved.cfg"), hooksLine(shared(home)));
+        return { GIT_CONFIG_GLOBAL: join(home, "moved.cfg") };
+      } },
+      "an include the global config pulls in": { scope: "global", lay: (home) => {
+        writeFileSync(join(home, "dotfiles.cfg"), hooksLine(shared(home)));
+        writeFileSync(join(home, ".gitconfig"), `[include]\n\tpath = ${join(home, "dotfiles.cfg")}\n`);
+        return {};
+      } },
+      "an includeIf the global config pulls in for this folder": { scope: "global", lay: (home, proj) => {
+        writeFileSync(join(home, "work.cfg"), hooksLine(shared(home)));
+        writeFileSync(join(home, ".gitconfig"), `[includeIf "gitdir:${realpathSync(proj)}/"]\n\tpath = ${join(home, "work.cfg")}\n`);
+        return {};
+      } },
+      "the environment's GIT_CONFIG_COUNT, which is no repository's config": { scope: "command", lay: (home) => (
+        { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: shared(home) }
+      ) },
+    };
+    for (const [name, { scope, lay }] of Object.entries(shapes)) {
+      it(`${name} is refused the same way, the folder untouched`, () => {
+        const { proj, home } = repo();
+        sharedFolder(home);
+        const env = lay(home, proj);
+        expectRefusedUntouched(attempt("codex", home, { project: proj, env }, "--git-hooks"), proj, home, scope);
+      });
+    }
+
+    it("hostile: GIT_CONFIG in the environment turns the install's own config write into a write on that file; the setting lands in this repository's config instead", () => {
+      const { proj, home } = repo();
+      const global = join(home, ".gitconfig");
+      writeFileSync(global, "[user]\n\tname = owner\n");
+      const r = attempt("codex", home, { project: proj, env: { GIT_CONFIG: global } }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(readFileSync(global, "utf8")).toBe("[user]\n\tname = owner\n");
+      expect(git(proj, "config", "--local", "--get", "core.hooksPath")).toBe(join(proj, GITHOOKS));
+    });
+
+    it("a relative value at global scope is refused too: the decision is the scope, not the path", () => {
+      const { proj, home } = repo();
+      writeFileSync(join(home, ".gitconfig"), hooksLine(".githooks"));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("at global scope");
+      expect(existsSync(join(proj, ".githooks"))).toBe(false);
+    });
+
+    it("the hostile spelling: a local setting naming the very folder the global one names is that folder, and is refused", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      git(proj, "config", "core.hooksPath", shared(home));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("the folder the global config names");
+      expect(r.stderr).toContain(shared(home));
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("a git too old to name the scope (no --show-scope) is refused, never guessed; with nothing set it installs as usual", () => {
+      const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+      const shim = fresh("cairn-oldgit-");
+      writeFileSync(join(shim, "git"), `#!/bin/sh\ncase " $* " in *" --show-scope "*) exit 129;; esac\nexec "${real}" "$@"\n`);
+      chmodSync(join(shim, "git"), 0o755);
+      const env = { PATH: `${shim}:${process.env.PATH ?? ""}` };
+
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj, env }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("a scope this git cannot name");
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+
+      const plain = repo();
+      const ok = attempt("codex", plain.home, { project: plain.proj, env }, "--git-hooks");
+      expect(ok.status, ok.out).toBe(0);
+      expect(existsSync(join(plain.proj, GITHOOKS, "pre-push"))).toBe(true);
+    });
+
+    it("the harmless twin: local scope beats the global setting and is respected; the global folder stays untouched", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      mkdirSync(join(proj, "scripts", "hooks"), { recursive: true });
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+      expect(git(proj, "config", "--get", "core.hooksPath")).toBe("scripts/hooks");
+    });
+
+    it("the harmless twin: worktree scope is respected", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      git(proj, "config", "extensions.worktreeConfig", "true");
+      git(proj, "config", "--worktree", "core.hooksPath", "wt-hooks");
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "wt-hooks", "pre-push"))).toBe(true);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("the way out the line names works: a local core.hooksPath, then a re-run, gates this project alone", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.stderr).toContain("git config --local core.hooksPath");
+      git(proj, "config", "--local", "core.hooksPath", GITHOOKS);
+      const again = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(again.status, again.out).toBe(0);
+      expect(push(proj, home, ["origin", "main"]).stderr).toContain("cairn run guard: this push lands on the default branch");
+      expect(push(repo().proj, home, ["origin", "main"]).status).toBe(0);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("the nested-cwd variant: from a folder below the root the global setting is still refused; a local absolute one is still respected", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const sub = join(proj, "src");
+      const r = attempt("codex", home, { cwd: sub }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("at global scope");
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+
+      const hooks = join(proj, "scripts", "hooks");
+      mkdirSync(hooks, { recursive: true });
+      git(proj, "config", "core.hooksPath", hooks);
+      const ok = attempt("codex", home, { cwd: sub }, "--git-hooks");
+      expect(ok.status, ok.out).toBe(0);
+      expect(existsSync(join(hooks, "pre-push"))).toBe(true);
+    });
+
+    it("without the flag a global setting changes nothing: the install lands, exit 0, the folder untouched", () => {
+      const { proj, home } = repo();
+      sharedFolder(home);
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const r = attempt("codex", home, { project: proj });
+      expect(r.status, r.out).toBe(0);
+      expect(readFileSync(join(shared(home), "pre-push"), "utf8")).toBe(OWNER_HOOK);
+    });
+
+    it("--check names a block an older install left in the shared folder, and lags; with no block a global setting is not a lag", () => {
+      const { proj, home } = repo();
+      run("codex", proj, home, "--git-hooks");
+      mkdirSync(shared(home));
+      writeFileSync(join(shared(home), "pre-push"), readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8"));
+      git(proj, "config", "--unset", "core.hooksPath");
+      writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
+      const out = runCheckFail("codex", proj, home);
+      expect(out).toContain("at global scope");
+      expect(out).toContain("every repository");
+
+      const clean = repo();
+      sharedFolder(clean.home);
+      writeFileSync(join(clean.home, ".gitconfig"), hooksLine("~/.githooks"));
+      const ok = attempt("codex", clean.home, { project: clean.proj }, "--check");
+      expect(ok.status, ok.out).toBe(0);
+      expect(ok.stdout).toContain("not installed");
+    });
+
+    it("Not seen: a local core.hooksPath naming a folder other repositories name in their own local configs is respected; git keeps no list of them", () => {
+      const { proj, home } = repo();
+      const folder = fresh("cairn-githooks-elsewhere-");
+      git(proj, "config", "core.hooksPath", folder);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(folder, "pre-push"))).toBe(true);
+      expect(readFileSync(SETUP, "utf8")).toContain("a local core.hooksPath naming a folder other");
+    });
   });
 });

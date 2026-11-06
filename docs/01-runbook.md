@@ -2126,8 +2126,11 @@ and the default-branch names from the shared hook library, the refusal
 is the run guard's own text, and the same `CAIRN_ALLOW_UNSHIPPED_PUSH`
 escape is honoured, said aloud on stderr, and never spelled as a prefix.
 A project's own `pre-push` survives below the cairn markers and still
-reads its refs from stdin; a `core.hooksPath` already set is respected
-(the hook goes into that folder, the setting stays); live hooks in
+reads its refs from stdin; a `core.hooksPath` already set in this
+repository's own config is respected (the hook goes into that folder, the
+setting stays); one set at global or system scope refuses the install and
+names the folder, because other repositories run hooks from it (#497,
+asserted: `server/test/setup.test.ts`); live hooks in
 `.git/hooks` refuse the install in one line rather than go silent under
 a new path. `--check` reports whether the hook is installed and whether
 git still runs hooks from there, and `plan_drift` measures the layer as

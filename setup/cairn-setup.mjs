@@ -22,7 +22,9 @@
 //   5. with --git-hooks only: a pre-push git hook that applies the ship
 //      gate's default-branch rule to every process in the checkout, and
 //      core.hooksPath pointed at it (#456). Opt-in, never default: a git
-//      config write is the owner's ground, and the flag is the consent.
+//      config write is the owner's ground, and the flag is the consent. The
+//      consent is for this project: a core.hooksPath at global or system
+//      scope is never written into (#497).
 //
 // Every copied-artifact surface gets a version stamp (.cairn-manifest.json:
 // source version + install date) so `--check` can answer "what's actually
@@ -36,13 +38,17 @@
 // Additive and idempotent: existing config entries are merged, never
 // clobbered; re-running produces byte-identical results.
 // Dependency-free node — builtins only.
+//
+// Not seen, dated 2026-11-05 (each pinned in server/test/setup.test.ts):
+//   - a local core.hooksPath naming a folder other repositories name in their
+//     own local configs is respected; git keeps no list of them (#497).
 
 import { execFileSync } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BEGIN, READERS, insideDir, reachFrom, realOrNull, sameFile, spliceFragment, spliceImport,
@@ -339,19 +345,61 @@ const SH_SHEBANG = /^#!.*\b(?:sh|bash|dash|ksh|zsh)\b/;
 
 /** git's trimmed answer at `dir`, or null when it says no (no repository, no git on PATH). */
 function gitAt(dir, gitArgs) {
+  // GIT_CONFIG makes every plain `git config` read and write that one file, so
+  // a value the shell carried would turn this install's local write into a
+  // write on whatever it names (#497, asserted: setup.test.ts).
+  const { GIT_CONFIG: _ignored, ...env } = process.env;
   try {
     return execFileSync("git", gitArgs, {
       cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+      env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
     }).trim();
   } catch {
     return null;
   }
 }
 
+const expandHome = (value) => value.replace(/^~(?=\/|$)/, homedir());
+
 /** A hooks folder as git reads one: `~` expanded, a relative path from the worktree root. */
 function hooksDirOf(value) {
-  return resolve(projectDir, value.replace(/^~(?=\/|$)/, homedir()));
+  return resolve(projectDir, expandHome(value));
+}
+
+// The only scopes that are this repository's own. Anything else -- global,
+// system, the environment's GIT_CONFIG_COUNT or `git -c` (git calls that one
+// command), or a git too old to say -- names a folder --git-hooks has no
+// consent for, so it is never written into (#497, asserted: setup.test.ts).
+const OWN_SCOPES = ["local", "worktree"];
+
+/** The core.hooksPath git obeys here and the scope it comes from, include
+ *  files counted under the file that pulled them in. null when unset. A git
+ *  with no --show-scope (older than 2.26) still answers the plain read, and
+ *  that value reads as a scope it cannot name: refused, never guessed. */
+function hooksPathSetting() {
+  const scoped = gitAt(projectDir, ["config", "--show-scope", "--get", "core.hooksPath"]);
+  const tab = scoped === null ? -1 : scoped.indexOf("\t");
+  if (tab > 0) return { scope: scoped.slice(0, tab), value: scoped.slice(tab + 1) };
+  const plain = gitAt(projectDir, ["config", "--get", "core.hooksPath"]);
+  return plain ? { scope: null, value: plain } : null;
+}
+
+/** Why the folder a setting names is not this project's alone, or null: the
+ *  setting's scope, or a local setting spelling the very folder the global or
+ *  system config names. A relative value up there resolves per repository, so
+ *  it is no one folder to collide with. */
+function sharedFolderWhy(setting, dir) {
+  if (!OWN_SCOPES.includes(setting.scope)) {
+    return `core.hooksPath is set at ${setting.scope ? `${setting.scope} scope` : "a scope this git cannot name (git config --show-scope, git 2.26+)"}, to ${dir}`;
+  }
+  const real = (p) => realOrNull(p) ?? resolve(p);
+  for (const scope of ["global", "system"]) {
+    const value = gitAt(projectDir, ["config", `--${scope}`, "--includes", "--get", "core.hooksPath"]);
+    if (value && isAbsolute(expandHome(value)) && real(expandHome(value)) === real(dir)) {
+      return `core.hooksPath here names ${dir}, the folder the ${scope} config names`;
+    }
+  }
+  return null;
 }
 
 /** The marker-delimited block: the gate runs first, and the refs git handed
@@ -410,17 +458,29 @@ function spliceHook(body, block) {
   return { next: `${first}\n${block}${nl < 0 ? "" : body.slice(nl + 1)}` };
 }
 
-/** Where the hook goes: the folder core.hooksPath names when set (respected,
- *  the setting stays), else cairn's own, which the install then names --
- *  unless the folder git runs today holds live hooks a new hooksPath would
- *  silence: refused, the owner moves them or sets the path. */
+/** Where the hook goes: the folder a local or worktree core.hooksPath names
+ *  when set (respected, the setting stays), else cairn's own, which the
+ *  install then names. Refused: a folder the setting shares with other
+ *  repositories (#497), the install says why and writes nothing there; and
+ *  live hooks in the folder git runs today that a new hooksPath would
+ *  silence, the owner moves them or sets the path. */
 function gitHooksTarget() {
   if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
     return { error: "not a git repository -- nothing for a pre-push hook to guard" };
   }
   const ours = join(projectDir, GITHOOKS_REL);
-  const configured = gitAt(projectDir, ["config", "--get", "core.hooksPath"]);
-  if (configured) return { dir: hooksDirOf(configured), configured };
+  const setting = hooksPathSetting();
+  if (setting) {
+    const dir = hooksDirOf(setting.value);
+    const why = sharedFolderWhy(setting, dir);
+    if (why) {
+      const wayOut = setting.scope === "command"
+        ? "drop the setting from this environment"
+        : `to gate this project alone, run \`git config --local core.hooksPath ${GITHOOKS_REL}\` (the shared hooks then stop running in this repository)`;
+      return { error: `${why}: every repository it reaches runs hooks from that folder, and --git-hooks is consent for this project alone, so nothing was written there -- ${wayOut}, then re-run` };
+    }
+    return { dir, configured: setting.value };
+  }
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
   const todayDir = today ? hooksDirOf(today) : null;
   let live = [];
@@ -459,7 +519,7 @@ function installGitHooks() {
   mkdirSync(target.dir, { recursive: true });
   if (next !== body) writeFileSync(path, next);
   chmodSync(path, 0o755);
-  if (target.configured === null && gitAt(projectDir, ["config", "core.hooksPath", target.dir]) === null) {
+  if (target.configured === null && gitAt(projectDir, ["config", "--local", "core.hooksPath", target.dir]) === null) {
     console.error(`  core.hooksPath could not be set to ${target.dir} -- set it yourself, then re-run cairn-setup.`);
     process.exit(1);
   }
@@ -482,6 +542,13 @@ function gitLayerStatus() {
     }
   };
   if (carries(join(dir, "pre-push"))) {
+    // An older install wrote here before #497: setup never writes here now,
+    // and it never deletes, so the block stays until the owner takes it out.
+    const setting = hooksPathSetting();
+    const why = setting ? sharedFolderWhy(setting, dir) : null;
+    if (why) {
+      return { detail: `installed at ${dir}, but ${why}: every repository it reaches runs this project's gate -- take the cairn block out of that file`, lagging: true };
+    }
     return existsSync(script) ? { detail: `installed at ${dir}; git runs hooks from there` }
       : { detail: `installed at ${dir}, but ${script} is missing -- not reached; re-run with --git-hooks`, lagging: true };
   }

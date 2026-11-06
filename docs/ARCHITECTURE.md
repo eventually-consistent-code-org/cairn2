@@ -725,7 +725,8 @@ copies the hook's script beside the copied verb helpers, so a push from
 a plain terminal, from a harness without hooks or from a script meets
 the same stamp rule. The hook is a thin caller over the shared stamp
 reader and the shared effect table, honours the owner's escape and says
-so on stderr, respects an existing hooks path, refuses the install when
+so on stderr, respects a hooks path in the repository's own config,
+refuses one at global or system scope (#497), refuses the install when
 live hooks would go silent, and is measured by `plan_drift` as
 `guardReach.gitLayer`, a field and never a flag (#456; asserted:
 `server/test/setup.test.ts`, `server/test/sweep-surface.test.ts`).
