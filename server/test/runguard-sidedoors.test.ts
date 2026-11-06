@@ -533,3 +533,25 @@ describe("side doors: the control the Not seen block relies on can't be removed 
     expect(header).toContain("a dated claim, 2026-11-05");
   });
 });
+
+describe("side doors: a request whose host no word names stays Not seen, pinned (#504)", () => {
+  it("each exits 0 and is named in the header; a deleted line is red", () => {
+    const f = fixture(false, false);
+    const path = "/repos/o/r/pulls/1/merge";
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0].replace(/\n \*\s+/g, " ");
+    const start = header.indexOf("Not seen, dated 2026-11-05 (#504");
+    expect(start, "the #504 Not seen line opens with its date and issue").toBeGreaterThan(-1);
+    const line = header.slice(start, start + 500);
+    for (const [c, phrase] of [
+      [`curl -X PUT https://203.0.113.9${path} -H 'Host: api.github.com'`, "an address with a Host header"],
+      [`curl -X PUT --connect-to x.test:443:api.github.com:443 https://x.test${path}`, "`--connect-to`"],
+      ["curl -X PUT -K request.cfg", "`curl -K`"],
+      ["wget --method=PUT -i urls.txt", "`wget -i`"],
+    ]) {
+      const r = call(f, bash(c));
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      expect(line, c).toContain(phrase);
+    }
+    expect(line).toContain("each needs a token");
+  });
+});

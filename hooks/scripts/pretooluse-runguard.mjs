@@ -248,6 +248,13 @@
  *   `U=$(cat url); curl -X PUT "$U"`): that route needs a token and has its
  *   line above, and refusing every `curl -X POST "$URL"` would over-refuse.
  *
+ *   Not seen, dated 2026-11-05 (#504, by decision; pinned by
+ *   runguard-sidedoors.test.ts (#504)): a request whose host no word on the line
+ *   names -- an address with a Host header, a `--connect-to` or `--resolve`
+ *   that sends another name to GitHub, a URL in a config or input file (`curl
+ *   -K`, `wget -i`). The host is parsed from a URL the line spells, and these
+ *   spell none; each needs a token, so the token's line above covers it.
+ *
  *   A push either of those gates checks is its own step (#305). The guard
  *   works out what a push sends before the line runs, so anything earlier
  *   on the line that could make a commit or move a ref refuses it: a git
