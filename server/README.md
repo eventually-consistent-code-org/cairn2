@@ -614,9 +614,12 @@ falling back — clear it or restore the member.
 
 1. No workspace found → `launchDir` (compatibility path).
 2. Workspace found, no focus set → `launchDir`.
-3. Workspace found, focus set to a member that is still a configured
+3. Launched inside a listed member, with or without its `cairn.json` yet, or
+   inside a folder below the root holding its own `cairn.json` → `launchDir`,
+   whatever the focus says (#487, #499).
+4. Workspace found, focus set to a member that is still a configured
    member → that member's absolute path.
-4. Workspace found, focus set to a member that is no longer a member or no
+5. Workspace found, focus set to a member that is no longer a member or no
    longer configured → `CONFIG_INVALID` naming the stale focus and the fix
    (never a silent fallback to the launch dir).
 

@@ -337,17 +337,21 @@ reason.
   tool call resolves its project dir through one function, which walks
   up from the launch dir to the nearest `cairn-workspace.json` and reads
   the focus file under that root. The focus moves only a session launched
-  at the workspace root or in a folder no member owns; a session launched
-  inside a configured member (or anywhere in its tree) resolves to its
-  launch dir whatever the focus says, because the focus file is shared by
-  every session beneath the root and honoring it there let one session's
-  focus switch redirect a sibling session's writes into its planning
-  folder and tracker (#487, observed during the v2.9.3 release).
+  at the workspace root or in a folder that claims no project; a session
+  launched inside a listed member, with or without its `cairn.json` yet, or
+  inside any folder below the root that holds its own `cairn.json` (or
+  anywhere in that tree) resolves to its launch dir whatever the focus says,
+  because the focus file is shared by every session beneath the root and
+  honoring it there let one session's focus switch redirect a sibling
+  session's writes into its planning folder and tracker (#487, observed
+  during the v2.9.3 release; #499). With no `cairn.json` the tools report
+  `CONFIG_MISSING` there rather than write elsewhere.
   `workspace_status` and `workspace_focus` report `launchDir`,
   `resolvedProject` and `focusApplied` so a redirect is a field, not a
   surprise. Asserted by `server/test/workspace-context.test.ts` ("a
-  member launch is never redirected", with the prefix-lookalike and
-  `..`-climb twins) and the member-launch block in `server/test/mcp.test.ts`.
+  member launch is never redirected" and "a listed member with no
+  cairn.json is its own session", with the prefix-lookalike and `..`-climb
+  twins) and the member-launch block in `server/test/mcp.test.ts`.
 - `core/` — continuity, active context, project registry, outlook
   emission; the wave checkpoint composes its notes and resume verb,
   writes the handoff and emits the outlook in one call. Which of these
