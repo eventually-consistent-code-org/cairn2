@@ -61,6 +61,31 @@
  *   a limited type's unreadable target is refused, not guessed (asserted:
  *   writeguard.test.ts, "a redirect after a cd the guard can't read").
  *
+ *   A nested line is read the same way (#511), through the reader's own
+ *   helpers, with the words spelled first (spellWords): `sh -c`, `bash -lc`,
+ *   `eval` (whose cd and assignments stay in this shell), `su -c`, a heredoc
+ *   or here-string fed to a shell, a wrapper's command line, a pager variable,
+ *   an option that runs a program (argCommands), and a runner's inner lines
+ *   (runnerCommands: `op run --`, `find -exec`, `trap`). Refused unread, since
+ *   each hands a shell a line nobody can see: a shell string holding a word the
+ *   reader calls wild (`eval "$(cmd)"`), a pipe into a shell (`cmd | sh`), a
+ *   nest past MAX_NEST, a line past MAX_READ or MAX_SEGMENTS (too costly to
+ *   read inside the hook's timeout), a substitution past the reader's depth,
+ *   and tee fed by xargs. Asserted: writeguard.test.ts, "a redirect inside a
+ *   nested shell". TEXT_ARGS names the programs whose words are code or text,
+ *   never a line (`awk '$1 > 5'` passes); a quoted argument of a program off
+ *   that list reads as a line, so `npx x --grep 'a > b'` is refused, visibly,
+ *   by decision (asserted: "an unknown program's quoted argument").
+ *
+ *   A target is spelled through the reader before it is judged (#512): what
+ *   the line assigned, every value of it; $HOME, ~ and $PWD anywhere in the
+ *   word, $PWD once per folder the shell may stand in; a brace; a name the
+ *   line never assigned both typed and gone. Slashes then collapse, so
+ *   `/$PWD/src/a.ts` is the project file it is. What stays unspelled, or a
+ *   glob, with a root at or below the literal folder before it (headReaches)
+ *   is unreadable and refused: `/$X/a`, `/$(pwd)/a`, `/U*\/proj/a`, `../$X/a`.
+ *   Asserted: writeguard.test.ts, "a target is spelled through the reader".
+ *
  *   Not seen, dated 2026-11-04 (#454), closed by decision under ADR 0016 --
  *   each is a shape the guard knows it does not read, written here rather
  *   than half-guarded; a test pins this block so a deleted line is red:
@@ -71,11 +96,23 @@
  *     reading covers the few named files that configure the agent.
  *   - a write in an interpreter: `python -c`, `node -e`, a script run by
  *     name. Code in another language is out of scope for every guard.
+ *   - dated 2026-11-05 (#511): a shell's script from a file, however named
+ *     (`sh x.sh`, `source x.sh`, `sh < x.sh`, `bash <(cmd)`), which is the
+ *     script-by-name line above; a line in a name only the session holds
+ *     (`eval "$CMD"`, the #291 decision); a command word the shell computes
+ *     (`$(which tee) x`); a git alias that runs a shell (`git -c alias.x=!...`),
+ *     since git's words are text here. Pinned: "the Not seen shapes stay passing".
  *   - an MCP file tool (a desktop-commander write_file): the matcher is the
  *     issue's four core tools; the harness guard's path-field reading can
  *     be added under `mcp__.*` by a later issue.
  *   - a symlink inside the project that points outside it, or the reverse:
  *     the written spelling is judged, not the inode.
+ *   - dated 2026-11-05 (#512): a value only the run knows, in a path whose
+ *     literal head sits off to the side (`/opt/$X/y`, X holding a climb);
+ *     `>&` onto a file, which the reader takes for a descriptor; a quoted
+ *     `'$HOME/x'`, read as spelled, since a target carries no quoting past
+ *     the parser. Pinned, with the /tmp link spelling of the line above, by
+ *     "the Not seen shapes stay passing" under "a target is spelled".
  *   - a harness that sends no agent_type (Cursor and the rest): allowed, as
  *     the issue scopes it; a per-harness field mapping is a later issue.
  *   - a verifier or seat dispatched as a general-purpose subagent
@@ -94,7 +131,10 @@ import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { projectRoot, projectRoots, readCairnConfig } from "./lib.mjs";
-import { commandName, shellSegments, unwrap } from "./shell-words.mjs";
+import {
+  SHELLS, argCommands, assignVars, braceExpand, commandName, evalCommandString, expandAssigned, lineVars, pagerCommands, runnerCommands, seedVars,
+  shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
+} from "./shell-words.mjs";
 
 // #358 -- the breaker loads on its own: a breaker.mjs that is missing or
 // broken leaves this guard refusing exactly as before, never crashed
@@ -117,8 +157,34 @@ const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
 /** A folder word the shell works out at run time: a variable, a substitution, `-`, `~user`. */
 const COMPUTED = /[$`]|^-$|^~[^/]/;
 
+/** In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob. */
+const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
+
 /** Past this many candidate folders a line counts as unreadable. */
 const MAX_PLACES = 16;
+
+/** How the reader spells a line's variables here. */
+const SPELL = { read: READ, cap: MAX_PLACES };
+
+/** How many shells within shells are read; a shell past this is refused unread, a runner's candidate left alone. */
+const MAX_NEST = 8;
+
+/**
+ * What one call may cost, nested re-reads included, so a line built to outlast
+ * the 3000ms hooks.json gives this hook is refused rather than read. What the
+ * harness does with a hook that times out is unverified (a dated claim,
+ * 2026-11-06, read from no doc and run by no test): assume it lets the call by.
+ */
+const MAX_READ = 1_000_000;
+const MAX_SEGMENTS = 4096;
+
+/**
+ * Programs whose words are code in another language, a pattern, or text --
+ * never a shell line -- beyond the reader's ARG_SAFE, so `awk '$1 > 5'` and
+ * `git commit -m 'a > b'` hold no redirect (#511). A program off this list
+ * errs toward a visible refusal, so a gap here is an annoyance, never a hole.
+ */
+const TEXT_ARGS = /^(?:python[\d.]*|node|nodejs|deno|bun|perl|ruby|php|lua|awk|gawk|mawk|nawk|sed|gsed|git|curl|wget|psql|mysql|sqlite3|test|\[\[?|export|declare|typeset|readonly|local|set|unset|read)$/;
 
 /** The planning folder's draft sessions -- spelled apart from the folder name
  *  on purpose: the commit leak guard refuses the joined literal in a hook. */
@@ -190,36 +256,149 @@ function underRoot(abs, roots) {
   for (const root of roots) {
     const rel = relative(root, abs);
     if (rel === "") return ".";
-    if (!rel.startsWith("..") && !isAbsolute(rel)) return rel.split("\\").join("/");
+    // a name that merely starts with two dots (`..foo`) is under the root (#512)
+    if (!/^\.\.(?:[/\\]|$)/.test(rel) && !isAbsolute(rel)) return rel.split("\\").join("/");
   }
   return null;
+}
+
+/** `~` in front of a path, in every value $HOME holds on the line; as typed when the line made $HOME unreadable. */
+function spellTilde(raw, vars) {
+  if (!/^~(?=\/|$)/.test(raw)) return [raw];
+  const homes = vars.get("HOME");
+  return Array.isArray(homes) ? homes.map((h) => h + raw.slice(1)) : [raw];
+}
+
+/**
+ * True when what the shell fills in decides whether a path lands under a
+ * root (#512): the literal folder before the first unspelled thing is a root
+ * or above one, so `/$X/src/a.ts`, `/Users/$USER/proj/a.ts`, `/U*\/proj/a.ts`
+ * and `../$X/a.ts` can each be a project file. Under a folder off to the side
+ * (`/opt/$X/y`, `/tmp/$(date).log`) it can't, short of a climb in the value.
+ */
+function headReaches(target, dir, roots) {
+  const at = target.search(UNSPELLED);
+  if (at < 0) return false;
+  const folder = resolve(dir, target.slice(0, target.lastIndexOf("/", at) + 1));
+  return roots.some((root) => underRoot(root, [folder]) !== null);
+}
+
+/** `vars` with $PWD every folder the shell may stand in: gone once a cd the guard can't read has run, left alone if the line made it wild. */
+function standing(vars, dirs) {
+  const held = vars.get("PWD");
+  if (held !== undefined && !Array.isArray(held)) return vars;
+  const out = new Map(vars);
+  if (dirs === null) out.delete("PWD");
+  else out.set("PWD", [...new Set([...(held ?? []), ...dirs])]);
+  return out;
 }
 
 /**
  * The files a shell line writes, each with the folders it may be written
  * from: `dirs` is every folder the shell may stand in at that point (the
  * call's cwd and each literal cd so far), or null once a cd the guard
- * can't read has run -- a later relative target is then unreadable.
+ * can't read has run -- a later relative target is then unreadable. `lost`
+ * marks one the guard can't place at all: refused whatever it says.
+ *
+ * Every nested line is walked here too (#511), from the folders and the
+ * variables its caller stood in, the same way the run guard and the harness
+ * guard walk one. One pass, single writer: `out` and `seen` are this call's.
  */
 function shellWrites(command, cwd) {
   const out = [];
-  let dirs = [cwd];
-  for (const seg of shellSegments(command, READ)) {
-    const { words, writes, dirs: moved } = unwrap(seg.words, READ);
-    const name = commandName(words[0]);
-    // a redirect is the shell's, from where it stands; a wrapper's own write
-    // and tee's operands land where the wrapper moved the command (env -C DIR)
-    for (const r of seg.redirects) if (r && !r.startsWith("&") && !DEVICE.test(r)) out.push({ raw: r, dirs });
-    const own = [...writes, ...(name === "tee" ? words.slice(1).filter((a) => !a.startsWith("-")) : [])];
-    const from = dirs === null ? null : [...new Set([...dirs, ...moved.map((d) => resolve(cwd, expandHome(d)))])];
-    for (const f of own) out.push({ raw: f, dirs: from });
-    if ((name === "cd" || name === "pushd") && dirs !== null) {
-      const arg = words.slice(1).find((a) => !a.startsWith("-") || a === "-") ?? "~";
-      if (COMPUTED.test(arg)) { dirs = null; continue; }
-      const next = [...new Set([...dirs, ...dirs.map((d) => resolve(d, expandHome(arg)))])];
-      dirs = next.length > MAX_PLACES ? null : next;
+  const seen = new Set();
+  let chars = 0;
+  let count = 0;
+  const unread = (what) => out.push({ raw: what, dirs: null, lost: true });
+  // a redirect target carries no spans past the parser, so it is spelled here, name by name
+  const place = (raw, dirs, vars) => {
+    for (const word of braceExpand(raw)) {
+      const { raws, lost } = expandAssigned(word, vars, MAX_PLACES);
+      for (const one of raws) {
+        for (const target of spellTilde(one, vars)) if (!DEVICE.test(target)) out.push({ raw: target, dirs, lost });
+      }
     }
-  }
+  };
+
+  /** One line read from `from` ({ dirs, vars }): what it leaves the shell with, which only eval's caller keeps. */
+  const walk = (line, from, depth, wilds) => {
+    chars += line.length;
+    const segs = chars > MAX_READ ? null : shellSegments(line, READ);
+    count += segs?.length ?? 0;
+    if (segs === null || count > MAX_SEGMENTS) { unread("a line longer than the guard reads"); return from; }
+    if (tooDeep(segs)) { unread("a line nested deeper than the guard reads"); return from; }
+    let { dirs } = from;
+    let vars = seedVars(segs, from.vars, SPELL);
+    let upstream = null;
+    for (const seg of segs) {
+      const piped = upstream;
+      upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
+      // a redirect is the shell's, from where it stands
+      for (const r of seg.redirects) if (r && !r.startsWith("&")) place(r, dirs, vars);
+      let moves = dirs;
+      // each way the words can read, spelled through what the line assigned
+      for (const { words: spelled, wild } of spellWords(seg, vars, { cap: MAX_PLACES, wild: wilds })) {
+        const { words, writes, dirs: moved, assigns, wrappers } = unwrap(spelled, READ);
+        const name = commandName(words[0]);
+        const args = words.slice(1);
+        // a wrapper's own write and tee's operands land where the wrapper
+        // moved the command (env -C DIR), and so does a line it nests
+        const there = dirs === null ? null
+          : [...new Set([...dirs, ...moved.flatMap((d) => spellTilde(d, vars).flatMap((m) => dirs.map((b) => resolve(b, m))))])];
+        const own = [...writes, ...(name === "tee" ? args.filter((a) => !a.startsWith("-")) : [])];
+        for (const f of own) for (const target of spellTilde(f, vars)) out.push({ raw: target, dirs: there });
+        if (name === "tee" && wrappers.some((w) => commandName(w.name) === "xargs")) unread("the files xargs hands tee");
+
+        const below = { dirs: there, vars: standing(assignVars(assigns, vars, SPELL), there) };
+        const deeper = new Set([...wilds, ...wild]);
+        const nest = (inner) => {
+          // a program's later words re-read as suffixes of each other, so each is read once per place and per spelling
+          const key = JSON.stringify([inner, there, [...below.vars], [...deeper]], (_, v) => (typeof v === "symbol" ? "?" : v));
+          if (seen.has(key)) return;
+          seen.add(key);
+          walk(inner, below, depth + 1, deeper);
+        };
+        if (depth < MAX_NEST) for (const inner of pagerCommands(assigns, words)) nest(inner);
+
+        if (SHELLS.has(name) || name === "eval" || name === "su") {
+          const script = name === "eval" ? evalCommandString(args)
+            : name === "su" ? suCommandString(args) : shellCommandString(args);
+          // a value the reader can't spell is read again as a line, so it may hold a redirect
+          const lostWord = script ? args.find((a) => a && wild.has(a) && script.includes(a)) : undefined;
+          if (lostWord !== undefined) unread(lostWord);
+          else if (script && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
+          else if (script && name === "eval") {
+            // eval runs in this shell: its cd and its assignments are the line's own
+            ({ dirs: moves, vars } = walk(script, { dirs: moves, vars }, depth + 1, deeper));
+          } else if (script) nest(script);
+          else if (name === "su" || shellReadsStdin(args)) {
+            // no string: its own heredoc or the one piped in, else whatever a pipe feeds it
+            const fed = [seg, ...(piped ? [piped] : [])].flatMap((s) => [...s.heredocs.map((h) => h.body), ...(s.herestrings ?? [])]);
+            if (fed.length && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
+            else if (fed.length) for (const doc of fed) nest(doc);
+            else if (piped) unread("what a pipe feeds a shell");
+          }
+        } else if (name === "cd" || name === "pushd") {
+          if (moves !== null) {
+            const arg = args.find((a) => !a.startsWith("-") || a === "-") ?? "~";
+            const spots = spellTilde(arg, vars);
+            const next = spots.some((s) => COMPUTED.test(s) || s.startsWith("~")) ? null
+              : [...new Set([...moves, ...spots.flatMap((s) => moves.map((d) => resolve(d, s)))])];
+            moves = next === null || next.length > MAX_PLACES ? null : next;
+          }
+        } else if (depth < MAX_NEST) {
+          // the program's later words may be the real command (#311); only the
+          // option that runs one, on a program whose words are text
+          for (const inner of TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words)) nest(inner);
+        }
+      }
+      dirs = moves;
+      vars = standing(lineVars(seg, vars, SPELL), dirs);
+    }
+    return { dirs, vars };
+  };
+  // $HOME and $PWD are known to every guard (the phase's reader decision), so they spell like what the line assigned
+  walk(command, { dirs: [cwd], vars: new Map([["HOME", [resolve(homedir())]], ["PWD", [cwd]]]) }, 0, new Set());
   return out;
 }
 
@@ -254,12 +433,12 @@ try {
 
   let hit = null;
   if (tool === "Bash") {
-    for (const { raw, dirs } of shellWrites(payload?.tool_input?.command ?? "", cwd)) {
-      const target = expandHome(raw);
-      if (dirs === null && !isAbsolute(target)) { hit = { rel: raw, why: "unreadable" }; break; }
-      for (const dir of isAbsolute(target) ? [cwd] : dirs) {
-        const rel = underRoot(resolve(dir, target), roots);
+    for (const { raw, dirs, lost } of shellWrites(payload?.tool_input?.command ?? "", cwd)) {
+      if (lost || (dirs === null && !isAbsolute(raw))) { hit = { rel: raw, why: "unreadable" }; break; }
+      for (const dir of isAbsolute(raw) ? [cwd] : dirs) {
+        const rel = underRoot(resolve(dir, raw), roots);
         if (rel !== null) hit = judge(rel);
+        else if (headReaches(raw, dir, roots)) hit = { rel: raw, why: "unreadable" };
         if (hit) break;
       }
       if (hit) break;
@@ -274,8 +453,8 @@ try {
   // one plain line naming the type, the path and the way to proceed deliberately; the key second
   const key = grant.kind === "read-only" ? "guards.writers.readOnly" : `guards.writers.paths["${grant.key}"]`;
   if (hit.why === "unreadable") {
-    console.error(`cairn write guard: agent type '${type}' is limited under this project, and this line redirects into ` +
-      `${hit.rel} from a folder the guard can't read (a cd it can't resolve) — spell the folder out, or hand the change to the dispatching session.`);
+    console.error(`cairn write guard: agent type '${type}' is limited under this project, and this line writes through ` +
+      `${hit.rel}, which the guard can't read (a cd, a variable or a nested line it can't resolve) — spell it out, or hand the change to the dispatching session.`);
   } else if (hit.why === "read-only") {
     console.error(`cairn write guard: agent type '${type}' is read-only under this project — it may not write ${hit.rel}. ` +
       "Hand the change to the dispatching session (the main session is never limited).");
