@@ -546,9 +546,7 @@ function foreignHooks(dir) {
  *  install then names. Refused: a folder the setting shares with other
  *  repositories (#497), the install says why and writes nothing there; live
  *  hooks in the folder git runs today that a new hooksPath would silence, the
- *  owner moves them or sets the path; and hooks already in cairn's own folder
- *  it did not write, which setting the path would arm (#508). A setting that
- *  is already there arms nothing new, so its folder keeps what it holds. */
+ *  owner moves them or sets the path. */
 function gitHooksTarget() {
   if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
     return { error: "not a git repository -- nothing for a pre-push hook to guard" };
@@ -576,11 +574,6 @@ function gitHooksTarget() {
     return { error: `${todayDir} holds live hooks (${live.join(", ")}) that a core.hooksPath would silence -- ` +
       `move them under ${ours}, or set core.hooksPath yourself, then re-run` };
   }
-  const foreign = foreignHooks(ours);
-  if (foreign.length) {
-    return { error: `${ours} holds hooks this install did not write (${foreign.join(", ")}), and pointing core.hooksPath at it would arm them for your next commit or push -- ` +
-      "read them, then remove them, or set core.hooksPath yourself, then re-run" };
-  }
   return { dir: ours, configured: null };
 }
 
@@ -593,6 +586,15 @@ function installGitHooks() {
     process.exit(1);
   }
   const path = checkLinks(join(target.dir, "pre-push"));
+  // Setting the pointer arms whatever the folder holds (#508), so one holding
+  // hooks this install did not write is the owner's to read first. A setting
+  // already there arms nothing new, and its folder keeps what it holds.
+  const foreign = target.configured === null ? foreignHooks(target.dir) : [];
+  if (foreign.length) {
+    console.error(`  --git-hooks: ${target.dir} holds hooks this install did not write (${foreign.join(", ")}), and pointing core.hooksPath at it would arm them for your next commit or push -- ` +
+      "read them, then remove them, or set core.hooksPath yourself, then re-run.");
+    process.exit(1);
+  }
   const scriptsOut = join(projectDir, SCRIPTS_REL);
   for (const f of helperClosure(join(repoRoot, "hooks", "scripts"), [PREPUSH])) {
     copyChecked(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));
