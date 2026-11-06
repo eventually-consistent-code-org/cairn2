@@ -2826,7 +2826,7 @@ function writeTargets(seg, ctx) {
     // #291 -- a variable the line assigned earlier is spelled out first, in
     // every value a loop gave it; one assigned from a substitution, leading
     // the path, puts the write where the guard can't follow
-    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
+    const { raws, typed, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
     for (const one of raws) {
       // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
       // sees them (#258, #263), $PWD and $HOME wherever they stand (#524), and a
@@ -2841,7 +2841,8 @@ function writeTargets(seg, ctx) {
       // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
       // judged there, as a $NAME the line never assigned is
       const abs = lost || /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
-      out.push({ raw: r, abs, mode, feed, walk: ctx.walk, reaches: headReaches(r, dir) });
+      // only as typed: with $OUT gone, `$OUT/$(date).log` has a `/` in front that the line never wrote (#524)
+      out.push({ raw: r, abs, mode, feed, walk: ctx.walk, reaches: !ctx.gone && typed.includes(one) && headReaches(r, dir) });
     }
   };
   if (ctx.chdir) {
@@ -2885,6 +2886,7 @@ function writeTargets(seg, ctx) {
         positional: marker,
         argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
         walk: ctx.walk,
+        gone: ctx.gone,
         vars: assignVars(assigns, ctx.vars, SPELL), // the line's variables, and this command's own prefix (#291)
       }));
     };
@@ -2971,7 +2973,7 @@ function gather(out, more) {
  */
 function deeper(line, ctx) {
   if (ctx.depth >= MAX_NEST) return [{ deep: true }];
-  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops, family: ctx.family });
+  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops, family: ctx.family, gone: ctx.gone });
 }
 
 /**
@@ -3220,9 +3222,9 @@ function lineTargets(command, dir, depth, extra = {}) {
       // through, so a value that holds the command or a flag and its path is
       // read as them (`C='rm hooks/x'; $C`). A word it can't spell stays as
       // typed, for writeTargets' add to place or call lost.
-      for (const { words } of spellWords(segs[k], vars, SPELL)) {
+      for (const { words, gone } of spellWords(segs[k], vars, SPELL)) {
         const seg = { ...segs[k], words };
-        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars }));
+        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars, gone: gone || extra.gone }));
       }
     }
     vars = lineVars(segs[k], vars, SPELL);

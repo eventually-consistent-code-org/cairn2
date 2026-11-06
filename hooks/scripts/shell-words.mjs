@@ -1144,13 +1144,13 @@ function refValue(ref, vars) {
  * read with the name gone, since an unset name is no part of the path at all
  * (`> $X.claude/settings.json`, #494), but a default written in the word is a
  * value too (`${X:-hooks}`), so it is judged as well. Past `cap` values the
- * rest is lost too.
+ * rest is lost too. `typed` lists the readings with every name still as typed.
  */
 export function expandAssigned(raw, vars, cap = SPELL_CAP, nest = 0) {
   const typed = spellRaw(raw, vars, cap, false, nest);
-  if (!typed.open) return { raws: typed.raws, lost: typed.lost };
+  if (!typed.open) return { raws: typed.raws, typed: typed.raws, lost: typed.lost };
   const gone = spellRaw(raw, vars, cap, true, nest);
-  return { raws: [...new Set([...typed.raws, ...gone.raws.filter(Boolean)])], lost: typed.lost || gone.lost };
+  return { raws: [...new Set([...typed.raws, ...gone.raws.filter(Boolean)])], typed: typed.raws, lost: typed.lost || gone.lost };
 }
 
 function spellRaw(raw, vars, cap, vanish, nest) {
@@ -1459,7 +1459,8 @@ export function spellWords(seg, vars, opts = {}) {
     return readings;
   };
   const typed = read(false);
-  return typed.some((r) => r.open.size) ? [...typed, ...read(true)] : typed;
+  // `gone` marks the readings with the name gone, for a guard that must tell a word from what the line wrote (#524)
+  return typed.some((r) => r.open.size) ? [...typed, ...read(true).map((r) => ({ ...r, gone: true }))] : typed;
 }
 
 /**

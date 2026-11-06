@@ -8405,6 +8405,13 @@ describe("harness guard: a slash before a variable no longer reads as outside th
       "echo x > /tmp/*.log",
       "echo x > /opt/$X/y",
       "echo x > $X/y",
+      // the shell gives a name it never heard of nothing, but a folder in that reading isn't what the line says
+      "echo x > $OUT/log-$(date +%s).txt",
+      "echo x > ${OUT}/run-$RUN.log",
+      "echo x > $OUT/*.log",
+      "cp a $OUT/`date`.bak",
+      'sh -c "echo x > $OUT/$(date).log"',
+      "rm -f $OUT/*.tmp",
       "echo x > $PWD/$X.log",
       "echo x > /$PWD/src/a.ts",
       "echo x > //$PWD//notes.txt",
