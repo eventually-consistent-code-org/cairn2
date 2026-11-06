@@ -6313,6 +6313,817 @@ describe("the approval stamp needs the owner's escape: plan_meta_set approve (#4
   });
 });
 
+// The third hardening's zones and pointers (#492, #500, #506, #507, #508,
+// #510) share one fixture and one guard call: a repository with a nested
+// pkg/lib, an empty home, and no system git config. `bare` strips
+// CLAUDE_PROJECT_DIR, the #459 reading of the root; every shape below runs
+// from the root and from the nested folder, with the variable and without.
+function hardenFixture(prefix: string) {
+  const p = freshDir(`cairn-hooks-${prefix}-proj-`);
+  const home = freshDir(`cairn-hooks-${prefix}-home-`);
+  mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+  spawnSync("git", ["init", "-q", p], { env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+  return { p, home };
+}
+
+/** git in a fixture, with its home and no system config; throws when git says no. */
+function hardenGit(cwd: string, home: string, ...args: string[]): string {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/** One harness guard call from `cwd`, the project unless told otherwise; `root` is what CLAUDE_PROJECT_DIR names, absent with `bare`. */
+function hardenRun(p: string, home: string, tool: string, input: Record<string, unknown>,
+  opts: { env?: Record<string, string>; cwd?: string; bare?: boolean; root?: string } = {}) {
+  const cwd = opts.cwd ?? p;
+  const env: Record<string, string | undefined> = {
+    ...process.env, CLAUDE_PROJECT_DIR: opts.root ?? p, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...opts.env,
+  };
+  for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "GIT_CONFIG_GLOBAL", "GIT_DIR", "GIT_WORK_TREE",
+    "XDG_CONFIG_HOME", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR"]) {
+    if (!(k in (opts.env ?? {}))) delete env[k];
+  }
+  if (opts.bare) delete env.CLAUDE_PROJECT_DIR;
+  const r = spawnSync(process.execPath, [HARNESSGUARD], {
+    cwd, env, encoding: "utf8", timeout: 5000,
+    input: JSON.stringify({ tool_name: tool, tool_input: input, cwd }),
+  });
+  return { status: r.status, stderr: r.stderr ?? "" };
+}
+
+const HARDEN_DC = "mcp__plugin_desktop-commander_desktop-commander__";
+
+// #492: the pre-push hook is a one-line caller; what it runs lives in
+// .cairn/harness/scripts, and the guard protected the caller and not the
+// body, so an ordinary Edit became code under the owner's identity at the
+// owner's next push. Both folders are zones now, in the project and in every
+// linked worktree of it, since the hook looks in the worktree it runs from
+// first. Only what writes is judged: the verbs and helpers there are read and
+// run as ordinary work, and setup, a process of its own, is never judged at all.
+describe("the folders the ship gate runs from are the harness guard's (#492)", () => {
+  const SCRIPTS_WHAT = "the scripts cairn's git hook runs";
+  const HOOKS_WHAT = "the folder cairn's git hooks live in";
+  const FILES: Array<[string, string]> = [
+    [".cairn/harness/scripts/lib.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/scripts/pre-push.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/scripts/git-effects.mjs", SCRIPTS_WHAT],
+    [".cairn/harness/verbs/plan.md", SCRIPTS_WHAT],
+    [".cairn/githooks/pre-push", HOOKS_WHAT],
+    [".cairn/githooks/pre-commit", HOOKS_WHAT],
+  ];
+
+  /** The fixture with an installed-looking pair of folders. */
+  function fixture() {
+    const f = hardenFixture("gate");
+    mkdirSync(join(f.p, ".cairn", "harness", "scripts"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "harness", "verbs"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "githooks"), { recursive: true });
+    mkdirSync(join(f.p, ".cairn", "notes"), { recursive: true });
+    writeFileSync(join(f.p, ".cairn", "harness", "scripts", "lib.mjs"), "export {};\n");
+    writeFileSync(join(f.p, ".cairn", "githooks", "pre-push"), "#!/bin/sh\n");
+    return f;
+  }
+
+  const refused = (r: { status: number | null; stderr: string }, what: string, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(what);
+    expect(r.stderr, label).toContain("file:");
+  };
+
+  it("refuses every tool and shell shape onto a file there, and reading or running one passes", () => {
+    const { p, home } = fixture();
+    for (const [rel, what] of FILES) {
+      refused(hardenRun(p, home, "Edit", { file_path: join(p, rel), old_string: "a", new_string: "b" }), what, `Edit ${rel}`);
+      refused(hardenRun(p, home, "Write", { file_path: join(p, rel), content: "x" }), what, `Write ${rel}`);
+      refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, rel), content: "x" }), what, `MCP ${rel}`);
+      for (const c of [`echo x >> ${rel}`, `tee ${rel} < /dev/null`, `sed -i '' s/a/b/ ${rel}`, `cp /tmp/x ${rel}`, `mv /tmp/x ${rel}`,
+        `rm ${rel}`, `touch ${rel}`, `dd if=/tmp/x of=${rel}`, `chmod 755 ${rel}`, `ln ${rel} /tmp/second-name`,
+        `bash -c 'echo x > ${rel}'`, `D=${rel}; echo x > $D`]) {
+        refused(hardenRun(p, home, "Bash", { command: c }), what, c);
+      }
+      for (const c of [`cat ${rel}`, `grep -n x ${rel}`, `cp ${rel} /tmp/copy-of-it`, `git add -N ${rel}`]) {
+        expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+      }
+    }
+    expect(hardenRun(p, home, "Bash", { command: "node .cairn/harness/scripts/merge-overlap.mjs" }).status).toBe(0);
+    expect(hardenRun(p, home, `${HARDEN_DC}read_file`, { path: join(p, ".cairn/harness/verbs/plan.md") }).status).toBe(0);
+    // an empty folder changes nothing, and the rest of .cairn is ordinary work
+    expect(hardenRun(p, home, "Bash", { command: "mkdir -p .cairn/harness" }).status).toBe(0);
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".cairn/notes/note.md"), content: "x" }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > .cairn/notes/note.md && rm -rf .cairn/notes/old" }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "cp -r /tmp/evil/. .cairn/notes/" }).status).toBe(0);
+  });
+
+  it("the hostile spellings the issue never named: a whole tree dropped on the folder, a letter case, a link, a find, a removal of what holds it", () => {
+    const { p, home } = fixture();
+    for (const c of ["cp -r /tmp/evil/. .cairn/", "rsync -a /tmp/evil/ .cairn/", "rsync -a /tmp/evil/ .cairn/harness/",
+      "tar xzf /tmp/a.tgz -C .cairn/harness", "cp -r /tmp/harness .cairn/", "mv /tmp/harness .cairn/harness",
+      "ln -s /tmp/evil .cairn/harness", "echo x > .CAIRN/HARNESS/scripts/lib.mjs", "echo x > ./.cairn/./harness/scripts/lib.mjs",
+      "cd .cairn && cd harness && echo x > scripts/lib.mjs", "git -C .cairn/harness/scripts mv lib.mjs other.mjs",
+      "find . -name lib.mjs -delete", "find .cairn/harness -type f -exec rm {} +",
+      "rm -rf .cairn", "mv .cairn /tmp/parked", "chmod -R 000 .cairn", "rm -rf .cairn/*"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    // a folder on the way, while it isn't there as one: the move plants the whole tree
+    const empty = hardenFixture("gate-empty");
+    for (const c of ["mv /tmp/evil .cairn", "cp -r /tmp/evil .cairn", "ln -s /tmp/evil .cairn"]) {
+      expect(hardenRun(empty.p, empty.home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(empty.p, empty.home, "Bash", { command: "mkdir -p .cairn/notes" }).status).toBe(0);
+    // setup installs where it stands, so a package folder's own pair is the same thing
+    for (const c of ["echo x > pkg/.cairn/harness/scripts/pre-push.mjs", "echo x > pkg/.cairn/githooks/pre-push", "echo x > pkg/.cairn/state/approvals/01-x.json"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(p, home, "Write", { file_path: join(p, "pkg/lib/.cairn/harness/scripts/lib.mjs"), content: "x" }).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > pkg/.cairn/notes/a.md" }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = fixture();
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: "echo x >> ../../.cairn/harness/scripts/lib.mjs" }, at), SCRIPTS_WHAT, `shell, bare=${bare}`);
+      refused(hardenRun(p, home, "Bash", { command: "echo x >> ../../.cairn/githooks/pre-commit" }, at), HOOKS_WHAT, `hooks, bare=${bare}`);
+      refused(hardenRun(p, home, "Edit", { file_path: "../../.cairn/harness/scripts/lib.mjs", old_string: "a", new_string: "b" }, at), SCRIPTS_WHAT, `Edit, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: "cat ../../.cairn/harness/scripts/lib.mjs" }, at).status).toBe(0);
+      expect(hardenRun(p, home, "Bash", { command: "echo x > ../../.cairn/notes/note.md" }, at).status).toBe(0);
+    }
+  });
+
+  it("a linked worktree's copy counts: the hook looks in the worktree it runs from first", () => {
+    const { p, home } = fixture();
+    hardenGit(p, home, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    const wt = join(freshDir("cairn-hooks-gate-wt-"), "w1");
+    hardenGit(p, home, "worktree", "add", "-q", wt, "-b", "w1");
+    // the variable names the main checkout, the shell stands in the worktree: the session a wave worker has
+    refused(hardenRun(p, home, "Bash", { command: "echo x >> .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt }), SCRIPTS_WHAT, "worktree, variable on the main checkout");
+    refused(hardenRun(p, home, "Write", { file_path: join(wt, ".cairn/githooks/pre-push"), content: "x" }, { cwd: wt }), HOOKS_WHAT, "worktree, Write");
+    refused(hardenRun(wt, home, "Bash", { command: "echo x >> .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt, bare: true }), SCRIPTS_WHAT, "worktree, no variable");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > src.txt" }, { cwd: wt }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "cat .cairn/harness/scripts/pre-push.mjs" }, { cwd: wt }).status).toBe(0);
+    // the same shape on any folder: a relative core.hooksPath means each worktree's own
+    hardenGit(p, home, "config", "core.hooksPath", "scripts/hooks");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > scripts/hooks/pre-push" }, { cwd: wt }).status, "relative hooksPath, in the worktree").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > scripts/other.sh" }, { cwd: wt }).status).toBe(0);
+  });
+
+  it("the owner's session escape lets it through, and setup without the flag is not judged for what it writes there", () => {
+    const { p, home } = fixture();
+    const c = "echo x >> .cairn/harness/scripts/lib.mjs";
+    expect(hardenRun(p, home, "Bash", { command: c }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "node setup/cairn-setup.mjs claude" }).status).toBe(0);
+  });
+
+  it("the measured gaps, as the Not seen block says: a write in an interpreter, and the members of an archive extracted above the folder, pass", () => {
+    const { p, home } = fixture();
+    const c = "node -e \"require('fs').appendFileSync('.cairn/harness/scripts/lib.mjs','x')\"";
+    expect(hardenRun(p, home, "Bash", { command: c }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "tar xzf /tmp/a.tgz -C .cairn" }).status).toBe(0);
+  });
+});
+
+// #500: #460 refused the tool's approve flag and left the file the flag
+// writes an ordinary write away: the agent hashes the plan it edited, writes
+// the stamp by hand, and the close-time re-run trusts it. The stamps' folder
+// is a protected zone, the server's own write never passes a hook, and the
+// switch the stamp matters under, verify.rerun, is the owner's beside it.
+describe("the approval stamp can't be written straight to disk, and the re-run switch is the owner's (#500)", () => {
+  const WHAT = "the owner's approval stamp on a plan";
+  const STAMP = ".cairn/state/approvals/01-x.json";
+  const FORGED = JSON.stringify({ version: 1, phaseDir: "01-x", blob: "a".repeat(40), at: "2026-11-05T00:00:00.000Z", by: "owner <o@x>" });
+  const OWNER = "an owner-only key in cairn.json (verify.rerun)";
+
+  function fixture() {
+    const f = hardenFixture("stamp");
+    mkdirSync(join(f.p, ".cairn", "state", "approvals"), { recursive: true });
+    writeFileSync(join(f.p, ".cairn", "state", "active-context.json"), "{}\n");
+    writeFileSync(join(f.p, STAMP), FORGED);
+    writeFileSync(join(f.p, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }, null, 2));
+    return f;
+  }
+
+  const refused = (r: { status: number | null; stderr: string }, what: string, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(what);
+  };
+
+  it("refuses every route onto a stamp; reading one, hashing the plan and the state beside it pass", () => {
+    const { p, home } = fixture();
+    refused(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }), WHAT, "Write");
+    refused(hardenRun(p, home, "Edit", { file_path: join(p, STAMP), old_string: "a", new_string: "b" }), WHAT, "Edit");
+    refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, STAMP), content: FORGED }), WHAT, "MCP");
+    for (const c of [`echo '{}' > ${STAMP}`, `printf x >> ${STAMP}`, `tee ${STAMP} < /tmp/s`, `cp /tmp/s ${STAMP}`, `mv /tmp/s ${STAMP}`, `rm ${STAMP}`,
+      "rm -rf .cairn/state/approvals", "rm -rf .cairn/state", "mv .cairn/state /tmp/parked", "ln -s /tmp/forged .cairn/state/approvals",
+      "cp -r /tmp/forged/. .cairn/state/approvals/", "cp -r /tmp/forged/. .cairn/state/", "find .cairn/state/approvals -type f -delete"]) {
+      refused(hardenRun(p, home, "Bash", { command: c }), "", c);
+    }
+    for (const c of [`cat ${STAMP}`, "git hash-object -w cairn.json", "echo '{}' > .cairn/state/active-context.json", "ls .cairn/state/approvals"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".cairn/state/active-context.json"), content: "{}" }).status).toBe(0);
+  });
+
+  it("a state folder that isn't there yet can't be moved in whole, and the session escape is the owner's way in", () => {
+    const empty = hardenFixture("stamp-empty");
+    mkdirSync(join(empty.p, ".cairn"), { recursive: true });
+    for (const c of ["mv /tmp/forged .cairn/state", "ln -s /tmp/forged .cairn/state"]) {
+      expect(hardenRun(empty.p, empty.home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    const { p, home } = fixture();
+    expect(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459), and in a linked worktree", () => {
+    const { p, home } = fixture();
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: `echo '{}' > ../../${STAMP}` }, at), WHAT, `shell, bare=${bare}`);
+      refused(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }, at), WHAT, `Write, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: `cat ../../${STAMP}` }, at).status).toBe(0);
+    }
+    hardenGit(p, home, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    const wt = join(freshDir("cairn-hooks-stamp-wt-"), "w1");
+    hardenGit(p, home, "worktree", "add", "-q", wt, "-b", "w1");
+    refused(hardenRun(p, home, "Write", { file_path: join(wt, STAMP), content: FORGED }, { cwd: wt }), WHAT, "linked worktree");
+  });
+
+  it("verify.rerun is an owner-only key: on is refused by every route, off, a sibling and a read pass", () => {
+    const { p, home } = fixture();
+    const cfg = join(p, "cairn.json");
+    const on = (v: unknown) => JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } }, verify: { rerun: v } });
+    refused(hardenRun(p, home, "Write", { file_path: cfg, content: on(true) }), OWNER, "Write on");
+    refused(hardenRun(p, home, "Write", { file_path: cfg, content: on("true") }), OWNER, "Write, a string where the boolean goes");
+    refused(hardenRun(p, home, "Bash", { command: `echo '${on(true)}' > cairn.json` }), OWNER, "shell line");
+    refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: cfg, content: on(true) }), OWNER, "MCP");
+    expect(hardenRun(p, home, "Write", { file_path: cfg, content: on(false) }).status).toBe(0);
+    expect(hardenRun(p, home, "Write", { file_path: cfg, content: JSON.stringify({ verify: { timeoutSeconds: 90 } }) }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "grep rerun cairn.json" }).status).toBe(0);
+    for (const bare of [false, true]) {
+      refused(hardenRun(p, home, "Write", { file_path: cfg, content: on(true) }, { cwd: join(p, "pkg", "lib"), bare }), OWNER, `nested, bare=${bare}`);
+    }
+  });
+
+  it("the server's own reader, on the stamp a process wrote: what the guard can't see is what the sentence says it can't", () => {
+    // the Not seen line: a stamp from an interpreter reaches the reader, shape checked and no more
+    const { p, home } = fixture();
+    const c = `node -e "require('fs').writeFileSync('${STAMP}','{}')"`;
+    expect(hardenRun(p, home, "Bash", { command: c }).status).toBe(0);
+  });
+});
+
+// #506: the #465 refusal read `git config` and no alias of it, so one -c on
+// the same line set the pointer past it. The harness guard now reads a git
+// line through the run guard's resolver (git-effects.mjs resolveAlias) on
+// every channel the line can carry an alias on, so every git leg it has
+// inherits the expansion, not only the pointer's.
+describe("an alias that runs git config core.hooksPath is the pointer: every channel (#506)", () => {
+  const WHAT = "where git looks for its hooks (core.hooksPath)";
+  const SET = "config core.hooksPath /tmp/h";
+
+  const refused = (r: { status: number | null; stderr: string }, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(WHAT);
+    expect(r.stderr, label).toContain("file:");
+  };
+
+  const REFUSED = [
+    // the issue's own, and every place a value can sit on the line
+    `git -c alias.ch='${SET}' ch`,
+    `git -C pkg -c alias.ch='${SET}' ch`,
+    `git -c ALIAS.CH='${SET}' ch`,
+    `git -c alias.ch='config --global core.hooksPath /tmp/h' ch`,
+    `git -c alias.ch='config set core.hooksPath /tmp/h' ch`,
+    `git -c alias.ch='config include.path /tmp/evil.cfg' ch`,
+    // an alias of an alias, and the words typed after it
+    `git -c alias.a=b -c alias.b='${SET}' a`,
+    "git -c alias.ch=config ch core.hooksPath /tmp/h",
+    "git -c 'alias.ch=config core.hooksPath' ch /tmp/h",
+    // a name git keeps for its builtin can't stand in for the write: git runs config
+    `git -c alias.a='${SET}' -c alias.config=status a`,
+    "git -c alias.config=status config core.hooksPath /tmp/h",
+    `git -c alias.a='-c alias.config=status ${SET}' a`,
+    // the environment's channels
+    `V='${SET}' git --config-env=alias.ch=V ch`,
+    `export V='${SET}'; git --config-env=alias.ch=V ch`,
+    `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.ch GIT_CONFIG_VALUE_0='${SET}' git ch`,
+    `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.ch GIT_CONFIG_VALUE_0='${SET}' git ch`,
+    // spelled from what the line assigned
+    `V='${SET}'; git -c "alias.ch=$V" ch`,
+    // what the guard can't read, on a name that may be an alias
+    'git -c "alias.ch=$(cat /tmp/f)" ch',
+    'git -c "$(cat /tmp/f)" ch',
+    "GIT_CONFIG_PARAMETERS=\"'alias.ch=config core.hooksPath /tmp/h'\" git ch",
+    "git --config-env=alias.ch=V ch",
+    // a shell alias is a line of its own
+    "git -c 'alias.ch=!git config core.hooksPath /tmp/h' ch",
+    "git -c 'alias.ch=! git config --global core.hooksPath /tmp/h' ch",
+    // the alias saved on this same line, and saved with the pointer inside it for later
+    `git config alias.ch '${SET}' && git ch`,
+    `git config --global alias.ch '${SET}'`,
+    "git config alias.ch '!git config core.hooksPath /tmp/h'",
+    `git config set alias.ch '${SET}'`,
+    // through what nests a git line
+    `bash -c "git -c alias.ch='${SET}' ch"`,
+    // a subcommand the stream names
+    `echo '${SET}' | xargs git`,
+    // a subcommand or a key a substitution computes
+    "git $(echo config) core.hooksPath /tmp/h",
+    "V=$(echo config); git $V core.hooksPath /tmp/h",
+    "git config $(echo core.hooksPath) /tmp/h",
+    "K=$(echo core.hooksPath); git config $K /tmp/h",
+  ];
+
+  const TWINS = [
+    // an alias that only reads the key, or that writes another
+    "git -c alias.r='config core.hooksPath' r",
+    "git -c alias.r='config --get core.hooksPath' r",
+    "git -c alias.st=status st",
+    "git -c 'alias.l=log -1 --oneline' l",
+    "git -c alias.ch='config user.name x' ch",
+    "git -c 'alias.w=!echo hi' w",
+    // saving an alias that writes nothing protected
+    "git config alias.st status",
+    "git config --global alias.l 'log -1'",
+    "git config --get alias.ch",
+    // the variable's name is typed, and a builtin never expands: nothing here can be an alias
+    'git -c "user.name=$N" commit --allow-empty -m x',
+    'git -c "$K=1" status',
+    // a stream of paths, not of subcommands
+    "git ls-files | xargs git add",
+    // a computed value, on a key the line spells, is only a value
+    'git config user.name "$(whoami)"',
+  ];
+
+  it("refuses each channel and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("alias");
+    for (const c of REFUSED) refused(hardenRun(p, home, "Bash", { command: c }), c);
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("alias-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: `git -c alias.ch='${SET}' ch` }, at), `inline, bare=${bare}`);
+      refused(hardenRun(p, home, "Bash", { command: `git config alias.ch '${SET}'` }, at), `saved, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: "git -c alias.r='config core.hooksPath' r" }, at).status).toBe(0);
+    }
+  });
+
+  it("an alias saved earlier is asked of git, at the folder the command runs in; one the session's environment carries is read too", () => {
+    const { p, home } = hardenFixture("alias-saved");
+    hardenGit(p, home, "config", "alias.ch", SET);
+    hardenGit(p, home, "config", "alias.st", "status");
+    hardenGit(p, home, "config", "alias.sh", "!git config core.hooksPath /tmp/h");
+    refused(hardenRun(p, home, "Bash", { command: "git ch" }), "saved");
+    refused(hardenRun(p, home, "Bash", { command: "git sh" }), "saved shell alias");
+    refused(hardenRun(p, home, "Bash", { command: "git ch" }, { cwd: join(p, "pkg") }), "saved, from a subfolder");
+    expect(hardenRun(p, home, "Bash", { command: "git st" }).status).toBe(0);
+    const other = hardenFixture("alias-other");
+    refused(hardenRun(other.p, other.home, "Bash", { command: `git -C ${p} ch` }), "saved in the repo -C names");
+    expect(hardenRun(other.p, other.home, "Bash", { command: "git ch" }).status, "no alias of that name here").toBe(0);
+    const env = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.envy", GIT_CONFIG_VALUE_0: SET };
+    refused(hardenRun(other.p, other.home, "Bash", { command: "git envy" }, { env }), "session environment");
+  });
+
+  it("the other legs inherit the expansion: a write, a clone, a shell alias's own redirect", () => {
+    const { p, home } = hardenFixture("alias-legs");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}\n");
+    for (const c of ["git -c 'alias.co=checkout -- hooks/hooks.json' co", "git -c 'alias.r=rm hooks/hooks.json' r",
+      "git -c 'alias.cl=clone https://x/y .claude/skills/y' cl", "git -c 'alias.w=!echo x > hooks/hooks.json' w",
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.co GIT_CONFIG_VALUE_0='checkout -- hooks/hooks.json' git co"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(p, home, "Bash", { command: "git -c 'alias.co=checkout -- src/a.ts' co" }).status).toBe(0);
+  });
+
+  it("the scenario is real: git itself sets the key from the inline alias the guard refuses", () => {
+    const { p, home } = hardenFixture("alias-real");
+    hardenGit(p, home, "-c", `alias.ch=${SET}`, "ch");
+    expect(hardenGit(p, home, "config", "--get", "core.hooksPath")).toBe("/tmp/h");
+  });
+
+  it("the measured gap, as the Not seen block says: a config key that runs a program, other than the pointer, passes", () => {
+    const { p, home } = hardenFixture("alias-gap");
+    for (const c of ["git config core.fsmonitor /tmp/x", "git config core.sshCommand /tmp/x", "git config alias.ch '!/tmp/x'"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+});
+
+// #507: a template folder's hooks/ is copied into .git/hooks by the init or
+// clone that names it, the third pointer-shaped way to plant a hook after the
+// folder (#353) and core.hooksPath (#465). Every way a line can name a
+// template is refused; a plain init, and reading the key, are ordinary.
+describe("a template folder copies hooks into .git/hooks: git init and clone (#507)", () => {
+  const WHAT = "the template folder git copies hooks from";
+  const POINTER = "where git looks for its hooks (core.hooksPath)";
+  const URL = "https://example.com/r.git";
+
+  const REFUSED: Array<[string, string]> = [
+    // the flag, in each spelling git's parser takes
+    ["git init --template=/tmp/t", WHAT],
+    ["git init --template /tmp/t", WHAT],
+    ["git init --temp=/tmp/t", WHAT],
+    ["git init -q --templ /tmp/t sub", WHAT],
+    [`git clone --template=/tmp/t ${URL} d`, WHAT],
+    [`git clone --template /tmp/t ${URL} d`, WHAT],
+    // init.templateDir on every channel
+    ["git -c init.templateDir=/tmp/t init", WHAT],
+    ["git -c INIT.TEMPLATEDIR=/tmp/t init", WHAT],
+    [`git -c init.templateDir=/tmp/t clone ${URL} d`, WHAT],
+    ["V=/tmp/t git --config-env=init.templateDir=V init", WHAT],
+    ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=init.templateDir GIT_CONFIG_VALUE_0=/tmp/t git init", WHAT],
+    ["git -c \"init.templateDir=$(cat /tmp/f)\" init", WHAT],
+    ["git -c \"$(cat /tmp/f)\" init", WHAT],
+    ["GIT_CONFIG_PARAMETERS=\"'init.templateDir=/tmp/t'\" git init", WHAT],
+    // saved, for the next init
+    ["git config init.templateDir /tmp/t", WHAT],
+    ["git config --global init.templateDir /tmp/t", WHAT],
+    ["git config --system init.templatedir /tmp/t", WHAT],
+    ["git config --file /tmp/c init.templateDir /tmp/t", WHAT],
+    ["git config set init.templateDir /tmp/t", WHAT],
+    ["git config --add INIT.TemplateDir /tmp/t", WHAT],
+    ["git config --rename-section evil init", WHAT],
+    ["git config --rename-section evil core", POINTER],
+    // the environment
+    ["GIT_TEMPLATE_DIR=/tmp/t git init", WHAT],
+    ["env GIT_TEMPLATE_DIR=/tmp/t git init", WHAT],
+    ["export GIT_TEMPLATE_DIR=/tmp/t; git init", WHAT],
+    ["export GIT_TEMPLATE_DIR=$(cat /tmp/f); git init", WHAT],
+    [`GIT_TEMPLATE_DIR=/tmp/t git clone ${URL} d`, WHAT],
+    [`GIT_TEMPLATE_DIR=/tmp/t git submodule add ${URL} d`, WHAT],
+    // a setting clone writes into the new repository's config
+    [`git clone -c core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --config core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --config=core.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone --conf=CORE.HOOKSPATH=/tmp/h ${URL} d`, POINTER],
+    [`git clone -ccore.hooksPath=/tmp/h ${URL} d`, POINTER],
+    [`git clone -c include.path=/tmp/evil ${URL} d`, POINTER],
+    [`git clone -c init.templateDir=/tmp/t ${URL} d`, WHAT],
+    [`git clone -c "$(cat /tmp/f)" ${URL} d`, POINTER],
+    // through an alias, and through what nests a git line
+    ["git -c 'alias.i=init --template=/tmp/t' i", WHAT],
+    ["git config alias.i 'init --template=/tmp/t'", WHAT],
+    ["bash -c 'git init --template=/tmp/t'", WHAT],
+  ];
+
+  const TWINS = [
+    "git init", "git init -q", "git init sub", "git init --bare sub.git", "git init -b main sub",
+    `git clone ${URL} d`, `git clone -c user.name=x ${URL} d`, `git clone --tags ${URL} d`, `git clone --depth 1 ${URL} d`,
+    `git clone -c "user.name=$(whoami)" ${URL} d`,
+    // reading the key
+    "git config init.templateDir", "git config --get init.templateDir", "git config get init.templateDir", "git config --list",
+    // a one-command setting on a command that copies nothing
+    "git -c init.templateDir=/tmp/t status", "GIT_TEMPLATE_DIR=/tmp/t git status", "git -c core.hooksPath=/tmp/h status",
+    // the other keys in that section
+    "git config init.defaultBranch main", "git -c init.defaultBranch=main init",
+    "echo '[init] defaultBranch = main' >> .git/config",
+  ];
+
+  it("refuses each spelling and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("tpl");
+    for (const [c, what] of REFUSED) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(what);
+    }
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+  });
+
+  it("a templateDir line put into a git config file is the same write, by the shell or a tool", () => {
+    const { p, home } = hardenFixture("tpl-file");
+    const cfg = join(p, ".git", "config");
+    for (const c of ["echo '[init] templateDir = /tmp/t' >> .git/config", "printf '[init]\\n\\ttemplatedir = /tmp/t\\n' >> .git/config",
+      `echo '[init] templateDir = /tmp/t' >> ${join(home, ".gitconfig")}`]) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+    }
+    expect(hardenRun(p, home, "Edit", { file_path: cfg, old_string: "x", new_string: "templateDir = /tmp/t" }).status).toBe(2);
+    expect(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: cfg, content: "[init]\n\ttemplateDir = /tmp/t\n" }).status).toBe(2);
+    expect(hardenRun(p, home, "Edit", { file_path: cfg, old_string: "x", new_string: "name = y" }).status).toBe(0);
+    // the measured gap, as the Not seen block says: content the line doesn't spell
+    expect(hardenRun(p, home, "Bash", { command: "cp /tmp/evil.cfg .git/config" }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("tpl-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      for (const c of ["git init --template=/tmp/t", "GIT_TEMPLATE_DIR=/tmp/t git init", "git config init.templateDir /tmp/t",
+        "echo '[init] templateDir = /tmp/t' >> ../../.git/config"]) {
+        expect(hardenRun(p, home, "Bash", { command: c }, at).status, `${c}, bare=${bare}`).toBe(2);
+      }
+      for (const c of ["git init sub", "git config --get init.templateDir"]) {
+        expect(hardenRun(p, home, "Bash", { command: c }, at).status, `${c}, bare=${bare}`).toBe(0);
+      }
+    }
+  });
+
+  it("the scenario is real: git copies the template's hook into the repository the guard refuses to re-init", () => {
+    const { p, home } = hardenFixture("tpl-real");
+    const tpl = freshDir("cairn-hooks-tpl-dir-");
+    mkdirSync(join(tpl, "hooks"), { recursive: true });
+    writeFileSync(join(tpl, "hooks", "pre-commit"), "#!/bin/sh\n");
+    hardenGit(p, home, "init", "-q", `--template=${tpl}`);
+    expect(existsSync(join(p, ".git", "hooks", "pre-commit"))).toBe(true);
+    // and the abbreviation this guard reads is one git takes
+    const q = hardenFixture("tpl-real-abbrev");
+    hardenGit(q.p, q.home, "init", "-q", `--temp=${tpl}`);
+    expect(existsSync(join(q.p, ".git", "hooks", "pre-commit"))).toBe(true);
+  });
+});
+
+// #508: `--git-hooks` writes core.hooksPath and arms whatever the folder
+// holds, and the flag was the consent any process could pass. Run by the
+// agent it is a harness write under the same escape as every other; setup's
+// own refusal of a folder holding hooks it did not write is setup.test.ts
+// "(#508)", for the harnesses where no guard runs.
+describe("an agent-run cairn-setup --git-hooks needs the owner (#508)", () => {
+  const WHAT = "where git looks for its hooks (core.hooksPath)";
+  const PKG = "@eventually-consistent/cairn";
+
+  const REFUSED = [
+    "node setup/cairn-setup.mjs claude --git-hooks",
+    "node ./setup/cairn-setup.mjs codex --git-hooks",
+    "node /opt/cairn/setup/cairn-setup.mjs claude --project . --git-hooks",
+    "node --no-warnings setup/cairn-setup.mjs claude --git-hooks",
+    "bun setup/cairn-setup.mjs claude --git-hooks",
+    "deno run -A setup/cairn-setup.mjs claude --git-hooks",
+    "npx cairn-setup codex --git-hooks",
+    `npx ${PKG} claude --git-hooks`,
+    // the sibling the plan names, and the runners around it
+    `npx --yes ${PKG}@latest claude --git-hooks`,
+    `npx -y -p ${PKG} cairn-setup claude --git-hooks`,
+    `npx --package=${PKG} cairn-setup claude --git-hooks`,
+    `pnpm dlx ${PKG} claude --git-hooks`,
+    `yarn dlx ${PKG} claude --git-hooks`,
+    `bunx ${PKG} claude --git-hooks`,
+    "npm exec -- cairn-setup claude --git-hooks",
+    "npm run setup -- claude --git-hooks",
+    // by name, a path, or a letter case the volume doesn't count
+    "cairn-setup claude --git-hooks",
+    "./node_modules/.bin/cairn-setup claude --git-hooks",
+    "CAIRN-SETUP claude --git-hooks",
+    // through what nests a command
+    "bash -c 'npx cairn-setup claude --git-hooks'",
+    "env X=1 cairn-setup claude --git-hooks",
+    "op run -- cairn-setup claude --git-hooks",
+    "eval cairn-setup claude --git-hooks",
+    "nohup cairn-setup claude --git-hooks",
+    "tsx setup/cairn-setup.mjs claude --git-hooks",
+    // the flag spelled from what the line gave it, or where the guard can't read it
+    "F=--git-hooks; cairn-setup claude $F",
+    "cairn-setup claude --git-{hooks,x}",
+    "cairn-setup claude $(echo --git-hooks)",
+    "F=$(echo --git-hooks); node setup/cairn-setup.mjs claude $F",
+    "cairn-setup claude $F",
+    "echo --git-hooks | xargs cairn-setup claude",
+    "echo --git-hooks | xargs node setup/cairn-setup.mjs claude",
+    "cairn-setup claude --git-h*",
+  ];
+
+  const TWINS = [
+    "node setup/cairn-setup.mjs claude",
+    "node ./setup/cairn-setup.mjs codex --local",
+    "npx cairn-setup claude",
+    `npx --yes ${PKG}@latest claude`,
+    "cairn-setup claude --check",
+    'cairn-setup claude --project "$PWD"',
+    "cairn-setup claude --project /tmp/x --local",
+    'node setup/cairn-setup.mjs "--project=$PWD" claude',
+    // naming it is not running it
+    "grep -n -- --git-hooks setup/cairn-setup.mjs",
+    "rg -- --git-hooks docs",
+    "cat setup/cairn-setup.mjs",
+    "echo cairn-setup claude --git-hooks",
+    "sed -n 1,5p setup/cairn-setup.mjs",
+    // a runner running something else, and a package with the name inside its own
+    "npx vitest run test/setup.test.ts",
+    "npm test",
+    "npx @eventually-consistent/cairn-server --help",
+  ];
+
+  it("refuses every spelling of the install and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("setup");
+    for (const c of REFUSED) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+      expect(r.stderr, c).toContain("--git-hooks");
+    }
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    // an MCP tool's command line reads the same
+    expect(hardenRun(p, home, `${HARDEN_DC}start_process`, { command: "npx cairn-setup claude --git-hooks" }).status).toBe(2);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("setup-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude --git-hooks" }, at).status, `bare=${bare}`).toBe(2);
+      expect(hardenRun(p, home, "Bash", { command: "npx cairn-setup claude --git-hooks" }, at).status, `bare=${bare}`).toBe(2);
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude" }, at).status, `bare=${bare}`).toBe(0);
+    }
+  });
+
+  it("the owner's escape lets it through: the session's, and the inline prefix every harness write honours (#265)", () => {
+    const { p, home } = hardenFixture("setup-escape");
+    const c = "node setup/cairn-setup.mjs claude --git-hooks";
+    expect(hardenRun(p, home, "Bash", { command: c }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 ${c}` }).status).toBe(0);
+    // ... and it exempts only its own command
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 true; ${c}` }).status).toBe(2);
+  });
+
+  it("the measured gap, as the Not seen block says: a renamed copy run directly, or setup started from an interpreter, passes", () => {
+    const { p, home } = hardenFixture("setup-gap");
+    for (const c of ["/tmp/renamed claude --git-hooks", "node -e \"require('child_process').execSync('cairn-setup claude --git-hooks')\""]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+});
+
+// #510: with no CLAUDE_PROJECT_DIR the root came from `git rev-parse
+// --show-toplevel`, so a shell standing in a nested repository (a submodule, a
+// scratch repo, a cloned dependency) judged a write to the outer project's
+// harness files against the inner repo, and it passed. The harness and write
+// guards now judge against the inner top level and any outer ancestor holding
+// .claude or cairn.json, stopping below the home folder, which holds .claude
+// too. With the variable set nothing changes, and a nested repo under no
+// project keeps its own root. The leak guard stays the inner repository's: the
+// commit lands there.
+describe("a nested repository is not the guards' whole root (#510)", () => {
+  /** An outer project (marked by `marker`), an ordinary src, a nested repo with a deeper folder, and an empty home. */
+  function fixture(marker: ".claude" | "cairn.json" | null = ".claude") {
+    const p = freshDir("cairn-hooks-nest-proj-");
+    const home = freshDir("cairn-hooks-nest-home-");
+    if (marker === ".claude") mkdirSync(join(p, ".claude"), { recursive: true });
+    if (marker === "cairn.json") writeFileSync(join(p, "cairn.json"), "{}\n");
+    mkdirSync(join(p, "src"), { recursive: true });
+    const nested = join(p, "vendor", "inner");
+    mkdirSync(join(nested, "deep"), { recursive: true });
+    hardenGit(nested, home, "init", "-q");
+    return { p, home, nested };
+  }
+
+  const OUTER_WRITES = ["echo x > ../../hooks/a.mjs", "echo x > ../../.mcp.json", "echo x > ../../.claude/settings.json",
+    "cp /tmp/x ../../.claude/skills/y/SKILL.md", "echo x >> ../../.cairn/harness/scripts/lib.mjs", "echo x > ../../.cairn/state/approvals/01-x.json"];
+
+  it("the issue's scenario: from the nested repo, with no variable, a write to the outer project's harness refuses, by the shell and by a tool", () => {
+    const { p, home, nested } = fixture();
+    const at = { cwd: nested, bare: true };
+    for (const c of OUTER_WRITES) expect(hardenRun(p, home, "Bash", { command: c }, at).status, c).toBe(2);
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".claude", "settings.json"), content: "{}" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Edit", { file_path: "../../hooks/a.mjs", old_string: "a", new_string: "b" }, at).status).toBe(2);
+    expect(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, ".mcp.json"), content: "{}" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "rm -rf ../.." }, at).status).toBe(2);
+  });
+
+  it("the harmless twins: the inner repo's own files, the outer's ordinary ones, and reading a protected one pass", () => {
+    const { p, home, nested } = fixture();
+    const at = { cwd: nested, bare: true };
+    for (const c of ["echo x > a.txt", "echo x > ../../src/a.ts", "rm -rf ../../src", "cat ../../hooks/a.mjs", "cat ../../.claude/settings.json"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }, at).status, c).toBe(0);
+    }
+    // the inner repo is a root of its own too
+    expect(hardenRun(p, home, "Bash", { command: "echo x > hooks/a.mjs" }, at).status).toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > .claude/settings.json" }, at).status).toBe(2);
+  });
+
+  it("the nested-cwd variant: from a folder deeper in the inner repo, and an outer marked by cairn.json alone", () => {
+    const a = fixture();
+    expect(hardenRun(a.p, a.home, "Bash", { command: "echo x > ../../../hooks/a.mjs" }, { cwd: join(a.nested, "deep"), bare: true }).status).toBe(2);
+    expect(hardenRun(a.p, a.home, "Bash", { command: "echo x > ../../../src/a.ts" }, { cwd: join(a.nested, "deep"), bare: true }).status).toBe(0);
+    const b = fixture("cairn.json");
+    expect(hardenRun(b.p, b.home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: b.nested, bare: true }).status).toBe(2);
+    // an owner-only key in the outer project's config, from inside the inner repo
+    expect(hardenRun(b.p, b.home, "Bash", { command: `echo '{"verify":{"rerun":true}}' > ../../cairn.json` }, { cwd: b.nested, bare: true }).status).toBe(2);
+  });
+
+  it("hostile: an inner repo inside a protected folder is the outer's protected folder, whatever it calls its own root", () => {
+    const { p, home } = fixture();
+    const inside = join(p, "hooks", "vendored");
+    mkdirSync(inside, { recursive: true });
+    hardenGit(inside, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > a.mjs" }, { cwd: inside, bare: true }).status).toBe(2);
+    expect(hardenRun(p, home, "Write", { file_path: join(inside, "a.mjs"), content: "x" }, { cwd: inside, bare: true }).status).toBe(2);
+    const skill = join(p, ".claude", "skills", "y");
+    mkdirSync(skill, { recursive: true });
+    hardenGit(skill, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > SKILL.md" }, { cwd: skill, bare: true }).status).toBe(2);
+  });
+
+  it("hostile: what the outer project's own settings run, its own git hooks, and three levels of nesting", () => {
+    const { p, home, nested } = fixture();
+    mkdirSync(join(p, "scripts"), { recursive: true });
+    writeFileSync(join(p, ".claude", "settings.json"), JSON.stringify({
+      hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "node $CLAUDE_PROJECT_DIR/scripts/gate.mjs" }] }] },
+    }));
+    writeFileSync(join(p, "scripts", "gate.mjs"), "\n");
+    hardenGit(p, home, "init", "-q");
+    const at = { cwd: nested, bare: true };
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../scripts/gate.mjs" }, at).status, "a script the outer settings run").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../.git/hooks/pre-commit" }, at).status, "the outer's git hooks").toBe(2);
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../scripts/other.mjs" }, at).status, "beside it").toBe(0);
+    const third = join(nested, "again");
+    mkdirSync(third, { recursive: true });
+    hardenGit(third, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../../.mcp.json" }, { cwd: third, bare: true }).status).toBe(2);
+  });
+
+  it("with the variable set nothing changes, and a nested repo under no project keeps its own root", () => {
+    const { p, home, nested } = fixture();
+    // the harness names the inner repo: the outer is outside the project, as it always was
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, root: nested }).status).toBe(0);
+    // ... and naming the outer refuses it, as it always did
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, root: p }).status).toBe(2);
+    const none = fixture(null);
+    expect(hardenRun(none.p, none.home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: none.nested, bare: true }).status).toBe(0);
+    expect(hardenRun(none.p, none.home, "Bash", { command: "echo x > hooks/a.mjs" }, { cwd: none.nested, bare: true }).status).toBe(2);
+  });
+
+  it("the walk stops below the home folder, which holds .claude too: a project under it isn't judged against it", () => {
+    const home = freshDir("cairn-hooks-nest-home-");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const repo = join(home, "work", "repo");
+    mkdirSync(repo, { recursive: true });
+    hardenGit(repo, home, "init", "-q");
+    const at = { cwd: repo, bare: true };
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, at).status, "home/hooks is nobody's hook directory").toBe(0);
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../other.txt" }, at).status).toBe(0);
+    // the home folder's own rules still stand, as they always did
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../../.claude/settings.json" }, at).status).toBe(2);
+    // and an outer project under the home folder still counts, below it
+    mkdirSync(join(home, "work", ".claude"), { recursive: true });
+    expect(hardenRun(repo, home, "Bash", { command: "echo x > ../hooks/a.mjs" }, at).status).toBe(2);
+  });
+
+  it("the leak guard stays the inner repository's, per the panel: the commit lands there", () => {
+    const { p, home, nested } = fixture("cairn.json");
+    writeFileSync(join(p, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }));
+    writeFileSync(join(nested, "a.ts"), 'const p = ".cairn' + '/plans/x";\n');
+    hardenGit(nested, home, "add", "a.ts");
+    const env: Record<string, string | undefined> = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
+    delete env.CLAUDE_PROJECT_DIR;
+    const r = spawnSync(process.execPath, [LEAKGUARD], {
+      cwd: nested, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "git commit -m x" }, cwd: nested }),
+    });
+    expect(r.status, r.stderr).toBe(0);
+  });
+
+  it("the measured gap, as the Not seen block says: an outer folder marked by neither is not a project the guards can name", () => {
+    const { p, home, nested } = fixture(null);
+    hardenGit(p, home, "init", "-q");
+    expect(hardenRun(p, home, "Bash", { command: "echo x > ../../hooks/a.mjs" }, { cwd: nested, bare: true }).status).toBe(0);
+  });
+
+  describe("the write guard takes the same helper", () => {
+    const WRITEGUARD = join(SCRIPTS, "pretooluse-writeguard.mjs");
+    const POLICY = { tracker: { type: "github", config: { repo: "o/r" } }, guards: { writers: { readOnly: ["cairn-uat"] } } };
+
+    function run(cwd: string, home: string, tool: string, input: Record<string, unknown>, root?: string) {
+      const env: Record<string, string | undefined> = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
+      delete env.CLAUDE_PROJECT_DIR;
+      if (root) env.CLAUDE_PROJECT_DIR = root;
+      const r = spawnSync(process.execPath, [WRITEGUARD], {
+        cwd, env, encoding: "utf8", timeout: 5000,
+        input: JSON.stringify({ tool_name: tool, tool_input: input, cwd, agent_type: "cairn-uat" }),
+      });
+      return r.status;
+    }
+
+    it("the outer project's table holds from the nested repo; with the variable set, or under no project, the inner root is what it was", () => {
+      const { p, home, nested } = fixture("cairn.json");
+      writeFileSync(join(p, "cairn.json"), JSON.stringify(POLICY));
+      expect(run(nested, home, "Bash", { command: "echo x > ../../src/a.ts" }), "the outer's file").toBe(2);
+      expect(run(nested, home, "Write", { file_path: join(p, "src", "a.ts"), content: "x" }), "the outer's file, by a tool").toBe(2);
+      expect(run(nested, home, "Bash", { command: "echo x > a.txt" }), "the inner repo sits inside the outer's table").toBe(2);
+      expect(run(join(nested, "deep"), home, "Bash", { command: "echo x > ../a.txt" }), "nested-cwd").toBe(2);
+      expect(run(nested, home, "Bash", { command: "cat ../../src/a.ts" }), "a read").toBe(0);
+      // the harness names the inner repo, which has no table: not a project this guard judges
+      expect(run(nested, home, "Bash", { command: "echo x > ../../src/a.ts" }, nested)).toBe(0);
+      const none = fixture(null);
+      expect(run(none.nested, none.home, "Bash", { command: "echo x > ../../src/a.ts" })).toBe(0);
+      // a nested project with a table of its own is judged by the nearest one
+      writeFileSync(join(nested, "cairn.json"), JSON.stringify({
+        tracker: POLICY.tracker, guards: { writers: { readOnly: [], paths: { "cairn-uat": ["a.txt"] } } },
+      }));
+      expect(run(nested, home, "Bash", { command: "echo x > a.txt" }), "its own table grants this path").toBe(0);
+      expect(run(nested, home, "Bash", { command: "echo x > b.txt" }), "and no other").toBe(2);
+    });
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with
@@ -7073,7 +7884,7 @@ describe("an owner-only key in cairn.json needs the owner: the harness guard (#2
     const source = readFileSync(HARNESSGUARD, "utf8");
     expect(source).toMatch(/^import \{[^}]*OWNER_ONLY_KEYS[^}]*\} from "\.\/owner-keys\.mjs";$/m);
     const hook = await import(pathToFileURL(join(scriptsDir, "owner-keys.mjs")).href);
-    expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"]);
+    expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers", "verify.rerun"]);
   });
 });
 

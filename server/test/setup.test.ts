@@ -753,6 +753,8 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     const owner = '#!/bin/sh\ncat > "$PWD/owner-saw.txt"\n';
     writeFileSync(join(proj, GITHOOKS, "pre-push"), owner);
     chmodSync(join(proj, GITHOOKS, "pre-push"), 0o755);
+    // the owner's own pointer: with none, this folder's hook is one setup won't arm (#508)
+    git(proj, "config", "core.hooksPath", GITHOOKS);
     run("codex", proj, home, "--git-hooks");
     const hook = readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8");
     expect(hook.startsWith("#!/bin/sh\n# cairn:begin")).toBe(true);
@@ -768,6 +770,106 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
 
     run("codex", proj, home, "--git-hooks");
     expect(readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+  });
+
+  // #508: the flag points git at the folder and arms what it holds. A folder
+  // holding hooks this install did not write is refused, for the harnesses
+  // where no guard stands in front of an agent-run install; the guard's half is
+  // hooks.test.ts "(#508)".
+  describe("a folder holding hooks setup did not write is never armed (#508)", () => {
+    const pointer = (proj: string) => spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: proj, encoding: "utf8" }).stdout.trim();
+
+    /** A commit from a plain shell, and whether a planted hook wrote its marker. */
+    function ownerCommits(proj: string, home: string): boolean {
+      const marker = join(proj, "armed.txt");
+      const r = spawnSync("git", ["commit", "-q", "--allow-empty", "-m", "owner", "--no-gpg-sign"], {
+        cwd: proj, encoding: "utf8", env: { ...process.env, ...GIT_IDENT, HOME: home },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return existsSync(marker);
+    }
+
+    function plant(proj: string, name: string, body: string): void {
+      mkdirSync(join(proj, GITHOOKS), { recursive: true });
+      writeFileSync(join(proj, GITHOOKS, name), body);
+      chmodSync(join(proj, GITHOOKS, name), 0o755);
+    }
+    const EVIL = '#!/bin/sh\necho armed > "$PWD/armed.txt"\n';
+
+    it("the issue's scenario: a planted pre-commit is named, nothing is pointed at it, and the owner's commit does not run it", () => {
+      const { proj, home } = repo();
+      plant(proj, "pre-commit", EVIL);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("did not write (pre-commit)");
+      expect(r.stderr).toContain("would arm them");
+      expect(pointer(proj)).toBe("");
+      expect(ownerCommits(proj, home)).toBe(false);
+    });
+
+    it("hostile: a pre-push with no markers, one with lines around the block, a link, and a folder of several, all named", () => {
+      const planted: Array<[string, string]> = [
+        ["pre-push", EVIL],
+        ["pre-push", `#!/bin/sh\n# cairn:begin -- managed by cairn-setup --git-hooks; do not edit inside markers\n# cairn:end\necho armed > "$PWD/armed.txt"\n`],
+        ["pre-push", `#!/bin/sh\necho armed > "$PWD/armed.txt"\n# cairn:begin -- managed by cairn-setup --git-hooks; do not edit inside markers\n# cairn:end\n`],
+      ];
+      for (const [name, body] of planted) {
+        const { proj, home } = repo();
+        plant(proj, name, body);
+        const r = attempt("codex", home, { project: proj }, "--git-hooks");
+        expect(r.status, r.out).toBe(1);
+        expect(r.stderr).toContain("did not write (pre-push)");
+        expect(pointer(proj)).toBe("");
+      }
+      const { proj, home } = repo();
+      mkdirSync(join(proj, GITHOOKS), { recursive: true });
+      symlinkSync("/nowhere", join(proj, GITHOOKS, "post-checkout"));
+      plant(proj, "post-commit", EVIL);
+      const r = attempt("codex", home, { project: proj }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("post-checkout");
+      expect(r.stderr).toContain("post-commit");
+      expect(pointer(proj)).toBe("");
+    });
+
+    it("the harmless twins: a re-run over its own hook, a sample and a dotfile; no flag at all; and a pointer the owner already set", () => {
+      const first = repo();
+      run("codex", first.proj, first.home, "--git-hooks");
+      const hook = readFileSync(join(first.proj, GITHOOKS, "pre-push"), "utf8");
+      // the pointer gone, the folder holding only what setup wrote: it arms nothing new
+      git(first.proj, "config", "--unset", "core.hooksPath");
+      plant(first.proj, "pre-commit.sample", EVIL);
+      writeFileSync(join(first.proj, GITHOOKS, ".gitignore"), "*\n");
+      const again = attempt("codex", first.home, { project: first.proj }, "--git-hooks");
+      expect(again.status, again.out).toBe(0);
+      expect(readFileSync(join(first.proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+      expect(pointer(first.proj)).toBe(join(first.proj, GITHOOKS));
+
+      const plain = repo();
+      plant(plain.proj, "pre-commit", EVIL);
+      const noFlag = attempt("codex", plain.home, { project: plain.proj });
+      expect(noFlag.status, noFlag.out).toBe(0);
+      expect(pointer(plain.proj)).toBe("");
+
+      // the owner's own pointer already runs that folder: the install adds its hook and arms nothing new
+      const set = repo();
+      plant(set.proj, "pre-commit", "#!/bin/sh\nexit 0\n");
+      git(set.proj, "config", "core.hooksPath", GITHOOKS);
+      const kept = attempt("codex", set.home, { project: set.proj }, "--git-hooks");
+      expect(kept.status, kept.out).toBe(0);
+      expect(existsSync(join(set.proj, GITHOOKS, "pre-commit"))).toBe(true);
+      expect(readFileSync(join(set.proj, GITHOOKS, "pre-push"), "utf8")).toContain("# cairn:begin");
+    });
+
+    it("the nested-cwd variant: run from a folder below the root, the folder it would point at is judged the same", () => {
+      const { proj, home } = repo();
+      const below = join(proj, "src");
+      plant(below, "pre-commit", EVIL);
+      const r = attempt("codex", home, { cwd: below }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      expect(r.stderr).toContain("did not write (pre-commit)");
+      expect(pointer(proj)).toBe("");
+    });
   });
 
   it("live hooks in the folder git runs today are refused in one line, nothing written, core.hooksPath left alone", () => {

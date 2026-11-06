@@ -24,7 +24,10 @@
 //      core.hooksPath pointed at it (#456). Opt-in, never default: a git
 //      config write is the owner's ground, and the flag is the consent. The
 //      consent is for this project: a core.hooksPath at global or system
-//      scope is never written into (#497).
+//      scope is never written into (#497). A flag is the owner's only where
+//      something says so: the harness guard refuses it from an agent without
+//      the owner's escape, and this install refuses to arm a folder holding
+//      hooks it did not write, for the harnesses running no guard (#508).
 //
 // Every copied-artifact surface gets a version stamp (.cairn-manifest.json:
 // source version + install date) so `--check` can answer "what's actually
@@ -514,12 +517,36 @@ function spliceHook(body, block) {
   return { next: `${first}\n${block}${nl < 0 ? "" : body.slice(nl + 1)}` };
 }
 
+/** True for a pre-push holding this install's block and nothing around it but a shebang. */
+function onlyOurBlock(path) {
+  let body;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  const start = body.indexOf(HOOK_BEGIN);
+  const end = body.indexOf(HOOK_END);
+  if (start < 0 || end < start) return false;
+  return /^(?:#![^\n]*\n)?\s*$/.test(body.slice(0, start) + body.slice(end + HOOK_END.length));
+}
+
+/** What in a hooks folder this install did not write (#508): a sample or a
+ *  dotfile git never runs aside, every name but a pre-push of ours alone. */
+function foreignHooks(dir) {
+  let names = [];
+  try {
+    names = readdirSync(dir).filter((n) => !n.startsWith(".") && !n.endsWith(".sample"));
+  } catch { /* no folder yet: nothing to arm */ }
+  return names.filter((n) => n !== "pre-push" || !onlyOurBlock(join(dir, n)));
+}
+
 /** Where the hook goes: the folder a local or worktree core.hooksPath names
  *  when set (respected, the setting stays), else cairn's own, which the
  *  install then names. Refused: a folder the setting shares with other
- *  repositories (#497), the install says why and writes nothing there; and
- *  live hooks in the folder git runs today that a new hooksPath would
- *  silence, the owner moves them or sets the path. */
+ *  repositories (#497), the install says why and writes nothing there; live
+ *  hooks in the folder git runs today that a new hooksPath would silence, the
+ *  owner moves them or sets the path. */
 function gitHooksTarget() {
   if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
     return { error: "not a git repository -- nothing for a pre-push hook to guard" };
@@ -559,6 +586,15 @@ function installGitHooks() {
     process.exit(1);
   }
   const path = checkLinks(join(target.dir, "pre-push"));
+  // Setting the pointer arms whatever the folder holds (#508), so one holding
+  // hooks this install did not write is the owner's to read first. A setting
+  // already there arms nothing new, and its folder keeps what it holds.
+  const foreign = target.configured === null ? foreignHooks(target.dir) : [];
+  if (foreign.length) {
+    console.error(`  --git-hooks: ${target.dir} holds hooks this install did not write (${foreign.join(", ")}), and pointing core.hooksPath at it would arm them for your next commit or push -- ` +
+      "read them, then remove them, or set core.hooksPath yourself, then re-run.");
+    process.exit(1);
+  }
   const scriptsOut = join(projectDir, SCRIPTS_REL);
   for (const f of helperClosure(join(repoRoot, "hooks", "scripts"), [PREPUSH])) {
     copyChecked(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));

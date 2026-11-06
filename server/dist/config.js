@@ -218,8 +218,8 @@ export const ConfigSchema = z.object({
 });
 // Owner-only keys (#281): the switches that widen what the agent may do --
 // the commit leak guard's off switch, ship's confirmation, the breaker's
-// limit, a peer CLI's licence to run the product, and the write authority
-// table. An agent can reach cairn.json through config_set or a plain file
+// limit, a peer CLI's licence to run the product, the write authority
+// table, and the close-time re-run of a plan's own verify line (#500). An agent can reach cairn.json through config_set or a plain file
 // write, and a steered one could grant itself the thing a guard refuses,
 // so these are the owner's: config_set refuses a patch that sets one to
 // anything but its safe value (below) unless the session carries the
@@ -236,6 +236,7 @@ export const OWNER_ONLY_KEYS = [
     "auto.breaker",
     "peers.*.execCapable",
     "guards.writers",
+    "verify.rerun",
 ];
 // The one value each key may be set to without the owner: its schema
 // default, the value that grants nothing. A key with no entry here
@@ -247,6 +248,7 @@ export const OWNER_ONLY_SAFE = {
     "ship.confirm": true,
     "auto.breaker": 3,
     "peers.*.execCapable": false,
+    "verify.rerun": false,
 };
 /** Every value `obj` holds at a dotted key, `*` matching one segment, as [path, value]; a null (a delete) or an absent key is none. */
 function valuesAt(obj, segs, path = []) {

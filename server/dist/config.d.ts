@@ -110,7 +110,7 @@ export declare const ConfigSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export type CairnConfig = z.infer<typeof ConfigSchema>;
-export declare const OWNER_ONLY_KEYS: readonly ["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"];
+export declare const OWNER_ONLY_KEYS: readonly ["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers", "verify.rerun"];
 export type OwnerOnlyKey = (typeof OWNER_ONLY_KEYS)[number];
 export declare const OWNER_ONLY_SAFE: Readonly<Partial<Record<OwnerOnlyKey, unknown>>>;
 /**

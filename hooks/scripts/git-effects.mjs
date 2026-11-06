@@ -459,10 +459,13 @@ export function inlineAlias(inv, name) {
  * settings gathered so far are kept, the expansion's own coming after
  * them -- read through the same `env` lookup the invocation was parsed
  * with (#467), so a --config-env inside an alias value is folded too.
+ * `builtin` names what else git runs itself, for a caller whose own rows
+ * sit off this table (the harness guard's `config`, #506): no alias stands
+ * in for one, an inline `-c alias.config=status` included.
  */
-export function resolveAlias(inv, lookup = () => undefined) {
+export function resolveAlias(inv, lookup = () => undefined, builtin = () => false) {
   const seen = new Set();
-  while (inv.sub && !TABLED.has(inv.sub) && !seen.has(inv.sub)) {
+  while (inv.sub && !TABLED.has(inv.sub) && !builtin(inv.sub) && !seen.has(inv.sub)) {
     seen.add(inv.sub);
     const value = inlineAlias(inv, inv.sub) ?? lookup(inv.sub);
     if (typeof value !== "string" || value === "") return inv;
