@@ -50,7 +50,9 @@
  * The rules, by effect
  *
  *   discards-work, in every session: the rows of EFFECT_TABLE (hard reset;
- *   force, mirror and prune pushes, or one deleting the default branch;
+ *   force, mirror and prune pushes, or one deleting the default branch; a
+ *   leading `+` in the `remote.<r>.push` a push follows, on the line, through
+ *   --config-env or GIT_CONFIG_*, or saved, is the same force, #502;
  *   forced or whole-tree checkout/restore; a discarding switch; clean; a
  *   forced whole-tree rm, #434; stash clear; a forced worktree remove; a
  *   stash pop, apply, drop or branch while more than one worktree shares
@@ -1428,6 +1430,19 @@ function branchSources(inv, at) {
 }
 
 /**
+ * True when a remote this push goes to has a `+` push refspec (#502): git
+ * applies it as a force, so a plain `git push origin main` rewrites the remote.
+ * Reads the saved settings, includes followed, and the session's GIT_CONFIG_*
+ * through git, plus this command's own: the same list a push's landing is read
+ * from. The table's pushSetting row asks only where git would follow it.
+ */
+function forcePushConfigured(inv, at) {
+  const current = gitOut(at, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const remote = pushRemote(inv, at, pushArgs(inv).words, current);
+  return remotePushSpecs(inv, at, remote).some((s) => s.startsWith("+"));
+}
+
+/**
  * True when a push's remote is configured to mirror already (`git remote
  * add --mirror=push`, `git config remote.<r>.mirror true`), which turns a
  * plain `git push <r>` into one that force-updates and deletes every
@@ -1522,6 +1537,7 @@ function reachesEveryFile(at, specs) {
  */
 const repoProbe = (at) => ({
   mirrorConfigured: (inv) => mirrorConfigured(inv, at),
+  forcePushConfigured: (inv) => forcePushConfigured(inv, at),
   deletesDefaultBranch: (inv) => defaultBranchSources(inv, at).includes(null),
   linkedWorktrees: () => linkedWorktrees(at),
   repoRoot: (word) => repoRoot(at, word),
@@ -2121,4 +2137,6 @@ try {
  *         root plus a glob), and one with a glob or `..` is asked of git, so a
  *         word that shows a literal character and still lists every tracked
  *         file (`*.*`) is whole-tree too.
+ *   #502  a leading + in a remote's push setting is the force row, on every
+ *         channel the guard reads; with no + it is judged for where it lands.
  */

@@ -964,3 +964,51 @@ describe("git effects: a relative root or a pathspec with no literal character i
     expect(causes("git rm -rf *.*", DISCARDS_WORK)).toEqual([]);
   });
 });
+
+describe("git effects: a leading + in a remote's push setting is the force row (#502)", () => {
+  const SPEC = "+refs/heads/*:refs/heads/*";
+
+  it("any -c spelling git would follow reads as `git push --force`, naming the setting; git's own exceptions do not", () => {
+    for (const c of [`git -c remote.origin.push=${SPEC} push`, `git -c remote.origin.push=${SPEC} push origin`,
+      `git -c remote.origin.push=${SPEC} push origin main`, `git -c REMOTE.origin.PUSH=${SPEC} push origin main`,
+      `git -c remote.origin.push=+main push --repo=origin`, `git -c remote.origin.push=${SPEC} push origin main x:y`]) {
+      const [hit, ...rest] = causes(c, DISCARDS_WORK);
+      expect(rest, c).toEqual([]);
+      expect(hit?.what, c).toBe("`git push --force`");
+      expect(hit?.flag, c).toMatch(/^-c remote\.origin\.push$/i);
+    }
+    // measured against git 2.56, 2026-11-05: each of these was rejected as a plain non-fast-forward
+    for (const c of ["git -c remote.origin.push=refs/heads/*:refs/heads/* push origin main",
+      `git -c remote.origin.push=${SPEC} push origin main:main`, `git -c remote.origin.push=${SPEC} push origin HEAD`,
+      `git -c remote.origin.push=${SPEC} push origin @`, `git -c remote.other.push=${SPEC} push origin main`,
+      `git -c remote.origin.push=${SPEC} push origin --all`, `git -c remote.origin.push=${SPEC} push --delete origin x`]) {
+      expect(causes(c, DISCARDS_WORK), c).toEqual([]);
+    }
+  });
+
+  it("--config-env and GIT_CONFIG_COUNT feed the same row; a value the lookup can't give is unread, and refused", () => {
+    const words = ["git", "--config-env=remote.origin.push=V", "push", "origin", "main"];
+    const hit = classify(parseInvocation(words, { env: (n: string) => (n === "V" ? SPEC : undefined) }), {}, { only: DISCARDS_WORK });
+    expect(hit.map((h: Cause) => h.what)).toEqual(["`git push --force`"]);
+    const plain = classify(parseInvocation(words, { env: (n: string) => (n === "V" ? SPEC.slice(1) : undefined) }), {}, { only: DISCARDS_WORK });
+    expect(plain).toEqual([]);
+    const unread = classify(parseInvocation(words, { env: () => undefined }), {}, { only: DISCARDS_WORK });
+    expect(unread.map((h: Cause) => h.what)).toEqual(["a git setting from a value the guard can't read"]);
+    expect(envConfig((n: string) => ({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.push", GIT_CONFIG_VALUE_0: SPEC } as Record<string, string>)[n]).configs)
+      .toEqual([`remote.origin.push=${SPEC}`]);
+  });
+
+  it("the saved half comes through the forcePushConfigured probe, asked only where git would follow the setting", () => {
+    const asked: unknown[] = [];
+    const probe = { forcePushConfigured: (i: unknown) => { asked.push(i); return true; } };
+    expect(causes("git push origin main", DISCARDS_WORK, probe).map((h) => h.flag)).toEqual(["remote.<name>.push"]);
+    expect(causes("git push", DISCARDS_WORK, probe).map((h) => h.flag)).toEqual(["remote.<name>.push"]);
+    asked.length = 0;
+    for (const c of ["git push origin main:main", "git push origin HEAD", "git push origin --all", "git push --delete origin x"]) {
+      expect(causes(c, DISCARDS_WORK, probe), c).toEqual([]);
+    }
+    expect(asked).toEqual([]);
+    // no probe: only what the line spells
+    expect(causes("git push origin main", DISCARDS_WORK)).toEqual([]);
+  });
+});

@@ -3807,3 +3807,138 @@ describe("run guard: a one-character glob or a relative root reaches every track
     }
   });
 });
+
+describe("run guard: a forced push written as a push setting is the force row (#502)", () => {
+  // The gap opens once the owner has shipped: with a clean stamp at HEAD the
+  // push reads as a plain push landing on a stamped main, and git applies the
+  // leading + and rewrites the remote. Every fixture here is stamped.
+  const SPEC = "+refs/heads/*:refs/heads/*";
+  const KEYS = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push";
+
+  /** The stamped fixture with a nested folder to run from -- the #383 matrix. */
+  function shipped(): { proj: string; home: string; sub: string } {
+    const { proj, home } = fixture();
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    return { proj, home, sub };
+  }
+
+  function expectForce(r: { status: number | null; stderr: string }, c: string): void {
+    expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    expect(r.stderr, c).toContain("refused in every session");
+    expect(r.stderr, c).toContain("`git push --force`");
+    expect(r.stderr, c).toContain("effect: discards-work");
+    expectOwnerTail(r.stderr, c, "CAIRN_ALLOW_DESTRUCTIVE_GIT");
+  }
+
+  it("git really does force on these, and rejects the twins, in a throwaway repository", () => {
+    const bare = freshDir("cairn-runguard-remote-");
+    const proj = freshDir("cairn-runguard-proj-");
+    git(bare, "init", "-q", "--bare");
+    git(proj, "init", "-q", "-b", "main");
+    writeFileSync(join(proj, "a"), "1\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "one", "--no-gpg-sign");
+    writeFileSync(join(proj, "a"), "2\n");
+    git(proj, "commit", "-q", "-a", "-m", "two", "--no-gpg-sign");
+    git(proj, "remote", "add", "origin", bare);
+    git(proj, "push", "-q", "origin", "main");
+    git(proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    const run = (...a: string[]) => spawnSync("git", a, { cwd: proj, encoding: "utf8" });
+    // the twins first: each rejected, so the rewrite is still there to force
+    for (const a of [["-c", "remote.origin.push=refs/heads/*:refs/heads/*", "push", "origin", "main"],
+      ["-c", `remote.origin.push=${SPEC}`, "push", "origin", "main:main"], ["-c", `remote.other.push=${SPEC}`, "push", "origin", "main"]]) {
+      const r = run(...a);
+      expect(r.status, a.join(" ")).toBe(1);
+      expect(r.stderr, a.join(" ")).toContain("rejected");
+    }
+    const forced = run("-c", `remote.origin.push=${SPEC}`, "push", "origin", "main");
+    expect(forced.status).toBe(0);
+    expect(forced.stderr).toContain("forced update");
+  });
+
+  it("every channel on the line refuses, stamped, from the root and a nested folder: -c, --config-env, GIT_CONFIG_COUNT, an export, a spelled variable", () => {
+    const { proj, home, sub } = shipped();
+    for (const c of [
+      `git -c remote.origin.push=${SPEC} push origin main`,
+      `git -c remote.origin.push=${SPEC} push`,
+      `git -c REMOTE.origin.PUSH=${SPEC} push origin`,
+      `V=${SPEC} git --config-env=remote.origin.push=V push origin main`,
+      `${KEYS} GIT_CONFIG_VALUE_0=${SPEC} git push origin main`,
+      `export ${KEYS} GIT_CONFIG_VALUE_0=${SPEC}; git push origin main`,
+      `S=${SPEC}; git -c "remote.origin.push=$S" push origin main`,
+    ]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+      // the owner's escape lifts the row, and the stamp still covers the commit
+      expect(guard(proj, home, c, { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1", CAIRN_ALLOW_UNSHIPPED_PUSH: "1" }).status, c).toBe(0);
+    }
+  });
+
+  it("the saved and session channels refuse too, once the guard asks the repository", () => {
+    const { proj, home, sub } = shipped();
+    git(proj, "config", "remote.origin.push", SPEC);
+    for (const c of ["git push origin main", "git push origin", "git push"]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+    }
+    // ...and any one value of several is enough: push is a multi-valued key
+    const many = shipped();
+    git(many.proj, "config", "--add", "remote.origin.push", "refs/heads/a:refs/heads/a");
+    git(many.proj, "config", "--add", "remote.origin.push", SPEC);
+    expectForce(guard(many.proj, many.home, "git push origin main"), "two values");
+    // a remote picked by the settings
+    const other = shipped();
+    git(other.proj, "config", "remote.pushDefault", "up");
+    git(other.proj, "config", "remote.up.push", SPEC);
+    expectForce(guard(other.proj, other.home, "git push"), "remote.pushDefault");
+    // the session's own GIT_CONFIG_*, which reaches git through the guard's probe
+    const session = shipped();
+    expectForce(guard(session.proj, session.home, "git push origin main", {
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.push", GIT_CONFIG_VALUE_0: SPEC }), "session environment");
+  });
+
+  it("hostile: an alias that carries it, and a value the guard can't read, refuse like the row", () => {
+    const { proj, home, sub } = shipped();
+    for (const c of [
+      `git -c 'alias.p=-c remote.origin.push=${SPEC} push' p origin main`,
+      `git -c alias.p=push -c remote.origin.push=${SPEC} p origin main`,
+    ]) {
+      for (const cwd of [proj, sub]) expectForce(guard(proj, home, c, {}, cwd), c);
+    }
+    for (const c of [
+      'git -c "remote.origin.push=$(cat spec)" push origin main',
+      "git --config-env=remote.origin.push=NOT_SET_ANYWHERE push origin main",
+      `${KEYS} GIT_CONFIG_VALUE_0='$(cat spec)' git push origin main`,
+    ]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("a git setting from a value the guard can't read");
+    }
+  });
+
+  it("the twins: the same setting with no + is judged for where it lands, and a setting git won't follow here changes nothing", () => {
+    const { proj, home, sub } = shipped();
+    const plain = `git -c remote.origin.push=${SPEC.slice(1)} push origin main`;
+    for (const c of [plain, `git -c remote.origin.push=${SPEC} push origin main:main`, `git -c remote.origin.push=${SPEC} push origin HEAD`,
+      `git -c remote.other.push=${SPEC} push origin main`, `V=${SPEC.slice(1)} git --config-env=remote.origin.push=V push origin main`,
+      `${KEYS} GIT_CONFIG_VALUE_0=${SPEC.slice(1)} CAIRN_ALLOW_UNSHIPPED_PUSH=1 git push origin main`]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    // with no stamp the same no-+ setting meets the ship gate: a gate, not the force row
+    const unshipped = fixture(undefined, false);
+    const gated = guard(unshipped.proj, unshipped.home, plain);
+    expect(gated.status).toBe(2);
+    expect(gated.stderr).toContain("lands on the default branch");
+    expect(gated.stderr).not.toContain("`git push --force`");
+    // the saved twins: another remote's +, a saved setting with no +, a src:dst the setting never maps
+    const saved = shipped();
+    git(saved.proj, "config", "remote.up.push", SPEC);
+    expect(guard(saved.proj, saved.home, "git push origin main").status).toBe(0);
+    git(saved.proj, "config", "remote.origin.push", SPEC.slice(1));
+    expect(guard(saved.proj, saved.home, "git push origin main").status).toBe(0);
+    git(saved.proj, "config", "--replace-all", "remote.origin.push", SPEC);
+    expect(guard(saved.proj, saved.home, "git push origin main:main").status).toBe(0);
+  });
+});

@@ -163,6 +163,11 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  *   always     the subcommand (and action) alone
  *   pushTo     any push; the cause is what decides where it lands
  *   plusRef    a refspec with a leading `+`
+ *   pushSetting  a `+` in `remote.<r>.push` this push would follow (#502): on
+ *              the line, by any channel `configs` folds in, for the remote it
+ *              names, or in the repository's or session's config through the
+ *              `forcePushConfigured` probe; asserted by runguard-effects.test.ts
+ *              and runguard-guards.test.ts (#502)
  *   config     a `-c` setting matching `key` that reads as true
  *   probe      the repository says so: probe[name](inv) is true
  *   wildSub    the subcommand itself is a word the guard can't spell (#494)
@@ -250,7 +255,7 @@ const SPELL_IT = "Spell it on the line (`NAME=value`, or the word itself) and th
  * same key through --config-env or GIT_CONFIG_KEY_n) pulls a file's every
  * setting in -- an alias, a mirror, a prune date -- unread here, so the
  * command is refused outright; and a setting this table reads (an alias,
- * `remote.<r>.mirror`, `gc.pruneExpire`, an include) whose value sits
+ * `remote.<r>.mirror`, `remote.<r>.push`, `gc.pruneExpire`, an include) whose value sits
  * where the guard can't read it -- a variable neither the prefix nor the
  * environment holds, a `$` expansion, GIT_CONFIG_PARAMETERS set by hand,
  * a numbered entry with no key or value -- is refused the same way
@@ -306,6 +311,9 @@ export const EFFECT_TABLE = Object.freeze([
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "plusRef",
     what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
+  // #502 -- the same + from a remote's push setting, on any channel
+  { effect: DISCARDS_WORK, sub: "push", when: "pushSetting",
+    what: "`git push --force`", why: "it overwrites remote history other people may already have pulled." },
   { effect: DISCARDS_WORK, sub: "push", when: "flag", names: ["--mirror"],
     what: "`git push --mirror`", why: "it force-updates and deletes remote refs to match this clone." },
   { effect: DISCARDS_WORK, sub: "push", when: "config", key: /^remote\.(.+)\.mirror(?:=(.*))?$/i,
@@ -327,7 +335,7 @@ export const EFFECT_TABLE = Object.freeze([
       "none of them before the line runs, so what the command does can't be told; it is refused as if it discarded " +
       "work. Put the setting on the line itself (`-c key=value`) and the guard can judge it." },
   // #467 -- a setting this table reads, from a value the guard can't; any subcommand
-  { effect: DISCARDS_WORK, when: "unread", key: /^(?:alias\.|include(?:if\.[^=]*)?\.path$|remote\..+\.mirror$|gc\.pruneexpire$)/i,
+  { effect: DISCARDS_WORK, when: "unread", key: /^(?:alias\.|include(?:if\.[^=]*)?\.path$|remote\..+\.(?:mirror|push)$|gc\.pruneexpire$)/i,
     what: "a git setting from a value the guard can't read",
     why: "the value sits in an environment variable or a shell expansion the guard can't see, and the setting " +
       "decides what the command does (an alias, a mirror, a prune date); set it on the line itself " +
@@ -842,6 +850,23 @@ function rowCause(row, inv, probe) {
     }
     case "plusRef":
       return pushArgs(inv).words.find((w) => w.startsWith("+")) ?? null;
+    case "pushSetting": {
+      // git follows the setting for a bare push and maps a branch typed on its
+      // own through it, the + included; a typed `a:b`, HEAD and @ are their own,
+      // and --all and --delete never read it (measured, git 2.56, 2026-11-05)
+      const { flags, values, words } = pushArgs(inv);
+      if (flags.has("--all") || flags.has("--branches") || flags.has("--delete")) return null;
+      const typed = words.slice(1);
+      if (typed.length && typed.every((w) => w.includes(":") || w === "HEAD" || w === "@")) return null;
+      // the remote it names, or with none typed any remote's: only the repository can say which
+      const remote = words[0] ?? values.get("--repo");
+      const hit = (inv.configs ?? []).find((c) => {
+        const m = /^remote\.(.+)\.push=\+/i.exec(c);
+        return m && (remote === undefined || m[1] === remote);
+      });
+      if (hit !== undefined) return `-c ${hit.slice(0, hit.indexOf("="))}`;
+      return typeof probe?.forcePushConfigured === "function" && probe.forcePushConfigured(inv) ? "remote.<name>.push" : null;
+    }
     case "config": {
       const hit = (inv.configs ?? []).find((c) => { const m = row.key.exec(c); return m && truthy(m[2] ?? "true"); });
       return hit === undefined ? null : `-c ${hit.split("=")[0]}`;
