@@ -442,7 +442,7 @@ describe("a redirect inside a nested shell is read like one typed directly (#511
       "python3 -c 'open(\"src/a.ts\", \"w\").write(\"x\")'",
       "sh ./write-it.sh", "source ./write-it.sh", "bash <(echo 'echo x > src/a.ts')", "sh < ./write-it.sh",
       "$(which tee) src/a.ts", "git -c alias.x='!echo x > src/a.ts' x",
-      `foo ${Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ")} tee src/a.ts`,
+      `foo ${Array.from({ length: 100 }, (_, k) => `w${k}`).join(" ")} tee src/a.ts`,
     ]) {
       const r = judge(c, sh(line));
       expect(r.status, `${line} -- ${r.stderr.split("\n")[0]}`).toBe(0);
@@ -712,7 +712,7 @@ describe("the write guard's header: Not seen block, sunset, axiom, and the rule 
       "a value only the run knows",
       "a quoted",
       "dated 2026-11-05 (#521)",
-      "more than three runner guesses",
+      "more than eight runner guesses",
     ]) expect(block, phrase).toContain(phrase);
     expect(block.split("\n").length, block).toBe(35);
   });

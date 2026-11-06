@@ -112,8 +112,8 @@
  *     a quoted `'$HOME/x'`, read as spelled, since a target carries no quoting
  *     past the parser. Pinned, with the /tmp link spelling of the line above,
  *     by "the Not seen shapes stay passing" under "a target is spelled".
- *   - dated 2026-11-05 (#521): a command more than three runner guesses in,
- *     past eight bare words each (`foo w1 ... w30 tee x`), since a guess is no
+ *   - dated 2026-11-05 (#521): a command more than eight runner guesses in,
+ *     past eight bare words each (`foo w1 ... w100 tee x`), since a guess is no
  *     nest and refusing there would refuse every long word list. Pinned by
  *     "the Not seen shapes stay passing" under "a redirect inside a nested shell".
  *   - a harness that sends no agent_type (Cursor and the rest): allowed, as
@@ -369,12 +369,15 @@ function shellWrites(command, cwd) {
               : [...new Set([...moves, ...spots.flatMap((s) => moves.map((d) => resolve(d, s)))])];
             moves = next === null || next.length > MAX_PLACES ? null : next;
           }
-        } else if ((from.hops ?? 0) < RUNNER_HOPS) {
+        } else {
           // the program's later words may be the real command (#311); only the
-          // option that runs one, on a program whose words are text
+          // option that runs one, on a program whose words are text. A long word
+          // list is no nest, so its guesses just stop at the depth (RUNNER_HOPS in a
+          // row); any fewer, and a line the depth would leave unread refuses (#521)
           const inner = TEXT_ARGS.test(name) ? argCommands(words) : runnerCommands(words);
-          if (inner.length && depth >= MAX_NEST) unread("a line nested deeper than the guard reads");
-          else {
+          if (depth >= MAX_NEST) {
+            if (inner.length && (from.hops ?? 0) < RUNNER_HOPS) unread("a line nested deeper than the guard reads");
+          } else {
             // a program's later words re-read as suffixes of each other, so each is read once per
             // place: all of them marked before any is read
             const hops = from.hops ?? 0;
