@@ -214,6 +214,22 @@
  *   "core.hooksPath (#465)", and the #383 rows "git config core.hooksPath"
  *   and "a hooksPath line appended to the repo's git config".
  *
+ *   A git line is read through its aliases first (#506), by the run guard's
+ *   resolver (git-effects.mjs resolveAlias), so every git leg here reads
+ *   what git runs: an inline -c, --config-env, GIT_CONFIG_COUNT (on the
+ *   line or in the session), one saved earlier (asked of git at the folder
+ *   the command runs in), and a `!` alias, whose body is a line of its own.
+ *   Saving an alias is judged the same, as what it would run: `git config
+ *   alias.x 'config core.hooksPath d'`. A subcommand or a config key the
+ *   guard can't read (from a stream, or a substitution) counts as the pointer,
+ *   and so does an alias whose value it can't. Asserted: hooks.test.ts "(#506)".
+ *
+ *   Not seen, dated 2026-11-05 (#506, by decision: the filed scope is the
+ *   pointer, and refusing every key below would refuse daily configuration):
+ *   a git config key other than the pointer that names a program git runs
+ *   later -- core.fsmonitor, core.sshCommand, a `!` alias running a program
+ *   the line doesn't write. Pinned by hooks.test.ts "(#506)".
+ *
  *   The ship gate's own folders (#492): the hook git runs is a thin caller,
  *   so protecting the caller and not what it calls left the body an ordinary
  *   Edit away from running under the owner's identity at the next push.
@@ -309,10 +325,11 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
+  SHELLS, SUBSTITUTION_DEPTH, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
   quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
   suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
+import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
 import { projectRoot } from "./lib.mjs";
 import { OWNER_ONLY_KEYS, OWNER_ONLY_SAFE } from "./owner-keys.mjs";
 
@@ -397,6 +414,17 @@ const HOOKS_PATH_WHAT = "where git looks for its hooks (core.hooksPath)";
 // the sections those keys live in.
 const POINTER_KEY = /^include(?:if\..*)?\.path$/;
 const POINTER_SECTION = /^include(?:if\..*)?$/;
+// What git runs itself, so no alias can stand in for it (#506): every
+// subcommand this guard has a leg for, and the everyday ones, which spares
+// asking git for an alias of `status` on every call. A builtin left off is
+// only read as its alias, if the line or the config names one.
+const GIT_BUILTINS = new Set(["checkout", "restore", "rm", "mv", "apply", "clone", "init", "worktree", "submodule",
+  "config", "status", "log", "diff", "show", "add", "commit", "branch", "fetch", "pull", "push", "merge", "rebase",
+  "reset", "switch", "stash", "tag", "remote", "rev-parse", "ls-files", "cherry-pick", "revert", "blame", "grep",
+  "describe", "clean", "gc", "bisect", "notes", "reflog", "hash-object", "cat-file", "rev-list", "ls-tree",
+  "for-each-ref", "symbolic-ref", "update-ref", "var", "version", "help"]);
+// A word the shell computes as the line runs, which no reading can spell.
+const COMPUTED = /\$\(|`/;
 // `git config`'s value-taking options, so a key is never read out of one.
 const GIT_CONFIG = { short: "f", long: ["--file", "--blob", "--type", "--default", "--get-color", "--comment",
   "--value", "--url"] };
@@ -1243,11 +1271,11 @@ function gitHookDirs() {
   return spellings(dir).filter((d) => !anchors.some((a) => holds(d, a)));
 }
 
-/** One git command from the project, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
-function askGit(args) {
+/** One git command from the project, or `cwd`, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
+function askGit(args, cwd = ROOTS[0]) {
   try {
     const r = spawnSync("git", args, {
-      cwd: ROOTS[0], encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
+      cwd, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
     });
     return r.status === 0 ? String(r.stdout).trim() : "";
@@ -2317,7 +2345,7 @@ function degitTargets(words, add) {
  * --get and kin, get, list and --list read and pass; -e opens an editor
  * the guard can't see (Not seen).
  */
-function gitConfigTargets(rest, ctx, out) {
+function gitConfigTargets(rest, seg, ctx, add, out) {
   const words = ctx.positional ? rest.map((a) => a.replace(POSITIONAL, ctx.positional)) : rest;
   const { opts, operands } = parseOpts(words, GIT_CONFIG);
   const names = opts.map((o) => o.name);
@@ -2336,29 +2364,108 @@ function gitConfigTargets(rest, ctx, out) {
   if (!writes && keyed.length < 2) return;
   const key = keyed[0];
   if (key === undefined) return;
+  // #506 -- a key the shell computes is any key; saving an alias is judged as
+  // what it would run, so a planted `git st` never reaches the owner's terminal
+  if (unspelled(key, ctx)) {
+    out.push({ raw: `${key} (a git config key the guard can't read)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  if (fold(key).startsWith("alias.") && keyed[1] !== undefined) {
+    if (keyed[1].startsWith("!")) out.push(...shellAliasTargets(keyed[1].slice(1), ctx.dir, ctx));
+    else gitTargets(aliasWords(keyed[1]), seg, ctx, add, out);
+  }
   const pointer = could(key, HOOKS_PATH_KEY) || POINTER_KEY.test(fold(key)) ||
     (section && (could(key, "core") || POINTER_SECTION.test(fold(key))));
   if (pointer) out.push({ raw: `${key} (a git config key)`, what: HOOKS_PATH_WHAT });
 }
 
+/** True for a word the shell works out as the line runs, a substitution or a name the line set from one (#506). */
+function unspelled(word, ctx) {
+  if (COMPUTED.test(word) || expandAssigned(word, ctx.vars, MAX_PLACES).lost) return true;
+  return [...word.matchAll(/\$\{?!?([A-Za-z_]\w*)/g)].some(([, name]) => {
+    const held = ctx.vars?.get(name);
+    return held === null || held === UNREADABLE;
+  });
+}
+
+/**
+ * A `!` alias's body, read as a line (#506): git runs it in a shell from the
+ * top of the worktree, so it is judged there and from the folder the command
+ * stands in, under the variables the line gave it.
+ */
+function shellAliasTargets(line, dir, ctx) {
+  if (ctx.depth >= 3) return [];
+  const out = [];
+  for (const at of new Set([dir, gitRoot(dir)])) {
+    out.push(...lineTargets(line, at, ctx.depth + 1, { walk: ctx.walk, vars: assignVars(ctx.assigns ?? [], ctx.vars, SPELL) }));
+  }
+  return out;
+}
+
+/**
+ * A git line as an invocation with its aliases walked (#506), the way the run
+ * guard reads one and through the same resolver: the numbered environment
+ * entries first as git reads them, then the -c and --config-env values, on
+ * the variables this command's prefix and the line gave it; an alias from
+ * neither is asked of git at the folder the command runs in. A -c the shell
+ * still works out is a setting the guard can't read, so it lands in `unread`
+ * rather than be expanded as typed. Returns the invocation and the folder.
+ */
+function gitInvocation(words, ctx) {
+  const assigns = ctx.assigns ?? [];
+  const env = (name) => {
+    const own = assigns.filter((a) => a.startsWith(`${name}=`)).pop();
+    if (own !== undefined) return own.slice(name.length + 1);
+    if (!ctx.vars?.has(name)) return process.env[name];
+    const held = ctx.vars.get(name);
+    return held === null || held === UNREADABLE ? undefined : held.at(-1);
+  };
+  const parsed = parseInvocation(["git", ...words], { aliases: false, env });
+  const fromEnv = envConfig(env);
+  const open = (c) => /[$`]/.test(c);
+  const inv = {
+    ...parsed,
+    configs: [...fromEnv.configs, ...parsed.configs.filter((c) => !open(c))],
+    unread: [...fromEnv.unread, ...parsed.unread, ...parsed.configs.filter(open).map((c) => {
+      const key = c.includes("=") ? c.slice(0, c.indexOf("=")) : "*";
+      return { key: open(key) ? "*" : key, from: `-c ${c}` };
+    })],
+  };
+  const place = (dirs) => dirs.reduce((at, d) => dirTarget(d, at, ctx.shellDir ?? ctx.dir)[0], ctx.dir);
+  const at = place(inv.dirs);
+  resolveAlias(inv, (name) => askGit(["config", "--get", `alias.${name}`], at) || undefined, (sub) => GIT_BUILTINS.has(sub));
+  return { inv, dir: place(inv.dirs) };
+}
+
 /**
  * git: checkout/restore pathspecs, rm/mv operands, apply's patch, the tree
  * clone and kin plant (#317), the config key that moves the hooks folder
- * (#465) -- from its -C folder (#258), read the way a
+ * (#465) -- each read on the subcommand git runs, its aliases walked (#506)
+ * -- from its -C folder (#258), read the way a
  * cd target is (#318): `~/proj`, `$HOME/proj` and `"$PWD"` spelled out,
  * and a folder the guard can't read (`-C "$X"`) LOST, so a relative
  * operand from it is refused rather than judged under a folder literally
  * named `~`.
  */
 function gitTargets(args, seg, ctx, add, out) {
-  let k = 0;
-  let dir = ctx.dir;
-  while (k < args.length && args[k].startsWith("-")) {
-    if (args[k] === "-C" && args[k + 1]) [dir] = dirTarget(args[k + 1], dir, ctx.shellDir ?? ctx.dir);
-    k += GIT_VALUE_OPTS.has(args[k]) ? 2 : 1;
+  const words = ctx.positional ? args.map((a) => a.replace(POSITIONAL, ctx.positional)) : args;
+  const { inv, dir } = gitInvocation(words, ctx);
+  const { sub } = inv;
+  const rest = inv.paths.length ? [...inv.args, "--", ...inv.paths] : inv.args;
+  if (sub === SHELL_ALIAS) {
+    // git hands a shell alias the words typed after it
+    out.push(...shellAliasTargets([inv.shell, ...rest.map(quoteWord)].join(" "), dir, ctx));
+    return;
   }
-  const sub = args[k];
-  const ops = plain(args.slice(k + 1));
+  // a subcommand from a stream or a substitution could be any of them; an
+  // alias whose value the guard can't read could be any line
+  const aliased = sub && !GIT_BUILTINS.has(sub) && inv.unread.find((u) => u.key === "*" || fold(u.key) === `alias.${fold(sub)}`);
+  if (STANDINS.some((m) => sub.includes(m)) || unspelled(sub, ctx) || aliased) {
+    const shown = aliased ? aliased.from : sub;
+    out.push({ raw: `${shown} (a git subcommand the guard can't read)`, what: HOOKS_PATH_WHAT });
+    return;
+  }
+  const ops = plain(rest);
   if (sub === "checkout" || sub === "restore") for (const a of ops) add(a, "write", dir);
   else if (sub === "rm") for (const a of ops) add(a, "remove", dir);
   else if (sub === "mv" && ops.length >= 2) {
@@ -2368,9 +2475,9 @@ function gitTargets(args, seg, ctx, add, out) {
       add(s, "remove", dir);
       add(join(dest, basename(s)), "write", dir);
     }
-  } else if (sub === "apply") applyTargets(args.slice(k + 1), seg, { ...ctx, dir }, add);
-  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, args.slice(k + 1), dir, add);
-  else if (sub === "config") gitConfigTargets(args.slice(k + 1), ctx, out);
+  } else if (sub === "apply") applyTargets(rest, seg, { ...ctx, dir }, add);
+  else if (["clone", "init", "worktree", "submodule"].includes(sub)) gitTreeTargets(sub, rest, dir, add);
+  else if (sub === "config") gitConfigTargets(rest, seg, { ...ctx, dir }, add, out);
 }
 
 /**
@@ -2643,7 +2750,7 @@ function writeTargets(seg, ctx) {
   else if (cmd === "tar" || cmd === "bsdtar" || cmd === "gtar") tarTargets(args, ctx, add);
   else if (cmd === "unzip") unzipTargets(args, ctx, add);
   else if (cmd === "patch") patchTargets(args, seg, ctx, add);
-  else if (cmd === "git") gitTargets(args, seg, ctx, add, out);
+  else if (cmd === "git") gitTargets(args, seg, { ...ctx, assigns }, add, out);
   else if (cmd === "claude") claudeTargets(args, ctx, add);
   else if (RUNNERS.has(cmd)) runnerTargets(cmd, args, ctx, add, out);
   // #317 -- an initializer run by name, or through `pnpm dlx` / `npm exec`

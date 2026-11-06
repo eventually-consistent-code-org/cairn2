@@ -6564,6 +6564,148 @@ describe("the approval stamp can't be written straight to disk, and the re-run s
   });
 });
 
+// #506: the #465 refusal read `git config` and no alias of it, so one -c on
+// the same line set the pointer past it. The harness guard now reads a git
+// line through the run guard's resolver (git-effects.mjs resolveAlias) on
+// every channel the line can carry an alias on, so every git leg it has
+// inherits the expansion, not only the pointer's.
+describe("an alias that runs git config core.hooksPath is the pointer: every channel (#506)", () => {
+  const WHAT = "where git looks for its hooks (core.hooksPath)";
+  const SET = "config core.hooksPath /tmp/h";
+
+  const refused = (r: { status: number | null; stderr: string }, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(WHAT);
+    expect(r.stderr, label).toContain("file:");
+  };
+
+  const REFUSED = [
+    // the issue's own, and every place a value can sit on the line
+    `git -c alias.ch='${SET}' ch`,
+    `git -C pkg -c alias.ch='${SET}' ch`,
+    `git -c ALIAS.CH='${SET}' ch`,
+    `git -c alias.ch='config --global core.hooksPath /tmp/h' ch`,
+    `git -c alias.ch='config set core.hooksPath /tmp/h' ch`,
+    `git -c alias.ch='config include.path /tmp/evil.cfg' ch`,
+    // an alias of an alias, and the words typed after it
+    `git -c alias.a=b -c alias.b='${SET}' a`,
+    "git -c alias.ch=config ch core.hooksPath /tmp/h",
+    "git -c 'alias.ch=config core.hooksPath' ch /tmp/h",
+    // a name git keeps for its builtin can't stand in for the write: git runs config
+    `git -c alias.a='${SET}' -c alias.config=status a`,
+    "git -c alias.config=status config core.hooksPath /tmp/h",
+    `git -c alias.a='-c alias.config=status ${SET}' a`,
+    // the environment's channels
+    `V='${SET}' git --config-env=alias.ch=V ch`,
+    `export V='${SET}'; git --config-env=alias.ch=V ch`,
+    `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.ch GIT_CONFIG_VALUE_0='${SET}' git ch`,
+    `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.ch GIT_CONFIG_VALUE_0='${SET}' git ch`,
+    // spelled from what the line assigned
+    `V='${SET}'; git -c "alias.ch=$V" ch`,
+    // what the guard can't read, on a name that may be an alias
+    'git -c "alias.ch=$(cat /tmp/f)" ch',
+    'git -c "$(cat /tmp/f)" ch',
+    "GIT_CONFIG_PARAMETERS=\"'alias.ch=config core.hooksPath /tmp/h'\" git ch",
+    "git --config-env=alias.ch=V ch",
+    // a shell alias is a line of its own
+    "git -c 'alias.ch=!git config core.hooksPath /tmp/h' ch",
+    "git -c 'alias.ch=! git config --global core.hooksPath /tmp/h' ch",
+    // the alias saved on this same line, and saved with the pointer inside it for later
+    `git config alias.ch '${SET}' && git ch`,
+    `git config --global alias.ch '${SET}'`,
+    "git config alias.ch '!git config core.hooksPath /tmp/h'",
+    `git config set alias.ch '${SET}'`,
+    // through what nests a git line
+    `bash -c "git -c alias.ch='${SET}' ch"`,
+    // a subcommand the stream names
+    `echo '${SET}' | xargs git`,
+    // a subcommand or a key a substitution computes
+    "git $(echo config) core.hooksPath /tmp/h",
+    "V=$(echo config); git $V core.hooksPath /tmp/h",
+    "git config $(echo core.hooksPath) /tmp/h",
+    "K=$(echo core.hooksPath); git config $K /tmp/h",
+  ];
+
+  const TWINS = [
+    // an alias that only reads the key, or that writes another
+    "git -c alias.r='config core.hooksPath' r",
+    "git -c alias.r='config --get core.hooksPath' r",
+    "git -c alias.st=status st",
+    "git -c 'alias.l=log -1 --oneline' l",
+    "git -c alias.ch='config user.name x' ch",
+    "git -c 'alias.w=!echo hi' w",
+    // saving an alias that writes nothing protected
+    "git config alias.st status",
+    "git config --global alias.l 'log -1'",
+    "git config --get alias.ch",
+    // the variable's name is typed, and a builtin never expands: nothing here can be an alias
+    'git -c "user.name=$N" commit --allow-empty -m x',
+    'git -c "$K=1" status',
+    // a stream of paths, not of subcommands
+    "git ls-files | xargs git add",
+    // a computed value, on a key the line spells, is only a value
+    'git config user.name "$(whoami)"',
+  ];
+
+  it("refuses each channel and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("alias");
+    for (const c of REFUSED) refused(hardenRun(p, home, "Bash", { command: c }), c);
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("alias-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: `git -c alias.ch='${SET}' ch` }, at), `inline, bare=${bare}`);
+      refused(hardenRun(p, home, "Bash", { command: `git config alias.ch '${SET}'` }, at), `saved, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: "git -c alias.r='config core.hooksPath' r" }, at).status).toBe(0);
+    }
+  });
+
+  it("an alias saved earlier is asked of git, at the folder the command runs in; one the session's environment carries is read too", () => {
+    const { p, home } = hardenFixture("alias-saved");
+    hardenGit(p, home, "config", "alias.ch", SET);
+    hardenGit(p, home, "config", "alias.st", "status");
+    hardenGit(p, home, "config", "alias.sh", "!git config core.hooksPath /tmp/h");
+    refused(hardenRun(p, home, "Bash", { command: "git ch" }), "saved");
+    refused(hardenRun(p, home, "Bash", { command: "git sh" }), "saved shell alias");
+    refused(hardenRun(p, home, "Bash", { command: "git ch" }, { cwd: join(p, "pkg") }), "saved, from a subfolder");
+    expect(hardenRun(p, home, "Bash", { command: "git st" }).status).toBe(0);
+    const other = hardenFixture("alias-other");
+    refused(hardenRun(other.p, other.home, "Bash", { command: `git -C ${p} ch` }), "saved in the repo -C names");
+    expect(hardenRun(other.p, other.home, "Bash", { command: "git ch" }).status, "no alias of that name here").toBe(0);
+    const env = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.envy", GIT_CONFIG_VALUE_0: SET };
+    refused(hardenRun(other.p, other.home, "Bash", { command: "git envy" }, { env }), "session environment");
+  });
+
+  it("the other legs inherit the expansion: a write, a clone, a shell alias's own redirect", () => {
+    const { p, home } = hardenFixture("alias-legs");
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}\n");
+    for (const c of ["git -c 'alias.co=checkout -- hooks/hooks.json' co", "git -c 'alias.r=rm hooks/hooks.json' r",
+      "git -c 'alias.cl=clone https://x/y .claude/skills/y' cl", "git -c 'alias.w=!echo x > hooks/hooks.json' w",
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.co GIT_CONFIG_VALUE_0='checkout -- hooks/hooks.json' git co"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    expect(hardenRun(p, home, "Bash", { command: "git -c 'alias.co=checkout -- src/a.ts' co" }).status).toBe(0);
+  });
+
+  it("the scenario is real: git itself sets the key from the inline alias the guard refuses", () => {
+    const { p, home } = hardenFixture("alias-real");
+    hardenGit(p, home, "-c", `alias.ch=${SET}`, "ch");
+    expect(hardenGit(p, home, "config", "--get", "core.hooksPath")).toBe("/tmp/h");
+  });
+
+  it("the measured gap, as the Not seen block says: a config key that runs a program, other than the pointer, passes", () => {
+    const { p, home } = hardenFixture("alias-gap");
+    for (const c of ["git config core.fsmonitor /tmp/x", "git config core.sshCommand /tmp/x", "git config alias.ch '!/tmp/x'"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with
