@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, utimesSync,
-  copyFileSync,
+  copyFileSync, cpSync,
 } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -8090,12 +8090,14 @@ describe("harness guard: a shell nested past the reader's depth is refused unrea
   it("past eight levels the line is refused unread, whatever is inside", () => {
     const p = fixture();
     for (const cwd of [p, join(p, "pkg", "lib")]) {
-      for (const c of [shells(WRITE, 9), shells(WRITE, 12), shells("echo hi", 9), evals(WRITE, 9),
+      for (const c of [shells(WRITE, 9), shells("echo hi", 9), evals(WRITE, 9),
         `bash -lc ${JSON.stringify(shells(WRITE, 9))}`, `nohup ${shells(WRITE, 9)}`]) {
         const r = judge(p, c, cwd);
         expect(r.status, c.slice(0, 40)).toBe(2);
         expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
       }
+      // twelve levels of this quoting run to megabytes, so the budget may get there first: refused either way
+      expect(judge(p, shells(WRITE, 12), cwd).status).toBe(2);
     }
   });
 
@@ -8130,5 +8132,114 @@ describe("harness guard: a shell nested past the reader's depth is refused unrea
     expect(judge(p, `foo ${words} rm hooks/hooks.json`).status).toBe(0);
     const header = readFileSync(HARNESSGUARD, "utf8");
     expect(header.slice(0, header.indexOf("*/"))).toContain("more than three runner guesses");
+  });
+});
+
+// #522: the harness half. A line built long enough runs the guard past its hook
+// timeout, and a hook that times out may let the call by.
+describe("harness guard: a line built to outlast the hook is refused inside its time (#522)", () => {
+  const WRITE = "echo x > hooks/hooks.json";
+  const TIMEOUT = 3000; // the figure hooks.json gives; asserted as a budget, not a benchmark
+  function fixture() {
+    const p = freshDir("cairn-hooks-522-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const inTime = (run: () => { status: number | null; stderr: string }, label: string) => {
+    const t0 = Date.now();
+    const r = run();
+    const ms = Date.now() - t0;
+    expect(r.status, `${label}: ${r.stderr.split("\n")[0]}`).toBe(2);
+    expect(ms, label).toBeLessThan(TIMEOUT);
+    return r;
+  };
+  const n = (k: number, f: (i: number) => string, sep = " ") => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+
+  it("20000 assignments in front of the write are refused inside the budget, from the root and a nested cwd", () => {
+    const p = fixture();
+    const line = `${n(20000, (i) => `A${i}=1`, "; ")}; `;
+    for (const [cwd, write] of [[p, WRITE], [join(p, "pkg", "lib"), "echo x > ../../hooks/hooks.json"]] as const) {
+      const r = inTime(() => judge(p, line + write, cwd), `from ${cwd}`);
+      expect(r.stderr).toContain("longer than the guard reads");
+    }
+  });
+
+  it("every shape that held or crashed the guard is refused: its write is never let by", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["a stack overflow in a substitution", `${WRITE}; echo ${'"$('.repeat(40000)}`],
+      ["a stack overflow in a default", `${WRITE}; echo ${"${X:-".repeat(60000)}y${"}".repeat(60000)}`],
+      ["more spans than a call can spread", `${WRITE}; echo ${"''$b".repeat(130000)}`],
+      ["one word of quoted expansions", `echo ${'"$a"'.repeat(100000)}; ${WRITE}`],
+      ["nested braces", `echo ${"{".repeat(100000)}a${"}".repeat(100000)}; ${WRITE}`],
+      ["brace lists", `echo ${"{a,}".repeat(100000)}; ${WRITE}`],
+      ["a redirect target of quoted names", `echo x > ${'"$H"x'.repeat(100000)}; ${WRITE}`],
+      ["wrappers in a row", `${"nice ".repeat(150000)}rm hooks/hooks.json`],
+      ["eval in a row", `${"eval ".repeat(30000)}${WRITE}`],
+      ["distinct aliases, each one asked of git", `${n(2000, (i) => `git frob${i}`, "; ")}; ${WRITE}`],
+      ["a pipeline of thousands", `${n(4000, () => "true", " | ")} | ${WRITE}`],
+      ["a shell per segment", `${n(1500, (i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`, ";")};${WRITE}`],
+      ["distinct quoted arguments", `foo ${n(150000, (i) => `'a ${i}'`)}; ${WRITE}`],
+      ["a very long unknown program", `foo ${n(150000, (i) => `w${i}`)}; ${WRITE}`],
+      ["an rm of thousands of files", `rm ${n(100000, (i) => `w${i}`)}; ${WRITE}`],
+      ["a value doubled per assignment", `A0=x; ${n(60, (i) => `A${i + 1}=$A${i}$A${i}`, "; ")}; ${WRITE}`],
+      ["env -S in a row", `${"env -S 'env -S x' ".repeat(40000)}rm hooks/hooks.json`],
+    ] as const) {
+      inTime(() => judge(p, line), shape);
+    }
+  }, 120_000);
+
+  it("twin: a 300 KB heredoc into a harmless file passes, quoted or not, naming the write as prose", () => {
+    const p = fixture();
+    const body = `never run ${WRITE} here\n`.repeat(9000);
+    expect(body.length).toBeGreaterThan(300_000);
+    for (const delim of ["'EOF'", "EOF", '"EOF"']) {
+      for (const cwd of [p, join(p, "pkg", "lib")]) {
+        const r = judge(p, `cat > notes.txt <<${delim}\n${body}EOF`, cwd);
+        expect(r.status, `${delim}: ${r.stderr.split("\n")[0]}`).toBe(0);
+      }
+    }
+  });
+
+  it("the heredoc is still judged when it lands on a protected file, or feeds a shell", () => {
+    const p = fixture();
+    const body = "plain\n".repeat(60000);
+    expect(judge(p, `cat > hooks/hooks.json <<'EOF'\n${body}EOF`).status).toBe(2);
+    expect(judge(p, `sh <<'EOF'\n${"echo pad\n".repeat(1000)}${WRITE}\nEOF`).status).toBe(2);
+  });
+
+  it("twins: a long line of plain work stays judged and passes", () => {
+    const p = fixture();
+    for (const [shape, line] of [
+      ["a thousand assignments", n(1000, (i) => `A${i}=1`, "; ")],
+      ["a thousand commands", n(1000, () => "true", " && ")],
+      ["an unknown program's 5 KB of words", `foo ${n(800, (i) => `w${i}`)}`],
+      ["a 40 KB quoted argument", `foo '${"word ".repeat(8000)}'`],
+      ["a 400-line script handed to an interpreter", `python3 -c '${Array.from({ length: 400 }, (_, k) => `value_${k} = compute(first, second) + ${k}  # a note about this line`).join("\n")}'`],
+    ] as const) {
+      const r = judge(p, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  }, 60_000);
+
+  it("a reader that runs out of stack refuses, while any other error of the guard's own stays fail-open (ADR 0016)", () => {
+    const p = fixture();
+    const copy = freshDir("cairn-hooks-522-rangeerror-");
+    cpSync(SCRIPTS, copy, { recursive: true });
+    const words = join(copy, "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function shellSegments(command, read = {}, depth = 0) {";
+    expect(source).toContain(entry);
+    const run = (error: string) => {
+      writeFileSync(words, source.replace(entry, `${entry} throw new ${error}("boom");`));
+      return runHookRaw(join(copy, basename(HARNESSGUARD)), p, JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" }, cwd: p }), { CAIRN_HOME: join(p, ".nope") }).status;
+    };
+    expect(run("RangeError")).toBe(2);
+    expect(run("TypeError")).toBe(0);
   });
 });

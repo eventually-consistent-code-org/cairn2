@@ -388,9 +388,9 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
-  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, lineVars,
-  pagerCommands, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
-  toolCommandLines, unwrap,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, freshGuess,
+  lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
+  shellSegments, spellWords, tooDeep, toolCommandLines, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
@@ -414,7 +414,8 @@ const BREAKER = await import("./breaker.mjs").catch(() => null);
  * comments end a command, a $(...) or backtick is one word whose body is
  * a command of its own (#257, #319) -- a <(...), >(...) or $((...)) too
  * (#320) -- and backslash-newline joins lines. Bodies and the lines a shell
- * is handed nest MAX_NEST levels; a line nested deeper is refused unread (#321, #521).
+ * is handed nest MAX_NEST levels; a line nested deeper is refused unread (#321,
+ * #521), and so is one past the call's read budget, which this READ carries (#522).
  * A heredoc body is data, never command lines (#322): only the
  * substitutions an unquoted body runs are read, each as a line of its
  * own, so a README written through `cat <<'EOF'` can mention a hard
@@ -422,8 +423,11 @@ const BREAKER = await import("./breaker.mjs").catch(() => null);
  */
 const READ = {
   subshells: true, comments: true, substitutions: true, heredocs: true,
-  continuation: true, posixEscapes: true, anyWhitespace: true,
+  continuation: true, posixEscapes: true, anyWhitespace: true, budget: readBudget(),
 };
+
+// The same, for a runner's guess at its later words (#522), on the same budget.
+const GUESS = { ...READ, guess: true };
 
 // How the shared reader spells this guard's variables (#494). $HOME and $PWD
 // stay as typed: pathWord and wholeTree read them per folder the command may
@@ -535,14 +539,15 @@ function readLine(line) {
     // the command piping into this one, so a heredoc it carries can be the
     // script of the shell reading it: `cat <<EOF | sh` (#322)
     let upstream = null;
-    const segs = shellSegments(text, READ);
+    const segs = shellSegments(text, inherit.hops ? GUESS : READ);
+    // #321, #522 -- substitutions nested deeper than the reader reads, or a call
+    // past its budget: the line is refused as a whole (judgeLine), unread from here
+    if (tooDeep(segs)) { out.deep = true; return; }
     // #494 -- what the line assigned so far, and all of it where a loop or a
     // function body can run after an assignment below it
     let vars = seedVars(segs, inherit.vars, SPELL);
     for (const seg of segs) {
-      // #321 -- substitutions nested deeper than the reader reads: the
-      // line is refused as a whole (judgeLine), so stop reading it here
-      if (seg.deep) { out.deep = true; return; }
+      if (overBudget(READ.budget)) { out.deep = true; return; }
       flush();
       const piped = upstream;
       upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
@@ -642,7 +647,10 @@ function readLine(line) {
           if (hops < RUNNER_HOPS) {
             const inner = HARMLESS.has(cmd) ? argCommands(words) : runnerCommands(words);
             if (inner.length && depth >= MAX_NEST) { out.deep = true; return; }
-            for (const line of inner) walk(line, depth + 1, { ...env, hops: hops + 1 });
+            // all of a runner's guesses marked before any is read, so none is read twice
+            const family = inherit.family ?? new Map();
+            const fresh = inner.filter((line) => freshGuess(family, line, hops));
+            for (const line of fresh) walk(line, depth + 1, { ...env, hops: hops + 1, family });
           }
           out.steps.push(alias ? writesFile(words) : !HARMLESS.has(cmd) || writesFile(words));
           continue;
@@ -1121,6 +1129,10 @@ function refuseDestructive(inv, cause) {
  * Never throws.
  */
 function gitOut(at, args, maxBuffer = undefined) {
+  // #522 -- a git process per question is what a line of many git commands costs
+  // most in: past the budget's clock, the line is refused rather than asked on
+  READ.budget.asks++;
+  if (overBudget(READ.budget)) refuseUnread();
   try {
     return execFileSync("git", args,
       { cwd: at.dir, env: at.env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer }).trim();
@@ -1149,7 +1161,8 @@ function linePushConfig(command, invs) {
       longs: ["--set-upstream-to", "--track"], valued: ["--set-upstream-to"] });
     return flags.has("--set-upstream-to") || flags.has("--track");
   };
-  return invs.some(changes) || shellSegments(command, READ)
+  // a second look at a line the budget already paid for, so it isn't charged again
+  return invs.some(changes) || shellSegments(command, { ...READ, budget: null })
     .some((s) => s.words.some((w) => /GIT_CONFIG\w*=/.test(w) || /^(?:HOME|XDG_CONFIG_HOME)=/.test(w)));
 }
 
@@ -1844,6 +1857,14 @@ function toolLines(payload) {
   return toolCommandLines(input);
 }
 
+/** The refusal for a line the guard did not read to its end: past the reader's depth or the call's budget (#321, #522). */
+function refuseUnread() {
+  refuse([
+    `cairn run guard: this line ${unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
+    "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
+  ], undefined, { effect: "unread", reason: READ.budget.over ? "a line past the read budget" : "a line nested past the reader's depth" });
+}
+
 /**
  * Judges one command line (a readLine result) that starts in the folder
  * `start`, and exits 2 on the first refusal: every git invocation in it,
@@ -1857,15 +1878,9 @@ function toolLines(payload) {
  */
 function judgeLine(line, start, ctx) {
   const { currentRuns, where } = ctx;
-  // #321 -- a line nested past what the reader reads holds commands the
-  // guard never saw; fail closed rather than let the unread part run
-  if (line.deep) {
-    refuse([
-      `cairn run guard: this line nests commands deeper than the guard reads (${MAX_NEST} ` +
-      "levels), so what runs inside them can't be judged.",
-      "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
-    ], undefined, { effect: "unread", reason: "a line nested past the reader's depth" });
-  }
+  // #321, #522 -- a line past what the reader reads holds commands the guard
+  // never saw; fail closed rather than let the unread part run
+  if (line.deep) refuseUnread();
   // #306 -- where each git command may run: every folder the line can cd
   // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
   const places = line.invs.length ? linePlaces(where, start) : [];
@@ -2023,7 +2038,7 @@ try {
   };
   const ctx = {
     projectDir, baseDir, cwd, project: { dir: projectDir }, allowDestructive, currentRuns, where,
-    lineConfig: lines.some((l) => linePushConfig(l.command, l.invs)),
+    lineConfig: lines.some((l) => !l.deep && linePushConfig(l.command, l.invs)),
     sessionId: typeof payload?.session_id === "string" ? payload.session_id : null,
     advice: new Set(),
   };
@@ -2039,7 +2054,13 @@ try {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: [...ctx.advice].join("\n") },
   }), () => process.exit(0));
-} catch {
+} catch (e) {
+  // #522 -- out of stack or past a string's length: the line did that, not a bug
+  // here, and failing open on it was a bypass any long enough line could reach
+  if (e instanceof RangeError) {
+    READ.budget.over = true;
+    refuseUnread();
+  }
   process.exit(0); // guard must never block work because IT broke
 }
 
@@ -2076,6 +2097,8 @@ try {
  *   #319  an unquoted $(...) is one word of its command
  *   #320  process substitution and arithmetic bodies run
  *   #321  a line nested past the reader's depth is refused unread
+ *   #522  the reading is linear, one read budget in the reader, a line past it
+ *         refused unread, and a reader that runs out of stack refuses too.
  *   #521  one depth for a shell, an eval, a heredoc fed to a shell, a pager and
  *         a runner's line, the write guard's; past it, refused unread. A runner's
  *         guesses in a row stop at RUNNER_HOPS, since a word list is no nest.

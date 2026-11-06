@@ -139,7 +139,9 @@
  *   before it can reach, `$(git rev-parse --show-toplevel)/x` the repo
  *   root above each of those (#321) -- and refused otherwise.
  *   Substitutions and the lines a shell is handed nest MAX_NEST levels deep;
- *   a line nested deeper is refused unread (#321, #521; hooks.test.ts). A command
+ *   a line nested deeper is refused unread (#321, #521; hooks.test.ts), and so is
+ *   one past the call's read budget, or one that runs the reader out of stack
+ *   (#522; hooks.test.ts: a heredoc's body never counts). A command
  *   that plants a whole tree is judged by where it lands, like a mkdir of
  *   it (#317): git clone, worktree add, submodule add and init, gh repo
  *   clone and fork --clone, npx degit, and the create-* initializers npm,
@@ -368,9 +370,9 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
-  quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
-  suCommandString, toolCommandLines, tooDeep, unwrap,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, lineVars,
+  overBudget, pagerCommands, quoteWord, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments,
+  spellWords, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
 import { projectRoots } from "./lib.mjs";
@@ -567,7 +569,10 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * hooks/hooks.json # note` is the write; a quoted `#`, or one inside a
  * word, is text.
  */
-const READ = { redirects: true, subshells: true, substitutions: true, comments: true };
+const READ = { redirects: true, subshells: true, substitutions: true, comments: true, budget: readBudget() };
+
+// The same, for a runner's guess at its later words (#522), on the same budget.
+const GUESS = { ...READ, guess: true };
 
 // find: name tests, the primaries that take a value, and the ones that act.
 const FIND_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
@@ -1355,6 +1360,10 @@ function gitHookDirs() {
 
 /** One git command from the project, or `cwd`, its stdout trimmed; "" when git is missing, hung past GIT_WAIT_MS, or fails. */
 function askGit(args, cwd = ROOTS[0]) {
+  // #522 -- a git process per question is what a line of many git commands costs
+  // most in: past the budget's clock it says nothing, and lineTargets refuses the line
+  READ.budget.asks++;
+  if (overBudget(READ.budget)) return "";
   try {
     const r = spawnSync("git", args, {
       cwd, encoding: "utf8", timeout: GIT_WAIT_MS, stdio: ["ignore", "pipe", "ignore"],
@@ -2924,10 +2933,18 @@ function writeTargets(seg, ctx) {
   // #521 -- a guess in a row stops at RUNNER_HOPS, since a long word list is no
   // nest; a guess the depth would leave unread refuses like a shell.
   else if ((ctx.hops ?? 0) < RUNNER_HOPS) {
-    const hops = (ctx.hops ?? 0) + 1;
-    for (const inner of runnerCommands(w)) out.push(...deeper(inner, { ...ctx, hops }));
+    const hops = ctx.hops ?? 0;
+    // all of a runner's guesses marked before any is read, so none is read twice
+    const family = ctx.family ?? new Map();
+    const fresh = runnerCommands(w).filter((inner) => freshGuess(family, `${ctx.dir}\0${inner}`, hops));
+    for (const inner of fresh) gather(out, deeper(inner, { ...ctx, hops: hops + 1, family }));
   }
   return out;
+}
+
+/** Appends a nested line's targets: a spread of them all would throw past a few score thousand (#522). */
+function gather(out, more) {
+  for (const t of more) out.push(t);
 }
 
 /**
@@ -2936,7 +2953,7 @@ function writeTargets(seg, ctx) {
  */
 function deeper(line, ctx) {
   if (ctx.depth >= MAX_NEST) return [{ deep: true }];
-  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops });
+  return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops, family: ctx.family });
 }
 
 /** True when the segment's own leading assignments carry the override. */
@@ -3129,7 +3146,7 @@ function linePlaces(segs, dir) {
  * (#265).
  */
 function lineTargets(command, dir, depth, extra = {}) {
-  const segs = shellSegments(command, READ);
+  const segs = shellSegments(command, extra.hops ? GUESS : READ);
   // a line nested past what the reader reads holds commands the guard never
   // saw (#321): refused unread, unless the human's override prefixes it
   if (tooDeep(segs)) return depth > 0 || !exempt(segs[0]?.words ?? []) ? [{ deep: true }] : [];
@@ -3139,13 +3156,16 @@ function lineTargets(command, dir, depth, extra = {}) {
   // the ones before it (#291); a nested line starts with its caller's, and
   // a loop or function body runs under all the line assigns (#494, seedVars)
   let vars = seedVars(segs, extra.vars ?? new Map(), SPELL);
+  // each command's readings, spelled once, as it was reached: a pipeline re-spelling
+  // everything before each stage is quadratic on a long one (#522)
+  let upstream = [];
   for (let k = 0; k < segs.length; k++) {
+    if (overBudget(READ.budget)) { out.push({ deep: true }); return out; }
     // the commands piping into this one, nearest last
-    const up = [];
     // (#509) spelled like the command itself, so `D=hooks; find $D | xargs rm` feeds what it walks
-    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) {
-      up.unshift(...spellWords(segs[j], vars, SPELL).map(({ words }) => ({ ...segs[j], words })));
-    }
+    if (k === 0 || !PIPE.has(segs[k - 1].op)) upstream = [];
+    else for (const { words } of spellWords(segs[k - 1], vars, SPELL)) upstream.push({ ...segs[k - 1], words });
+    const up = upstream.slice();
     // the prefix counts on a command the human typed, not inside a quoted string
     if (depth > 0 || !exempt(segs[k].words)) {
       // #509 -- the words spelled first, by the pass the run guard reads
@@ -3154,12 +3174,37 @@ function lineTargets(command, dir, depth, extra = {}) {
       // typed, for writeTargets' add to place or call lost.
       for (const { words } of spellWords(segs[k], vars, SPELL)) {
         const seg = { ...segs[k], words };
-        for (const d of places) out.push(...writeTargets(seg, { ...extra, dir: d, depth, up, vars }));
+        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars }));
       }
     }
     vars = lineVars(segs[k], vars, SPELL);
   }
+  if (overBudget(READ.budget)) out.push({ deep: true });
   return out;
+}
+
+/**
+ * lineTargets from the top of a line, and the first thing in it to refuse. Out of
+ * stack or past a string's length is the line's doing, not a bug here, so it is a
+ * line the guard couldn't read (#522): failing open on it was a bypass any long
+ * enough line could reach. Any other error stays the guard's own (ADR 0016).
+ */
+function lineHit(line, dir) {
+  let targets;
+  try {
+    targets = lineTargets(line, dir, 0);
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e;
+    READ.budget.over = true;
+    return { deep: true };
+  }
+  for (const t of targets) {
+    const hit = judgeTarget(t);
+    if (hit) return hit;
+    if (overBudget(READ.budget)) return { deep: true };
+  }
+  // #281 -- a write onto cairn.json the guard can't run: judged by the key word it spells
+  return ownerLineHit(targets, line);
 }
 
 /**
@@ -3327,14 +3372,7 @@ try {
   if (tool === "Bash") {
     // Only what the command WRITES is checked; reading a hook file is
     // ordinary work and must stay frictionless (#240).
-    const command = payload?.tool_input?.command ?? "";
-    const targets = lineTargets(command, cwd, 0);
-    for (const t of targets) {
-      hit = judgeTarget(t);
-      if (hit) break;
-    }
-    // #281 -- a write onto cairn.json the guard can't run: judged by the key word it spells
-    if (!hit) hit = ownerLineHit(targets, command);
+    hit = lineHit(payload?.tool_input?.command ?? "", cwd);
   } else if (core) {
     const p = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
     const abs = p ? resolveIn(cwd, expandHome(String(p))) : null;
@@ -3355,13 +3393,7 @@ try {
     }
     // a command line is read like Bash, from the folder the input names for it
     for (const { line, cwd: at } of hit ? [] : mcpLines) {
-      const dir = at ? resolveIn(cwd, expandHome(at)) : cwd;
-      const targets = lineTargets(line, dir, 0);
-      for (const t of targets) {
-        hit = judgeTarget(t);
-        if (hit) break;
-      }
-      if (!hit) hit = ownerLineHit(targets, line); // #281
+      hit = lineHit(line, at ? resolveIn(cwd, expandHome(at)) : cwd);
       if (hit) break;
     }
   }
@@ -3371,8 +3403,7 @@ try {
   if (hit.deep) {
     // #321: substitutions nested past what the reader reads -- fail closed
     console.error(
-      `cairn harness guard: this line nests commands deeper than the guard reads (${MAX_NEST} ` +
-      "levels), so what runs inside them can't be judged.",
+      `cairn harness guard: this line ${unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
     );
     console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
   } else if (hit.lost) {
@@ -3410,7 +3441,7 @@ try {
   // lines: a breaker that loaded but misbehaves must not reach the outer catch,
   // whose fail-open exit 0 would turn this refusal into an allow
   // (asserted: hooks.test.ts, "missing, broken or misbehaving").
-  const reason = hit.deep ? "a line nested past the reader's depth"
+  const reason = hit.deep ? (READ.budget.over ? "a line past the read budget" : "a line nested past the reader's depth")
     : hit.lost ? "a write past a folder the guard can't follow" : `a write to ${hit.what}`;
   let more = [];
   try {

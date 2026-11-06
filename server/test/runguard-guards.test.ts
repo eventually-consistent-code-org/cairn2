@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -2285,13 +2285,15 @@ describe("run guard: a shell nested past the reader's depth is refused unread, n
     const nested = join(proj, "pkg", "lib");
     mkdirSync(nested, { recursive: true });
     for (const cwd of [proj, nested]) {
-      for (const c of [shells(RESET, 9), shells(RESET, 12), shells("echo hi", 9), evals(RESET, 9),
+      for (const c of [shells(RESET, 9), shells("echo hi", 9), evals(RESET, 9),
         `bash -lc ${JSON.stringify(shells(RESET, 9))}`, `nohup ${shells(RESET, 9)}`]) {
         const r = guard(proj, home, c, {}, cwd);
         expect(r.status, c.slice(0, 40)).toBe(2);
         expect(r.stderr, c.slice(0, 40)).toContain("deeper than the guard reads");
         expectOwnerTail(r.stderr, c.slice(0, 40));
       }
+      // twelve levels of this quoting run to megabytes, so the budget may get there first: refused either way
+      expect(guard(proj, home, shells(RESET, 12), {}, cwd).status).toBe(2);
     }
   });
 
@@ -2326,6 +2328,108 @@ describe("run guard: a shell nested past the reader's depth is refused unread, n
     expect(guard(proj, home, `foo ${words} ${RESET}`).status).toBe(0);
     const header = readFileSync(RUNGUARD, "utf8");
     expect(header.split("\nimport ")[0]).toContain("more than three runner guesses");
+  });
+});
+
+// #522: a line built long enough runs a guard past its hook timeout, and a hook
+// that times out may let the call by (the dated claim in the reader's header).
+describe("run guard: a line built to outlast the hook is refused inside its time (#522)", () => {
+  const RESET = "git reset --hard";
+  const TIMEOUT = 3000; // the figure hooks.json gives; asserted as a budget, not a benchmark
+  const inTime = (run: () => { status: number | null; stderr: string }, label: string) => {
+    const t0 = Date.now();
+    const r = run();
+    const ms = Date.now() - t0;
+    expect(r.status, `${label}: ${r.stderr.split("\n")[0]}`).toBe(2);
+    expect(ms, label).toBeLessThan(TIMEOUT);
+    return r;
+  };
+
+  it("20000 assignments in front of the reset are refused inside the budget, from the root and a nested cwd", () => {
+    const { proj, home } = fixture();
+    const nested = join(proj, "pkg", "lib");
+    mkdirSync(nested, { recursive: true });
+    const line = `${Array.from({ length: 20000 }, (_, k) => `A${k}=1`).join("; ")}; ${RESET}`;
+    for (const cwd of [proj, nested]) {
+      const r = inTime(() => guard(proj, home, line, {}, cwd), `from ${cwd}`);
+      expect(r.stderr).toContain("longer than the guard reads");
+      expectOwnerTail(r.stderr, "20000 assignments");
+    }
+  });
+
+  it("every shape that held or crashed the guard is refused: its reset is never let by", () => {
+    const { proj, home } = fixture();
+    const n = (k: number, f: (i: number) => string, sep = " ") => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+    for (const [shape, line] of [
+      ["a stack overflow in a substitution", `${RESET}; echo ${'"$('.repeat(40000)}`],
+      ["a stack overflow in a default", `${RESET}; echo ${"${X:-".repeat(60000)}y${"}".repeat(60000)}`],
+      ["more spans than a call can spread", `${RESET}; echo ${"''$b".repeat(130000)}`],
+      ["one word of quoted expansions", `echo ${'"$a"'.repeat(100000)}; ${RESET}`],
+      ["nested braces", `echo ${"{".repeat(100000)}a${"}".repeat(100000)}; ${RESET}`],
+      ["brace lists", `echo ${"{a,}".repeat(100000)}; ${RESET}`],
+      ["wrappers in a row", `${"nice ".repeat(150000)}${RESET}`],
+      ["eval in a row", `${"eval ".repeat(30000)}${RESET}`],
+      ["distinct aliases, each one asked of git", `${n(2000, (i) => `git frob${i}`, "; ")}; ${RESET}`],
+      ["a shell per segment", `${n(1500, (i) => `sh -c 'echo ${"pad".repeat(200)} ${i}'`, ";")};${RESET}`],
+      ["distinct quoted arguments", `foo ${n(150000, (i) => `'a ${i}'`)}; ${RESET}`],
+      ["a very long unknown program", `foo ${n(150000, (i) => `w${i}`)}; ${RESET}`],
+      ["a very long git line", `git log ${n(120000, (i) => `w${i}`)}; ${RESET}`],
+      ["a value doubled per assignment", `A0=x; ${n(60, (i) => `A${i + 1}=$A${i}$A${i}`, "; ")}; ${RESET}`],
+      ["env -S in a row", `${"env -S 'env -S x' ".repeat(40000)}${RESET}`],
+    ] as const) {
+      inTime(() => guard(proj, home, line), shape);
+    }
+  }, 120_000);
+
+  it("twin: a 300 KB heredoc into a harmless file passes, quoted or not, naming the reset as prose", () => {
+    const { proj, home } = fixture();
+    const body = `never run ${RESET} here\n`.repeat(14000);
+    expect(body.length).toBeGreaterThan(300_000);
+    for (const delim of ["'EOF'", "EOF", '"EOF"']) {
+      const r = guard(proj, home, `cat > notes.txt <<${delim}\n${body}EOF`);
+      expect(r.status, `${delim}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("the heredoc is still read when it is code: fed to a shell, its reset is the reset", () => {
+    const { proj, home } = fixture();
+    const body = `echo ${"pad ".repeat(10)}\n`.repeat(1000);
+    expect(guard(proj, home, `sh <<'EOF'\n${body}${RESET}\nEOF`).status).toBe(2);
+    expect(guard(proj, home, `sh <<'EOF'\n${body}EOF`).status).toBe(0);
+  });
+
+  it("twins: a long line of plain work stays judged and passes", () => {
+    const { proj, home } = fixture();
+    const n = (k: number, f: (i: number) => string, sep: string) => Array.from({ length: k }, (_, i) => f(i)).join(sep);
+    for (const [shape, line] of [
+      ["a thousand assignments", n(1000, (i) => `A${i}=1`, "; ")],
+      ["a thousand commands", n(1000, () => "true", " && ")],
+      ["an unknown program's 5 KB of words", `foo ${n(800, (i) => `w${i}`, " ")}`],
+      ["a 40 KB quoted argument", `foo '${"word ".repeat(8000)}'`],
+      ["a 400-line script handed to an interpreter", `python3 -c '${Array.from({ length: 400 }, (_, k) => `value_${k} = compute(first, second) + ${k}  # a note about this line`).join("\n")}'`],
+    ] as const) {
+      const r = guard(proj, home, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  }, 60_000);
+
+  it("a reader that runs out of stack refuses, while any other error of the guard's own stays fail-open (ADR 0016)", () => {
+    const { proj, home } = fixture();
+    const copy = freshDir("cairn-runguard-rangeerror-");
+    cpSync(dirname(RUNGUARD), copy, { recursive: true });
+    const words = join(copy, "shell-words.mjs");
+    const source = readFileSync(words, "utf8");
+    const entry = "export function shellSegments(command, read = {}, depth = 0) {";
+    expect(source).toContain(entry);
+    const run = (error: string) => {
+      writeFileSync(words, source.replace(entry, `${entry} throw new ${error}("boom");`));
+      return spawnSync(process.execPath, [join(copy, basename(RUNGUARD))], {
+        cwd: proj, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: proj, CAIRN_HOME: home },
+        input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" }, cwd: proj }),
+      }).status;
+    };
+    expect(run("RangeError")).toBe(2);
+    expect(run("TypeError")).toBe(0);
   });
 });
 
