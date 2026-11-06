@@ -714,6 +714,98 @@ export function unwrap(words, read = {}) {
   return { words: w, assigns, writes, wrappers, dirs };
 }
 
+// Spelling a line's variables (#291)
+
+// A `$NAME` or `${NAME}` inside a word (#291).
+const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
+
+// The most spellings of one word before the rest count as lost.
+const SPELL_CAP = 16;
+
+/**
+ * `raw` with every variable the line assigned earlier spelled out (#291):
+ * each $NAME / ${NAME} whose NAME is in `vars`, in every value a loop gave
+ * it, so `D=hooks; echo x > $D/hooks.json` is judged at hooks/. One the
+ * line assigned from a substitution (null in `vars`), at the front of the
+ * path with a folder after it, leads the write where the guard can't
+ * follow -- `lost`, as a cd it can't read (#258) and a substitution leading
+ * a path (#319) do; elsewhere in the path it stays as typed, judged under
+ * the folder before it, as `/tmp/$(date).bak` is. A variable the line
+ * never assigned stays as typed (the guard's Not seen block). Past `cap`
+ * values the rest is lost too.
+ */
+export function expandAssigned(raw, vars, cap = SPELL_CAP) {
+  if (!vars?.size) return { raws: [raw], lost: false };
+  let raws = [""];
+  let lost = false;
+  let at = 0;
+  for (const m of raw.matchAll(VAR_REF)) {
+    const text = raw.slice(at, m.index);
+    at = m.index + m[0].length;
+    const vals = vars.get(m[1] ?? m[2]);
+    if (vals === undefined) { raws = raws.map((r) => r + text + m[0]); continue; } // never assigned on the line
+    if (vals === null) { // assigned from something the guard can't read
+      if (/^(?:\.\/)*$/.test(raw.slice(0, m.index)) && raw.slice(at).includes("/")) lost = true;
+      raws = raws.map((r) => r + text + m[0]);
+      continue;
+    }
+    raws = raws.flatMap((r) => vals.map((v) => r + text + v));
+    if (raws.length > cap) { lost = true; raws = raws.slice(0, cap); }
+  }
+  return { raws: raws.map((r) => r + raw.slice(at)), lost };
+}
+
+/**
+ * The values one assignment's right-hand side can take (#291), spelled out
+ * through the variables assigned before it and the ones the guard knows
+ * (`known`: the harness guard's ~, $HOME, $CAIRN_HOME ...), one per value
+ * a loop variable in it holds. Null when a $(...) or backtick computes it,
+ * or a variable it names was itself unresolvable.
+ */
+function valueOf(v, vars, { known = (x) => x, cap = SPELL_CAP } = {}) {
+  if (/\$\(|`/.test(v)) return null;
+  if ([...v.matchAll(VAR_REF)].some((m) => vars.get(m[1] ?? m[2]) === null)) return null;
+  const { raws, lost } = expandAssigned(v, vars, cap);
+  return lost ? null : raws.map(known);
+}
+
+/** `vars` with each NAME=value of `assigns` set, in order, each read through the ones before it (#291). */
+export function assignVars(assigns, vars, opts = {}) {
+  const out = new Map(vars);
+  for (const a of assigns) {
+    const eq = a.indexOf("=");
+    if (eq > 0) out.set(a.slice(0, eq), valueOf(a.slice(eq + 1), out, opts));
+  }
+  return out;
+}
+
+/**
+ * The variables one segment leaves set for the commands after it (#291):
+ * a bare NAME=value (one or several), an export, declare, typeset,
+ * readonly or local one, and a `for NAME in WORDS` (or select) header,
+ * which gives NAME each word in turn -- every word, since the body runs
+ * for each. A prefix assignment on a real command (`D=x cmd`) is that
+ * command's alone, as the shell gives it: the guard hands it to the line
+ * the command nests, and nothing after it sees it. `opts`: `read`, how the
+ * guard reads a line, `known` and `cap`, as valueOf takes them.
+ */
+export function lineVars(seg, vars, opts = {}) {
+  const { words: w, assigns } = unwrap(seg.words, opts.read);
+  let out = vars;
+  if (!w.length) out = assignVars(assigns, out, opts);
+  else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
+    out = assignVars(w.slice(1).filter((a) => ASSIGNMENT.test(a)), out, opts);
+  }
+  const r = seg.reserved ?? [];
+  const at = r.findIndex((x, i) => (x === "for" || x === "select") && r[i + 2] === "in");
+  if (at >= 0) {
+    const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out, opts));
+    out = new Map(out);
+    out.set(r[at + 1], vals.includes(null) ? null : vals.flat());
+  }
+  return out;
+}
+
 /**
  * Commands that only print, search or document their arguments, never run
  * one (#311): the words after one are data, so a guard never re-reads them

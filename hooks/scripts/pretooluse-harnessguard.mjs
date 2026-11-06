@@ -269,7 +269,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, braceExpand, evalCommandString, pagerCommands, quoteWord, runnerCommands,
+  SHELLS, SUBSTITUTION_DEPTH, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
+  quoteWord, runnerCommands,
   shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 import { projectRoot } from "./lib.mjs";
@@ -768,91 +769,9 @@ function expandVars(raw) {
     .replace(/^(?:\$GIT_CONFIG_GLOBAL|\$\{GIT_CONFIG_GLOBAL\})(?=\/|$)/, () => expandHome(process.env.GIT_CONFIG_GLOBAL ?? ""));
 }
 
-// A `$NAME` or `${NAME}` inside a word (#291).
-const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
-
-/**
- * `raw` with every variable the line assigned earlier spelled out (#291):
- * each $NAME / ${NAME} whose NAME is in `vars`, in every value a loop gave
- * it, so `D=hooks; echo x > $D/hooks.json` is judged at hooks/. One the
- * line assigned from a substitution (null in `vars`), at the front of the
- * path with a folder after it, leads the write where the guard can't
- * follow -- `lost`, as a cd it can't read (#258) and a substitution leading
- * a path (#319) do; elsewhere in the path it stays as typed, judged under
- * the folder before it, as `/tmp/$(date).bak` is. A variable the line
- * never assigned stays as typed (the header's Not seen block). Past
- * MAX_PLACES values the rest is lost too.
- */
-function expandAssigned(raw, vars) {
-  if (!vars?.size) return { raws: [raw], lost: false };
-  let raws = [""];
-  let lost = false;
-  let at = 0;
-  for (const m of raw.matchAll(VAR_REF)) {
-    const text = raw.slice(at, m.index);
-    at = m.index + m[0].length;
-    const vals = vars.get(m[1] ?? m[2]);
-    if (vals === undefined) { raws = raws.map((r) => r + text + m[0]); continue; } // never assigned on the line
-    if (vals === null) { // assigned from something the guard can't read
-      if (/^(?:\.\/)*$/.test(raw.slice(0, m.index)) && raw.slice(at).includes("/")) lost = true;
-      raws = raws.map((r) => r + text + m[0]);
-      continue;
-    }
-    raws = raws.flatMap((r) => vals.map((v) => r + text + v));
-    if (raws.length > MAX_PLACES) { lost = true; raws = raws.slice(0, MAX_PLACES); }
-  }
-  return { raws: raws.map((r) => r + raw.slice(at)), lost };
-}
-
-/**
- * The values one assignment's right-hand side can take (#291), spelled out
- * through the variables assigned before it and the ones the guard knows
- * (~, $HOME, $CAIRN_HOME ...), one per value a loop variable in it holds.
- * Null when a $(...) or backtick computes it, or a variable it names was
- * itself unresolvable.
- */
-function valueOf(v, vars) {
-  if (/\$\(|`/.test(v)) return null;
-  if ([...v.matchAll(VAR_REF)].some((m) => vars.get(m[1] ?? m[2]) === null)) return null;
-  const { raws, lost } = expandAssigned(v, vars);
-  return lost ? null : raws.map(expandVars);
-}
-
-/** `vars` with each NAME=value of `assigns` set, in order, each read through the ones before it (#291). */
-function assignVars(assigns, vars) {
-  const out = new Map(vars);
-  for (const a of assigns) {
-    const eq = a.indexOf("=");
-    if (eq > 0) out.set(a.slice(0, eq), valueOf(a.slice(eq + 1), out));
-  }
-  return out;
-}
-
-/**
- * The variables one segment leaves set for the commands after it (#291):
- * a bare NAME=value (one or several), an export, declare, typeset,
- * readonly or local one, and a `for NAME in WORDS` (or select) header,
- * which gives NAME each word in turn -- every word, since the body runs
- * for each. A prefix assignment on a real command (`D=x cmd`) is that
- * command's alone, as the shell gives it: writeTargets hands it to the
- * line the command nests, and nothing after it sees it.
- */
-function lineVars(seg, vars) {
-  const { words: w, assigns } = unwrap(seg.words, READ);
-  let out = vars;
-  if (!w.length) out = assignVars(assigns, out);
-  else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
-    out = assignVars(w.slice(1).filter((a) => ASSIGNMENT.test(a)), out);
-  }
-  const r = seg.reserved ?? [];
-  const at = r.findIndex((x, i) => (x === "for" || x === "select") && r[i + 2] === "in");
-  if (at >= 0) {
-    const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out));
-    out = new Map(out);
-    out.set(r[at + 1], vals.includes(null) ? null : vals.flat());
-  }
-  return out;
-}
+// How the shared reader spells this guard's variables (#291, shell-words.mjs):
+// a value's ~, $HOME and the config dirs are the ones this guard knows.
+const SPELL = { read: READ, known: expandVars, cap: MAX_PLACES };
 
 /**
  * The folder Claude Code keeps its user config in when CLAUDE_CONFIG_DIR
@@ -2530,7 +2449,7 @@ function writeTargets(seg, ctx) {
     // #291 -- a variable the line assigned earlier is spelled out first, in
     // every value a loop gave it; one assigned from a substitution, leading
     // the path, puts the write where the guard can't follow
-    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars);
+    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
     for (const one of raws) {
       // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
       // sees them (#258, #263), and a folder it computes in front of the path
@@ -2592,7 +2511,7 @@ function writeTargets(seg, ctx) {
         positional: marker,
         argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
         walk: ctx.walk,
-        vars: assignVars(assigns, ctx.vars), // the line's variables, and this command's own prefix (#291)
+        vars: assignVars(assigns, ctx.vars, SPELL), // the line's variables, and this command's own prefix (#291)
       }));
     };
     const str = cmd === "eval" ? evalCommandString(args)
@@ -2868,7 +2787,7 @@ function lineTargets(command, dir, depth, extra = {}) {
     if (depth > 0 || !exempt(segs[k].words)) {
       for (const d of places) out.push(...writeTargets(segs[k], { ...extra, dir: d, depth, up, vars }));
     }
-    vars = lineVars(segs[k], vars);
+    vars = lineVars(segs[k], vars, SPELL);
   }
   return out;
 }
