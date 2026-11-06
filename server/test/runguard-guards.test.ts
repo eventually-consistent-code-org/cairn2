@@ -3783,6 +3783,9 @@ describe("a flag, path or command the shell builds from a same-line variable mee
       "git x $UNSET_A y", 'git x "$UNSET_A" y', "git $UNSET_A x", "git x p$UNSET_A", "$UNSET_A git x",
       "F=b; G=a$F; git x $G", "for F in a b; do git x $F; done", 'F=a; git x "p${F}s"', 'git x $"q"',
       'F=a; git x "$F"s', "F=a; git x $F's'", 'F=a; G=b; git x "$F"$G', "F='a b'; git x \"$F\"$F",
+      // #527: a quoted brace in a default closes nothing, so the git after it is the git bash runs
+      ": ${X:-'{}'}; git x y", "BODY=${X:-'{}'}; git x y", ": ${X:-'}'}; git x y", ': "${X:-"}"}"; git x y',
+      ": ${X:-\\}}; git x y", ": ${X:-${Y:-'}'}}; git x y",
     ];
     for (const line of lines) {
       const out = execFileSync("bash", ["-c", `git() { printf '%s\\n' "$@"; echo =; }; ${line}`], { encoding: "utf8" });
@@ -4320,5 +4323,92 @@ describe("the pre-push hook: a rewrite of the default branch is the table's forc
     // the same line with the remote at a real ancestor, and with no ref there yet, passes
     expect(hook(`refs/heads/main ${head} refs/heads/main ${git(f.proj, "rev-parse", "HEAD~1")}`).status).toBe(0);
     expect(hook(`refs/heads/main ${head} refs/heads/main ${"0".repeat(40)}`).status).toBe(0);
+  });
+});
+
+/**
+ * #527: a quoted brace in a `${...}` default swallowed the rest of the line, so a
+ * destructive tail read as text and the shell still ran it. shell-words.test.ts
+ * holds the reader against real bash; this holds the guard, end to end.
+ */
+describe("run guard: a command after a quoted brace in a default is read and judged (#527)", () => {
+  const FRONTS = [
+    "echo ${J:-'{}'}", "BODY=${J:-'{}'}", "echo ${J:-'}'}", `echo "\${J:-'}'}"`, 'echo ${J:-"}"}', "echo ${J:-\\}}",
+    'echo "${J:-"}"}"', `echo "\${J:-"'"}"`, `echo "\${J:-'"'}"`, "echo ${J:-${K:-'}'}}", "echo ${J:-$'}'}", "echo ${J#'}'}",
+    "echo $(echo ${J:-')'})", 'echo "$(echo "${J:-"}"}")"',
+  ];
+  const TAILS: Array<[string, string]> = [
+    ["git reset --hard", "git reset --hard"], ["git push --force origin x", "git push --force"],
+    ["git push origin main", "moves-shared-ref"], ["gh pr merge 1", "gh pr merge"],
+  ];
+  function nested() {
+    const f = fixture(undefined, false);
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+
+  it("every destructive tail after every front is refused, from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const front of FRONTS) {
+      for (const [tail, names] of TAILS) {
+        for (const cwd of [proj, sub]) {
+          const c = `${front}; ${tail}`;
+          const r = guard(proj, home, c, {}, cwd);
+          expect(r.status, `${c} from ${cwd === sub ? "sub" : "root"}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain(names);
+        }
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same fronts with nothing destructive after them, and a tail the default really holds, pass", () => {
+    const { proj, home, sub } = nested();
+    for (const front of FRONTS) {
+      for (const cwd of [proj, sub]) {
+        const c = `${front}; git status; git log -1`;
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const c of ["echo ${J:-'; git reset --hard; '}", 'echo ${J:-"; git reset --hard; "}', `echo \${J:-'}; git reset --hard; '}`,
+      'git commit -m "${M:-a}"', `git commit -m "\${M:-'a}b'}"`, 'git commit -m "${M:-"a}b"}"']) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("hostile: a nested shell, an eval, a pipe, a substitution in the default, a default that is the flag, a line shells part over", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      `sh -c 'echo \${J:-"}"}; git reset --hard'`, `bash -c "echo \\\${J:-\\"}\\"}; git reset --hard"`,
+      `eval 'echo \${J:-"}"}; git reset --hard'`, "echo ${J:-'}'} | git reset --hard", "echo ${J:-'}'} && git reset --hard",
+      "echo ${J:-'}'}\ngit reset --hard", "echo ${J:-'}'$(git reset --hard)}", 'echo "${J:-$(git reset --hard)}"',
+      "echo ${J:-`git reset --hard`}", "git reset ${J:-'--hard'}", 'git reset "${J:-"--hard"}"', "git reset ${J:-${K:-'--hard'}}",
+      // bash keeps the reset in one word and a POSIX sh or zsh runs it: judged either way
+      `echo "\${J:-'}"; git reset --hard; echo "'}"`,
+      // the same, one level down
+      `echo "$(echo "\${J:-'}"; git reset --hard; echo "'}")"`,
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      }
+    }
+  });
+
+  it("a thousand nested defaults, and defaults in substitutions past the reader's depth, cost what a long word does: refused in time", () => {
+    const { proj, home } = nested();
+    for (const [shape, line] of [
+      ["defaults", `echo ${"${a:-".repeat(1000)}'}'${"}".repeat(1000)}; git reset --hard`],
+      ["quoted defaults", `echo "${'${a:-"'.repeat(1000)}'}'${'"}'.repeat(1000)}"; git reset --hard`],
+      ["defaults in substitutions", `git reset --hard; echo ${"${a:-$(".repeat(40000)}`],
+      ["quoted defaults in substitutions", `git reset --hard; echo ${'"${a:-$('.repeat(40000)}`],
+    ] as const) {
+      const t0 = Date.now();
+      const r = guard(proj, home, line);
+      expect(r.status, `${shape}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(Date.now() - t0, shape).toBeLessThan(3000);
+    }
   });
 });

@@ -8437,3 +8437,59 @@ describe("harness guard: a slash before a variable no longer reads as outside th
     expect(header).toContain("a temp root");
   });
 });
+
+describe("harness guard: a write after a quoted brace in a default is read and judged (#527)", () => {
+  const FRONTS = ["echo ${J:-'{}'}", "BODY=${J:-'{}'}", "echo ${J:-'}'}", 'echo ${J:-"}"}', "echo ${J:-\\}}", 'echo "${J:-"}"}"',
+    `echo "\${J:-"'"}"`, "echo ${J:-${K:-'}'}}"];
+  function fixture() {
+    const p = freshDir("cairn-hooks-527-proj-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return p;
+  }
+  const judge = (p: string, command: string, cwd = p) =>
+    runHookRaw(HARNESSGUARD, p, JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }), { CAIRN_HOME: join(p, ".nope") });
+  const TAILS = (up: string) => [`rm -rf ${up}hooks`, `cp evil.sh ${up}.git/hooks/pre-commit`, "git config core.hooksPath /tmp/h", `echo x > ${up}hooks/hooks.json`];
+
+  it("every protected write after every front is refused, from the root and a nested folder", () => {
+    const p = fixture();
+    for (const front of FRONTS) {
+      for (const [cwd, up] of [[p, ""], [join(p, "pkg", "lib"), "../../"]] as const) {
+        for (const tail of TAILS(up)) {
+          const line = `${front}; ${tail}`;
+          const r = judge(p, line, cwd);
+          expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+        }
+      }
+    }
+  }, 120_000);
+
+  it("twins: the same fronts with an everyday tail, and a write the default only spells, pass", () => {
+    const p = fixture();
+    for (const front of FRONTS) {
+      for (const cwd of [p, join(p, "pkg", "lib")]) {
+        const line = `${front}; ls; echo x > note.txt`;
+        const r = judge(p, line, cwd);
+        expect(r.status, `${line}\n${r.stderr}`).toBe(0);
+      }
+    }
+    for (const line of ["echo ${J:-'; rm -rf hooks; '}", 'echo ${J:-"; rm -rf hooks; "}', "echo ${J:-'}; rm -rf hooks; '}"]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(0);
+    }
+  });
+
+  it("hostile: the default is the path, the write sits in a substitution or a nested shell, or the line is one shells part over", () => {
+    const p = fixture();
+    for (const line of [
+      "echo x > ${J:-'hooks/hooks.json'}", 'echo x > "${J:-"hooks/hooks.json"}"', "rm -rf ${J:-${K:-'hooks'}}",
+      "echo ${J:-'}'$(rm -rf hooks)}", 'echo "${J:-$(rm -rf hooks)}"', `sh -c 'echo \${J:-"}"}; rm -rf hooks'`,
+      "echo ${J:-'}'} > hooks/hooks.json", `echo "\${J:-'}"; rm -rf hooks; echo "'}"`,
+    ]) {
+      const r = judge(p, line);
+      expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+    }
+  });
+});

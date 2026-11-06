@@ -770,3 +770,42 @@ describe("cairn.json guards.writers is a typed block (#454)", () => {
     ]) expect(ConfigSchema.safeParse({ ...base, guards }).success, JSON.stringify(guards)).toBe(false);
   });
 });
+
+describe("write guard: a write after a quoted brace in a default is read and judged (#527)", () => {
+  const FRONTS = ["echo ${J:-'{}'}", "BODY=${J:-'{}'}", 'echo ${J:-"}"}', "echo ${J:-\\}}", 'echo "${J:-"}"}"', `echo "\${J:-"'"}"`, "echo ${J:-${K:-'}'}}"];
+
+  for (const where of ["root", "nested"] as const) {
+    it(`a read-only type's write after every front is refused, from the ${where}`, () => {
+      const c = at(fixture(), where);
+      for (const front of FRONTS) {
+        const line = `${front}; echo x > ${c.rel}src/x.ts`;
+        const r = judge(c, sh(line));
+        expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, line).toContain("src/x.ts");
+      }
+    });
+
+    it(`twins: the same fronts reading, and a write the default only spells, pass, from the ${where}`, () => {
+      const c = at(fixture(), where);
+      for (const front of FRONTS) {
+        const line = `${front}; cat ${c.rel}seed.txt`;
+        const r = judge(c, sh(line));
+        expect(r.status, `${line}\n${r.stderr}`).toBe(0);
+      }
+      const held = `echo \${J:-'; echo x > ${c.rel}src/x.ts; '}`;
+      const r = judge(c, sh(held));
+      expect(r.status, `${held}\n${r.stderr}`).toBe(0);
+    });
+  }
+
+  it("hostile: the write sits in a substitution in the default, a nested shell, a redirect on the front, or a line shells part over", () => {
+    const c = at(fixture(), "root");
+    for (const line of [
+      "echo ${J:-'}'$(echo x > src/x.ts)}", 'echo "${J:-$(echo x > src/x.ts)}"', `sh -c 'echo \${J:-"}"}; echo x > src/x.ts'`,
+      "echo ${J:-'}'} > src/x.ts", 'echo "${J:-"}"}" > src/x.ts', `echo "\${J:-'}"; echo x > src/x.ts; echo "'}"`,
+    ]) {
+      const r = judge(c, sh(line));
+      expect(r.status, `${line}\n${r.stderr}`).toBe(2);
+    }
+  });
+});
