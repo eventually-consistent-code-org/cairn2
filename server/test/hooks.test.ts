@@ -6474,6 +6474,96 @@ describe("the folders the ship gate runs from are the harness guard's (#492)", (
   });
 });
 
+// #500: #460 refused the tool's approve flag and left the file the flag
+// writes an ordinary write away: the agent hashes the plan it edited, writes
+// the stamp by hand, and the close-time re-run trusts it. The stamps' folder
+// is a protected zone, the server's own write never passes a hook, and the
+// switch the stamp matters under, verify.rerun, is the owner's beside it.
+describe("the approval stamp can't be written straight to disk, and the re-run switch is the owner's (#500)", () => {
+  const WHAT = "the owner's approval stamp on a plan";
+  const STAMP = ".cairn/state/approvals/01-x.json";
+  const FORGED = JSON.stringify({ version: 1, phaseDir: "01-x", blob: "a".repeat(40), at: "2026-11-05T00:00:00.000Z", by: "owner <o@x>" });
+  const OWNER = "an owner-only key in cairn.json (verify.rerun)";
+
+  function fixture() {
+    const f = hardenFixture("stamp");
+    mkdirSync(join(f.p, ".cairn", "state", "approvals"), { recursive: true });
+    writeFileSync(join(f.p, ".cairn", "state", "active-context.json"), "{}\n");
+    writeFileSync(join(f.p, STAMP), FORGED);
+    writeFileSync(join(f.p, "cairn.json"), JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } } }, null, 2));
+    return f;
+  }
+
+  const refused = (r: { status: number | null; stderr: string }, what: string, label: string) => {
+    expect(r.status, label).toBe(2);
+    expect(r.stderr, label).toContain(what);
+  };
+
+  it("refuses every route onto a stamp; reading one, hashing the plan and the state beside it pass", () => {
+    const { p, home } = fixture();
+    refused(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }), WHAT, "Write");
+    refused(hardenRun(p, home, "Edit", { file_path: join(p, STAMP), old_string: "a", new_string: "b" }), WHAT, "Edit");
+    refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: join(p, STAMP), content: FORGED }), WHAT, "MCP");
+    for (const c of [`echo '{}' > ${STAMP}`, `printf x >> ${STAMP}`, `tee ${STAMP} < /tmp/s`, `cp /tmp/s ${STAMP}`, `mv /tmp/s ${STAMP}`, `rm ${STAMP}`,
+      "rm -rf .cairn/state/approvals", "rm -rf .cairn/state", "mv .cairn/state /tmp/parked", "ln -s /tmp/forged .cairn/state/approvals",
+      "cp -r /tmp/forged/. .cairn/state/approvals/", "cp -r /tmp/forged/. .cairn/state/", "find .cairn/state/approvals -type f -delete"]) {
+      refused(hardenRun(p, home, "Bash", { command: c }), "", c);
+    }
+    for (const c of [`cat ${STAMP}`, "git hash-object -w cairn.json", "echo '{}' > .cairn/state/active-context.json", "ls .cairn/state/approvals"]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+    expect(hardenRun(p, home, "Write", { file_path: join(p, ".cairn/state/active-context.json"), content: "{}" }).status).toBe(0);
+  });
+
+  it("a state folder that isn't there yet can't be moved in whole, and the session escape is the owner's way in", () => {
+    const empty = hardenFixture("stamp-empty");
+    mkdirSync(join(empty.p, ".cairn"), { recursive: true });
+    for (const c of ["mv /tmp/forged .cairn/state", "ln -s /tmp/forged .cairn/state"]) {
+      expect(hardenRun(empty.p, empty.home, "Bash", { command: c }).status, c).toBe(2);
+    }
+    const { p, home } = fixture();
+    expect(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459), and in a linked worktree", () => {
+    const { p, home } = fixture();
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      refused(hardenRun(p, home, "Bash", { command: `echo '{}' > ../../${STAMP}` }, at), WHAT, `shell, bare=${bare}`);
+      refused(hardenRun(p, home, "Write", { file_path: join(p, STAMP), content: FORGED }, at), WHAT, `Write, bare=${bare}`);
+      expect(hardenRun(p, home, "Bash", { command: `cat ../../${STAMP}` }, at).status).toBe(0);
+    }
+    hardenGit(p, home, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    const wt = join(freshDir("cairn-hooks-stamp-wt-"), "w1");
+    hardenGit(p, home, "worktree", "add", "-q", wt, "-b", "w1");
+    refused(hardenRun(p, home, "Write", { file_path: join(wt, STAMP), content: FORGED }, { cwd: wt }), WHAT, "linked worktree");
+  });
+
+  it("verify.rerun is an owner-only key: on is refused by every route, off, a sibling and a read pass", () => {
+    const { p, home } = fixture();
+    const cfg = join(p, "cairn.json");
+    const on = (v: unknown) => JSON.stringify({ tracker: { type: "github", config: { repo: "o/r" } }, verify: { rerun: v } });
+    refused(hardenRun(p, home, "Write", { file_path: cfg, content: on(true) }), OWNER, "Write on");
+    refused(hardenRun(p, home, "Write", { file_path: cfg, content: on("true") }), OWNER, "Write, a string where the boolean goes");
+    refused(hardenRun(p, home, "Bash", { command: `echo '${on(true)}' > cairn.json` }), OWNER, "shell line");
+    refused(hardenRun(p, home, `${HARDEN_DC}write_file`, { path: cfg, content: on(true) }), OWNER, "MCP");
+    expect(hardenRun(p, home, "Write", { file_path: cfg, content: on(false) }).status).toBe(0);
+    expect(hardenRun(p, home, "Write", { file_path: cfg, content: JSON.stringify({ verify: { timeoutSeconds: 90 } }) }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: "grep rerun cairn.json" }).status).toBe(0);
+    for (const bare of [false, true]) {
+      refused(hardenRun(p, home, "Write", { file_path: cfg, content: on(true) }, { cwd: join(p, "pkg", "lib"), bare }), OWNER, `nested, bare=${bare}`);
+    }
+  });
+
+  it("the server's own reader, on the stamp a process wrote: what the guard can't see is what the sentence says it can't", () => {
+    // the Not seen line: a stamp from an interpreter reaches the reader, shape checked and no more
+    const { p, home } = fixture();
+    const c = `node -e "require('fs').writeFileSync('${STAMP}','{}')"`;
+    expect(hardenRun(p, home, "Bash", { command: c }).status).toBe(0);
+  });
+});
+
 // #470: the measured duration subtracts the usage-limit pauses the pauses
 // log records, and nothing guarded the log: one row appended at claim time,
 // from any session string, turned an honest two hours into zero minutes with
@@ -7234,7 +7324,7 @@ describe("an owner-only key in cairn.json needs the owner: the harness guard (#2
     const source = readFileSync(HARNESSGUARD, "utf8");
     expect(source).toMatch(/^import \{[^}]*OWNER_ONLY_KEYS[^}]*\} from "\.\/owner-keys\.mjs";$/m);
     const hook = await import(pathToFileURL(join(scriptsDir, "owner-keys.mjs")).href);
-    expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers"]);
+    expect([...hook.OWNER_ONLY_KEYS]).toEqual(["leakGuard.enabled", "ship.confirm", "auto.breaker", "peers.*.execCapable", "guards.writers", "verify.rerun"]);
   });
 });
 

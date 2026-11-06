@@ -1662,8 +1662,8 @@ is tests-pass, standard adds the tracker cross-check, deep adds an
 adversarial verification subagent. VERIFICATION.md is written only on a
 pass, and a failed verify mandatorily becomes a trace.
 
-**`verify.rerun`** (cairn.json, default `false`; `verify.timeoutSeconds`,
-default 600). When it's on, a close doesn't just record the evidence the
+**`verify.rerun`** (cairn.json, default `false`, and turning it on is the
+owner's, #500; `verify.timeoutSeconds`, default 600). When it's on, a close doesn't just record the evidence the
 worker narrated — the server re-runs the task's declared `verify:` line
 itself, but only when the evidence command equals that line exactly, the
 PLAN.md holding it is tracked by git, and the line is the one in the plan

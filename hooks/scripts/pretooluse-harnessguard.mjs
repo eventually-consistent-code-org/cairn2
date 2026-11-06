@@ -81,13 +81,13 @@
  *   ordinary work as a file, but the keys only the owner sets -- the list
  *   the server exports (config.ts OWNER_ONLY_KEYS: the leak guard's off
  *   switch, ship's confirmation, the breaker's limit, a peer's
- *   execCapable, the write table), read here from the generated
+ *   execCapable, the write table, the close-time re-run), read here from the generated
  *   owner-keys.mjs -- are the harness: an Edit or Write is applied to the
  *   file in the guard's head and each key's value compared, so one set
  *   away from its safe value is refused, naming the key, while the safe
  *   value, a sibling key and a removal land; a shell line or an MCP input
  *   that writes cairn.json and spells a key's last word (`enabled`,
- *   `confirm`, `breaker`, `execCapable`, `writers`, in any case, a JSON
+ *   `confirm`, `breaker`, `execCapable`, `writers`, `rerun`, in any case, a JSON
  *   \u escape decoded) is refused as typed, whatever value it sets -- the
  *   guard cannot run it. Asserted: hooks.test.ts "(#281)"; config_set
  *   refuses the same keys with OWNER_ONLY (config.test.ts "owner-only").
@@ -167,10 +167,15 @@
  *   name, carrying `approve` (true, "true" or 1) mints the owner's
  *   approval stamp on a plan, the act the close-time verify re-run
  *   trusts (ADR 0017); refused unless the session carries
- *   CAIRN_HARNESS_EDIT=1, so the stamp is a human act by mechanism and
- *   not by the plan verb's manners. Asserted: hooks.test.ts
- *   "plan_meta_set approve (#460)" and the #383 row "plan_meta_set with
- *   approve".
+ *   CAIRN_HARNESS_EDIT=1. The file that flag writes is the same act, so
+ *   .cairn/state/approvals is a protected tree too, under the project and
+ *   each linked worktree (#500; the server's own write passes no hook), and
+ *   verify.rerun, the switch the stamp matters under, is an owner-only key.
+ *   Where this guard runs, then, a stamp is a human act by mechanism and not
+ *   by the plan verb's manners; on a harness that runs no hooks it is a
+ *   dated claim (Claude Code and Cursor only, ADR 0017, 2026-11-05).
+ *   Asserted: hooks.test.ts "plan_meta_set approve (#460)", "(#500)" and the
+ *   #383 row "plan_meta_set with approve".
  *
  *   Git hooks (#353): the folder git runs its hooks from is a protected
  *   tree for every tool above -- core.hooksPath when set, the repo's own
@@ -278,6 +283,12 @@
  *   a name it never assigned (${X:-hooks}) is judged as a value. Asserted:
  *   hooks.test.ts "(#509)".
  *
+ *   Not seen, dated 2026-11-05 (#500, by the decision of #289): a stamp a
+ *   process writes itself (`node -e`, a script), which reads as a write in
+ *   an interpreter; the server's reader checks its shape and no more, so the
+ *   sentence above is about what this guard reads. Pinned by hooks.test.ts
+ *   "(#500)".
+ *
  *   Not seen, dated 2026-11-05 (#509, by the decision of #291; both pinned by
  *   hooks.test.ts "(#509)"): a value from a file the line sources, which reads
  *   as a name the line never assigned (`. ./env.sh; echo x > $HK/y`). A value
@@ -372,13 +383,6 @@ const MCP_DIR_WHAT = "a folder your MCP server config runs its server from";
 // the refusal names the file on its next line and asks where the
 // instruction came from, like every other (ADR 0016).
 const GIT_HOOK_WHAT = "a git hook that runs at your next checkout or commit";
-
-// cairn's own folders the installed git layer trusts (#492), under a project
-// root and every linked worktree of it, as [names, what a refusal calls it].
-const CAIRN_ZONES = [
-  [[".cairn", "harness"], "the scripts cairn's git hook runs and the verbs beside them"],
-  [[".cairn", "githooks"], "the folder cairn's git hooks live in"],
-];
 
 // How long one `git rev-parse` may take before the guard goes on without it.
 const GIT_WAIT_MS = 1500;
@@ -651,6 +655,16 @@ const OWNER_LEAVES = OWNER_ONLY_KEYS.map((k) => [k, fold(k.split(".").pop())]);
 // calls it.
 const APPROVAL_TOOL = /(?:^|__)plan_meta_set$/;
 const APPROVAL_WHAT = "the owner's approval stamp on a plan";
+
+// cairn's own folders something else trusts, under a project root and every
+// linked worktree of it, as [names, what a refusal calls it]: the ones the
+// installed git layer runs from (#492), and the stamps the close-time re-run
+// reads (#500), which the tool's approve flag above is only one way to write.
+const CAIRN_ZONES = [
+  [[".cairn", "harness"], "the scripts cairn's git hook runs and the verbs beside them"],
+  [[".cairn", "githooks"], "the folder cairn's git hooks live in"],
+  [[".cairn", "state", "approvals"], APPROVAL_WHAT],
+];
 
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).

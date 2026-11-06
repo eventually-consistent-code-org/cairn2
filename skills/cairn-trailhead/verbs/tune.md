@@ -22,9 +22,9 @@ hand-edits (single-writer rule).
 - `tune leakguard off|on` = `config_set({leakGuard: {enabled: false|true}})`
   — the guard's front door. `off` is owner-only (below).
 - Owner-only keys (#281): `leakGuard.enabled`, `ship.confirm`,
-  `auto.breaker`, `peers.<provider>.execCapable`, `guards.writers`. The
-  server answers `OWNER_ONLY` when a patch sets one away from its safe
-  value (on, on, 3, false; the write table has none) and the session was
+  `auto.breaker`, `peers.<provider>.execCapable`, `guards.writers`,
+  `verify.rerun`. The server answers `OWNER_ONLY` when a patch sets one away
+  from its safe value (on, on, 3, false, none for the write table, off) and the session was
   not started with `CAIRN_HARNESS_EDIT=1`. Render it human-first: the key,
   then "this one is the owner's — set it in cairn.json yourself, or start
   the session with CAIRN_HARNESS_EDIT set to 1". Never route around it

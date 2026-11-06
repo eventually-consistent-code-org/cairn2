@@ -189,3 +189,33 @@ passing, the nested working directory with and without
 `CLAUDE_PROJECT_DIR`, and the refusal row the breaker counts) and in the
 #383 matrix row "plan_meta_set with approve" beside the same tool's
 ordinary wave edit.
+
+## Amendment 2026-11-05 — the file the flag writes is the same act (#500)
+
+The 2026-11-04 heading said more than its mechanism did. The flag was
+refused, and the file the flag writes was an ordinary write: hash the plan
+into the object store, write `{version, phaseDir, blob, at, by}` to the
+stamps' folder by hand, and the reader, which checks a stamp's shape and
+that its blob exists, took it. `verify.rerun` could be switched on the
+same way. Both are closed where a guard runs:
+
+- **Asserted.** The stamps' folder is a protected tree for the harness
+  guard, by Edit, Write, MCP path tools and every shell shape it reads,
+  under the project and each linked worktree of it, a folder on the way to
+  it included; reading a stamp passes, and the server's own write passes no
+  hook. `verify.rerun` joins the owner-only keys, so `config_set` and the
+  guard both refuse it set to anything but `false`. `server/test/hooks.test.ts`
+  "(#500)" and `server/test/config.test.ts` "owner-only keys".
+- **A dated claim, 2026-11-05.** The harness guard runs on Claude Code and
+  Cursor. On the other six harnesses nothing refuses the write, so there the
+  stamp is the plan verb's manners and no more; `verify.rerun` off by
+  default stays the real gate.
+- **Not seen, dated 2026-11-05.** A stamp a process writes itself (`node -e`,
+  a script) reads as a write in an interpreter, the class ADR 0016 leaves to
+  the operating system. Pinned in the same test.
+
+So "the stamp is a human act by mechanism" carries that qualifier: where a
+guard runs, for what it reads. A signature was the other way to get there
+and was rejected: on a one-user machine there is no key the agent process
+can't read, so it is a check the attacker can re-stamp, and it only looks
+stronger.

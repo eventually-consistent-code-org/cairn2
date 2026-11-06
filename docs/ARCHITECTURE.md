@@ -592,7 +592,7 @@ distinction matters more than the count.
   `server/test/hooks.test.ts`, "(#293)"). The harness guard also holds
   the owner-only keys of cairn.json — the leak guard's off switch,
   ship's confirmation, the breaker's limit, a peer's `execCapable`, the
-  write authority table — to the owner (#281): the server exports the
+  write authority table, the close-time re-run (#500) — to the owner (#281): the server exports the
   list (`config.ts OWNER_ONLY_KEYS`, each with the one safe value it may
   be set to without the owner) and `config_set` refuses a patch that
   sets one away from that value with `OWNER_ONLY` unless the session
