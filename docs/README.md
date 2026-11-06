@@ -8,6 +8,11 @@
   ~15 minutes: install, credentials, cairn.json, first phase.
 - **[Runbook](01-runbook.md)** — the complete operating manual: every verb,
   every flag, every backend, every error code.
+- **[Architecture](ARCHITECTURE.md)** — how the plugin layer (policy and
+  judgment) and the MCP server (every mechanism with a wrong answer) split
+  the work.
+- **[ADRs](adr/)** — the decisions that shaped the code, each carrying the
+  condition that would retire it (`removeWhen:`).
 - **[How cairn compares](comparison.md)** — mechanism-by-mechanism against
   the nearest alternatives, every competitor claim carrying a
   last-verified date.
@@ -19,9 +24,10 @@
   minutes, and the instrumentation gap the run caught in its own budget
   ceiling — fixed and refusal-tested one release later.
 
-Docs follow the spec → plan → build → review cycle: every phase/tier gets a
-design spec, then an implementation plan, then ships. Specs are decision
-records — status lines say whether a doc is approved or draft.
+The 2.0 build followed a spec → plan → build → review cycle, and the specs
+and plans below are its records — status lines say whether a doc is approved
+or draft. The newest spec is dated 2026-09-20. Later phases keep their plans
+out of the shipped tree and land what they decided as [ADRs](adr/).
 
 ## Where the history lives
 
@@ -53,6 +59,11 @@ root puts the same files at `evals-archive/docs/superpowers/`.
 | [2026-07-22 — P5′ cutover](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-22-cairn-2-p5-prime-cutover.md) | Shim removal, `/cairn` as the only command, dogfood + publish as human gates |
 | [2026-07-23 — Tracker-mirror fidelity](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-23-cairn-2-tracker-mirror-fidelity-design.md) | Inbound PM-delta ingest (`plan_tracker_delta` cursor, edits integrate forward) + outbound paper trail (comment lifecycle, Jira worklog, `timeSpentMinutes`) |
 | [2026-07-23 — Engineer mode](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-23-cairn-2-engineer-mode-design.md) | `user.mode` vibe/engineer posture: work pairing, review both ways (no self-merge), decision surfacing |
+| [2026-07-25 — Docusaurus docs connector](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-25-docusaurus-docs-connector-design.md) | Second docs connector: publishing the docs tree into a Docusaurus site, which has no runtime page API |
+| [2026-07-26 — Auto-assign on claim](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-26-auto-assign-on-claim-design.md) | Assignment follows the credentials doing the work when a verb claims an issue |
+| [2026-07-26 — Local tracker](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-26-local-tracker-design.md) | A local-files backend for teams, solo devs and CI agents who want issues without a hosted service or credentials |
+| [2026-07-30 — Survey verb](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-07-30-cairn-2-survey-verb-design.md) | Project-wide research → discussion → roadmap apply, where `scout` covers one phase |
+| [2026-09-20 — Context economy layer](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/specs/2026-09-20-context-economy-layer-design.md) | Cutting the context a session holds and the turns that hold it, against a 50% target on `cache_read` tokens per unit of delivered work |
 
 ## Implementation plans (`docs/superpowers/plans/` on `evals-archive`)
 
@@ -77,6 +88,10 @@ root puts the same files at `evals-archive/docs/superpowers/`.
 | [Tier F3](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/plans/2026-07-22-cairn-2-tier-f3.md) | Frontend quality loop: designer + uat agents |
 | [Fidelity](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/plans/2026-07-23-cairn-2-tracker-mirror-fidelity.md) | Tracker-mirror fidelity: tracker-delta cursor module, write-through no-echo, worklog capability, verb-doc lifecycle |
 | [Engineer mode](https://github.com/eventually-consistent-code-org/cairn2/blob/evals-archive/docs/superpowers/plans/2026-07-23-cairn-2-engineer-mode.md) | `user.mode` key + pairing/no-self-merge/decision-surfacing verb-doc overlays |
+
+This table stops at 2026-07-23. Thirteen later plans, from the Docusaurus
+connector through the context economy layer, are in
+[the same folder](https://github.com/eventually-consistent-code-org/cairn2/tree/evals-archive/docs/superpowers/plans).
 
 ## Research (`docs/superpowers/research/` on `evals-archive`)
 

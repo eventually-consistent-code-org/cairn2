@@ -288,9 +288,9 @@ docs/       quickstart, runbook, ADRs, architecture — see docs/README.md
 
 ## Documentation
 
-Everything is indexed at **[docs/README.md](docs/README.md)** — design specs
-(umbrella design, parity roadmap, tier specs), per-phase implementation
-plans, and competitive research. The spec/plan/research history and the
+The index is **[docs/README.md](docs/README.md)** — architecture, ADRs, design
+specs (umbrella design, parity roadmap, tier specs), implementation plans, and
+competitive research. The spec/plan/research history and the
 behavioral eval suite live on the orphan
 [`evals-archive`](https://github.com/eventually-consistent-code-org/cairn2/tree/evals-archive) branch,
 so the tree the marketplace ships is the plugin alone (#403).

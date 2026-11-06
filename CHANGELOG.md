@@ -1,5 +1,51 @@
 # Changelog
 
+## Backfill — phases the changelog never named (2026-11-05)
+
+Nothing new ships here. Six phases verified and shipped without their name
+landing in this file, so the docs drift report kept flagging three of them
+and passed the other three only because a low phase number also matches
+inside a higher one. Written from each phase's own ledger.
+
+#### the marketing launch, July 2026 (the `v1` entry below)
+
+- Phase 1, projects section scaffold: the `/projects/` landing page, nav
+  slot and projects archetype on eventually-consistent.io, with a clean
+  build and nothing leaking into the home feed.
+- Phase 2, cairn marketing pages: the feature story page and the
+  positioning section, reworked after review into a capability matrix and
+  a shipped-versus-requested section with verified upstream citations.
+- Phase 3, quick start page: install and server build, tracker setup for
+  the six backends of the day, a `/cairn:new` walkthrough, and the
+  companion-plugin loadout.
+- Phase 4, go public + verify + publish: the repository flipped public
+  after a cleanup pass (license, banners, redaction, gitignore), install
+  smoke test and link check run against the public repo, pages live.
+
+#### phase 7, watertight (first tagged in v2.2.0)
+
+- Estimates are gated on tracker capability: `issue_create` and
+  `issue_update` report `estimateSkipped` on the backends without support.
+- Decimal phase numbers converge on one shared validator with a structured
+  `CONFIG_INVALID`, and `check-surface` fails when a decimal claim and an
+  integer schema drift apart.
+- Tracker HTTP errors read the response body into the message, an
+  auth-shaped 400 reads `AUTH_MISSING`, and `nextAction` names the token,
+  scope or policy. `docs_status` stays graceful on an unreachable connector.
+- `config_probe` preflights the eight trackers and two docs connectors,
+  scoped to the real target after live verification caught token-only
+  probes passing on bad targets.
+- Jira and Confluence scoped tokens route through the Atlassian API gateway.
+
+#### phase 22, the drill (first tagged in v2.7.0)
+
+- Behavioral eval suite: six cases, a mocked cairn server and
+  `docs/EVALS.md`. First acceptance run 0.954 overall, four of six cases
+  perfect, and it surfaced the shim plugin-root defect, fixed in the phase.
+- Trigger-rate cases and the first baseline table in `docs/EVALS.md`.
+- An allowed-to-fail eval lane in CI: nightly and on dispatch, path
+  filtered, `continue-on-error`.
+
 ## Unreleased — the guard gaps (phase 31, 2026-11-04)
 
 The guards' sentences come true. The October guard-shape backlog, the
