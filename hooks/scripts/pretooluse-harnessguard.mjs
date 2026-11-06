@@ -245,15 +245,31 @@
  *   line doesn't spell (`cp evil.cfg .git/config`, an unreadable patch),
  *   and the editor `git config --edit` opens (#465).
  *   A protected path in a variable the line never assigns (#291, by
- *   decision, phase 31: the session's environment, a `read`, a value a
- *   caller computed) -- `$HK/hooks.json` is judged as typed, measured by
- *   hooks.test.ts "(#291)"; one the line assigns is spelled out before
- *   judgment, and one it assigns from a substitution is refused as a
- *   write the guard can't place.
+ *   decision, phase 31: the session's environment, a file it sources, a value a
+ *   caller computed) -- `$HK/hooks.json` is judged as typed and with the name
+ *   gone, measured by hooks.test.ts "(#291)", "(#509)"; one the line assigns is
+ *   spelled out before judgment, and one it assigns from a substitution is
+ *   refused as a write the guard can't place.
  *   An owner-only cairn.json key (#281) arriving in content the line
  *   doesn't spell (`cp evil.json cairn.json`, `mv`, `cat evil.json >
  *   cairn.json`, a patch): the file lands with the key set and the server
  *   reads it -- measured by hooks.test.ts "(#281)".
+ *
+ *   A line's words are spelled before a write is judged (#291, #494, #509),
+ *   by the pass the run guard reads through too (shell-words.mjs spellWords),
+ *   so a value holding the command, or a flag and its path, is read as them.
+ *   An operator on a name the line assigns (${HK:1}, ${HK#x}, ${HK/X/a}, ${!A},
+ *   ${arr[0]}, ${HK:-x}) and a name it assigns from `read`, `mapfile`, `printf
+ *   -v`, `getopts`, `+=`, an array or a transforming `declare` are refused as a
+ *   write the guard can't place, at the front of a path; a default written on
+ *   a name it never assigned (${X:-hooks}) is judged as a value. Asserted:
+ *   hooks.test.ts "(#509)".
+ *
+ *   Not seen, dated 2026-11-05 (#509, by the decision of #291; both pinned by
+ *   hooks.test.ts "(#509)"): a value from a file the line sources, which reads
+ *   as a name the line never assigned (`. ./env.sh; echo x > $HK/y`). A value
+ *   read or built under a folder the guard knows, judged there though it may
+ *   climb out (`read N; echo x > /tmp/$N`), as `/tmp/$(date).bak` is.
  *
  *   Fails open on its own error only (exit 0 above): since Claude Code
  *   2.1.299 the platform fails closed when it cannot reach the guard or
@@ -269,8 +285,9 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SHELLS, SUBSTITUTION_DEPTH, braceExpand, evalCommandString, pagerCommands, quoteWord, runnerCommands,
-  shellCommandString, shellReadsStdin, shellSegments, suCommandString, toolCommandLines, tooDeep, unwrap,
+  SHELLS, SUBSTITUTION_DEPTH, assignVars, braceExpand, evalCommandString, expandAssigned, lineVars, pagerCommands,
+  quoteWord, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords,
+  suCommandString, toolCommandLines, tooDeep, unwrap,
 } from "./shell-words.mjs";
 import { projectRoot } from "./lib.mjs";
 import { OWNER_ONLY_KEYS, OWNER_ONLY_SAFE } from "./owner-keys.mjs";
@@ -768,91 +785,10 @@ function expandVars(raw) {
     .replace(/^(?:\$GIT_CONFIG_GLOBAL|\$\{GIT_CONFIG_GLOBAL\})(?=\/|$)/, () => expandHome(process.env.GIT_CONFIG_GLOBAL ?? ""));
 }
 
-// A `$NAME` or `${NAME}` inside a word (#291).
-const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
-
-/**
- * `raw` with every variable the line assigned earlier spelled out (#291):
- * each $NAME / ${NAME} whose NAME is in `vars`, in every value a loop gave
- * it, so `D=hooks; echo x > $D/hooks.json` is judged at hooks/. One the
- * line assigned from a substitution (null in `vars`), at the front of the
- * path with a folder after it, leads the write where the guard can't
- * follow -- `lost`, as a cd it can't read (#258) and a substitution leading
- * a path (#319) do; elsewhere in the path it stays as typed, judged under
- * the folder before it, as `/tmp/$(date).bak` is. A variable the line
- * never assigned stays as typed (the header's Not seen block). Past
- * MAX_PLACES values the rest is lost too.
- */
-function expandAssigned(raw, vars) {
-  if (!vars?.size) return { raws: [raw], lost: false };
-  let raws = [""];
-  let lost = false;
-  let at = 0;
-  for (const m of raw.matchAll(VAR_REF)) {
-    const text = raw.slice(at, m.index);
-    at = m.index + m[0].length;
-    const vals = vars.get(m[1] ?? m[2]);
-    if (vals === undefined) { raws = raws.map((r) => r + text + m[0]); continue; } // never assigned on the line
-    if (vals === null) { // assigned from something the guard can't read
-      if (/^(?:\.\/)*$/.test(raw.slice(0, m.index)) && raw.slice(at).includes("/")) lost = true;
-      raws = raws.map((r) => r + text + m[0]);
-      continue;
-    }
-    raws = raws.flatMap((r) => vals.map((v) => r + text + v));
-    if (raws.length > MAX_PLACES) { lost = true; raws = raws.slice(0, MAX_PLACES); }
-  }
-  return { raws: raws.map((r) => r + raw.slice(at)), lost };
-}
-
-/**
- * The values one assignment's right-hand side can take (#291), spelled out
- * through the variables assigned before it and the ones the guard knows
- * (~, $HOME, $CAIRN_HOME ...), one per value a loop variable in it holds.
- * Null when a $(...) or backtick computes it, or a variable it names was
- * itself unresolvable.
- */
-function valueOf(v, vars) {
-  if (/\$\(|`/.test(v)) return null;
-  if ([...v.matchAll(VAR_REF)].some((m) => vars.get(m[1] ?? m[2]) === null)) return null;
-  const { raws, lost } = expandAssigned(v, vars);
-  return lost ? null : raws.map(expandVars);
-}
-
-/** `vars` with each NAME=value of `assigns` set, in order, each read through the ones before it (#291). */
-function assignVars(assigns, vars) {
-  const out = new Map(vars);
-  for (const a of assigns) {
-    const eq = a.indexOf("=");
-    if (eq > 0) out.set(a.slice(0, eq), valueOf(a.slice(eq + 1), out));
-  }
-  return out;
-}
-
-/**
- * The variables one segment leaves set for the commands after it (#291):
- * a bare NAME=value (one or several), an export, declare, typeset,
- * readonly or local one, and a `for NAME in WORDS` (or select) header,
- * which gives NAME each word in turn -- every word, since the body runs
- * for each. A prefix assignment on a real command (`D=x cmd`) is that
- * command's alone, as the shell gives it: writeTargets hands it to the
- * line the command nests, and nothing after it sees it.
- */
-function lineVars(seg, vars) {
-  const { words: w, assigns } = unwrap(seg.words, READ);
-  let out = vars;
-  if (!w.length) out = assignVars(assigns, out);
-  else if (/^(export|declare|typeset|readonly|local)$/.test(w[0])) {
-    out = assignVars(w.slice(1).filter((a) => ASSIGNMENT.test(a)), out);
-  }
-  const r = seg.reserved ?? [];
-  const at = r.findIndex((x, i) => (x === "for" || x === "select") && r[i + 2] === "in");
-  if (at >= 0) {
-    const vals = r.slice(at + 3).filter((x) => x !== "do").map((x) => valueOf(x, out));
-    out = new Map(out);
-    out.set(r[at + 1], vals.includes(null) ? null : vals.flat());
-  }
-  return out;
-}
+// How the shared reader spells this guard's variables (#291, shell-words.mjs):
+// a value's ~, $HOME and the config dirs are the ones this guard knows, and
+// braces are writeTargets' own, spelled with the ANY marker (#258).
+const SPELL = { read: READ, known: expandVars, cap: MAX_PLACES, braces: false };
 
 /**
  * The folder Claude Code keeps its user config in when CLAUDE_CONFIG_DIR
@@ -2055,7 +1991,8 @@ function copyTargets(cmd, args, add) {
     } else if (cmd === "ln" && operands.length === 1) dest = "."; // ln -s x: a link named x, here
     else return;
   }
-  const remote = (p) => rsync && /^[^/]*:/.test(p);
+  // host:path, and never the `:` of a shell operator (`${D:0}/x`, #509)
+  const remote = (p) => rsync && /^[^/$]*:/.test(p);
   if (cmd === "mv" || (rsync && hasOpt(opts, "--remove-source-files"))) {
     for (const s of srcs) if (!remote(s)) add(s, "remove");
   }
@@ -2530,7 +2467,7 @@ function writeTargets(seg, ctx) {
     // #291 -- a variable the line assigned earlier is spelled out first, in
     // every value a loop gave it; one assigned from a substitution, leading
     // the path, puts the write where the guard can't follow
-    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars);
+    const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
     for (const one of raws) {
       // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
       // sees them (#258, #263), and a folder it computes in front of the path
@@ -2592,7 +2529,7 @@ function writeTargets(seg, ctx) {
         positional: marker,
         argvFeed: xargs ? own : ctx.argvFeed, // `xargs -I{} sh -c 'rm {}'` too
         walk: ctx.walk,
-        vars: assignVars(assigns, ctx.vars), // the line's variables, and this command's own prefix (#291)
+        vars: assignVars(assigns, ctx.vars, SPELL), // the line's variables, and this command's own prefix (#291)
       }));
     };
     const str = cmd === "eval" ? evalCommandString(args)
@@ -2616,7 +2553,8 @@ function writeTargets(seg, ctx) {
   if (cmd === "find") {
     const spec = parseFind(args);
     for (const f of spec.files) add(f);
-    const walk = { spec, dir: ctx.dir };
+    // #509 -- a start the shell works out from what it can't read is a walk it can't place
+    const walk = { spec, dir: ctx.dir, lost: spec.starts.some((s) => expandAssigned(s, ctx.vars, MAX_PLACES).lost) };
     if (spec.remove) out.push({ raw: WALK, abs: ctx.dir, mode: "remove", walk });
     for (const words of spec.execs) {
       const inner = { words, redirects: [], heredocs: [], herestrings: [], inputs: [], op: null };
@@ -2858,17 +2796,28 @@ function lineTargets(command, dir, depth, extra = {}) {
   const places = linePlaces(segs, dir);
   const out = [];
   // the variables assigned so far on the line, each command judged under
-  // the ones before it (#291); a nested line starts with its caller's
-  let vars = extra.vars ?? new Map();
+  // the ones before it (#291); a nested line starts with its caller's, and
+  // a loop or function body runs under all the line assigns (#494, seedVars)
+  let vars = seedVars(segs, extra.vars ?? new Map(), SPELL);
   for (let k = 0; k < segs.length; k++) {
     // the commands piping into this one, nearest last
     const up = [];
-    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) up.unshift(segs[j]);
+    // (#509) spelled like the command itself, so `D=hooks; find $D | xargs rm` feeds what it walks
+    for (let j = k - 1; j >= 0 && PIPE.has(segs[j].op); j--) {
+      up.unshift(...spellWords(segs[j], vars, SPELL).map(({ words }) => ({ ...segs[j], words })));
+    }
     // the prefix counts on a command the human typed, not inside a quoted string
     if (depth > 0 || !exempt(segs[k].words)) {
-      for (const d of places) out.push(...writeTargets(segs[k], { ...extra, dir: d, depth, up, vars }));
+      // #509 -- the words spelled first, by the pass the run guard reads
+      // through, so a value that holds the command or a flag and its path is
+      // read as them (`C='rm hooks/x'; $C`). A word it can't spell stays as
+      // typed, for writeTargets' add to place or call lost.
+      for (const { words } of spellWords(segs[k], vars, SPELL)) {
+        const seg = { ...segs[k], words };
+        for (const d of places) out.push(...writeTargets(seg, { ...extra, dir: d, depth, up, vars }));
+      }
     }
-    vars = lineVars(segs[k], vars);
+    vars = lineVars(segs[k], vars, SPELL);
   }
   return out;
 }
@@ -2892,7 +2841,7 @@ function judgeTarget(t) {
   }
   if (lead === WALK) {
     if (!t.walk) return null;
-    if (t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandVars(s))))) return lost;
+    if (t.walk.lost || t.walk.spec.starts.some((s) => isLost(resolveIn(t.walk.dir, expandVars(s))))) return lost;
     return walkHit(t.walk.spec, t.walk.dir, t.mode);
   }
   if (isLost(t.abs)) return lost;

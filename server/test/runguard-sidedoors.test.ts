@@ -237,3 +237,109 @@ describe("side-door matrix, table two: the routes the guard does not see are an 
     expect(source).toMatch(/\*\s+#483\s+the push action by another route/);
   });
 });
+
+// #501 -- a refspec or an API URL the shell builds from a variable read as the
+// literal `$B` or `$U`, which names no branch and no path at GitHub's API, so a
+// push onto the default branch and a merge request both passed. The reader
+// spells them (#494), and a refspec it can't spell refuses as an unreadable
+// push. A URL from the environment or a substitution stays Not seen by decision.
+describe("a refspec or API URL built from a variable meets the two push gates (#501)", () => {
+  const GATED = [
+    "git $X push origin main",
+    "B=main; git push origin $B", 'B=main; git push origin "$B"', "B=main; git push origin ${B}", "S=HEAD:main; git push origin $S",
+    "B=main; git push origin $B:$B", "R=origin; B=main; git push $R $B", "B=refs/heads/main; git push origin HEAD:$B",
+    "C='git push origin main'; $C", 'C=\'git push origin main\'; eval "$C"',
+    `U=${MERGE}; curl -X PUT $U`, `U=${MERGE}; curl -X PUT "$U"`, `U=${MERGE}; wget --method=PUT "$U"`,
+    `M=PUT; U=${MERGE}; curl -X $M $U`, "E=repos/o/r/pulls/1/merge; gh api -X PUT $E", "A='-X PUT'; E=repos/o/r/pulls/1/merge; gh api $A $E",
+    'H=https://api.github.com; curl -X PUT "$H/repos/o/r/pulls/1/merge"',
+    `C='curl -X PUT ${MERGE}'; $C`, "N=1; gh pr merge $N",
+    // hostile: a scheme-carrying URL split across two variables; a default in the word
+    "H=https://api.github.com; P=/repos/o/r/pulls/1/merge; curl -X PUT $H$P", `curl -X PUT \${X:-${MERGE}}`,
+  ];
+  const UNREADABLE: Array<[string, string]> = [
+    ["git push origin $B", "$B"], ['git push origin "$B"', "$B"], ["git push $R main", "$R"], ["git push origin feature$B", "feature$B"],
+    ["git push -u origin ${B}", "${B}"], ["git push origin ${X:-main}", "${X:-main}"], ["git push origin ${X:-feature}", "${X:-feature}"],
+    ['git push origin "$(git branch --show-current)"', "$(git branch --show-current)"],
+    ["git push origin `git branch --show-current`", "`git branch --show-current`"],
+    ['B=$(git branch --show-current); git push origin "$B"', "$B"],
+    ['git push origin "HEAD:$(cat x)"', "HEAD:$(cat x)"],
+    ['git push "$(cat r)" main', "$(cat r)"],
+    ["read B; git push origin $B", "$B"],
+    ["B=main; git push origin ${B:0}", "${B:0}"],
+    ["B=mai; B+=n; git push origin $B", "$B"],
+    ["a=(main); git push origin ${a[0]}", "${a[0]}"],
+    ["printf -v B main; git push origin $B", "$B"],
+    ["git push origin -- $(cat x)", "$(cat x)"],
+  ];
+  const TWINS = [
+    "B=feature; git push origin $B", 'B=feature; git push origin "$B"', "S=HEAD:feature; git push origin $S",
+    `U=${MERGE}; curl $U`, `U=${MERGE}; curl -X GET "$U"`, "U=https://example.com/x; curl -X PUT $U", "E=repos/o/r/pulls/1/merge; gh api $E",
+    'O=$(date); git push -o "$O" origin feature', 'R=$(cat x); git push --repo "$R" origin feature',
+    "N=1; gh pr view $N", "git ls-remote origin $B", "B=main; echo $B", "B=$(cat x); git log $B",
+  ];
+
+  it("spelled out: no stamp, each refuses as the typed form does, from the root and a nested folder; its twin passes", () => {
+    const f = fixture(false, false);
+    for (const cwd of [f.proj, f.sub]) {
+      for (const c of GATED) {
+        const r = call(f, bash(c), cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("moves-shared-ref");
+      }
+      for (const c of TWINS) {
+        const r = call(f, bash(c), cwd);
+        expect(r.status, `${c}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("a live run without its push grant refuses each too; a clean stamp and no run lets the spelled ones through, since the gate, not the variable, is what refused", () => {
+    const hot = fixture(true, true);
+    for (const c of GATED) {
+      const r = call(hot, bash(c));
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain("run-x");
+    }
+    const clean = fixture(true, false);
+    for (const c of GATED) expect(call(clean, bash(c)).status, c).toBe(0);
+  });
+
+  it("a refspec it can't spell refuses as an unreadable push, naming the word, stamped or not, on any branch, from the root and a nested folder", () => {
+    for (const f of [fixture(false, false), fixture(true, false)]) {
+      git(f.proj, "checkout", "-q", "-b", "feature");
+      for (const cwd of [f.proj, f.sub]) {
+        for (const [c, word] of UNREADABLE) {
+          const r = call(f, bash(c), cwd);
+          expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+          expect(r.stderr, c).toContain("can't spell");
+          expect(r.stderr, c).toContain(`\`${word}\``);
+          expect(r.stderr, c).toContain("moves-shared-ref");
+          expect(r.stderr, c).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH");
+        }
+      }
+    }
+  });
+
+  it("a spelled force is the force row, in every session: a hard refusal, not a gate", () => {
+    const f = fixture(true, false);
+    for (const c of ["F=--force; git push origin feature $F", "F=-f; git push origin feature $F", "S=+feature; git push origin $S",
+      "F=--mirror; git push origin $F", "F=--prune; git push origin $F"]) {
+      const r = call(f, bash(c));
+      expect(r.status, `${c}\n${r.stderr}`).toBe(2);
+    }
+  });
+
+  it("the Not seen lines hold: a URL from the environment or a substitution passes as typed; a deleted line is red", () => {
+    const f = fixture(false, false);
+    const rows: Array<[string, string]> = [
+      ['curl -X PUT "$URL"', "a URL from the environment or a substitution"],
+      ['curl -X PUT "$(cat url)"', "a URL from the environment or a substitution"],
+      ['U=$(cat url); curl -X PUT "$U"', "a URL from the environment or a substitution"],
+    ];
+    const header = readFileSync(RUNGUARD, "utf8").split("\nimport ")[0];
+    for (const [c, line] of rows) {
+      expect(call(f, bash(c)).status, c).toBe(0);
+      expect(header, c).toContain(line);
+    }
+  });
+});
