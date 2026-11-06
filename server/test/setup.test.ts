@@ -902,6 +902,185 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     expect(push(proj, home, ["origin", "main"]).stderr).toContain("cairn run guard: this push lands on the default branch");
   });
 
+  // Reproduced 2026-11-06, git 2.56.0, before the fix: from a project below the
+  // root the gate landed in the project's scripts/hooks, --check exited 0 saying
+  // "not installed", and a real push reached main with nothing judging it.
+  describe("a relative core.hooksPath in a project below the repository root (#526)", () => {
+    const REFUSED = "cairn run guard: this push lands on the default branch";
+
+    function nestedRepo(): { proj: string; home: string; sub: string } {
+      const { proj, home } = repo();
+      const sub = join(proj, "packages", "app");
+      mkdirSync(sub, { recursive: true });
+      return { proj, home, sub };
+    }
+
+    it("what the fix rests on: a real commit from the nested folder runs the hook in the root's folder, and never the nested one", () => {
+      const { proj, sub } = nestedRepo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      for (const [name, base] of [["ROOT", proj], ["NESTED", sub]]) {
+        mkdirSync(join(base, "scripts", "hooks"), { recursive: true });
+        writeFileSync(join(base, "scripts", "hooks", "pre-commit"), `#!/bin/sh\necho "RAN ${name}"\n`);
+        chmodSync(join(base, "scripts", "hooks", "pre-commit"), 0o755);
+      }
+      writeFileSync(join(sub, "f.txt"), "f\n");
+      git(sub, "add", "f.txt");
+      // a hook's stdout reaches the caller on stderr
+      const done = spawnSync("git", ["commit", "-m", "two", "--no-gpg-sign"], { cwd: sub, encoding: "utf8", env: { ...process.env, ...GIT_IDENT } });
+      expect(done.status, done.stderr).toBe(0);
+      expect(done.stderr).toContain("RAN ROOT");
+      expect(done.stderr).not.toContain("RAN NESTED");
+    });
+
+    it("the gate lands where git looks: a real push from the project, and from the root, is refused; --check says reached; the setting stays", () => {
+      const { proj, home, sub } = nestedRepo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      run("codex", sub, home, "--git-hooks");
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(existsSync(join(sub, "scripts", "hooks", "pre-push"))).toBe(false);
+      expect(git(proj, "config", "--get", "core.hooksPath")).toBe("scripts/hooks");
+
+      const fromProject = push(sub, home, ["origin", "main"]);
+      expect(fromProject.status).not.toBe(0);
+      expect(fromProject.stderr).toContain(REFUSED);
+      expect(push(proj, home, ["origin", "main"]).stderr).toContain(REFUSED);
+      expect(git(proj, "ls-remote", "--heads", "origin")).toBe("");
+
+      const check = run("codex", sub, home, "--check");
+      expect(check).toContain("git hooks (pre-push): installed");
+      expect(check).toContain("git runs hooks from there");
+      expect(check).toContain("all installed surfaces current.");
+    });
+
+    it("the nested-cwd variant: bare from the nested folder, with no --project, lands in the same place", () => {
+      const { proj, home, sub } = nestedRepo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const r = attempt("codex", home, { cwd: sub }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(existsSync(join(sub, "scripts", "hooks", "pre-push"))).toBe(false);
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+    });
+
+    it("a linked worktree reads it from its own root: the nested project there gates that worktree", () => {
+      const { proj, home } = nestedRepo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const linked = join(fresh("cairn-githooks-linked-"), "wt");
+      git(proj, "worktree", "add", "-q", "-b", "side", linked);
+      const sub = join(linked, "packages", "app");
+      mkdirSync(sub, { recursive: true });
+      run("codex", sub, home, "--git-hooks");
+      expect(existsSync(join(linked, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(existsSync(join(sub, "scripts", "hooks", "pre-push"))).toBe(false);
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(false);
+      expect(push(sub, home, ["origin", "side:main"]).stderr).toContain(REFUSED);
+    });
+
+    it("--check flags a hook an older install stranded where git never looks, exit non-zero; a re-run arms the right folder", () => {
+      const { proj, home, sub } = nestedRepo();
+      // what the old resolution left behind: the block in the project's folder, the setting relative
+      git(proj, "config", "core.hooksPath", join(sub, "scripts", "hooks"));
+      run("codex", sub, home, "--git-hooks");
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      expect(push(sub, home, ["origin", "main:feature"]).stderr).not.toContain(REFUSED);
+
+      const out = runCheckFail("codex", sub, home);
+      expect(out).toContain(`installed at ${join(sub, "scripts", "hooks")}`);
+      expect(out).toContain(`runs hooks from ${join(realpathSync(proj), "scripts", "hooks")}`);
+      expect(out).toContain("not reached");
+
+      run("codex", sub, home, "--git-hooks");
+      expect(run("codex", sub, home, "--check")).toContain("git runs hooks from there");
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+    });
+
+    it("the hostile one: a hooks folder at the root that links out of the repository is refused, as it is for a project at the root; nothing lands outside", () => {
+      for (const at of [["scripts", "hooks"], ["scripts", "hooks", "pre-push"]]) {
+        const { proj, home, sub } = nestedRepo();
+        const outside = fresh("cairn-githooks-outside-");
+        const victim = join(outside, "victim");
+        if (at.length === 2) mkdirSync(victim);
+        else writeFileSync(victim, "the owner's\n");
+        mkdirSync(join(proj, ...at.slice(0, -1)), { recursive: true });
+        symlinkSync(victim, join(proj, ...at));
+        git(proj, "config", "core.hooksPath", "scripts/hooks");
+        const r = attempt("codex", home, { project: sub }, "--git-hooks");
+        expect(r.status, r.out).toBe(1);
+        expect(r.stderr).toContain("refusing to write through it");
+        if (at.length === 2) expect(readdirSync(victim)).toEqual([]);
+        else expect(readFileSync(victim, "utf8")).toBe("the owner's\n");
+      }
+    });
+
+    it("the harmless twin of the hostile one: a link at the root that stays inside the repository writes", () => {
+      const { proj, home, sub } = nestedRepo();
+      mkdirSync(join(proj, "tools", "hooks"), { recursive: true });
+      mkdirSync(join(proj, "scripts"));
+      symlinkSync(join(proj, "tools", "hooks"), join(proj, "scripts", "hooks"));
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const r = attempt("codex", home, { project: sub }, "--git-hooks");
+      expect(r.status, r.out).toBe(0);
+      expect(existsSync(join(proj, "tools", "hooks", "pre-push"))).toBe(true);
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+    });
+
+    it("the way out a shared setting's refusal names works from below the root: the command as printed gates the project's own folder", () => {
+      const { proj, home, sub } = nestedRepo();
+      const shared = join(home, ".githooks");
+      mkdirSync(shared);
+      writeFileSync(join(home, ".gitconfig"), "[core]\n\thooksPath = ~/.githooks\n");
+      const r = attempt("codex", home, { project: sub }, "--git-hooks");
+      expect(r.status, r.out).toBe(1);
+      const printed = /git config --local core\.hooksPath (\S+)`/.exec(r.stderr);
+      expect(printed, r.stderr).not.toBeNull();
+      git(proj, "config", "--local", "core.hooksPath", (printed as RegExpExecArray)[1]);
+      const again = attempt("codex", home, { project: sub }, "--git-hooks");
+      expect(again.status, again.out).toBe(0);
+      expect(existsSync(join(sub, GITHOOKS, "pre-push"))).toBe(true);
+      expect(readdirSync(shared)).toEqual([]);
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+    });
+
+    it("the twin: a project at the root is unchanged, through a link to it too, the paths it prints included", () => {
+      const { proj, home } = repo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const alias = join(fresh("cairn-githooks-alias-"), "proj");
+      symlinkSync(proj, alias);
+      const out = run("codex", alias, home, "--git-hooks");
+      expect(out).toContain(`${join(alias, "scripts", "hooks", "pre-push")}: pre-push hook installed`);
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(run("codex", alias, home, "--check")).toContain(`installed at ${join(alias, "scripts", "hooks")}`);
+
+      const plain = repo();
+      const shared = join(plain.home, ".githooks");
+      mkdirSync(shared);
+      writeFileSync(join(plain.home, ".gitconfig"), "[core]\n\thooksPath = ~/.githooks\n");
+      const refused = attempt("codex", plain.home, { project: plain.proj }, "--git-hooks");
+      expect(refused.stderr).toContain(`git config --local core.hooksPath ${GITHOOKS}\``);
+    });
+
+    it("a project reached through a link from elsewhere is read from where git stands, not from the spelling: the gate is reached and --check says so", () => {
+      const { proj, home, sub } = nestedRepo();
+      git(proj, "config", "core.hooksPath", "scripts/hooks");
+      const alias = join(fresh("cairn-githooks-alias-"), "app");
+      symlinkSync(sub, alias);
+      run("codex", alias, home, "--git-hooks");
+      expect(existsSync(join(proj, "scripts", "hooks", "pre-push"))).toBe(true);
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+      expect(run("codex", alias, home, "--check")).toContain("git runs hooks from there");
+    });
+
+    it("a relative value that climbs out of the worktree is read as git reads it, from the root, and stays a local setting's to name", () => {
+      const { proj, home, sub } = nestedRepo();
+      const beside = fresh("cairn-githooks-beside-");
+      git(proj, "config", "core.hooksPath", `../${basename(beside)}`);
+      run("codex", sub, home, "--git-hooks");
+      expect(existsSync(join(beside, "pre-push"))).toBe(true);
+      expect(existsSync(join(proj, "packages", basename(beside)))).toBe(false);
+      expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
+    });
+  });
+
   it("--check lags when the hook is installed but git no longer runs hooks from there", () => {
     const { proj, home } = repo();
     run("codex", proj, home, "--git-hooks");
