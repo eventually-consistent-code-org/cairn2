@@ -679,7 +679,7 @@ describe("the write guard ships, counts toward the breaker, and fails open on it
     cpSync(SCRIPTS, join(copy, "scripts"), { recursive: true });
     writeFileSync(join(copy, "scripts", "shell-words.mjs"), "export function shellSegments() { throw new Error('broken reader'); }\n"
       + "export const SHELLS = new Set();\nexport const MAX_NEST = 8;\nexport const RUNNER_HOPS = 3;\n"
-      + ["childVars", "freshGuess", "overBudget", "readBudget", "argCommands", "assignVars", "commandName", "evalCommandString", "expandAssigned", "lineVars", "pagerCommands", "runnerCommands", "seedVars",
+      + ["childVars", "freshGuess", "literalHead", "overBudget", "readBudget", "argCommands", "assignVars", "commandName", "evalCommandString", "expandAssigned", "lineVars", "pagerCommands", "runnerCommands", "seedVars",
         "shellCommandString", "shellReadsStdin", "spellWords", "suCommandString", "tooDeep", "unwrap", "braceExpand"].map((n) => `export function ${n}() {}\n`).join(""));
     const r = judge(c, sh("echo x > src/x.ts"), true, join(copy, "scripts", "pretooluse-writeguard.mjs"));
     expect(r.status).toBe(0);

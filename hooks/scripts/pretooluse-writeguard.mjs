@@ -135,7 +135,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { projectRoot, projectRoots, readCairnConfig } from "./lib.mjs";
 import {
-  MAX_NEST, RUNNER_HOPS, SHELLS, argCommands, assignVars, braceExpand, childVars, commandName, evalCommandString, expandAssigned, freshGuess, lineVars,
+  MAX_NEST, RUNNER_HOPS, SHELLS, argCommands, assignVars, braceExpand, childVars, commandName, evalCommandString, expandAssigned, freshGuess, lineVars, literalHead,
   overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments, spellWords, suCommandString, tooDeep, unwrap,
 } from "./shell-words.mjs";
 
@@ -162,9 +162,6 @@ const DEVICE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
 
 /** A folder word the shell works out at run time: a variable, a substitution, `-`, `~user`. */
 const COMPUTED = /[$`]|^-$|^~[^/]/;
-
-/** In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob. */
-const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
 
 /** Past this many candidate folders a line counts as unreadable. */
 const MAX_PLACES = 16;
@@ -271,9 +268,9 @@ function spellTilde(raw, vars) {
  * (`/opt/$X/y`, `/tmp/$(date).log`) it can't, short of a climb in the value.
  */
 function headReaches(target, dir, roots) {
-  const at = target.search(UNSPELLED);
-  if (at < 0) return false;
-  const folder = resolve(dir, target.slice(0, target.lastIndexOf("/", at) + 1));
+  const head = literalHead(target);
+  if (head === null) return false;
+  const folder = resolve(dir, head);
   return roots.some((root) => underRoot(root, [folder]) !== null);
 }
 

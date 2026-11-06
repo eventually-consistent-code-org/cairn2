@@ -931,6 +931,21 @@ export function unwrap(words, read = {}) {
 
 // Spelling a line's variables (#291, #494, #509)
 
+// In a target the reader spelled, the first thing only the run can fill in: an expansion left as typed, or a glob.
+const UNSPELLED = /\$[({A-Za-z_0-9@*]|`|[*?[]/;
+
+/**
+ * The literal folder in front of the first thing only the run can fill in, with
+ * its slash, or null for a target with none (#512, #524): `/` for `/$X/a`,
+ * `/opt/` for `/opt/$X/a`, and "" for `$X/a`. Whether a root sits at or below it
+ * is the guard's to say, since what the shell fills in then decides where the
+ * write lands (writeguard.test.ts "a target is spelled", hooks.test.ts "(#524)").
+ */
+export function literalHead(target) {
+  const at = target.search(UNSPELLED);
+  return at < 0 ? null : target.slice(0, target.lastIndexOf("/", at) + 1);
+}
+
 // The most spellings of one word before the rest count as lost.
 const SPELL_CAP = 16;
 

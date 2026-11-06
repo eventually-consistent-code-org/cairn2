@@ -345,6 +345,18 @@
  *   sentence above is about what this guard reads. Pinned by hooks.test.ts
  *   "(#500)".
  *
+ *   A target is spelled before it is judged (#524, the rule #512 gave the write
+ *   guard): $PWD and $HOME wherever they stand, so `/$PWD/hooks/x` is the project's
+ *   file. What stays unspelled, or a glob, with a project, a home or a zone strictly
+ *   below the literal folder before it can't be placed, and is refused:
+ *   `/$X/hooks/x`, `/$(pwd)/hooks/x`, `/*\/hooks/x`, `../$X/hooks/x`. Asserted:
+ *   hooks.test.ts "(#524)".
+ *
+ *   Not seen, dated 2026-11-05 (#524, pinned by hooks.test.ts "(#524)"): a value
+ *   only the run knows, in a path whose literal head sits off to the side or under
+ *   a temp root (`/opt/$X/y`, `/tmp/$X/y`, X holding a climb), since `/tmp/$(date)`
+ *   is a daily shape and a climb in a value is #291's.
+ *
  *   Not seen, dated 2026-11-05 (#521, pinned by hooks.test.ts "(#521)"): a
  *   command more than three runner guesses in, past eight bare words each
  *   (`foo w1 ... w30 rm hooks/x`), since a guess is no nest and refusing there
@@ -370,7 +382,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, lineVars,
+  MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, lineVars, literalHead,
   overBudget, pagerCommands, quoteWord, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments,
   spellWords, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
 } from "./shell-words.mjs";
@@ -531,6 +543,12 @@ const HAS_STANDIN = /[*?[\u0001-\u0003]/;
 
 // `$1`, `${2}`, `$@`, `$*` -- a nested shell's positional arguments.
 const POSITIONAL = /\$\{?[0-9@*]\}?/g;
+
+// What headReaches measures a literal folder against (#524). Set once, on first use, by the one line read.
+let ANCHORS = null;
+
+// The shared temp roots, where a computed name is a daily shape (#524).
+const TEMP_ROOT = /^(?:\/private)?\/(?:tmp|var\/tmp)(?:\/|$)/;
 
 // The folder after a directory change the guard can't follow (#258). Paths
 // resolved from it stay under it, so a write there is told apart and refused.
@@ -2811,10 +2829,10 @@ function writeTargets(seg, ctx) {
     const { raws, lost } = expandAssigned(mapped ? raw.replace(POSITIONAL, ctx.positional) : raw, ctx.vars, MAX_PLACES);
     for (const one of raws) {
       // the shell spells out $PWD, $HOME, ~ and $CAIRN_HOME before the command
-      // sees them (#258, #263), and a folder it computes in front of the path
-      // when the guard knows which: $(pwd) and the repo root (#321)
-      const r = expandVars(computedDir(one
-        .replace(/^(?:\$PWD|\$\{PWD\})(?=\/|$)/, () => ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
+      // sees them (#258, #263), $PWD and $HOME wherever they stand (#524), and a
+      // folder it computes in front of the path when the guard knows which:
+      // $(pwd) and the repo root (#321)
+      const r = expandVars(computedDir(spellKnown(one, ctx.vars, ctx.shellDir ?? ctx.dir), ctx.shellDir ?? ctx.dir));
       const feed = pipe || xargs ? own : (ctx.argvFeed ?? own);
       // a path with nothing in front of any other substitution to anchor it
       // (`$(somecmd)/notes.txt`, `\`dirname x\`/y`) lands where the guard can't
@@ -2823,7 +2841,7 @@ function writeTargets(seg, ctx) {
       // computed name under a folder it knows (`/tmp/$(date +%s).bak`) is
       // judged there, as a $NAME the line never assigned is
       const abs = lost || /^(?:\.\/)*(?:\$\(|`)[^]*\//.test(r) ? LOST : resolveIn(dir, r);
-      out.push({ raw: r, abs, mode, feed, walk: ctx.walk });
+      out.push({ raw: r, abs, mode, feed, walk: ctx.walk, reaches: headReaches(r, dir) });
     }
   };
   if (ctx.chdir) {
@@ -2954,6 +2972,36 @@ function gather(out, more) {
 function deeper(line, ctx) {
   if (ctx.depth >= MAX_NEST) return [{ deep: true }];
   return lineTargets(line, ctx.dir, ctx.depth + 1, { walk: ctx.walk, hops: ctx.hops, family: ctx.family });
+}
+
+/**
+ * $PWD and $HOME spelled wherever they stand in a word (#524), since a shell holds
+ * both: `/$PWD/hooks/x` is the project's file, its slashes collapsed by resolveIn.
+ * A name the line assigned was spelled by the reader, or left as typed because it
+ * can't be: this folder is no answer for either.
+ */
+function spellKnown(word, vars, here) {
+  const pwd = vars?.has("PWD") ? word : word.replace(/\$PWD\b|\$\{PWD\}/g, () => here);
+  return vars?.has("HOME") ? pwd : pwd.replace(/\$HOME\b|\$\{HOME\}/g, () => resolve(homedir()));
+}
+
+/**
+ * True when what the shell fills in decides whether a write lands somewhere this
+ * guard protects (#524, the rule #512 gave the write guard): a project, a home or
+ * a zone sits below the literal folder before the first thing it can't spell, so
+ * `/$X/hooks/x`, `/U*\/me/proj/hooks/x` and `../$X/hooks/x` can each be the file.
+ * Strictly below: a value right under a root is #291's `$X/y`, which stays as
+ * typed, as `$PWD/$X.log` does. A temp root is off to the side wherever a test or a
+ * scratch project happens to sit under it.
+ */
+function headReaches(target, dir) {
+  const head = literalHead(target);
+  if (!head) return false;
+  const folder = resolveIn(dir, head);
+  if (isLost(folder) || TEMP_ROOT.test(folder)) return false;
+  // a zone counts on its own only outside the roots: one under a project is that project's
+  ANCHORS ??= [...ROOTS, ...HOMES, ...ZONES.map((z) => z.dir).filter((d) => ![...ROOTS, ...HOMES].some((a) => holds(a, d)))];
+  return ANCHORS.some((a) => holds(folder, a) && !same(folder, a));
 }
 
 /** True when the segment's own leading assignments carry the override. */
@@ -3231,7 +3279,9 @@ function judgeTarget(t) {
   }
   if (isLost(t.abs)) return lost;
   const what = judge(t.abs, t.mode);
-  return what ? { path: t.raw, what } : null;
+  if (what) return { path: t.raw, what };
+  // nothing it can name, and what the shell fills in decides where it lands (#524)
+  return t.reaches ? lost : null;
 }
 
 // MCP tools (#310)

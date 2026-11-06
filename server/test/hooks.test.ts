@@ -8294,3 +8294,124 @@ describe("harness guard: `>&` onto a protected file is a write (#523)", () => {
     }
   });
 });
+
+// #524: `/$PWD/...` and `/$X/...` read as a path outside the project, and the shell
+// collapses the slash and writes the protected file. The rule #512 gave the write
+// guard: what the guard knows is spelled wherever it stands, and what it can't spell
+// with a root below the literal folder before it can't be placed.
+describe("harness guard: a slash before a variable no longer reads as outside the project (#524)", () => {
+  function fixture() {
+    const p = freshDir("cairn-hooks-524-proj-");
+    const home = freshDir("cairn-hooks-524-home-");
+    execFileSync("git", ["init", "-q", p]);
+    mkdirSync(join(p, "hooks"), { recursive: true });
+    mkdirSync(join(p, "pkg", "lib"), { recursive: true });
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(p, "hooks", "hooks.json"), "{}");
+    return { p, home };
+  }
+  const judge = (f: { p: string; home: string }, command: string, cwd = f.p) => {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_PROJECT_DIR: f.p, HOME: f.home, CAIRN_HOME: join(f.home, ".cairn") };
+    for (const k of ["CAIRN_HARNESS_EDIT", "CDPATH", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CONFIG_DIR"]) delete env[k];
+    const r = spawnSync(process.execPath, [HARNESSGUARD], {
+      cwd: f.p, env, encoding: "utf8", timeout: 5000,
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd }),
+    });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  };
+
+  it("$PWD and $HOME are spelled wherever they stand, and slashes collapse: the protected file is named as itself", () => {
+    const f = fixture();
+    for (const [line, what] of [
+      ["echo x > /$PWD/hooks/hooks.json", "hook directory"],
+      ["echo x > /${PWD}/hooks/hooks.json", "hook directory"],
+      ["echo x > //$PWD//hooks//hooks.json", "hook directory"],
+      ["echo x > /./$PWD/./hooks/hooks.json", "hook directory"],
+      ["cd hooks && echo x > /$PWD/hooks.json", "hook directory"],
+      ["cp a /$PWD/hooks/hooks.json", "hook directory"],
+      ["rm -f /$PWD/hooks/hooks.json", "hook directory"],
+      ["tee /$PWD/hooks/hooks.json", "hook directory"],
+      ["sh -c 'echo x > /$PWD/hooks/hooks.json'", "hook directory"],
+      ["echo x >& /$PWD/hooks/hooks.json", "hook directory"],
+      ["echo x > /$HOME/.claude/settings.json", "settings"],
+    ] as const) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(r.stderr, line).toContain(what);
+    }
+  });
+
+  it("from a nested cwd, $PWD is that folder, and so its climb lands where the shell lands it", () => {
+    const f = fixture();
+    const nested = join(f.p, "pkg", "lib");
+    expect(judge(f, "echo x > /$PWD/../../hooks/hooks.json", nested).status).toBe(2);
+    expect(judge(f, "echo x > /$X/hooks/hooks.json", nested).status).toBe(2);
+    expect(judge(f, "echo x > /$PWD/notes.txt", nested).status).toBe(0);
+  });
+
+  it("what the guard can't spell, with a root below the literal folder before it, can't be placed: refused", () => {
+    const f = fixture();
+    const parent = dirname(f.p);
+    for (const line of [
+      "echo x > /$X/hooks/hooks.json",
+      "echo x > //$X//hooks/hooks.json",
+      "echo x > /${X}/hooks/hooks.json",
+      "echo x > /$(pwd)/hooks/hooks.json",
+      "echo x > /`pwd`/hooks/hooks.json",
+      "echo x > /*/hooks/hooks.json",
+      // a project under a temp root (a Linux runner's /tmp) sits under the carve the Not seen block names
+      ...(/^(?:\/private)?\/(?:tmp|var\/tmp)(?:\/|$)/.test(parent) ? [] : [
+        `echo x > ${parent}/$X/hooks/hooks.json`,
+        `echo x > ${parent}/*/hooks/hooks.json`,
+        "echo x > ../$X/hooks/hooks.json",
+      ]),
+      "cp a /$X/hooks/hooks.json",
+      "rm -f /$X/hooks/hooks.json",
+      "mv a /$X/hooks/hooks.json",
+      "sh -c 'echo x > /$X/hooks/hooks.json'",
+      "echo x > /$CAIRN_HOME/x",
+      // the line made the name unreadable: no folder can be said for it
+      "PWD=$(mktemp -d); echo x > /$PWD/hooks/hooks.json",
+      "read HOME; echo x > /$HOME/.claude/settings.json",
+    ]) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(2);
+      expect(r.stderr, line).toContain("goes somewhere the guard couldn't tell");
+    }
+  });
+
+  it("twins: a folder off to the side, a temp root, a project file named through $PWD, and #291's value at the front all pass", () => {
+    const f = fixture();
+    for (const line of [
+      "echo x > /tmp/$X/y",
+      "echo x > /tmp/$(date +%s).bak",
+      "echo x > /private/tmp/$X/y",
+      "echo x > /var/tmp/$X/y",
+      "echo x > /tmp/*.log",
+      "echo x > /opt/$X/y",
+      "echo x > $X/y",
+      "echo x > $PWD/$X.log",
+      "echo x > /$PWD/src/a.ts",
+      "echo x > //$PWD//notes.txt",
+      "echo x > $PWD/tmp/$X",
+      "echo x > $HOME/notes.md",
+      "echo x > /$HOME/notes.md",
+      "echo x > /dev/null",
+      // the line assigned it, so the value is the line's and not this folder
+      "PWD=/tmp; echo x > /$PWD/y",
+      "X=/tmp; echo x > /$X/y",
+    ]) {
+      const r = judge(f, line);
+      expect(r.status, `${line}: ${r.stderr.split("\n")[0]}`).toBe(0);
+    }
+  });
+
+  it("the Not seen lines hold: a value in a path whose head sits to the side, or under a temp root, stays as typed, and the header names both", () => {
+    const f = fixture();
+    expect(judge(f, "X=$(cat where); echo x > /opt/$X/y").status).toBe(0);
+    expect(judge(f, "echo x > /tmp/$X/../../hooks/hooks.json").status).toBe(0);
+    const header = readFileSync(HARNESSGUARD, "utf8").split("\nimport ")[0];
+    expect(header).toContain("Not seen, dated 2026-11-05 (#524");
+    expect(header).toContain("a temp root");
+  });
+});
