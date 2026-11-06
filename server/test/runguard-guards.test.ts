@@ -3942,3 +3942,188 @@ describe("run guard: a forced push written as a push setting is the force row (#
     expect(guard(saved.proj, saved.home, "git push origin main:main").status).toBe(0);
   });
 });
+
+describe("the pre-push hook: a rewrite of the default branch is the table's force row (#503)", () => {
+  // Real pushes from a plain shell, as setup.test.ts (#456) runs them: the
+  // hook file is the thin caller cairn-setup installs, the remote a bare repo.
+  // Before #503 the hook built its invocation from the refspecs alone, so a
+  // stamped rewrite of main read as a plain push and printed `forced update`.
+  const HOOK = join(dirname(RUNGUARD), "pre-push.mjs");
+
+  /** A repo on main with two commits pushed to a bare remote, then the hook wired in; no stamp yet. */
+  function hooked(): { proj: string; home: string; bare: string; sub: string } {
+    const bare = freshDir("cairn-prepush-remote-");
+    const proj = freshDir("cairn-prepush-proj-");
+    const home = freshDir("cairn-prepush-home-");
+    git(bare, "init", "-q", "--bare", "-b", "main");
+    git(proj, "init", "-q", "-b", "main");
+    git(proj, "config", "user.email", "t@t");
+    git(proj, "config", "user.name", "t");
+    const sub = join(proj, "sub");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "a.txt"), "1\n");
+    git(proj, "add", "-A");
+    git(proj, "commit", "-q", "-m", "one", "--no-gpg-sign");
+    writeFileSync(join(sub, "a.txt"), "2\n");
+    git(proj, "commit", "-q", "-a", "-m", "two", "--no-gpg-sign");
+    git(proj, "remote", "add", "origin", bare);
+    git(proj, "push", "-q", "origin", "main");
+    const hooks = freshDir("cairn-prepush-hooks-");
+    writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\nexec "${process.execPath}" "${HOOK}" "$@"\n`);
+    chmodSync(join(hooks, "pre-push"), 0o755);
+    git(proj, "config", "core.hooksPath", hooks);
+    return { proj, home, bare, sub };
+  }
+
+  /** `git push` as a plain shell runs it: every harness and cairn variable stripped, the cairn home pinned. */
+  function push(cwd: string, home: string, args: string[], extra: Record<string, string> = {}) {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !k.startsWith("CLAUDE_") && !k.startsWith("CAIRN_")) env[k] = v;
+    }
+    const r = spawnSync("git", ["push", ...args], { cwd, encoding: "utf8", timeout: 20000,
+      env: { ...env, ...GIT_IDENT, CAIRN_HOME: home, ...extra } });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  /** The commit rewritten in place, and the clean stamp plan_drift would leave for it. */
+  function rewriteAndStamp(f: { proj: string; home: string }): string {
+    git(f.proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    return git(f.proj, "rev-parse", "HEAD");
+  }
+
+  function expectForce(r: { status: number | null; stderr: string }, label: string): void {
+    expect(r.status, `${label}\n${r.stderr}`).not.toBe(0);
+    expect(r.stderr, label).toContain("cairn run guard: `git push --force` is refused in every session");
+    expect(r.stderr, label).toContain("effect: discards-work, from `+");
+    expect(r.stderr, label).toContain("CAIRN_ALLOW_DESTRUCTIVE_GIT");
+    expect(r.stderr, label).toContain("doesn't descend from it");
+    expect(r.stderr, label).not.toContain("forced update");
+  }
+
+  it("a stamped rewrite of main refuses by every spelling of the force, from the root and a nested folder; the remote stays put", () => {
+    const f = hooked();
+    const before = git(f.bare, "rev-parse", "main");
+    rewriteAndStamp(f);
+    for (const args of [["--force", "origin", "main"], ["-f", "origin", "main"], ["origin", "+main"], ["origin", "+HEAD:refs/heads/main"],
+      ["--force-with-lease", "origin", "main"], ["--force", "origin", "HEAD:main"]]) {
+      for (const cwd of [f.proj, f.sub]) expectForce(push(cwd, f.home, args), args.join(" "));
+    }
+    expect(git(f.bare, "rev-parse", "main")).toBe(before);
+  });
+
+  it("the channels the run guard reads for a force are covered here by the effect: a setting's +, an alias, a rewind with no new commit", () => {
+    const f = hooked();
+    const before = git(f.bare, "rev-parse", "main");
+    rewriteAndStamp(f);
+    const r = spawnSync("git", ["-c", "remote.origin.push=+refs/heads/*:refs/heads/*", "push", "origin", "main"],
+      { cwd: f.proj, encoding: "utf8", env: { ...process.env, ...GIT_IDENT, CAIRN_HOME: f.home, CLAUDE_PROJECT_DIR: "" } });
+    expectForce({ status: r.status, stderr: r.stderr }, "a push setting's +");
+    expect(git(f.bare, "rev-parse", "main")).toBe(before);
+    // a rewind: the stamp names an older commit, and nothing new is pushed at all
+    const g = hooked();
+    const older = git(g.proj, "rev-parse", "HEAD~1");
+    stamp(g.proj, g.home, { head: older });
+    expectForce(push(g.proj, g.home, ["--force", "origin", "HEAD~1:main"]), "a rewind");
+  });
+
+  it("a remote sha this clone doesn't hold reads as a rewrite: another clone's commit can't be vouched for, and the refusal says to fetch", () => {
+    const f = hooked();
+    const other = freshDir("cairn-prepush-other-");
+    git(other, "clone", "-q", f.bare, ".");
+    git(other, "config", "user.email", "t@t");
+    git(other, "config", "user.name", "t");
+    writeFileSync(join(other, "b.txt"), "b\n");
+    git(other, "add", "-A");
+    git(other, "commit", "-q", "-m", "theirs", "--no-gpg-sign");
+    git(other, "push", "-q", "origin", "main");
+    const theirs = git(f.bare, "rev-parse", "main");
+    writeFileSync(join(f.proj, "c.txt"), "c\n");
+    git(f.proj, "add", "-A");
+    git(f.proj, "commit", "-q", "-m", "mine", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    expectForce(push(f.proj, f.home, ["--force", "origin", "main"]), "not held, forced");
+    expect(git(f.bare, "rev-parse", "main")).toBe(theirs);
+    // the twin: fetched and merged, it's a fast-forward again
+    git(f.proj, "pull", "-q", "--no-rebase", "--no-edit", "--no-gpg-sign", "origin", "main");
+    stamp(f.proj, f.home);
+    const ok = push(f.proj, f.home, ["origin", "main"]);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(git(f.bare, "rev-parse", "main")).toBe(git(f.proj, "rev-parse", "HEAD"));
+  });
+
+  it("the twins pass: a fast-forward with a clean stamp, a first push of a new ref, a force push of another branch (named Not seen)", () => {
+    const f = hooked();
+    writeFileSync(join(f.proj, "d.txt"), "d\n");
+    git(f.proj, "add", "-A");
+    git(f.proj, "commit", "-q", "-m", "three", "--no-gpg-sign");
+    stamp(f.proj, f.home);
+    for (const cwd of [f.proj, f.sub]) {
+      const r = push(cwd, f.home, ["origin", "main"]);
+      expect(r.status, r.stderr).toBe(0);
+    }
+    expect(git(f.bare, "rev-parse", "main")).toBe(git(f.proj, "rev-parse", "HEAD"));
+    // a first push of a default-named ref: nothing there to rewrite, and the stamp covers it
+    const master = push(f.proj, f.home, ["origin", "main:master"]);
+    expect(master.status, master.stderr).toBe(0);
+    // a first push to an empty remote
+    const empty = freshDir("cairn-prepush-empty-");
+    git(empty, "init", "-q", "--bare");
+    git(f.proj, "remote", "add", "fresh", empty);
+    const first = push(f.proj, f.home, ["fresh", "main"]);
+    expect(first.status, first.stderr).toBe(0);
+    // a feature branch rewritten and forced: the hook's rule is the default branch's
+    git(f.proj, "checkout", "-q", "-b", "feature");
+    git(f.proj, "commit", "-q", "--allow-empty", "-m", "f1", "--no-gpg-sign");
+    expect(push(f.proj, f.home, ["origin", "feature"]).status).toBe(0);
+    git(f.proj, "commit", "-q", "--amend", "--allow-empty", "-m", "f2", "--no-gpg-sign");
+    const forced = push(f.proj, f.home, ["--force", "origin", "feature"]);
+    expect(forced.status, forced.stderr).toBe(0);
+    const header = readFileSync(HOOK, "utf8").split("\n// Imports")[0].replace(/\n \*\s+/g, " ");
+    expect(header).toContain("a forced push of any other branch");
+  });
+
+  it("the ancestry is read in the repository the push leaves, wherever the session's project sits: a fast-forward never reads as a rewrite", () => {
+    const f = hooked();
+    const elsewhere = fixture().proj;
+    git(f.proj, "commit", "-q", "--allow-empty", "-m", "three", "--no-gpg-sign");
+    const r = push(f.proj, f.home, ["origin", "main"], { CLAUDE_PROJECT_DIR: elsewhere, CAIRN_ALLOW_UNSHIPPED_PUSH: "1" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("`git push --force`");
+  });
+
+  it("the owner's escape lifts the force row and leaves the stamp's rule standing", () => {
+    const f = hooked();
+    const r0 = push(f.proj, f.home, ["origin", "main"]);
+    expect(r0.status, r0.stderr).toBe(0); // nothing to send, nothing to judge
+    git(f.proj, "commit", "-q", "--amend", "-m", "rewritten", "--no-gpg-sign");
+    // no stamp: lifted past the force row, the default-branch rule still refuses, under its own escape
+    const gated = push(f.proj, f.home, ["--force", "origin", "main"], { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" });
+    expect(gated.status, gated.stderr).not.toBe(0);
+    expect(gated.stderr).toContain("this push lands on the default branch");
+    expect(gated.stderr).toContain("CAIRN_ALLOW_UNSHIPPED_PUSH");
+    stamp(f.proj, f.home);
+    const lifted = push(f.proj, f.home, ["--force", "origin", "main"], { CAIRN_ALLOW_DESTRUCTIVE_GIT: "1" });
+    expect(lifted.status, lifted.stderr).toBe(0);
+    expect(lifted.stderr).toContain("forced update");
+  });
+
+  it("hostile: what stdin claims stays data: a non-hex sha never reaches git's argv, and refuses as a rewrite", () => {
+    const f = hooked();
+    stamp(f.proj, f.home);
+    const head = git(f.proj, "rev-parse", "HEAD");
+    const hook = (line: string) => spawnSync(process.execPath, [HOOK, "origin", "x"], {
+      cwd: f.proj, encoding: "utf8", input: `${line}\n`,
+      env: { ...process.env, CAIRN_HOME: f.home, CLAUDE_PROJECT_DIR: "" },
+    });
+    for (const remote of ["--help", "--is-ancestor", "deadbeef".repeat(5)]) {
+      const r = hook(`refs/heads/main ${head} refs/heads/main ${remote}`);
+      expect(r.status, `${remote}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, remote).toContain("`git push --force`");
+    }
+    // the same line with the remote at a real ancestor, and with no ref there yet, passes
+    expect(hook(`refs/heads/main ${head} refs/heads/main ${git(f.proj, "rev-parse", "HEAD~1")}`).status).toBe(0);
+    expect(hook(`refs/heads/main ${head} refs/heads/main ${"0".repeat(40)}`).status).toBe(0);
+  });
+});
