@@ -239,8 +239,10 @@ export function tokenize(text) {
 }
 /** Settings-shaped files a project or plugin declares hooks/permissions in. */
 const SETTINGS_FILES = [".claude/settings.json", ".claude/settings.local.json"];
-/** Where cairn-setup --git-hooks puts the pre-push hook (#456), in the planning folder. */
+/** Where cairn-setup --git-hooks put the pre-push hook before #558, in the planning folder. */
 const CAIRN_GITHOOKS = [".cairn", "githooks"].join("/");
+/** Where it puts it since #558: under the git common directory. */
+const CAIRN_GATE_HOOKS = [".git", "cairn", "hooks"].join("/");
 const HOOK_MANIFESTS = ["hooks/hooks.json", ...SETTINGS_FILES];
 /** Hooks registered in a plugin hooks.json or a settings file. */
 function hookControls(root, skipped) {
@@ -394,14 +396,19 @@ function gitAndCiControls(root, skipped) {
     // The hooks `cairn-setup --git-hooks` installs (#456): the git layer of
     // the ship gate, so a default-branch "never" pairs with two controls on a
     // project that installed it. Only a file carrying the cairn marker counts.
-    for (const name of listDir(root, CAIRN_GITHOOKS)) {
-        if (name.startsWith("."))
-            continue;
-        const rel = `${CAIRN_GITHOOKS}/${name}`;
-        const text = readUnderRoot(root, rel, skipped);
-        if (text === null || !text.includes("# cairn:begin"))
-            continue;
-        out.push({ type: "git-hook", id: `cairn ${name}`, source: rel, detail: firstProseLine(text), tokens: tokenize(`${name} ${text}`) });
+    // Since #558 setup installs under the git common directory, read here at the
+    // root's .git (a linked worktree's lies outside the root and is not read);
+    // an older install's folder is read after it, one entry per hook name.
+    for (const dir of [CAIRN_GATE_HOOKS, CAIRN_GITHOOKS]) {
+        for (const name of listDir(root, dir)) {
+            if (name.startsWith(".") || out.some((c) => c.id === `cairn ${name}`))
+                continue;
+            const rel = `${dir}/${name}`;
+            const text = readUnderRoot(root, rel, skipped);
+            if (text === null || !text.includes("# cairn:begin"))
+                continue;
+            out.push({ type: "git-hook", id: `cairn ${name}`, source: rel, detail: firstProseLine(text), tokens: tokenize(`${name} ${text}`) });
+        }
     }
     for (const name of listDir(root, ".github/workflows")) {
         if (!/\.ya?ml$/.test(name))

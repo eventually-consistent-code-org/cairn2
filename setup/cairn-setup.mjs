@@ -21,7 +21,11 @@
 //      Codex prints its config.toml block; Gemini merges settings + GEMINI.md)
 //   5. with --git-hooks only: a pre-push git hook that applies the ship
 //      gate's default-branch rule to every process in the checkout, and
-//      core.hooksPath pointed at it (#456). Opt-in, never default: a git
+//      core.hooksPath pointed at it (#456). The hook and the script it runs
+//      live under the git common directory, where no checkout, merge,
+//      restore or pull writes and every linked worktree finds the same pair;
+//      a re-run moves an older install off .cairn/githooks (#558, asserted:
+//      gitlayer.test.ts). Opt-in, never default: a git
 //      config write is the owner's ground, and the flag is the consent. The
 //      consent is for this project: a core.hooksPath at global or system
 //      scope is never written into (#497). A flag is the owner's only where
@@ -48,6 +52,15 @@
 // Not seen, dated 2026-11-05 (each pinned in server/test/setup.test.ts):
 //   - a local core.hooksPath naming a folder other repositories name in their
 //     own local configs is respected; git keeps no list of them (#497).
+//   - a local core.hooksPath the owner points inside the working tree (a
+//     tracked .githooks, a husky folder) is respected too, and the hook goes
+//     there: that layout is the owner's, so a checkout can still change the
+//     hook file in it, though not the script it runs, which stays under the
+//     git common directory (#558, pinned in gitlayer.test.ts).
+//   - the hook drops PATH folders inside the worktree it runs in before it
+//     runs node (#558); a PATH folder inside another linked worktree of the
+//     repository, or a program file elsewhere that links into a worktree, is
+//     kept (pinned in gitlayer.test.ts).
 //   - a hard link has no direction: one to a file outside the project is that
 //     file, by this name too, so it is written through (#498).
 //   - a link staying inside the project writes as today, wherever inside it
@@ -62,7 +75,7 @@ import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BEGIN, READERS, insideDir, reachFrom, realOrNull, sameFile, spliceFragment, spliceImport,
@@ -142,8 +155,8 @@ function checkLinks(path, base) {
 function writeChecked(path, data, base) {
   writeFileSync(checkLinks(path, base), data);
 }
-function copyChecked(src, path) {
-  copyFileSync(src, checkLinks(path));
+function copyChecked(src, path, base) {
+  copyFileSync(src, checkLinks(path, base));
 }
 function mkdirChecked(path, base) {
   mkdirSync(checkLinks(path, base), { recursive: true });
@@ -397,8 +410,20 @@ function mergeCodexToml(path) {
 // consent. The hook file is a thin caller over the copied pre-push.mjs
 // (its imports land beside it in the scripts folder); the rule lives in
 // git-effects.mjs and lib.mjs. Asserted: setup.test.ts "(#456)".
+//
+// Where the pair lives (#558): both under the git common directory, in
+// cairn/hooks and cairn/scripts. A folder in the working tree is one any
+// checkout, merge, restore or pull writes: a contributor's branch adding a
+// post-checkout there ran it as the owner, and a branch carrying its own
+// copy of the script swapped the gate, or, checked out and back, deleted it,
+// so the next push landed unjudged. git never writes the common directory
+// from a commit, and every linked worktree reads the same one. The hook
+// names its script by that one absolute path and looks nowhere else.
+// Asserted: gitlayer.test.ts, each scenario a real git run.
 const PREPUSH = "pre-push.mjs";
+// The layout before #558, inside the working tree: read for the move and for --check, never written.
 const GITHOOKS_REL = [".cairn", "githooks"].join("/");
+const GATE_REL = "cairn";
 const HOOK_BEGIN = "# cairn:begin -- managed by cairn-setup --git-hooks; do not edit inside markers";
 const HOOK_END = "# cairn:end";
 const SH_SHEBANG = /^#!.*\b(?:sh|bash|dash|ksh|zsh)\b/;
@@ -443,6 +468,31 @@ function gitPathDir(answer) {
   return resolve(root === projectDir ? projectDir : realOrNull(projectDir) ?? projectDir, answer);
 }
 
+/** The gate's folders under the git common directory, real paths (#558): `home`
+ *  holds `hooks` (what core.hooksPath names) and `scripts` (what the hook runs).
+ *  Every linked worktree shares the one common directory. null outside a repository. */
+function gateDirs() {
+  const answer = gitAt(projectDir, ["rev-parse", "--git-common-dir"]);
+  const common = answer ? realOrNull(resolve(realOrNull(projectDir) ?? projectDir, answer)) : null;
+  if (common === null) return null;
+  const home = join(common, GATE_REL);
+  return { common, home, hooks: join(home, "hooks"), scripts: join(home, "scripts") };
+}
+
+/** One folder by two spellings: real paths compared, a path that isn't there yet as written. */
+const sameDir = (a, b) => (realOrNull(a) ?? resolve(a)) === (realOrNull(b) ?? resolve(b));
+
+/** An install before #558: the hooks folder is some checkout's .cairn/githooks. */
+const oldLayout = (dir) => basename(dir) === basename(GITHOOKS_REL) && basename(dirname(dir)) === dirname(GITHOOKS_REL);
+
+/** Is a folder inside this worktree, where a checkout writes? */
+function inWorkingTree(dir) {
+  return insideDir(realOrNull(dir) ?? resolve(dir), realOrNull(worktreeRoot()));
+}
+
+/** A value for a sh line: single-quoted, so no folder name is ever read as shell. */
+const shQuote = (s) => `'${String(s).replaceAll("'", "'\\''")}'`;
+
 // The only scopes that are this repository's own. Anything else -- global,
 // system, the environment's GIT_CONFIG_COUNT or `git -c` (git calls that one
 // command), or a git too old to say -- names a folder --git-hooks has no
@@ -481,11 +531,13 @@ function sharedFolderWhy(setting, dir) {
 
 /** The marker-delimited block: the gate runs first, and the refs git handed
  *  over stay on stdin for whatever the owner keeps below the markers. The
- *  script is looked for where git runs the hook ($PWD is the worktree root),
- *  then at this install's own copy -- a linked worktree has no copy of its
- *  own. Exit 2 from the script is the refusal; anything else fails open. */
-function hookBlock() {
-  const script = `${SCRIPTS_REL}/${PREPUSH}`;
+ *  script is named by one absolute path under the git common directory, and
+ *  looked for nowhere else (#558): the worktree git runs the hook in is what a
+ *  checkout writes, and every linked worktree shares the common directory.
+ *  node, and the git the script runs, come from PATH with this worktree's
+ *  folders taken out, and the owner's lines after the markers get PATH back.
+ *  Exit 2 from the script is the refusal; anything else fails open. */
+function hookBlock(gate) {
   return [
     HOOK_BEGIN,
     "# The git layer of cairn's ship gate: a push landing on the default branch",
@@ -494,8 +546,19 @@ function hookBlock() {
     "# Exit 2 from the script refuses the push; anything else fails open, so a",
     "# missing node or script never blocks a push -- it says so instead. The refs",
     "# git hands this hook are kept on stdin for whatever follows the markers.",
-    `cairn_prepush="$PWD/${script}"`,
-    `[ -f "$cairn_prepush" ] || cairn_prepush="${join(projectDir, SCRIPTS_REL, PREPUSH)}"`,
+    "# The script lives under the git common directory, which no checkout writes.",
+    `cairn_prepush=${shQuote(join(gate.scripts, PREPUSH))}`,
+    "# Every program the block runs, node and the git the script calls, comes from",
+    "# a PATH folder outside this worktree: a branch can carry node_modules/.bin/node,",
+    "# and npm puts that folder first. The owner's lines below get their PATH back.",
+    'cairn_top=$(pwd -P); cairn_oldpath=$PATH; cairn_safe=; cairn_ifs=$IFS; IFS=:',
+    "for cairn_d in $PATH; do",
+    '  case "$cairn_d" in /*) ;; *) continue ;; esac',
+    '  cairn_real=$(cd "$cairn_d" 2>/dev/null && pwd -P) || continue',
+    '  case "$cairn_real/" in "$cairn_top"/*) continue ;; esac',
+    "  cairn_safe=${cairn_safe:+$cairn_safe:}$cairn_d",
+    "done",
+    "IFS=$cairn_ifs; PATH=$cairn_safe",
     'if command -v node >/dev/null 2>&1 && [ -f "$cairn_prepush" ]; then',
     "  if cairn_refs=$(mktemp 2>/dev/null); then",
     '    cat > "$cairn_refs"',
@@ -509,6 +572,7 @@ function hookBlock() {
     "else",
     '  echo "cairn pre-push: node or $cairn_prepush not found -- this push was not judged" >&2',
     "fi",
+    "PATH=$cairn_oldpath",
     HOOK_END,
   ].join("\n") + "\n";
 }
@@ -517,7 +581,7 @@ function hookBlock() {
  *  markers; else put right after a sh shebang (one is written when there is
  *  no file or no shebang). Another interpreter's hook is refused -- sh lines
  *  at its top would break it. An orphaned marker is refused, never guessed. */
-function spliceHook(body, block) {
+function spliceHook(body, block, scriptsDir) {
   const start = body.indexOf(HOOK_BEGIN);
   const end = body.indexOf(HOOK_END);
   if (start >= 0 && end > start) {
@@ -530,7 +594,7 @@ function spliceHook(body, block) {
   const first = nl < 0 ? body : body.slice(0, nl);
   if (!first.startsWith("#!")) return { next: `#!/bin/sh\n${block}${body}` };
   if (!SH_SHEBANG.test(first)) {
-    return { error: `runs under ${first.slice(2).trim()}, not sh -- call ${SCRIPTS_REL}/${PREPUSH} from it by hand` };
+    return { error: `runs under ${first.slice(2).trim()}, not sh -- call ${join(scriptsDir, PREPUSH)} from it by hand` };
   }
   return { next: `${first}\n${block}${nl < 0 ? "" : body.slice(nl + 1)}` };
 }
@@ -559,30 +623,32 @@ function foreignHooks(dir) {
   return names.filter((n) => n !== "pre-push" || !onlyOurBlock(join(dir, n)));
 }
 
-/** Where the hook goes: the folder a local or worktree core.hooksPath names
- *  when set (respected, the setting stays), else cairn's own, which the
- *  install then names. Refused: a folder the setting shares with other
- *  repositories (#497), the install says why and writes nothing there; live
- *  hooks in the folder git runs today that a new hooksPath would silence, the
- *  owner moves them or sets the path. */
+/** Where the hook goes: cairn's own folder under the git common directory
+ *  (#558), which the install then names; or the folder a local or worktree
+ *  core.hooksPath names when the owner set one (respected, the setting stays).
+ *  A setting naming some checkout's .cairn/githooks is an install before #558,
+ *  and it moves: the pointer changes, the old folder is left as it was.
+ *  Refused: a folder the setting shares with other repositories (#497), the
+ *  install says why and writes nothing there; live hooks in the folder git runs
+ *  today that a new hooksPath would silence, the owner moves them or sets the path. */
 function gitHooksTarget() {
-  if (gitAt(projectDir, ["rev-parse", "--git-common-dir"]) === null) {
+  const gate = gateDirs();
+  if (gate === null) {
     return { error: "not a git repository -- nothing for a pre-push hook to guard" };
   }
-  const ours = join(projectDir, GITHOOKS_REL);
   const setting = hooksPathSetting();
   if (setting) {
     const dir = hooksDirOf(setting.value);
     const why = sharedFolderWhy(setting, dir);
     if (why) {
-      // git reads this value from the root, so a project below it spells the way down
-      const own = join(relative(realOrNull(worktreeRoot()) ?? projectDir, realOrNull(projectDir) ?? projectDir), GITHOOKS_REL);
       const wayOut = setting.scope === "command"
         ? "drop the setting from this environment"
-        : `to gate this project alone, run \`git config --local core.hooksPath ${own}\` (the shared hooks then stop running in this repository)`;
+        : `to gate this project alone, run \`git config --local core.hooksPath ${gate.hooks}\` (the shared hooks then stop running in this repository)`;
       return { error: `${why}: every repository it reaches runs hooks from that folder, and --git-hooks is consent for this project alone, so nothing was written there -- ${wayOut}, then re-run` };
     }
-    return { dir, configured: setting.value, base: worktreeRoot() };
+    if (sameDir(dir, gate.hooks)) return { gate, dir: gate.hooks, configured: setting.value, base: gate.common };
+    if (oldLayout(dir)) return { gate, dir: gate.hooks, configured: null, base: gate.common, moved: { dir, scope: setting.scope } };
+    return { gate, dir, configured: setting.value, base: worktreeRoot(), inTree: inWorkingTree(dir) };
   }
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
   const todayDir = today ? gitPathDir(today) : null;
@@ -592,19 +658,21 @@ function gitHooksTarget() {
   } catch { /* no hooks folder yet: nothing a hooksPath would silence */ }
   if (live.length) {
     return { error: `${todayDir} holds live hooks (${live.join(", ")}) that a core.hooksPath would silence -- ` +
-      `move them under ${ours}, or set core.hooksPath yourself, then re-run` };
+      `move them under ${gate.hooks}, or set core.hooksPath yourself, then re-run` };
   }
-  return { dir: ours, configured: null };
+  return { gate, dir: gate.hooks, configured: null, base: gate.common };
 }
 
-/** Install the git layer: the script beside the verb helpers, the hook under
- *  the markers, core.hooksPath set once. Idempotent: a re-run is byte-identical. */
+/** Install the git layer: the script and its imports under the git common
+ *  directory, the hook under the markers, core.hooksPath set once. Idempotent:
+ *  a re-run is byte-identical. */
 function installGitHooks() {
   const target = gitHooksTarget();
   if (target.error) {
     console.error(`  --git-hooks: ${target.error}.`);
     process.exit(1);
   }
+  const { gate } = target;
   const path = checkLinks(join(target.dir, "pre-push"), target.base);
   // Setting the pointer arms whatever the folder holds (#508), so one holding
   // hooks this install did not write is the owner's to read first. A setting
@@ -615,15 +683,15 @@ function installGitHooks() {
       "read them, then remove them, or set core.hooksPath yourself, then re-run.");
     process.exit(1);
   }
-  const scriptsOut = join(projectDir, SCRIPTS_REL);
+  mkdirChecked(gate.scripts, gate.common);
   for (const f of helperClosure(join(repoRoot, "hooks", "scripts"), [PREPUSH])) {
-    copyChecked(join(repoRoot, "hooks", "scripts", f), join(scriptsOut, f));
+    copyChecked(join(repoRoot, "hooks", "scripts", f), join(gate.scripts, f), gate.common);
   }
   let body = "";
   try {
     body = readFileSync(path, "utf8");
   } catch { /* new file */ }
-  const { next, error } = spliceHook(body, hookBlock());
+  const { next, error } = spliceHook(body, hookBlock(gate), gate.scripts);
   if (error) {
     console.error(`  ${path}: ${error} -- then re-run cairn-setup.`);
     process.exit(1);
@@ -631,29 +699,48 @@ function installGitHooks() {
   mkdirChecked(target.dir, target.base);
   if (next !== body) writeChecked(path, next, target.base);
   chmodSync(checkLinks(path, target.base), 0o755);
-  if (target.configured === null && gitAt(projectDir, ["config", "--local", "core.hooksPath", target.dir]) === null) {
+  // The move keeps the scope the old pointer had: a worktree setting outranks a local one.
+  const scope = target.moved?.scope === "worktree" ? "--worktree" : "--local";
+  if (target.configured === null && gitAt(projectDir, ["config", scope, "core.hooksPath", target.dir]) === null) {
     console.error(`  core.hooksPath could not be set to ${target.dir} -- set it yourself, then re-run cairn-setup.`);
     process.exit(1);
   }
   console.log(`  ${path}: pre-push hook ${next === body ? "already current..." : "installed (the ship gate's default-branch rule, for every process here)."}`);
+  console.log(`  ${join(gate.scripts, PREPUSH)}: the script the hook runs, under the git common directory (no checkout writes there).`);
+  if (target.moved) {
+    // Moved, never deleted (#558): what the old folder holds is the owner's to read,
+    // and nothing in it is copied across, since a checkout may have put it there.
+    console.log(`  core.hooksPath: moved from ${target.moved.dir}, inside the working tree, to ${target.dir}; the old folder is left as it was.`);
+    const left = foreignHooks(target.moved.dir);
+    if (left.length) {
+      console.log(`  ${target.moved.dir}: no longer runs ${left.join(", ")} -- read them, and move any you keep into ${target.dir} yourself.`);
+    }
+    return;
+  }
   console.log(`  core.hooksPath: ${target.configured === null ? `set to ${target.dir}` : `already ${target.configured}, left as is -- the hook went into that folder`}.`);
+  if (target.inTree) {
+    console.log(`  note: ${target.dir} is inside the working tree, so a checkout can change the hook file there (the script it runs stays under the git common directory) -- that layout is yours, and it stays.`);
+  }
 }
 
 /** Read-only, for --check: where git runs hooks today, and whether cairn's
- *  pre-push is there with its script. null outside a repository (no line). */
+ *  pre-push is there, current, with its script under the git common directory.
+ *  null outside a repository (no line). */
 function gitLayerStatus() {
   const today = gitAt(projectDir, ["rev-parse", "--git-path", "hooks"]);
-  if (today === null) return null;
+  const gate = gateDirs();
+  if (today === null || gate === null) return null;
   const dir = gitPathDir(today);
   const setting = hooksPathSetting();
-  const script = join(projectDir, SCRIPTS_REL, PREPUSH);
-  const carries = (p) => {
+  const script = join(gate.scripts, PREPUSH);
+  const read = (p) => {
     try {
-      return readFileSync(p, "utf8").includes(HOOK_BEGIN);
+      return readFileSync(p, "utf8");
     } catch {
-      return false;
+      return "";
     }
   };
+  const carries = (p) => read(p).includes(HOOK_BEGIN);
   if (carries(join(dir, "pre-push"))) {
     // An older install wrote here before #497: setup never writes here now,
     // and it never deletes, so the block stays until the owner takes it out.
@@ -661,12 +748,28 @@ function gitLayerStatus() {
     if (why) {
       return { detail: `installed at ${dir}, but ${why}: every repository it reaches runs this project's gate -- take the cairn block out of that file`, lagging: true };
     }
-    return existsSync(script) ? { detail: `installed at ${dir}; git runs hooks from there` }
-      : { detail: `installed at ${dir}, but ${script} is missing -- not reached; re-run with --git-hooks`, lagging: true };
+    if (oldLayout(dir)) {
+      return { detail: `installed at ${dir}, inside the working tree, where a checkout can change what runs or delete the gate (#558) -- re-run with --git-hooks to move it to ${gate.hooks}`, lagging: true };
+    }
+    if (!read(join(dir, "pre-push")).includes(hookBlock(gate))) {
+      return { detail: `installed at ${dir}, but its block is an older one, which looks for the script in the working tree (#558), or names another git folder -- re-run with --git-hooks`, lagging: true };
+    }
+    if (!existsSync(script)) {
+      return { detail: `installed at ${dir}, but ${script} is missing -- not reached; re-run with --git-hooks`, lagging: true };
+    }
+    const out = linkOut(script, gate.common);
+    if (out) {
+      return { detail: `installed at ${dir}, but ${out.link} leads out of the git folder (${out.real ?? "to nothing"}), so what runs is not what setup wrote -- remove the link, then re-run with --git-hooks`, lagging: true };
+    }
+    const note = inWorkingTree(dir) ? " (a folder inside the working tree, by your core.hooksPath: a checkout can change the hook file there, not the script it runs)" : "";
+    return { detail: `installed at ${dir}; git runs hooks from there${note}` };
+  }
+  if (carries(join(gate.hooks, "pre-push"))) {
+    return { detail: `installed at ${gate.hooks}, but git runs hooks from ${dir} -- not reached; re-run with --git-hooks, or point core.hooksPath back`, lagging: true };
   }
   const ours = join(projectDir, GITHOOKS_REL);
   if (carries(join(ours, "pre-push"))) {
-    return { detail: `installed at ${ours}, but git runs hooks from ${dir} -- not reached; re-run with --git-hooks, or point core.hooksPath back`, lagging: true };
+    return { detail: `installed at ${ours}, inside the working tree (#558), and git runs hooks from ${dir} -- not reached; re-run with --git-hooks`, lagging: true };
   }
   // An install before #526 read a relative value from the project, and git never runs that folder.
   const stranded = setting ? resolve(projectDir, expandHome(setting.value)) : null;

@@ -12,7 +12,9 @@
  *   git-effects.mjs's table, the stamp and the default-branch names from
  *   lib.mjs, the refusal text is the run guard's. No rule lives here
  *   (asserted: sweep-surface.test.ts "(#456)"; the pushes from a plain
- *   shell: setup.test.ts "(#456)").
+ *   shell: setup.test.ts "(#456)"). Setup copies it and its two imports
+ *   under the git common directory, named by one absolute path, so nothing a
+ *   checkout writes changes what judges a push (#558, gitlayer.test.ts).
  *
  *   git hands a pre-push hook the remote's name and URL as arguments and
  *   one line per ref on stdin: `<local ref> <local sha> <remote ref>
@@ -32,8 +34,7 @@
  *   pre-push hook; so does a clone whose config never got the hooksPath.
  *   A ruleset at the tracker host is the only layer past that
  *   (docs/01-runbook.md, the ship-gate section). By decision, dated 2026-11-05
- *   (#503, pinned there): a forced push of any other branch isn't this layer's.
- *
+ *   (#503, pinned there): a forced push of any other branch isn't this layer's. *
  * removeWhen: the tracker host's branch ruleset is read for every project
  *   cairn runs in (config_probe, #485) and refuses the unshipped push
  *   itself; the local layer is then a convenience, not a guard.

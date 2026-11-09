@@ -2125,10 +2125,13 @@ hook; a human's own terminal, a harness wired for skills but not hooks
 git all push past it. `cairn-setup <harness> --git-hooks` is the opt-in
 second layer, never the default: it writes `core.hooksPath` into the
 repository's config, which is the owner's ground, so the flag is the
-consent. It installs a `pre-push` hook under the cairn home folder's
-`githooks/` directory, points `core.hooksPath` at it (an absolute path,
+consent. It installs a `pre-push` hook in `cairn/hooks/` under the git
+common directory, points `core.hooksPath` at it (an absolute path,
 local to that `.git/config`, so every worktree of the repository runs
-it), and copies the hook's script beside the verb helpers. The hook is a
+it), and copies the hook's script beside it in `cairn/scripts/`: no
+checkout, merge, restore or pull writes there, so a contributor's branch
+can't change what judges a push, and a re-run moves an older install off
+the working tree's folder without deleting it (#558). The hook is a
 thin caller: the effect comes from the shared effect table, the stamp
 and the default-branch names from the shared hook library, the refusal
 is the run guard's own text, and the same `CAIRN_ALLOW_UNSHIPPED_PUSH`
