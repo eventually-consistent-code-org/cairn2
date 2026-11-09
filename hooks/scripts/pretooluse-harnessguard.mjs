@@ -399,8 +399,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, assignVars, braceExpand, evalCommandString, expandAssigned, freshGuess, holdsBraceList, lineVars, literalHead,
-  overBudget, pagerCommands, quoteWord, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin, shellSegments,
-  spellWords, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
+  overBudget, pagerCommands, printedText, quoteWord, readBudget, runnerCommands, scriptSource, seedVars, shellCommandString,
+  shellSegments, spellWords, stdinLines, suCommandString, toolCommandLines, tooDeep, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import { SHELL_ALIAS, aliasWords, envConfig, parseInvocation, resolveAlias } from "./git-effects.mjs";
 import { projectRoots } from "./lib.mjs";
@@ -601,9 +601,15 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * at a word start comments out the rest of its line (#283), as the shell
  * reads it, so `echo x # > hooks/hooks.json` writes nothing and `echo x >
  * hooks/hooks.json # note` is the write; a quoted `#`, or one inside a
- * word, is text.
+ * word, is text. A backslash-newline joins the lines it splits, as bash
+ * joins them (#529): `cp evil.sh \` over `.git/hooks/pre-commit` is one cp,
+ * and a double-quoted backslash escapes only what bash lets it. Asserted by
+ * hooks.test.ts and shell-words.test.ts (#529), the second against real bash.
  */
-const READ = { redirects: true, subshells: true, substitutions: true, comments: true, budget: readBudget() };
+const READ = {
+  redirects: true, subshells: true, substitutions: true, comments: true, continuation: true, posixEscapes: true,
+  budget: readBudget(),
+};
 
 // The same, for a runner's guess at its later words (#522), on the same budget.
 const GUESS = { ...READ, guess: true };
@@ -2027,6 +2033,31 @@ function stdinText(seg, dir, up = []) {
   return parts.length ? parts.join("\n") : null;
 }
 
+// Why a line a shell is fed goes unread (#530), for the refusal.
+const FEED_UNREAD = "feeds a shell text another command makes, which the guard can't read";
+
+/**
+ * The lines the command piping into a shell prints, every way the line spells
+ * it (`up` holds each reading, nearest last), or null when any of them prints
+ * text the guard can't read (#530, printedText).
+ */
+function fedText(up) {
+  const last = up[up.length - 1];
+  const lines = [];
+  for (const u of up.filter((x) => x.heredocs === last.heredocs)) {
+    const text = printedText(unwrap(u.words, READ).words, u);
+    if (text === null) return null;
+    lines.push(...text);
+  }
+  return lines;
+}
+
+/** What a process substitution feeds the shell that runs it: one printer's text, else null (#530). */
+function substitutionText(body) {
+  const segs = shellSegments(body, READ);
+  return segs.length === 1 && !tooDeep(segs) ? fedText([segs[0]]) : null;
+}
+
 /** The nearest folder at or above `dir` holding a .git, else `dir`. */
 function gitRoot(dir) {
   for (let d = dir; ; d = dirname(d)) {
@@ -3026,8 +3057,12 @@ function writeTargets(seg, ctx) {
   // heredoc or here-string fed to a shell (or to su) reading stdin (#258).
   // eval's line is its words joined by one space (#283), through the
   // function the run guard reads it with, so the two guards agree on it.
-  if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su") {
-    const nest = (text, rest = []) => {
+  // #530 -- `source` and `.` of a path that names stdin read it like a shell.
+  const from = cmd === "su" ? "stdin" : cmd === "eval" ? null : scriptSource(cmd, args);
+  if (SHELLS.has(cmd) || cmd === "eval" || cmd === "su" || ((cmd === "source" || cmd === ".") && from)) {
+    // what this command reads on stdin is a pipe or text, so a shell its string runs is fed it too
+    const fed = Boolean(ctx.fed || ctx.up.length || seg.heredocs.length || seg.herestrings?.length);
+    const nest = (text, rest = [], more = {}) => {
       // #521 -- past the reader's depth a line is refused unread, never passed
       if (ctx.depth >= MAX_NEST) { out.push({ deep: true }); return; }
       const marker = rest.join(" ").split("").find((c) => c === STDIN || c === WALK);
@@ -3037,21 +3072,22 @@ function writeTargets(seg, ctx) {
         walk: ctx.walk,
         gone: ctx.gone,
         vars: assignVars(assigns, ctx.vars, SPELL), // the line's variables, and this command's own prefix (#291)
+        ...more,
       }));
     };
     const str = cmd === "eval" ? evalCommandString(args)
-      : cmd === "su" ? suCommandString(args) : shellCommandString(args);
+      : cmd === "su" ? suCommandString(args) : SHELLS.has(cmd) ? shellCommandString(args) : null;
     if (str) {
-      nest(str, cmd === "eval" ? [] : args.slice(args.indexOf(str) + 1));
+      nest(str, cmd === "eval" ? [] : args.slice(args.indexOf(str) + 1), { fed });
       return out;
     }
-    if (cmd !== "eval" && (cmd === "su" || shellReadsStdin(args))) {
-      // its own heredoc, or the one piped in: `cat <<EOF | sh`
-      for (const s of [seg, ...ctx.up.slice(-1)]) {
-        for (const h of s.heredocs) nest(h.body);
-        for (const x of s.herestrings ?? []) nest(x);
-      }
-    }
+    // #322, #530 -- its own heredoc or here-string, the literal text the command
+    // before it prints (`cat <<EOF | sh`, `echo ... | sh`), or a process
+    // substitution's; anything else a pipe feeds it can't be read, and refuses
+    const texts = from === "stdin" ? stdinLines(seg, ctx.up.length ? fedText(ctx.up) : ctx.fed ? null : [])
+      : from ? substitutionText(from.body) : [];
+    if (texts === null) out.push({ deep: true, why: FEED_UNREAD });
+    else for (const text of texts) nest(text);
     return out;
   }
   // `rm -rf {hooks,}` is `rm -rf hooks`: spell braces out first, as bash does (#258)
@@ -3358,8 +3394,11 @@ function lineTargets(command, dir, depth, extra = {}) {
   // each command's readings, spelled once, as it was reached: a pipeline re-spelling
   // everything before each stage is quadratic on a long one (#522)
   let upstream = [];
+  // #530 -- a pipe earlier on the line, or around it, may feed a shell further on (`x | (true; sh)`)
+  let fed = Boolean(extra.fed);
   for (let k = 0; k < segs.length; k++) {
     if (overBudget(READ.budget)) { out.push({ deep: true }); return out; }
+    if (k > 0 && PIPE.has(segs[k - 1].op)) fed = true;
     // the commands piping into this one, nearest last
     // (#509) spelled like the command itself, so `D=hooks; find $D | xargs rm` feeds what it walks
     if (k === 0 || !PIPE.has(segs[k - 1].op)) upstream = [];
@@ -3373,7 +3412,7 @@ function lineTargets(command, dir, depth, extra = {}) {
       // typed, for writeTargets' add to place or call lost.
       for (const { words, gone } of spellWords(segs[k], vars, SPELL)) {
         const seg = { ...segs[k], words };
-        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars, gone: gone || extra.gone }));
+        for (const d of places) gather(out, writeTargets(seg, { ...extra, dir: d, depth, up, vars, gone: gone || extra.gone, fed }));
       }
     }
     vars = lineVars(segs[k], vars, SPELL);
@@ -3413,7 +3452,7 @@ function lineHit(line, dir) {
  * track of could be anywhere, so it is a hit of its own (#258).
  */
 function judgeTarget(t) {
-  if (t.deep) return { deep: true };
+  if (t.deep) return { deep: true, why: t.why };
   if (t.what) return { path: t.raw, what: t.what }; // a git config key, judged where it was read (#465)
   const lead = t.raw.replace(/^(\.\/)+/, "")[0];
   const lost = { path: t.raw, lost: true };
@@ -3602,11 +3641,12 @@ try {
   if (!hit) process.exit(0);
 
   if (hit.deep) {
-    // #321: substitutions nested past what the reader reads -- fail closed
+    // #321: substitutions nested past what the reader reads -- fail closed; #530: a shell fed what it can't read
     console.error(
-      `cairn harness guard: this line ${unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
+      `cairn harness guard: this line ${hit.why ?? unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
     );
-    console.error("  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
+    console.error(hit.why ? "  run the commands on the line itself, or in a heredoc, and the guard can judge them."
+      : "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.");
   } else if (hit.lost) {
     // #258: a directory change it couldn't follow -- fail closed, and say so
     // (a git -C too, #318; a folder a substitution computes, #319; a
@@ -3642,7 +3682,8 @@ try {
   // lines: a breaker that loaded but misbehaves must not reach the outer catch,
   // whose fail-open exit 0 would turn this refusal into an allow
   // (asserted: hooks.test.ts, "missing, broken or misbehaving").
-  const reason = hit.deep ? (READ.budget.over ? "a line past the read budget" : "a line nested past the reader's depth")
+  const reason = hit.deep ? (hit.why ? "a shell fed text the guard can't read"
+    : READ.budget.over ? "a line past the read budget" : "a line nested past the reader's depth")
     : hit.lost ? "a write past a folder the guard can't follow" : `a write to ${hit.what}`;
   let more = [];
   try {

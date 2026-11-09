@@ -8,7 +8,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -16,7 +16,7 @@ import {
   WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
   shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
   toolCommandLines, tooDeep, evalCommandString, MAX_NEST, MAX_READ, MAX_SEGMENTS, assignVars, lineVars, seedVars,
-  overBudget, readBudget, spellWords, expandAssigned,
+  overBudget, readBudget, spellWords, expandAssigned, scriptSource, printedText, stdinLines,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -235,11 +235,13 @@ describe("shellSegments", () => {
       .toEqual([["cat"], ["ls"], ["cat"], ["rm", "x"]]);
     // bodies are read only when substitutions are
     expect(words("cat <<EOF\n$(rm x)\nEOF", { redirects: true })).toEqual([["cat"]]);
-    // `heredocs` alone models just the heredoc: `<`, `<<<` and `>` stay word text
+    // `heredocs` alone models just the heredoc and the here-string (#530): `<` and `>` stay word text
     const only = { heredocs: true, substitutions: true };
     expect(words("cat < in <<EOF > out\n$(rm x)\nEOF", only))
       .toEqual([["cat", "<", "in", ">", "out"], ["rm", "x"]]);
-    expect(words('cat <<< "$(ls)"', only)).toEqual([["cat", "<<<", "$(ls)"], ["ls"]]);
+    expect(words('cat <<< "$(ls)"', only)).toEqual([["cat"], ["ls"]]);
+    expect((shellSegments("bash <<< 'git reset --hard'", only) as Array<Seg & { herestrings: string[] }>)[0].herestrings)
+      .toEqual(["git reset --hard"]);
     expect(words("cat <<'EOF'\nrm x\nEOF\nls", { heredocs: true })).toEqual([["cat"], ["ls"]]);
   });
 });
@@ -1059,6 +1061,16 @@ describe("`>&` is a descriptor only for a number or `-`; anything else is a redi
 });
 
 /**
+ * Each guard's read options, as its READ holds them (no budget): the tables
+ * below hold the reader against real bash under every one of them.
+ */
+const GUARD_READS: Record<string, Record<string, boolean>> = {
+  run: { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+  harness: { redirects: true, subshells: true, substitutions: true, comments: true, continuation: true, posixEscapes: true },
+  write: { redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+};
+
+/**
  * #527: the reader walks a `${...}` the way bash does, or whatever follows it on
  * the line reads as text and runs unjudged. Every spelling below goes through
  * every context below, and real bash decides: a tail bash ran is a tail the reader
@@ -1067,11 +1079,7 @@ describe("`>&` is a descriptor only for a number or `-`; anything else is a redi
  * reader to nothing. Empty is a failure: the table has to reach bash and find tails.
  */
 describe("a quote or brace in a ${...} is read as real bash reads it (#527)", () => {
-  const READS: Record<string, Record<string, boolean>> = {
-    run: { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true },
-    harness: { redirects: true, subshells: true, substitutions: true, comments: true },
-    write: { redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true, continuation: true, posixEscapes: true, anyWhitespace: true },
-  };
+  const READS = GUARD_READS;
   const SPELLINGS = [
     // the issue's, and the plain controls
     "${X:-'}'}", "${X:-'{}'}", '${X:-"}"}', "${X:-\\}}", "${X}", "${X:-}", "${X:-x}", "${#X}",
@@ -1187,4 +1195,167 @@ describe("a quote or brace in a ${...} is read as real bash reads it (#527)", ()
     expect(wrong).toEqual([]);
     if (OTHERS.length) expect(ran).toBeGreaterThan(SPELLINGS.length);
   }, 240_000);
+});
+
+/**
+ * #529: a line wrapped with a trailing backslash is one line to bash, so the reader
+ * joins it the way bash does, under every guard's read options, or the target after
+ * the wrap is never judged. A probe program `p` prints the words bash really handed
+ * it, and the reader's words for each `p` must be those. Empty is a failure: the
+ * table has to reach bash and find calls.
+ */
+describe("a line continued with a backslash is read as real bash reads it (#529)", () => {
+  const LINES = [
+    // the issue's: a wrapped operand, a wrapped word, a wrapped config line
+    "p cp evil.sh \\\n  .git/hooks/pre-commit", "p rm -rf \\\n  hooks", "p git config \\\n core.hooksPath /tmp/h",
+    "p cairn-setup claude \\\n --git-hooks", "p hoo\\\nks/hooks.json", "p a\\\n\\\nb", "p \\\n",
+    // inside quotes: double quotes join, single quotes keep it, an escaped backslash is no wrap
+    'p "hoo\\\nks"', "p 'hoo\\\nks'", 'p "a\\\\\\\nb"', 'p "a\\\n"b', "p a\\\\\nb", "p $'a\\\nb'",
+    // a comment ends at its newline, wrapped or not
+    "p a #c \\\np after", "p a \\\n#c\np b",
+    // an operator wrapped in two
+    "p b &\\\n& p c", "false |\\\n| p c", "p b ;\\\n p c", "p b \\\n; p c",
+    // a heredoc: an unquoted body's wrapped line can be its end, a quoted body's never is
+    "cat <<EOF\nbody\nE\\\nOF\np ESCAPED\nEOF", "cat <<'EOF'\nE\\\nOF\np HIDDEN\nEOF\np AFTER",
+    "cat <<EOF\nE\\\nO\\\nF\np ESCAPED\nEOF", "cat <<EOF\nE\\\\\nOF\np KEPT\nEOF\np AFTER",
+    // a here-string, a heredoc and its delimiter wrapped in two
+    "cat <\\\n<< hs\np AFTER", "cat <<\\\n< hs\np AFTER", "cat <\\\n<EOF\np HIDDEN\nEOF\np AFTER", "cat <<\\\nEOF\np HIDDEN\nEOF\np AFTER",
+  ];
+  const cwd = mkdtempSync(join(tmpdir(), "cairn-529-"));
+  const bin = mkdtempSync(join(tmpdir(), "cairn-529-bin-"));
+  writeFileSync(join(bin, "p"), "#!/bin/sh\nprintf 'P'\nfor a in \"$@\"; do printf '\\037%s' \"$a\"; done\nprintf '\\036'\n");
+  chmodSync(join(bin, "p"), 0o755);
+  // each `p` bash ran, as the words it was handed
+  const ran = (line: string, at = cwd): string[][] => {
+    const r = spawnSync("bash", ["-c", line], { cwd: at, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    return [...(r.stdout ?? "").matchAll(/P((?:\x1f[^\x1e\x1f]*)*)\x1e/g)].map((m) => m[1].split("\x1f").slice(1));
+  };
+  const read = (line: string, opts: Record<string, boolean>): string[][] =>
+    (shellSegments(line, opts) as Seg[]).filter((s) => s.words[0] === "p").map((s) => s.words.slice(1));
+
+  it("every line: the reader's words for each p are the words bash handed it", () => {
+    const wrong: string[] = [];
+    let calls = 0;
+    for (const line of LINES) {
+      const b = ran(line);
+      calls += b.length;
+      for (const [name, opts] of Object.entries(GUARD_READS)) {
+        const r = read(line, opts);
+        if (JSON.stringify(r) !== JSON.stringify(b)) wrong.push(`${name}: ${JSON.stringify(line)} bash ${JSON.stringify(b)} reader ${JSON.stringify(r)}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    // a table that stopped reaching bash would pass above forever
+    expect(calls).toBeGreaterThan(LINES.length);
+  }, 60_000);
+
+  const TARGETS = ["p x > hoo\\\nks.json", "p x >\\\n out1", "p x >\\\n> out2", "p x &\\\n> out3", 'p x > "o\\\nut4"', "p x >\\\n| out5",
+    "p x > out\\\n6 \\\n> out7"];
+
+  it("every wrapped redirect: the reader's targets are the files bash wrote", () => {
+    const wrong: string[] = [];
+    let files = 0;
+    for (const line of TARGETS) {
+      const at = mkdtempSync(join(tmpdir(), "cairn-529-to-"));
+      ran(line, at);
+      const wrote = readdirSync(at).sort();
+      files += wrote.length;
+      for (const name of ["harness", "write"]) {
+        const segs = shellSegments(line, GUARD_READS[name]) as Seg[];
+        const targets = [...new Set(segs.flatMap((s) => s.redirects))].sort();
+        if (JSON.stringify(targets) !== JSON.stringify(wrote)) wrong.push(`${name}: ${JSON.stringify(line)} bash wrote ${wrote} reader ${targets}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(files).toBeGreaterThanOrEqual(TARGETS.length);
+  });
+});
+
+/**
+ * #530: what a shell reads its commands from, and what the command piping into
+ * it prints. printedText is held against real shells: whatever bash, sh or zsh
+ * prints for a printer line is one of the texts the reader says it prints.
+ */
+describe("a shell's stdin, and the text a pipe feeds it (#530)", () => {
+  const READ = GUARD_READS.harness;
+
+  it("scriptSource: stdin, a path naming it, `source` of one, a process substitution, else null", () => {
+    expect(scriptSource("bash", [])).toBe("stdin");
+    expect(scriptSource("sh", ["-s", "a"])).toBe("stdin");
+    for (const p of ["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]) {
+      expect(scriptSource("bash", [p])).toBe("stdin");
+      expect(scriptSource("source", [p])).toBe("stdin");
+      expect(scriptSource(".", [p])).toBe("stdin");
+    }
+    expect(scriptSource("/bin/bash", ["--", "/dev/stdin", "x"])).toBe("stdin");
+    expect(scriptSource("bash", ["<(echo x)"])).toEqual({ body: "echo x" });
+    expect(scriptSource("source", ["<(echo x)"])).toEqual({ body: "echo x" });
+    // twins: a -c string, a script file, a file sourced, and no shell at all
+    expect(scriptSource("bash", ["-c", "x"])).toBeNull();
+    expect(scriptSource("bash", ["x.sh"])).toBeNull();
+    expect(scriptSource("source", ["./env.sh"])).toBeNull();
+    expect(scriptSource("cat", ["/dev/stdin"])).toBeNull();
+    expect(shellReadsStdin(["/dev/stdin"])).toBe(true);
+    expect(shellReadsStdin(["/dev/stdout"])).toBe(false);
+  });
+
+  it("a pipe after a group feeds the group: an empty segment stands for it, never its last command", () => {
+    for (const line of ["(echo a; echo b) | sh", "(echo a) 2>&1 | sh", "(echo a) |& sh"]) {
+      const segs = shellSegments(line, READ) as Array<Seg & { reserved: string[]; op: string }>;
+      const sh = segs.findIndex((s) => s.words[0] === "sh");
+      expect(segs[sh - 1].words, line).toEqual([]);
+      expect(segs[sh - 1].reserved, line).toEqual([")"]);
+    }
+    // twins: a list after a group, and `||`, stand for nothing
+    for (const line of ["(echo a) || sh", "(echo a); sh", "(echo a) && sh"]) {
+      expect((shellSegments(line, READ) as Seg[]).map((s) => s.words), line).toEqual([["echo", "a"], ["sh"]]);
+    }
+  });
+
+  it("stdinLines: its own text wins over any pipe; else what the guard read the pipe to hold", () => {
+    const [own] = shellSegments("sh <<< 'ls'", READ) as Seg[];
+    expect(stdinLines(own, null)).toEqual(["ls"]);
+    const [bare] = shellSegments("sh", READ) as Seg[];
+    expect(stdinLines(bare)).toEqual([]);
+    expect(stdinLines(bare, null)).toBeNull();
+    expect(stdinLines(bare, ["ls"])).toEqual(["ls"]);
+  });
+
+  const PRINTERS = [
+    "echo git reset --hard", "echo 'git reset --hard'", "echo -n git reset", "echo -e 'git\\x20reset --hard'", "echo 'a\\tb'",
+    "echo -E 'a\\nb'", "printf 'git reset --hard\\n'", "printf '%s\\n' 'git reset --hard'", "printf '%s %s\\n' a b c d e",
+    "printf 'rm -rf %s\\n' hooks", "printf '%b\\n' 'a\\x41'", "printf '100%%\\n'", "printf -- '%s' x", "printf x",
+  ];
+  const segOf = (line: string) => (shellSegments(line, READ) as Seg[])[0];
+  const run = (exe: string, line: string) => spawnSync(exe, ["-c", line], { encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+
+  it("printedText: what a real shell printed is one of the texts the reader says it prints", () => {
+    const wrong: string[] = [];
+    let printed = 0;
+    for (const exe of ["bash", ...["/bin/sh", "/bin/zsh", "/bin/dash"].filter((p) => existsSync(p))]) {
+      for (const line of PRINTERS) {
+        const r = run(exe, line);
+        if (r.status !== 0) continue;
+        printed++;
+        const seg = segOf(line);
+        const texts = (printedText(seg.words, seg) as string[] | null) ?? [];
+        // echo ends its text with a newline unless -n says not to
+        const said = texts.flatMap((t) => [t, `${t}\n`]);
+        if (!said.includes(r.stdout)) wrong.push(`${exe}: ${line} printed ${JSON.stringify(r.stdout)}, reader ${JSON.stringify(texts)}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(printed).toBeGreaterThanOrEqual(PRINTERS.length);
+  });
+
+  it("printedText: what the guard can't spell is null, never a guess", () => {
+    for (const line of ["printf '%d\\n' 3", "printf '%-5s' x", "printf \"$F\" x", "echo \"$X\"", "echo `id`", "curl -s x", "cat f.sh", "cat"]) {
+      const seg = segOf(line);
+      expect(printedText(seg.words, seg), line).toBeNull();
+    }
+    const [cat] = shellSegments("cat <<'EOF'\nls\nEOF", READ) as Seg[];
+    expect(printedText(cat.words, cat)).toEqual(["ls\n"]);
+    const [wild] = shellSegments("echo x", READ) as Seg[];
+    expect(printedText(wild.words, wild, new Set(["x"]))).toBeNull();
+  });
 });
