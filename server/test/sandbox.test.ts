@@ -6,7 +6,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +164,23 @@ describe("cairn-setup claude --sandbox writes the recipe (#567)", () => {
     expect(readFileSync(far, "utf8")).toBe("{}\n");
   });
 
+  // A session inside the sandbox can't write its own settings file; a folder
+  // the OS won't let setup write stands in for that refusal here.
+  it("a write the OS refuses is a one-line refusal, not a stack trace", () => {
+    const p = repo();
+    const home = fresh("cairn-sandbox-home-");
+    mkdirSync(join(p, ".claude"), { recursive: true });
+    chmodSync(join(p, ".claude"), 0o500);
+    try {
+      const r = setup("claude", home, { project: p }, "--sandbox");
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/the write was refused \((EACCES|EPERM)\) -- a session inside the sandbox can't change its own settings/);
+      expect(r.stderr).not.toContain("    at ");
+    } finally {
+      chmodSync(join(p, ".claude"), 0o700);
+    }
+  });
+
   it("without the flag, writes no sandbox block (opt-in)", () => {
     const p = repo();
     const home = fresh("cairn-sandbox-home-");
@@ -253,5 +270,19 @@ describe("the deny rows are one list a later change extends (#567, #558)", () =>
     expect(header).toContain("a worktree or submodule made after the install has no rows of its own");
     expect(header).toContain("a relative row anchors at the session's working directory");
     expect(header).toContain("a package folder or a worktree inside the checkout holding its own");
+  });
+});
+
+describe("the docs page says what the recipe leaves uncovered, and what was measured (#567)", () => {
+  const page = readFileSync(join(ROOT, "docs", "sandbox.md"), "utf8");
+  it("names each thing the sandbox does not reach", () => {
+    for (const item of ["Claude's built-in file tools", "Commands you type yourself", "`git reset --hard`",
+      "Pushes, and anything else on the network", "The other seven harnesses", "A committed settings file that loosens it",
+      "An agent running `--sandbox` itself"]) expect(page, item).toContain(item);
+  });
+  it("dates its claims and its drill run, and keeps the recipe arm a claim", () => {
+    expect(page).toContain("read on 2026-11-06");
+    expect(page).toContain("It ran on 2026-11-09, on macOS with Claude Code 2.1.319");
+    expect(page).toContain("Whether the rows hold is still a\nclaim");
   });
 });
