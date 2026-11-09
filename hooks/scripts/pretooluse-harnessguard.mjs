@@ -271,10 +271,16 @@
  *   The ship gate's own folders (#492): the hook git runs is a thin caller,
  *   so protecting the caller and not what it calls left the body an ordinary
  *   Edit away from running under the owner's identity at the next push.
- *   .cairn/harness (the scripts the hook runs, the verbs beside them) and
- *   .cairn/githooks are protected trees under the project root and under
+ *   Setup installs the hook and the script it runs under the git common
+ *   directory since #558 (cairn/ beside the repository's config), where no
+ *   checkout writes and every linked worktree finds the same pair: that folder
+ *   is a protected tree, wherever the common directory lies. No zone can judge
+ *   what a checkout writes, which is why the pair left the working tree.
+ *   Asserted: gitlayer.test.ts "(#558)". An older install's
+ *   .cairn/harness (the scripts its hook runs, the verbs beside them) and
+ *   .cairn/githooks stay protected trees under the project root and under
  *   every linked worktree of it (`git worktree list`, asked once per call),
- *   since the hook looks in the worktree it runs from first; a folder on the
+ *   since that hook looked in the worktree it ran from first; a folder on the
  *   way to one (.cairn), while it isn't there as a folder, counts, and so
  *   does a folder's unknown contents copied onto it (`cp -r src/. .cairn/`).
  *   A package folder's own pair counts at any depth in the project, since
@@ -786,6 +792,12 @@ const CAIRN_ZONES = [
 for (const [names, what] of CAIRN_ZONES) {
   PROTECTED.push({ re: new RegExp(`^(?:.*/)?${names.join("/").replace(/\./g, "\\.")}/`, "i"), what });
 }
+// Where setup installs the git layer since #558: one folder under the git
+// common directory, the hook and the script it runs, shared by every linked
+// worktree. The two working-tree folders above stay zones: an older install's
+// hook and the verbs live there until a re-run moves the pointer.
+const GATE_ZONE = "cairn";
+const GATE_WHAT = "the ship gate's git hook and the script it runs";
 
 // What an MCP tool does to the paths it names, read off the words of its
 // name (`write_file`, `editBlock`, `move_file`, `create_directory`, #310).
@@ -1439,8 +1451,12 @@ function gitWorktrees(project) {
 
 /**
  * cairn's own folders as tree zones (#492), under the project root and every
- * linked worktree of it: the hook runs `$PWD/.cairn/harness/scripts/pre-push.mjs`
- * from the worktree a push starts in, before the install's own copy. `within`
+ * linked worktree of it: an install before #558 ran
+ * `$PWD/.cairn/harness/scripts/pre-push.mjs` from the worktree a push starts
+ * in, and the verbs live there. Then the gate's folder under the git common
+ * directory (#558), where setup installs the hook and its script now: the
+ * folder beside the common config git names (`--git-path config`, already
+ * asked), else the nearest .git folder when there is no git to ask. `within`
  * marks a zone a whole tree can be dropped on (dirRule, zoneGlob).
  */
 function cairnZones() {
@@ -1450,6 +1466,13 @@ function cairnZones() {
     for (const [names, what] of CAIRN_ZONES) {
       for (const dir of spellings(join(root, ...names))) zones.push({ dir, what, tree: true, carve: [], within });
     }
+  }
+  for (const project of PROJECTS) {
+    let common = gitAnswers(project).config;
+    common = common === null ? join(gitRoot(project), ".git") : dirname(common);
+    try { if (!statSync(common).isDirectory()) continue; } catch { continue; }
+    const within = spellings(common);
+    for (const dir of spellings(join(common, GATE_ZONE))) zones.push({ dir, what: GATE_WHAT, tree: true, carve: [], within });
   }
   return zones;
 }

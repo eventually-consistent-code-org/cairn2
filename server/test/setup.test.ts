@@ -600,7 +600,11 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
   const git = (cwd: string, ...a: string[]) =>
     execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe", env: { ...process.env, ...GIT_IDENT } }).trim();
   // Built, never spelled: the leak guard refuses the planning folder's path as a literal.
+  // The layout before #558, which setup now only reads (gitlayer.test.ts has the move).
   const GITHOOKS = join(".cairn", "githooks");
+  /** Where setup puts the gate since #558: under the git common directory, real path. */
+  const gate = (proj: string, ...rest: string[]) => join(realpathSync(proj), ".git", "cairn", ...rest);
+  const gateHooks = (proj: string) => gate(proj, "hooks");
 
   /** A committed repo on main with a bare remote, plus an empty home for the stamp. */
   function repo(): { proj: string; home: string } {
@@ -638,23 +642,24 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       JSON.stringify({ head, clean, at: "2026-11-04T00:00:00Z" }));
   }
 
-  it("installs the hook, points core.hooksPath at it, copies the script beside the helpers; re-run byte-identical; --check reports it reached", () => {
+  it("installs the hook, points core.hooksPath at it, copies the script under the git common directory; re-run byte-identical; --check reports it reached", () => {
     const { proj, home } = repo();
     const out = run("codex", proj, home, "--git-hooks");
     expect(out).toContain("pre-push hook installed");
-    const hook = readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8");
+    const hook = readFileSync(join(gateHooks(proj), "pre-push"), "utf8");
     expect(hook.startsWith("#!/bin/sh\n")).toBe(true);
     expect(hook).toContain("# cairn:begin");
     expect(hook).toContain("# cairn:end");
     expect(hook).toContain("pre-push.mjs");
-    expect(git(proj, "config", "--get", "core.hooksPath")).toBe(join(proj, GITHOOKS));
-    expect(git(proj, "rev-parse", "--git-path", "hooks")).toBe(join(proj, GITHOOKS));
+    expect(git(proj, "config", "--get", "core.hooksPath")).toBe(gateHooks(proj));
+    expect(git(proj, "rev-parse", "--git-path", "hooks")).toBe(gateHooks(proj));
     for (const f of ["pre-push.mjs", "lib.mjs", "git-effects.mjs"]) {
-      expect(existsSync(join(proj, ".cairn", "harness", "scripts", f)), f).toBe(true);
+      expect(existsSync(gate(proj, "scripts", f)), f).toBe(true);
     }
+    expect(existsSync(join(proj, GITHOOKS))).toBe(false);
 
     const again = run("codex", proj, home, "--git-hooks");
-    expect(readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+    expect(readFileSync(join(gateHooks(proj), "pre-push"), "utf8")).toBe(hook);
     expect(again).toContain("pre-push hook already current");
 
     const check = run("codex", proj, home, "--check");
@@ -667,6 +672,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     const { proj, home } = repo();
     run("codex", proj, home);
     expect(existsSync(join(proj, GITHOOKS))).toBe(false);
+    expect(existsSync(gate(proj))).toBe(false);
     expect(spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: proj }).status).not.toBe(0);
     const check = run("codex", proj, home, "--check");
     expect(check).toContain("git hooks (pre-push): not installed");
@@ -749,14 +755,15 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
 
   it("a project's own pre-push survives under the markers, runs after the gate, and still reads the refs from stdin", () => {
     const { proj, home } = repo();
-    mkdirSync(join(proj, GITHOOKS), { recursive: true });
+    const own = join("scripts", "hooks");
+    mkdirSync(join(proj, own), { recursive: true });
     const owner = '#!/bin/sh\ncat > "$PWD/owner-saw.txt"\n';
-    writeFileSync(join(proj, GITHOOKS, "pre-push"), owner);
-    chmodSync(join(proj, GITHOOKS, "pre-push"), 0o755);
+    writeFileSync(join(proj, own, "pre-push"), owner);
+    chmodSync(join(proj, own, "pre-push"), 0o755);
     // the owner's own pointer: with none, this folder's hook is one setup won't arm (#508)
-    git(proj, "config", "core.hooksPath", GITHOOKS);
+    git(proj, "config", "core.hooksPath", own);
     run("codex", proj, home, "--git-hooks");
-    const hook = readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8");
+    const hook = readFileSync(join(proj, own, "pre-push"), "utf8");
     expect(hook.startsWith("#!/bin/sh\n# cairn:begin")).toBe(true);
     expect(hook.indexOf("# cairn:end")).toBeLessThan(hook.indexOf("owner-saw.txt"));
 
@@ -769,7 +776,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     expect(readFileSync(join(proj, "owner-saw.txt"), "utf8")).toContain("refs/heads/main");
 
     run("codex", proj, home, "--git-hooks");
-    expect(readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
+    expect(readFileSync(join(proj, own, "pre-push"), "utf8")).toBe(hook);
   });
 
   // #508: the flag points git at the folder and arms what it holds. A folder
@@ -789,10 +796,11 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       return existsSync(marker);
     }
 
+    /** A hook in the folder setup points at, the gate's under the git common directory (#558). */
     function plant(proj: string, name: string, body: string): void {
-      mkdirSync(join(proj, GITHOOKS), { recursive: true });
-      writeFileSync(join(proj, GITHOOKS, name), body);
-      chmodSync(join(proj, GITHOOKS, name), 0o755);
+      mkdirSync(gateHooks(proj), { recursive: true });
+      writeFileSync(join(gateHooks(proj), name), body);
+      chmodSync(join(gateHooks(proj), name), 0o755);
     }
     const EVIL = '#!/bin/sh\necho armed > "$PWD/armed.txt"\n';
 
@@ -822,8 +830,8 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
         expect(pointer(proj)).toBe("");
       }
       const { proj, home } = repo();
-      mkdirSync(join(proj, GITHOOKS), { recursive: true });
-      symlinkSync("/nowhere", join(proj, GITHOOKS, "post-checkout"));
+      mkdirSync(gateHooks(proj), { recursive: true });
+      symlinkSync("/nowhere", join(gateHooks(proj), "post-checkout"));
       plant(proj, "post-commit", EVIL);
       const r = attempt("codex", home, { project: proj }, "--git-hooks");
       expect(r.status, r.out).toBe(1);
@@ -835,15 +843,15 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
     it("the harmless twins: a re-run over its own hook, a sample and a dotfile; no flag at all; and a pointer the owner already set", () => {
       const first = repo();
       run("codex", first.proj, first.home, "--git-hooks");
-      const hook = readFileSync(join(first.proj, GITHOOKS, "pre-push"), "utf8");
+      const hook = readFileSync(join(gateHooks(first.proj), "pre-push"), "utf8");
       // the pointer gone, the folder holding only what setup wrote: it arms nothing new
       git(first.proj, "config", "--unset", "core.hooksPath");
       plant(first.proj, "pre-commit.sample", EVIL);
-      writeFileSync(join(first.proj, GITHOOKS, ".gitignore"), "*\n");
+      writeFileSync(join(gateHooks(first.proj), ".gitignore"), "*\n");
       const again = attempt("codex", first.home, { project: first.proj }, "--git-hooks");
       expect(again.status, again.out).toBe(0);
-      expect(readFileSync(join(first.proj, GITHOOKS, "pre-push"), "utf8")).toBe(hook);
-      expect(pointer(first.proj)).toBe(join(first.proj, GITHOOKS));
+      expect(readFileSync(join(gateHooks(first.proj), "pre-push"), "utf8")).toBe(hook);
+      expect(pointer(first.proj)).toBe(gateHooks(first.proj));
 
       const plain = repo();
       plant(plain.proj, "pre-commit", EVIL);
@@ -853,18 +861,20 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
 
       // the owner's own pointer already runs that folder: the install adds its hook and arms nothing new
       const set = repo();
-      plant(set.proj, "pre-commit", "#!/bin/sh\nexit 0\n");
-      git(set.proj, "config", "core.hooksPath", GITHOOKS);
+      const own = join(set.proj, "scripts", "hooks");
+      mkdirSync(own, { recursive: true });
+      writeFileSync(join(own, "pre-commit"), "#!/bin/sh\nexit 0\n");
+      git(set.proj, "config", "core.hooksPath", "scripts/hooks");
       const kept = attempt("codex", set.home, { project: set.proj }, "--git-hooks");
       expect(kept.status, kept.out).toBe(0);
-      expect(existsSync(join(set.proj, GITHOOKS, "pre-commit"))).toBe(true);
-      expect(readFileSync(join(set.proj, GITHOOKS, "pre-push"), "utf8")).toContain("# cairn:begin");
+      expect(existsSync(join(own, "pre-commit"))).toBe(true);
+      expect(readFileSync(join(own, "pre-push"), "utf8")).toContain("# cairn:begin");
     });
 
     it("the nested-cwd variant: run from a folder below the root, the folder it would point at is judged the same", () => {
       const { proj, home } = repo();
       const below = join(proj, "src");
-      plant(below, "pre-commit", EVIL);
+      plant(proj, "pre-commit", EVIL);
       const r = attempt("codex", home, { cwd: below }, "--git-hooks");
       expect(r.status, r.out).toBe(1);
       expect(r.stderr).toContain("did not write (pre-commit)");
@@ -1036,7 +1046,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       git(proj, "config", "--local", "core.hooksPath", (printed as RegExpExecArray)[1]);
       const again = attempt("codex", home, { project: sub }, "--git-hooks");
       expect(again.status, again.out).toBe(0);
-      expect(existsSync(join(sub, GITHOOKS, "pre-push"))).toBe(true);
+      expect(existsSync(join(gateHooks(proj), "pre-push"))).toBe(true);
       expect(readdirSync(shared)).toEqual([]);
       expect(push(sub, home, ["origin", "main"]).stderr).toContain(REFUSED);
     });
@@ -1056,7 +1066,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       mkdirSync(shared);
       writeFileSync(join(plain.home, ".gitconfig"), "[core]\n\thooksPath = ~/.githooks\n");
       const refused = attempt("codex", plain.home, { project: plain.proj }, "--git-hooks");
-      expect(refused.stderr).toContain(`git config --local core.hooksPath ${GITHOOKS}\``);
+      expect(refused.stderr).toContain(`git config --local core.hooksPath ${gateHooks(plain.proj)}\``);
     });
 
     it("a project reached through a link from elsewhere is read from where git stands, not from the spelling: the gate is reached and --check says so", () => {
@@ -1111,7 +1121,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
   // landing in it refused default-branch pushes in unrelated repositories.
   describe("a folder other repositories run hooks from is never written into (#497)", () => {
     const OWNER_HOOK = "#!/bin/sh\necho the owner hook\n";
-    const SCRIPT = join(".cairn", "harness", "scripts", "pre-push.mjs");
+    const SCRIPT = join(".git", "cairn", "scripts", "pre-push.mjs");
     const shared = (home: string) => join(home, ".githooks");
     const hooksLine = (value: string) => `[core]\n\thooksPath = ${value}\n`;
     const localHooksPath = (proj: string) => spawnSync("git", ["config", "--local", "--get", "core.hooksPath"], { cwd: proj }).status;
@@ -1192,7 +1202,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       const r = attempt("codex", home, { project: proj, env: { GIT_CONFIG: global } }, "--git-hooks");
       expect(r.status, r.out).toBe(0);
       expect(readFileSync(global, "utf8")).toBe("[user]\n\tname = owner\n");
-      expect(git(proj, "config", "--local", "--get", "core.hooksPath")).toBe(join(proj, GITHOOKS));
+      expect(git(proj, "config", "--local", "--get", "core.hooksPath")).toBe(gateHooks(proj));
     });
 
     it("a relative value at global scope is refused too: the decision is the scope, not the path", () => {
@@ -1234,7 +1244,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       const plain = repo();
       const ok = attempt("codex", plain.home, { project: plain.proj, env }, "--git-hooks");
       expect(ok.status, ok.out).toBe(0);
-      expect(existsSync(join(plain.proj, GITHOOKS, "pre-push"))).toBe(true);
+      expect(existsSync(join(gateHooks(plain.proj), "pre-push"))).toBe(true);
     });
 
     it("the harmless twin: local scope beats the global setting and is respected; the global folder stays untouched", () => {
@@ -1307,7 +1317,7 @@ describe("cairn-setup --git-hooks: the git layer of the ship gate (#456)", () =>
       const { proj, home } = repo();
       run("codex", proj, home, "--git-hooks");
       mkdirSync(shared(home));
-      writeFileSync(join(shared(home), "pre-push"), readFileSync(join(proj, GITHOOKS, "pre-push"), "utf8"));
+      writeFileSync(join(shared(home), "pre-push"), readFileSync(join(gateHooks(proj), "pre-push"), "utf8"));
       git(proj, "config", "--unset", "core.hooksPath");
       writeFileSync(join(home, ".gitconfig"), hooksLine("~/.githooks"));
       const out = runCheckFail("codex", proj, home);
@@ -1496,9 +1506,11 @@ describe("one link check on every project-scoped write (#498)", () => {
   it("the git layer's writes go through it too: the hooks folder, the hook file, the script copy, and a folder a local core.hooksPath names", () => {
     const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
     const shapes: Array<[string, (proj: string, outside: string) => void]> = [
-      ["the cairn hooks folder links out", (p, o) => plant(p, join(CAIRN, "githooks"), join(o, "folder"))],
-      ["the hook file links out", (p, o) => plant(p, join(CAIRN, "githooks", "pre-push"), join(o, "victim"))],
-      ["the copied script links out", (p, o) => plant(p, join(CAIRN, "harness", "scripts", "pre-push.mjs"), join(o, "victim"))],
+      // the gate's folder under the git common directory (#558), each name on the way
+      ["the gate's folder links out", (p, o) => plant(p, join(".git", "cairn"), join(o, "folder"))],
+      ["the cairn hooks folder links out", (p, o) => plant(p, join(".git", "cairn", "hooks"), join(o, "folder"))],
+      ["the hook file links out", (p, o) => plant(p, join(".git", "cairn", "hooks", "pre-push"), join(o, "victim"))],
+      ["the copied script links out", (p, o) => plant(p, join(".git", "cairn", "scripts", "pre-push.mjs"), join(o, "victim"))],
       ["a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks"), join(o, "folder")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
       ["a hook in a local hooks folder links out", (p, o) => { plant(p, join("scripts", "hooks", "pre-push"), join(o, "victim")); git(p, "config", "core.hooksPath", "scripts/hooks"); }],
     ];
