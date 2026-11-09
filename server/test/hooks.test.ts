@@ -6952,6 +6952,94 @@ describe("an agent-run cairn-setup --git-hooks needs the owner (#508)", () => {
   });
 });
 
+// #567: `--sandbox` writes the sandbox block into the main checkout's local
+// settings. Run by the agent it could set the block's keys its own way, so it
+// is the owner's install as --git-hooks is (#508): every spelling refuses
+// without the owner's escape, and the flag rides the same reader.
+describe("an agent-run cairn-setup --sandbox needs the owner (#567)", () => {
+  const WHAT = "the Claude Code sandbox settings (.claude/settings.local.json)";
+  const PKG = "@eventually-consistent/cairn";
+
+  const REFUSED = [
+    "node setup/cairn-setup.mjs claude --sandbox",
+    "node /opt/cairn/setup/cairn-setup.mjs claude --project . --sandbox",
+    "bun setup/cairn-setup.mjs claude --sandbox",
+    "npx cairn-setup claude --sandbox",
+    `npx --yes ${PKG}@latest claude --sandbox`,
+    `npx -y -p ${PKG} cairn-setup claude --sandbox`,
+    `pnpm dlx ${PKG} claude --sandbox`,
+    `bunx ${PKG} claude --sandbox`,
+    "npm exec -- cairn-setup claude --sandbox",
+    "npm run setup -- claude --sandbox",
+    "cairn-setup claude --sandbox",
+    "./node_modules/.bin/cairn-setup claude --sandbox",
+    "CAIRN-SETUP claude --sandbox",
+    "bash -c 'npx cairn-setup claude --sandbox'",
+    "env X=1 cairn-setup claude --sandbox",
+    "eval cairn-setup claude --sandbox",
+    // hostile: the flag where a folder name goes still reaches setup's own check
+    "cairn-setup claude --project --sandbox",
+    // the flag spelled from the line, or where the guard can't read it
+    "F=--sandbox; cairn-setup claude $F",
+    "cairn-setup claude --sand{box,x}",
+    "cairn-setup claude $(echo --sandbox)",
+    "echo --sandbox | xargs cairn-setup claude",
+    "cairn-setup claude --sand*",
+  ];
+
+  const TWINS = [
+    "node setup/cairn-setup.mjs claude",
+    "cairn-setup claude --check",
+    "npx cairn-setup claude --local",
+    // naming it is not running it
+    "grep -n -- --sandbox setup/sandbox.mjs",
+    "cat docs/sandbox.md",
+    "echo cairn-setup claude --sandbox",
+    "npx vitest run test/sandbox.test.ts",
+  ];
+
+  it("refuses every spelling of the install and passes each twin, from the root", () => {
+    const { p, home } = hardenFixture("setup-sandbox");
+    for (const c of REFUSED) {
+      const r = hardenRun(p, home, "Bash", { command: c });
+      expect(r.status, c).toBe(2);
+      expect(r.stderr, c).toContain(WHAT);
+      expect(r.stderr, c).toContain("--sandbox");
+    }
+    // both flags on one line refuse; the refusal names the first one it finds
+    const both = hardenRun(p, home, "Bash", { command: "cairn-setup claude --git-hooks --sandbox" });
+    expect(both.status).toBe(2);
+    expect(both.stderr).toContain("--git-hooks");
+    for (const c of TWINS) expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    expect(hardenRun(p, home, `${HARDEN_DC}start_process`, { command: "npx cairn-setup claude --sandbox" }).status).toBe(2);
+  });
+
+  it("holds from a nested working directory, with and without CLAUDE_PROJECT_DIR (#383, #459)", () => {
+    const { p, home } = hardenFixture("setup-sandbox-nested");
+    const nested = join(p, "pkg", "lib");
+    for (const bare of [false, true]) {
+      const at = { cwd: nested, bare };
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude --sandbox" }, at).status, `bare=${bare}`).toBe(2);
+      expect(hardenRun(p, home, "Bash", { command: "node ../../setup/cairn-setup.mjs claude" }, at).status, `bare=${bare}`).toBe(0);
+    }
+  });
+
+  it("the measured gap is #508's: a renamed copy run directly, or setup started from an interpreter, passes", () => {
+    const { p, home } = hardenFixture("setup-sandbox-gap");
+    for (const c of ["/tmp/renamed claude --sandbox", "node -e \"require('child_process').execSync('cairn-setup claude --sandbox')\""]) {
+      expect(hardenRun(p, home, "Bash", { command: c }).status, c).toBe(0);
+    }
+  });
+
+  it("the owner's escape lets it through: the session's, and the inline prefix (#265)", () => {
+    const { p, home } = hardenFixture("setup-sandbox-escape");
+    const c = "node setup/cairn-setup.mjs claude --sandbox";
+    expect(hardenRun(p, home, "Bash", { command: c }, { env: { CAIRN_HARNESS_EDIT: "1" } }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 ${c}` }).status).toBe(0);
+    expect(hardenRun(p, home, "Bash", { command: `CAIRN_HARNESS_EDIT=1 true; ${c}` }).status).toBe(2);
+  });
+});
+
 // #510: with no CLAUDE_PROJECT_DIR the root came from `git rev-parse
 // --show-toplevel`, so a shell standing in a nested repository (a submodule, a
 // scratch repo, a cloned dependency) judged a write to the outer project's
@@ -8139,7 +8227,7 @@ describe("harness guard: a shell nested past the reader's depth is refused unrea
 // timeout, and a hook that times out may let the call by.
 describe("harness guard: a line built to outlast the hook is refused inside its time (#522)", () => {
   const WRITE = "echo x > hooks/hooks.json";
-  const TIMEOUT = 3000; // the figure hooks.json gives; asserted as a budget, not a benchmark
+  const TIMEOUT = 3000; // ms: a tenth of the 30 s hooks.json gives (#568); asserted as a budget, not a benchmark
   function fixture() {
     const p = freshDir("cairn-hooks-522-proj-");
     execFileSync("git", ["init", "-q", p]);

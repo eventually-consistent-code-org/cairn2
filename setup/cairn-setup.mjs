@@ -2,7 +2,7 @@
 
 // cairn-setup — wire cairn into a non-Claude harness (CRN-71).
 //
-//   node setup/cairn-setup.mjs <harness> [--project <dir>] [--local] [--check] [--git-hooks]
+//   node setup/cairn-setup.mjs <harness> [--project <dir>] [--local] [--check] [--git-hooks] [--sandbox]
 //   harness: grok | copilot | codex | gemini | cursor | claude
 //
 // What it does, per project:
@@ -32,6 +32,12 @@
 //      something says so: the harness guard refuses it from an agent without
 //      the owner's escape, and this install refuses to arm a folder holding
 //      hooks it did not write, for the harnesses running no guard (#508).
+//   6. with --sandbox, for the claude harness only: a Claude Code sandbox
+//      block in the main checkout's .claude/settings.local.json -- enabled,
+//      failing when unavailable, no unsandboxed retry, and a denyWrite list
+//      for cairn's protected folders and git's (#567, setup/sandbox.mjs,
+//      asserted: sandbox.test.ts). Opt-in and the owner's, as --git-hooks
+//      is: the harness guard refuses it from an agent (asserted: hooks.test.ts).
 //
 // Every copied-artifact surface gets a version stamp (.cairn-manifest.json:
 // source version + install date) so `--check` can answer "what's actually
@@ -87,7 +93,7 @@ const HARNESSES = ["grok", "copilot", "codex", "gemini", "cursor", "opencode", "
 
 function usage(msg) {
   if (msg) console.error(msg);
-  console.error(`usage: node setup/cairn-setup.mjs <${HARNESSES.join("|")}> [--project <dir>] [--local] [--check] [--git-hooks]`);
+  console.error(`usage: node setup/cairn-setup.mjs <${HARNESSES.join("|")}> [--project <dir>] [--local] [--check] [--git-hooks] [--sandbox]`);
   process.exit(msg ? 1 : 0);
 }
 

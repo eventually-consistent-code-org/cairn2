@@ -1247,7 +1247,7 @@ wires a project for Grok Build, GitHub Copilot CLI, Codex, Gemini CLI, or
 Cursor:
 
 ```bash
-node setup/cairn-setup.mjs <harness> [--project <dir>] [--git-hooks]
+node setup/cairn-setup.mjs <harness> [--project <dir>] [--git-hooks] [--sandbox]
 ```
 
 `--git-hooks` adds the git layer of the ship gate — a `pre-push` hook
@@ -1255,6 +1255,13 @@ that refuses an unshipped default-branch push from any process in the
 checkout, not only the one harness that runs the run guard (section 10,
 "The git layer"). Opt-in, because it writes `core.hooksPath` into the
 repository's config.
+
+`--sandbox`, for `claude` only, writes an opt-in Claude Code sandbox block
+into the main checkout's `.claude/settings.local.json`, so the operating
+system refuses shell writes to cairn's protected folders however a command
+is spelled. [The sandbox recipe](sandbox.md) says what it denies, what it
+leaves to the guards, and what the drill measured. Both flags are the
+owner's to pass: the harness guard refuses either from an agent.
 
 Setup writes nothing through a link that leaves the project or points at
 nothing, at the file or at any folder above it: it names the link and

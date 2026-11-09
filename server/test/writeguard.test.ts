@@ -606,7 +606,7 @@ describe("the write guard ships, counts toward the breaker, and fails open on it
     expect(entries).toHaveLength(1);
     expect(entries[0].matcher).toBe("Edit|Write|NotebookEdit|Bash");
     expect(entries[0].hooks[0].command).toBe('node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pretooluse-writeguard.mjs"');
-    expect(entries[0].hooks[0].timeout).toBe(3000);
+    expect(entries[0].hooks[0].timeout).toBe(30); // seconds, the owner's 2026-11-09 decision (#568)
     expect(manifest.description).toContain("write guard");
     // four PreToolUse guards now: the count is the pin (#454)
     const scripts = new Set(manifest.hooks.PreToolUse.flatMap((g) => g.hooks.map((h) => basename(h.command.replace(/"$/, "")))));

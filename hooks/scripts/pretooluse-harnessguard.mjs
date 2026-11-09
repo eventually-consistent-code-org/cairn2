@@ -247,17 +247,17 @@
  *   refused. A plain init or clone, reading the key, and the same setting on
  *   a command that copies nothing pass. Asserted: hooks.test.ts "(#507)".
  *
- *   The install (#508): `cairn-setup <harness> --git-hooks` sets the pointer
- *   and arms whatever the folder holds, so the flag being the consent means
- *   the owner's, and any process can pass a flag. Every spelling refuses
- *   without the owner's escape: the program by name or path, its package
- *   through npx, pnpm dlx, yarn dlx, bunx or npm exec, any of cairn's runners
- *   carrying the flag, a flag spelled from the line, and on a line naming the
- *   program, a word the guard can't read that may be it. The install without
- *   the flag passes, and naming it (grep, cat, echo) runs nothing. The inline
- *   prefix is honoured as on every harness write (#265). Setup refuses a
- *   folder holding hooks it did not write on its own, for the harnesses
- *   running no guard. Asserted: hooks.test.ts "(#508)", setup.test.ts "(#508)".
+ *   The installs (#508, #567): `cairn-setup <harness> --git-hooks` sets the
+ *   pointer and arms whatever the folder holds, and `--sandbox` writes the
+ *   sandbox block, so the flag is the owner's consent, and any process can
+ *   pass a flag. Every spelling refuses without the owner's escape: the
+ *   program by name or path, its package through npx, pnpm dlx, yarn dlx,
+ *   bunx or npm exec, a runner carrying either flag, a flag spelled from the
+ *   line, and on a line naming the program, a word it can't read. Without a
+ *   flag it passes, and naming it (grep, cat, echo) runs nothing. The inline
+ *   prefix is honoured (#265). Setup refuses a folder holding hooks it did
+ *   not write, for the harnesses running no guard. Asserted: hooks.test.ts
+ *   "(#508)" and "(#567)", setup.test.ts "(#508)".
  *
  *   Not seen, dated 2026-11-05 (#508): a renamed copy of setup run directly,
  *   and setup started from an interpreter. Pinned by hooks.test.ts "(#508)".
@@ -491,9 +491,15 @@ const TEMPLATE_WHAT = "the template folder git copies hooks from (init.templateD
 // the sections those keys live in.
 const POINTER_KEY = /^include(?:if\..*)?\.path$/;
 const POINTER_SECTION = /^include(?:if\..*)?$/;
-// The install that sets the pointer (#508): the flag, the program's own names
-// and the package that ships it, never `cairn-server`.
-const SETUP_FLAG = "--git-hooks";
+// The installs that write what governs the agent: the flags, the program's own
+// names and the package that ships it, never `cairn-server`. --git-hooks sets
+// the pointer (#508); --sandbox writes the sandbox block into local settings,
+// and run by an agent it could set the block's keys its own way (#567).
+const SANDBOX_WHAT = "the Claude Code sandbox settings (.claude/settings.local.json)";
+const SETUP_FLAGS = Object.freeze([
+  Object.freeze({ flag: "--git-hooks", does: "it points git at a folder of hooks", what: HOOKS_PATH_WHAT }),
+  Object.freeze({ flag: "--sandbox", does: "it writes the Claude Code sandbox settings", what: SANDBOX_WHAT }),
+]);
 const SETUP_BIN = /^cairn-setup(?:\.mjs)?$/;
 const SETUP_PKG = /^(?:npm:)?@eventually-consistent\/cairn(?:@[^/]*)?$/;
 // What git runs itself, so no alias can stand in for it (#506): every
@@ -2962,26 +2968,30 @@ function runnerTargets(cmd, args, ctx, add, out) {
 }
 
 /**
- * `cairn-setup --git-hooks`, run by the agent (#508): the flag on the program
- * by name or path, on its package, or on any of the runners (`npm run setup
- * -- --git-hooks` names neither). On a line naming the program, a word the
- * guard can't read -- a substitution, a variable, a glob, a word from a stream
- * -- may be the flag, past the value --project takes. No path to judge: the
- * hit carries its own `what`.
+ * `cairn-setup --git-hooks` or `--sandbox`, run by the agent (#508, #567): a
+ * flag on the program by name or path, on its package, or on any of the
+ * runners (`npm run setup -- --git-hooks` names neither). On a line naming the
+ * program, a word the guard can't read -- a substitution, a variable, a glob,
+ * a word from a stream -- may be either flag, past the value --project takes.
+ * No path to judge: the hit carries its own `what`.
  */
 function setupTargets(cmd, args, out) {
   const runner = RUNNERS.has(cmd);
   const named = SETUP_BIN.test(cmd) ||
     (runner && args.some((a) => SETUP_BIN.test(cmdName(a)) || SETUP_PKG.test(fold(a))));
   if (!runner && !named) return;
-  if (args.includes(SETUP_FLAG)) {
-    out.push({ raw: `cairn-setup ${SETUP_FLAG} (it points git at a folder of hooks)`, what: HOOKS_PATH_WHAT });
+  const hit = SETUP_FLAGS.find((f) => args.includes(f.flag));
+  if (hit !== undefined) {
+    out.push({ raw: `cairn-setup ${hit.flag} (${hit.does})`, what: hit.what });
     return;
   }
   if (!named) return;
   const open = args.find((a, i) => args[i - 1] !== "--project" && !a.startsWith("--project=") &&
     (/[$`*?[]/.test(a) || STANDINS.some((m) => a.includes(m))));
-  if (open !== undefined) out.push({ raw: `cairn-setup ${open} (it may be ${SETUP_FLAG})`, what: HOOKS_PATH_WHAT });
+  if (open !== undefined) {
+    out.push({ raw: `cairn-setup ${open} (it may be ${SETUP_FLAGS.map((f) => f.flag).join(" or ")})`,
+      what: SETUP_FLAGS.map((f) => f.what).join(", or ") });
+  }
 }
 
 /**

@@ -247,6 +247,12 @@ describe("the deny rows are one list a later change extends (#567, #558)", () =>
     for (const row of CAIRN_DENY) {
       expect(base.some((x) => x.endsWith(row.rel)), row.rel).toBe(true);
     }
+    // the gate's folder (#558): the row and setup's GATE_REL name one folder,
+    // so moving the gate without moving the deny fails here
+    const gate = /^const GATE_REL = "([^"]+)";$/m.exec(readFileSync(SETUP, "utf8"));
+    expect(gate, "setup's GATE_REL").not.toBeNull();
+    expect(CAIRN_DENY.some((r) => r.at === "common" && r.rel === gate![1]), `a common row for ${gate![1]}`).toBe(true);
+    expect(base).toContain(join(p, ".git", gate![1]));
     const more = denyPaths(where, { platform: "linux", rows: [...CAIRN_DENY, { at: "common", rel: "cairn-gate", why: "test" }] });
     expect(more).toContain(join(p, ".git", "cairn-gate"));
     // outside a repository the git rows have nowhere to hang; with no rows at all, nothing to write is an error

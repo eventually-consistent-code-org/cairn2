@@ -90,17 +90,19 @@ export const RECIPE = Object.freeze({
 // cairn's own folders something else trusts, as rows: `at` names the base a
 // row hangs from ("project": every checkout's root; "common": git's common
 // directory, shared by every linked worktree), `rel` the path under it, `why`
-// what a reader of the settings file is told. The gate's new home in the
-// common directory (#558) is one more `at: "common"` row -- add it here, and
-// the install, --check and the drill all pick it up.
+// what a reader of the settings file is told. A new row here reaches the
+// install, --check and the drill. The gate's home in the common directory
+// (#558) is the `cairn` row; its name is setup's GATE_REL, and
+// sandbox.test.ts fails when the two part.
 export const CAIRN_DENY = Object.freeze([
-  Object.freeze({ at: "project", rel: ".cairn/harness", why: "the scripts cairn's git hook runs and the verbs beside them" }),
+  Object.freeze({ at: "project", rel: ".cairn/harness", why: "the verbs cairn-setup installs, and the scripts an older --git-hooks install ran" }),
   Object.freeze({ at: "project", rel: ".cairn/githooks", why: "the folder an older --git-hooks install points git at" }),
   Object.freeze({ at: "project", rel: ".cairn/state/approvals", why: "the owner's approval stamps the close-time re-run trusts" }),
   Object.freeze({ at: "project", rel: "cairn.json", why: "the config file holding the owner-only keys" }),
   Object.freeze({ at: "common", rel: "hooks", why: "the hooks git runs (the sandbox denies .git/hooks; this names the shared one)" }),
   Object.freeze({ at: "common", rel: "config", why: "the repository config, which names the hooks folder" }),
   Object.freeze({ at: "common", rel: "config.worktree", why: "per-worktree config, which can name a hooks folder too" }),
+  Object.freeze({ at: "common", rel: "cairn", why: "the gate git runs on push and the scripts it calls (#558)" }),
 ]);
 
 // Keys in the committed project settings that loosen the sandbox for every

@@ -11,6 +11,9 @@
 - **[Architecture](ARCHITECTURE.md)** — how the plugin layer (policy and
   judgment) and the MCP server (every mechanism with a wrong answer) split
   the work.
+- **[The sandbox recipe](sandbox.md)** — the opt-in Claude Code sandbox
+  block `cairn-setup claude --sandbox` writes: what the operating system
+  denies, what it leaves to the guards, and what the drill measured.
 - **[ADRs](adr/)** — the decisions that shaped the code, each carrying the
   condition that would retire it (`removeWhen:`).
 - **[How cairn compares](comparison.md)** — mechanism-by-mechanism against

@@ -93,7 +93,8 @@ The sandbox already denies, inside the folders a command may write: the
 
 | Entry | Why |
 |---|---|
-| `.cairn/harness`, `.cairn/githooks` | the scripts and folder cairn's git hook runs from |
+| the common git folder's `cairn` | the gate git runs on push and the scripts it calls (#558) |
+| `.cairn/harness`, `.cairn/githooks` | the verbs setup installs, and where an older `--git-hooks` install put the gate |
 | `.cairn/state/approvals` | the owner's approval stamps the close-time re-run trusts |
 | `cairn.json` | the file holding the owner-only keys |
 | the common git folder's `hooks`, `config`, `config.worktree` | the hooks git runs, and the files that name them |
@@ -107,9 +108,10 @@ directory". On macOS the recipe also writes wildcard entries, so a worktree
 or package folder made later is covered; Linux takes only a trailing `/**`,
 so there `--check` reports a new worktree until you re-run.
 
-The rows live in one list, `CAIRN_DENY` in `setup/sandbox.mjs`. When the
-gate moves into the git common folder (#558), its folder is one more row
-there, and the install, `--check` and the drill pick it up.
+The rows live in one list, `CAIRN_DENY` in `setup/sandbox.mjs`, and the
+install, `--check` and the drill read it. The gate's folder in the git
+common folder (#558) is one of them, and `sandbox.test.ts` fails if it and
+the folder setup installs the gate into ever part.
 
 ## What it does not cover
 
@@ -127,9 +129,14 @@ there, and the install, `--check` and the drill pick it up.
   `.claude/settings.json` can add `excludedCommands` or `allowWrite`, which
   merge in unless the sandbox is admin-required. `--check` fails on those
   keys. To make Claude Code ignore them, start sessions with
-  `--settings '{"sandbox":{"allowUnsandboxedCommands":false}}'`.
+  `--settings '{"sandbox":{"allowUnsandboxedCommands":false}}'`: turning the
+  retry off by that flag makes the sandbox admin-required, and Claude Code
+  then ignores a repository's loosening keys, `excludedCommands` included
+  (a claim, per the sandboxing page, read 2026-11-09).
 - **An agent running `--sandbox` itself.** The harness guard refuses an
-  agent's `--git-hooks`, and does not yet refuse an agent's `--sandbox`. Inside
+  agent's `--sandbox` as it refuses `--git-hooks` (asserted: `hooks.test.ts`
+  "(#567)"), with the same gap the guard's header names: a renamed copy of
+  setup run directly, or setup started from an interpreter, passes. Inside
   a sandboxed session the write to the settings file should be refused anyway,
   since it's a protected path (a claim, not yet drilled). Setup turns a write
   the OS refuses into one line telling you to run it from your own terminal

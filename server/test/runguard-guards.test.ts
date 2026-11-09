@@ -2335,7 +2335,7 @@ describe("run guard: a shell nested past the reader's depth is refused unread, n
 // that times out may let the call by (the dated claim in the reader's header).
 describe("run guard: a line built to outlast the hook is refused inside its time (#522)", () => {
   const RESET = "git reset --hard";
-  const TIMEOUT = 3000; // the figure hooks.json gives; asserted as a budget, not a benchmark
+  const TIMEOUT = 3000; // ms: a tenth of the 30 s hooks.json gives (#568); asserted as a budget, not a benchmark
   const inTime = (run: () => { status: number | null; stderr: string }, label: string) => {
     const t0 = Date.now();
     const r = run();
