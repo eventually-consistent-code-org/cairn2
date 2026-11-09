@@ -1,5 +1,7 @@
 # Security policy
 
+Security maintainer: John Reed ([@eventually-consistent-code](https://github.com/eventually-consistent-code))
+
 ## Reporting a vulnerability
 
 Report security issues privately through GitHub's vulnerability
