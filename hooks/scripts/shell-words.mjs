@@ -273,12 +273,13 @@ function commandStart(words, from = 0) {
  * The text a `$'...'` holds, as the shell decodes it (#494): `$'--hard'` is
  * --hard, and so is `$'\x2d\x2dhard'`. `body` runs from just past the
  * opening quote; returns { text, end }, `end` the closing quote's index.
+ * A null `stop` decodes the whole string, as echo -e and printf do (#530).
  */
-function ansiQuoted(body) {
+function ansiQuoted(body, stop = "'") {
   const CODES = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v" };
   let text = "";
   let i = 0;
-  for (; i < body.length && body[i] !== "'"; i++) {
+  for (; i < body.length && body[i] !== stop; i++) {
     if (body[i] !== "\\") { text += body[i]; continue; }
     const rest = body.slice(i + 1);
     const m = /^(?:x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8})|([0-7]{1,3}))/.exec(rest);
@@ -312,7 +313,10 @@ function ansiQuoted(body) {
  * header -- see commandStart) move to `reserved`, so they never stand in
  * for the command (#285). `op` is the operator that ended the segment (`|`
  * `|&` `||` `&&` `;` `&`, a newline, a subshell character, or null at the
- * end), so a reader can tell a pipeline from a list (#258):
+ * end), so a reader can tell a pipeline from a list (#258). A pipe right after
+ * a `)` gets a segment of its own, with no words and `)` reserved, so the group
+ * it feeds from is what a reader sees piping in, never the group's last
+ * command (#530):
  *
  *   redirects      `>` `>>` `&>` `>|` and zsh's `>!` targets go to `redirects`,
  *                  and so does what follows `>&` unless it is a number or `-`, a
@@ -322,8 +326,9 @@ function ansiQuoted(body) {
  *                  heredoc body is data -- skipped through its delimiter line
  *                  and kept on its segment (see heredocs). Off: those
  *                  characters are word text and body lines are commands.
- *   heredocs       just the `<<` part of redirects: a heredoc body is data
- *                  on its segment, never command lines, while `<`, `<<<`
+ *   heredocs       just the `<<` and `<<<` parts of redirects: a heredoc body
+ *                  is data on its segment, never command lines, and a
+ *                  here-string's text goes to `herestrings` (#530), while `<`
  *                  and `>` stay word text. An unquoted delimiter (`<<EOF`)
  *                  leaves the shell expanding the body before the command
  *                  reads it, so each `$(...)`, backtick and `$((...))` in
@@ -659,9 +664,9 @@ export function shellSegments(command, read = {}, depth = 0) {
       continue;
     }
 
-    // `<` is read when redirects are; `<<` (not `<<<`) when heredocs alone are (#322)
-    if (c === "<" && (read.redirects
-      || (read.heredocs && n === "<" && command[i + 2] !== "<" && command[i - 1] !== "<"))) {
+    // `<` is read when redirects are; `<<` when heredocs alone are (#322), and
+    // `<<<` with it, since a here-string is a shell's script as much as a heredoc (#530)
+    if (c === "<" && (read.redirects || (read.heredocs && n === "<" && command[i - 1] !== "<"))) {
       pushWord();
       if (command.startsWith("<<<", i)) { next = "herestring"; i += 3; continue; }
       if (n === "<") {
@@ -676,11 +681,18 @@ export function shellSegments(command, read = {}, depth = 0) {
     }
 
     if (breaks.includes(c)) {
-      // name the operator; the second character of `||` `&&` `|&` ends an
-      // empty segment, which is never kept, so it can't overwrite this one
+      // name the operator, and take both characters of `||` `&&` `|&`
       const pair = c + (n ?? "");
-      endSeg(pair === "||" || pair === "&&" || pair === "|&" ? pair : c);
-      i++;
+      const op = pair === "||" || pair === "&&" || pair === "|&" ? pair : c;
+      // #530 -- a pipe right after a `)` feeds the whole group: an empty
+      // segment stands for it, so no command in it passes for the pipe's feed
+      const group = (op === "|" || op === "|&") && cur === null && !words.length && !redirects.length
+        && segs.at(-1)?.op === ")";
+      endSeg(op);
+      if (group) {
+        segs.push({ words: [], quotes: [], reserved: [")"], redirects: [], heredocs: [], herestrings: [], inputs: [], op });
+      }
+      i += op.length;
       continue;
     }
 
@@ -1885,25 +1897,140 @@ export function evalCommandString(args) {
   return line || null;
 }
 
+// The paths a shell or `source` opens to read its own stdin (#530).
+const STDIN_PATHS = new Set(["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]);
+
 /**
- * True when a shell given these args reads its commands from stdin -- no
- * -c string and no script path, or an explicit -s -- so a heredoc or
- * here-string fed to it is a script, not data (#258).
+ * The script word of a shell given these args: null when it reads stdin (no
+ * -c string and no script path, or an explicit -s), undefined for a -c string.
  */
-export function shellReadsStdin(args) {
+function scriptArg(args) {
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
-    if (a === "--" || a === "-") return k + 1 >= args.length;
+    if (a === "--" || a === "-") return k + 1 >= args.length ? null : args[k + 1];
     if (SHELL_VALUE_OPTS.has(a)) { k++; continue; }
     if (a.startsWith("--")) continue;
     if (/^[-+][A-Za-z]+$/.test(a)) {
-      if (a[0] === "-" && a.includes("c")) return false;
-      if (a[0] === "-" && a.includes("s")) return true;
+      if (a[0] === "-" && a.includes("c")) return undefined;
+      if (a[0] === "-" && a.includes("s")) return null;
       continue;
     }
-    return false; // a script path
+    return a; // a script path
   }
-  return true;
+  return null;
+}
+
+/**
+ * True when a shell given these args reads its commands from stdin -- no
+ * -c string and no script path, or an explicit -s -- so a heredoc or
+ * here-string fed to it is a script, not data (#258). A script path that
+ * names stdin (`bash /dev/stdin`, `/dev/fd/0`) is stdin too (#530).
+ */
+export function shellReadsStdin(args) {
+  const a = scriptArg(args);
+  return a === null || STDIN_PATHS.has(a);
+}
+
+/**
+ * Where a shell, or `source` and `.`, given these args reads its commands
+ * (#530): "stdin" (shellReadsStdin, or `source /dev/stdin`), { body } for a
+ * process substitution whose output is the script (`bash <(echo ...)`), the
+ * body to read as the line that prints it, or null: a -c string, a script file.
+ */
+export function scriptSource(cmd, args) {
+  const name = commandName(cmd ?? "");
+  const a = name === "source" || name === "." ? (args[0] === "--" ? args[1] : args[0])
+    : SHELLS.has(name) ? scriptArg(args) : undefined;
+  if (a === null || STDIN_PATHS.has(a)) return "stdin";
+  if (typeof a === "string" && a.startsWith("<(") && a.endsWith(")")) return { body: a.slice(2, -1) };
+  return null;
+}
+
+// echo's options, and the printf conversions whose text the guard can spell out.
+const ECHO_OPTS = /^-[neE]+$/;
+const PRINTF_PART = /(%[%sb])/;
+
+// The escapes a POSIX echo or printf knows: no \x, and an unknown one keeps its backslash.
+const POSIX_CODES = { "\\": "\\", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+
+/**
+ * The ways a printer may decode a string's backslash escapes, since the shells
+ * part over them (asserted against bash, sh, zsh and dash by shell-words.test.ts
+ * (#530)): bash's `echo -e` and printf, which know \x; a POSIX sh's and dash's,
+ * which don't; and none at all, bash's plain echo.
+ */
+const DECODINGS = [
+  (s) => s,
+  (s) => ansiQuoted(s, null).text,
+  (s) => s.replace(/\\(0[0-7]{0,3}|[0-7]{1,3}|[\s\S])?/g, (m, e) =>
+    e === undefined ? m : /^[0-7]/.test(e) ? String.fromCharCode(parseInt(e, 8) & 255) : POSIX_CODES[e] ?? m),
+];
+
+/** What printf prints for these args, each way it may decode them, or null for a conversion the guard can't spell. */
+function printfTexts(args) {
+  if (args[0] === "--") args = args.slice(1);
+  if (args[0] === "-v") return [""]; // into a variable: nothing reaches the pipe
+  const [format = "", ...rest] = args;
+  const parts = format.split(PRINTF_PART);
+  if (parts.some((p, k) => k % 2 === 0 && p.includes("%"))) return null;
+  const takes = parts.filter((p, k) => k % 2 === 1 && p !== "%%").length;
+  return DECODINGS.slice(1).map((decode) => {
+    let text = "";
+    let used = 0;
+    // the format runs again while words are left, as printf runs it
+    do {
+      for (let k = 0; k < parts.length; k++) {
+        const p = parts[k];
+        if (k % 2 === 0) text += decode(p);
+        else if (p === "%%") text += "%";
+        else text += p === "%b" ? decode(rest[used++] ?? "") : rest[used++] ?? "";
+      }
+    } while (takes && used < rest.length);
+    return text;
+  });
+}
+
+/**
+ * The text a command prints into a pipe, as a shell reading it would run it
+ * (#530), or null when the guard can't say. `words` are the command's words,
+ * spelled and unwrapped; `seg` is its segment. Read, every way a shell may print
+ * it (DECODINGS): echo's words, its options taken or printed (a POSIX sh's echo
+ * prints `-n`); printf's format filled with its words, for %s, %b and %%; cat
+ * with no file, its own heredocs and here-strings. A word holding a `$` or a
+ * backtick the line could not spell, or one in `wild`, is text only the shell
+ * knows: null.
+ */
+export function printedText(words, seg, wild = new Set()) {
+  const name = commandName(words[0] ?? "");
+  const args = words.slice(1);
+  if (args.some((a) => wild.has(a) || /[$`]/.test(a))) return null;
+  if (name === "echo") {
+    let k = 0;
+    while (k < args.length && ECHO_OPTS.test(args[k])) k++;
+    const texts = [args.slice(k).join(" "), args.join(" ")];
+    return [...new Set(texts.flatMap((t) => DECODINGS.map((decode) => decode(t))))];
+  }
+  if (name === "printf") {
+    const texts = printfTexts(args);
+    return texts === null ? null : [...new Set(texts)];
+  }
+  if (name === "cat" && args.every((a) => a === "-")) {
+    const own = [...seg.heredocs.map((h) => h.body), ...(seg.herestrings ?? [])];
+    return own.length ? own : null;
+  }
+  return null;
+}
+
+/**
+ * The lines a shell reading stdin runs (#530): its own heredocs and here-strings,
+ * which take its stdin from any pipe; else `fed`, what a guard read the pipe into
+ * it to hold -- the lines printedText gave for the command before it, [] when
+ * nothing feeds it, or null when a pipe feeds it text the guard can't read (any
+ * other command, a group, a pipe further up the line or around a nested one).
+ */
+export function stdinLines(seg, fed = []) {
+  const own = [...seg.heredocs.map((h) => h.body), ...(seg.herestrings ?? [])];
+  return own.length ? own : fed;
 }
 
 // The fields a tool's input names a shell command in (#310), the ones that

@@ -16,7 +16,7 @@ import {
   WRAPPERS, SHELLS, ARG_SAFE, SUBSTITUTION_DEPTH, braceExpand, commandName, shellSegments, unwrap,
   shellCommandString, shellReadsStdin, suCommandString, runnerCommands, argCommands, pagerCommands,
   toolCommandLines, tooDeep, evalCommandString, MAX_NEST, MAX_READ, MAX_SEGMENTS, assignVars, lineVars, seedVars,
-  overBudget, readBudget, spellWords, expandAssigned,
+  overBudget, readBudget, spellWords, expandAssigned, scriptSource, printedText, stdinLines,
 // @ts-expect-error untyped hook module
 } from "../../hooks/scripts/shell-words.mjs";
 
@@ -235,11 +235,13 @@ describe("shellSegments", () => {
       .toEqual([["cat"], ["ls"], ["cat"], ["rm", "x"]]);
     // bodies are read only when substitutions are
     expect(words("cat <<EOF\n$(rm x)\nEOF", { redirects: true })).toEqual([["cat"]]);
-    // `heredocs` alone models just the heredoc: `<`, `<<<` and `>` stay word text
+    // `heredocs` alone models just the heredoc and the here-string (#530): `<` and `>` stay word text
     const only = { heredocs: true, substitutions: true };
     expect(words("cat < in <<EOF > out\n$(rm x)\nEOF", only))
       .toEqual([["cat", "<", "in", ">", "out"], ["rm", "x"]]);
-    expect(words('cat <<< "$(ls)"', only)).toEqual([["cat", "<<<", "$(ls)"], ["ls"]]);
+    expect(words('cat <<< "$(ls)"', only)).toEqual([["cat"], ["ls"]]);
+    expect((shellSegments("bash <<< 'git reset --hard'", only) as Array<Seg & { herestrings: string[] }>)[0].herestrings)
+      .toEqual(["git reset --hard"]);
     expect(words("cat <<'EOF'\nrm x\nEOF\nls", { heredocs: true })).toEqual([["cat"], ["ls"]]);
   });
 });
@@ -1266,5 +1268,94 @@ describe("a line continued with a backslash is read as real bash reads it (#529)
     }
     expect(wrong).toEqual([]);
     expect(files).toBeGreaterThanOrEqual(TARGETS.length);
+  });
+});
+
+/**
+ * #530: what a shell reads its commands from, and what the command piping into
+ * it prints. printedText is held against real shells: whatever bash, sh or zsh
+ * prints for a printer line is one of the texts the reader says it prints.
+ */
+describe("a shell's stdin, and the text a pipe feeds it (#530)", () => {
+  const READ = GUARD_READS.harness;
+
+  it("scriptSource: stdin, a path naming it, `source` of one, a process substitution, else null", () => {
+    expect(scriptSource("bash", [])).toBe("stdin");
+    expect(scriptSource("sh", ["-s", "a"])).toBe("stdin");
+    for (const p of ["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]) {
+      expect(scriptSource("bash", [p])).toBe("stdin");
+      expect(scriptSource("source", [p])).toBe("stdin");
+      expect(scriptSource(".", [p])).toBe("stdin");
+    }
+    expect(scriptSource("/bin/bash", ["--", "/dev/stdin", "x"])).toBe("stdin");
+    expect(scriptSource("bash", ["<(echo x)"])).toEqual({ body: "echo x" });
+    expect(scriptSource("source", ["<(echo x)"])).toEqual({ body: "echo x" });
+    // twins: a -c string, a script file, a file sourced, and no shell at all
+    expect(scriptSource("bash", ["-c", "x"])).toBeNull();
+    expect(scriptSource("bash", ["x.sh"])).toBeNull();
+    expect(scriptSource("source", ["./env.sh"])).toBeNull();
+    expect(scriptSource("cat", ["/dev/stdin"])).toBeNull();
+    expect(shellReadsStdin(["/dev/stdin"])).toBe(true);
+    expect(shellReadsStdin(["/dev/stdout"])).toBe(false);
+  });
+
+  it("a pipe after a group feeds the group: an empty segment stands for it, never its last command", () => {
+    for (const line of ["(echo a; echo b) | sh", "(echo a) 2>&1 | sh", "(echo a) |& sh"]) {
+      const segs = shellSegments(line, READ) as Array<Seg & { reserved: string[]; op: string }>;
+      const sh = segs.findIndex((s) => s.words[0] === "sh");
+      expect(segs[sh - 1].words, line).toEqual([]);
+      expect(segs[sh - 1].reserved, line).toEqual([")"]);
+    }
+    // twins: a list after a group, and `||`, stand for nothing
+    for (const line of ["(echo a) || sh", "(echo a); sh", "(echo a) && sh"]) {
+      expect((shellSegments(line, READ) as Seg[]).map((s) => s.words), line).toEqual([["echo", "a"], ["sh"]]);
+    }
+  });
+
+  it("stdinLines: its own text wins over any pipe; else what the guard read the pipe to hold", () => {
+    const [own] = shellSegments("sh <<< 'ls'", READ) as Seg[];
+    expect(stdinLines(own, null)).toEqual(["ls"]);
+    const [bare] = shellSegments("sh", READ) as Seg[];
+    expect(stdinLines(bare)).toEqual([]);
+    expect(stdinLines(bare, null)).toBeNull();
+    expect(stdinLines(bare, ["ls"])).toEqual(["ls"]);
+  });
+
+  const PRINTERS = [
+    "echo git reset --hard", "echo 'git reset --hard'", "echo -n git reset", "echo -e 'git\\x20reset --hard'", "echo 'a\\tb'",
+    "echo -E 'a\\nb'", "printf 'git reset --hard\\n'", "printf '%s\\n' 'git reset --hard'", "printf '%s %s\\n' a b c d e",
+    "printf 'rm -rf %s\\n' hooks", "printf '%b\\n' 'a\\x41'", "printf '100%%\\n'", "printf -- '%s' x", "printf x",
+  ];
+  const segOf = (line: string) => (shellSegments(line, READ) as Seg[])[0];
+  const run = (exe: string, line: string) => spawnSync(exe, ["-c", line], { encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+
+  it("printedText: what a real shell printed is one of the texts the reader says it prints", () => {
+    const wrong: string[] = [];
+    let printed = 0;
+    for (const exe of ["bash", ...["/bin/sh", "/bin/zsh", "/bin/dash"].filter((p) => existsSync(p))]) {
+      for (const line of PRINTERS) {
+        const r = run(exe, line);
+        if (r.status !== 0) continue;
+        printed++;
+        const seg = segOf(line);
+        const texts = (printedText(seg.words, seg) as string[] | null) ?? [];
+        // echo ends its text with a newline unless -n says not to
+        const said = texts.flatMap((t) => [t, `${t}\n`]);
+        if (!said.includes(r.stdout)) wrong.push(`${exe}: ${line} printed ${JSON.stringify(r.stdout)}, reader ${JSON.stringify(texts)}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(printed).toBeGreaterThanOrEqual(PRINTERS.length);
+  });
+
+  it("printedText: what the guard can't spell is null, never a guess", () => {
+    for (const line of ["printf '%d\\n' 3", "printf '%-5s' x", "printf \"$F\" x", "echo \"$X\"", "echo `id`", "curl -s x", "cat f.sh", "cat"]) {
+      const seg = segOf(line);
+      expect(printedText(seg.words, seg), line).toBeNull();
+    }
+    const [cat] = shellSegments("cat <<'EOF'\nls\nEOF", READ) as Seg[];
+    expect(printedText(cat.words, cat)).toEqual(["ls\n"]);
+    const [wild] = shellSegments("echo x", READ) as Seg[];
+    expect(printedText(wild.words, wild, new Set(["x"]))).toBeNull();
   });
 });

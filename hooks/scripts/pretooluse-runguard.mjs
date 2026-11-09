@@ -184,6 +184,20 @@
  *   the hard reset and `eval echo git reset --hard` is an echo. Asserted by
  *   runguard-guards.test.ts (#283).
  *
+ *   What a shell reads on stdin is its script (#530): a heredoc or here-string
+ *   fed to it, `bash /dev/stdin`, `source /dev/stdin` and `. /dev/fd/0`, the
+ *   literal text the command before it pipes in -- echo's words, printf's
+ *   format filled with its words (%s, %b, %%), a cat of its own heredoc, each
+ *   way bash, sh, zsh or dash may print it -- and the same text from a process
+ *   substitution (`bash <(echo ...)`). Anything else a pipe or a process
+ *   substitution feeds a shell, or `source`, is text the guard can't read and
+ *   is refused, in every session, as the write guard refuses it: `curl ... |
+ *   bash`, `cat x.sh | sh`, a group (`(echo ...) | sh`), a filter (`sed ... |
+ *   sh`), a word the line can't spell, and a shell reading stdin further down a
+ *   line a pipe feeds (`x | (true; sh)`, `x | sh -c sh`). Asserted by
+ *   runguard-guards.test.ts (#530); printedText is held against the real shells
+ *   by shell-words.test.ts (#530).
+ *
  *   The push action by another route (#483): moves-shared-ref is reachable
  *   with no git on the line -- `gh pr merge`; a `gh api` write (-X PUT,
  *   PATCH, POST or DELETE, or -f / -F fields or --input with no method)
@@ -371,6 +385,9 @@
  *   runguard-guards.test.ts "a soft or mixed reset".
  *   the words xargs reads from stdin (`echo --hard | xargs git reset`): a
  *   pipe's content, which no word on the line spells.
+ *   dated 2026-11-05 (#530, pinned by runguard-guards.test.ts (#530) "Not
+ *   seen"): a script a shell or `source` reads from a file (`bash x.sh`,
+ *   `source x.sh`), whose text is the file's, not the line's.
  *
  *   Which tools (#310): the Bash tool's command, and the same line from any
  *   other tool -- an MCP server's shell tool -- found by its input's fields:
@@ -403,8 +420,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { defaultBranches, projectKey, readShipGateStamp, shipGateMismatch, worktreeKey } from "./lib.mjs";
 import {
   MAX_NEST, RUNNER_HOPS, SHELLS, UNREADABLE, argCommands, assignVars, commandName, evalCommandString, freshGuess,
-  holdsBraceList, lineVars, overBudget, pagerCommands, readBudget, runnerCommands, seedVars, shellCommandString, shellReadsStdin,
-  shellSegments, spellWords, tooDeep, toolCommandLines, unreadWhy, unwrap,
+  holdsBraceList, lineVars, overBudget, pagerCommands, printedText, readBudget, runnerCommands, scriptSource, seedVars,
+  shellCommandString, shellSegments, spellWords, stdinLines, tooDeep, toolCommandLines, unreadWhy, unwrap,
 } from "./shell-words.mjs";
 import {
   DISCARDS_WORK, EFFECT_TABLE, MOVES_SHARED_REF, PUSH_READ, TOUCHES_OWNER_CHECKOUT, classify, effectLine,
@@ -447,6 +464,29 @@ const GUESS = { ...READ, guess: true };
 // stay as typed: pathWord and wholeTree read them per folder the command may
 // stand in.
 const SPELL = { read: READ };
+
+// Why a line a shell is fed goes unread (#530), for refuseUnread.
+const FEED_UNREAD = "feeds a shell text another command makes, which the guard can't read";
+
+/**
+ * The lines the command `seg` prints into a pipe, every way the line spells
+ * it, or null when any reading prints text the guard can't read (#530).
+ */
+function fedBy(seg, vars, inherit) {
+  const lines = [];
+  for (const { words, wild } of spellWords(seg, vars, { wild: inherit.wild })) {
+    const text = printedText(unwrap(words, READ).words, seg, new Set(wild));
+    if (text === null) return null;
+    lines.push(...text);
+  }
+  return lines;
+}
+
+/** What a process substitution feeds the shell that runs it: one printer's text, else null (#530). */
+function substitutionText(body, vars, inherit) {
+  const segs = shellSegments(body, READ);
+  return segs.length === 1 && !tooDeep(segs) ? fedBy(segs[0], vars, inherit) : null;
+}
 
 // The session-wide escape for the always-on destructive refusals. Same shape
 // as CAIRN_HARNESS_EDIT: set in the environment, or as the leading
@@ -553,6 +593,7 @@ function readLine(line) {
     // the command piping into this one, so a heredoc it carries can be the
     // script of the shell reading it: `cat <<EOF | sh` (#322)
     let upstream = null;
+    let piping = false;
     const segs = shellSegments(text, inherit.hops ? GUESS : READ);
     // #321, #522 -- substitutions nested deeper than the reader reads, or a call
     // past its budget: the line is refused as a whole (judgeLine), unread from here
@@ -565,6 +606,9 @@ function readLine(line) {
       flush();
       const piped = upstream;
       upstream = seg.op === "|" || seg.op === "|&" ? seg : null;
+      // #530 -- a pipe earlier on the line may feed this command too (`x | (true; sh)`)
+      const pipedBefore = piping;
+      if (upstream) piping = true;
       const afterDescriptor = descriptor;
       descriptor = seg.op === "&" && /[<>]$/.test(seg.words[seg.words.length - 1] ?? "");
       if ((seg.op === "&" && !descriptor) || seg.op === "|" || seg.op === "|&") out.unordered = true;
@@ -600,6 +644,9 @@ function readLine(line) {
           // a nested line inherits the line's variables, and this command's own prefix (#291, #494)
           vars: assignVars(assigns, vars, SPELL),
           wild: new Set([...inherit.wild, ...wild]),
+          // #530 -- what this command reads on stdin is a pipe or text, so a shell it
+          // runs that reads stdin is fed what this line can't show it (`... | sh -c sh`)
+          fed: Boolean(inherit.fed || piped || pipedBefore || seg.heredocs.length || seg.herestrings.length),
         };
         // #521 -- one depth with every guard, and a line past it is refused unread:
         // before this, a shell string past the depth was never read, and passed
@@ -609,15 +656,20 @@ function readLine(line) {
 
         // sh -c / bash -lc: the script is one quoted word -- parse it too,
         // found the same way the harness guard finds it (#270)
-        if (SHELLS.has(cmd)) {
-          const script = shellCommandString(words.slice(1));
-          // #322 -- a shell reading stdin runs the heredoc fed to it, its own
-          // or the one piped in (`cat <<EOF | sh`), as the harness guard reads it
-          const docs = !script && shellReadsStdin(words.slice(1))
-            ? [seg, ...(piped ? [piped] : [])].flatMap((s) => s.heredocs) : [];
+        const from = scriptSource(cmd, words.slice(1));
+        if (SHELLS.has(cmd) || ((cmd === "source" || cmd === ".") && from)) {
+          const script = SHELLS.has(cmd) ? shellCommandString(words.slice(1)) : null;
+          // #322, #530 -- a shell reading stdin runs what it is fed: its own heredoc or
+          // here-string, or the literal text the command before it prints (`cat <<EOF
+          // | sh`, `echo ... | sh`); a process substitution's literal text is its script
+          // too. Anything else a pipe feeds it is text the guard can't read, refused.
+          const docs = script ? []
+            : from === "stdin" ? stdinLines(seg, piped ? fedBy(piped, vars, inherit) : pipedBefore || inherit.fed ? null : [])
+            : from ? substitutionText(from.body, vars, inherit) : [];
+          if (docs === null) { out.deep = true; out.why = FEED_UNREAD; return; }
           if ((script || docs.length) && depth >= MAX_NEST) { out.deep = true; return; }
           if (script) walk(script, depth + 1, env);
-          else if (docs.length) for (const h of docs) walk(h.body, depth + 1, env);
+          else if (docs.length) for (const doc of docs) walk(doc, depth + 1, { ...env, fed: false });
           else out.steps.push(true); // a script file, or stdin the guard can't see: anything at all
           continue;
         }
@@ -1885,8 +1937,17 @@ function toolLines(payload) {
   return toolCommandLines(input);
 }
 
-/** The refusal for a line the guard did not read to its end: past the reader's depth or the call's budget (#321, #522). */
-function refuseUnread() {
+/**
+ * The refusal for a line the guard did not read to its end: past the reader's depth or the call's budget (#321, #522),
+ * or a shell fed text the guard can't read (#530), `why`.
+ */
+function refuseUnread(why) {
+  if (why) {
+    refuse([
+      `cairn run guard: this line ${why}, so what runs inside it can't be judged.`,
+      "  run the commands on the line itself, or in a heredoc, and the guard can judge them.",
+    ], undefined, { effect: "unread", reason: "a shell fed text the guard can't read" });
+  }
   refuse([
     `cairn run guard: this line ${unreadWhy(READ.budget)}, so what runs inside it can't be judged.`,
     "  flatten the line -- run the inner commands as steps of their own -- and the guard can judge it.",
@@ -1908,7 +1969,7 @@ function judgeLine(line, start, ctx) {
   const { currentRuns, where } = ctx;
   // #321, #522 -- a line past what the reader reads holds commands the guard
   // never saw; fail closed rather than let the unread part run
-  if (line.deep) refuseUnread();
+  if (line.deep) refuseUnread(line.why);
   // #306 -- where each git command may run: every folder the line can cd
   // to, and every GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR it can set
   const places = line.invs.length ? linePlaces(where, start) : [];
