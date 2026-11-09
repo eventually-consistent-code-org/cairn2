@@ -286,3 +286,41 @@ describe("the docs page says what the recipe leaves uncovered, and what was meas
     expect(page).toContain("Whether the rows hold is still a\nclaim");
   });
 });
+
+// #568, the owner's decision of 2026-11-09: the four PreToolUse guards cancel
+// at 30 seconds and still fail open. The hooks reference (dated claim, read
+// 2026-11-06) reads `timeout` as "Seconds before canceling", and "On
+// `PreToolUse`, a timed-out `command` ... hook doesn't block the tool call",
+// so 3000 held a stalled session for 50 minutes before the same pass.
+describe("the guards' hook timeout is 30 seconds, failing open (#568)", () => {
+  const manifest = JSON.parse(readFileSync(join(ROOT, "hooks", "hooks.json"), "utf8")) as {
+    hooks: Record<string, { matcher?: string; hooks: { command: string; timeout?: number; onFailure?: string }[] }[]>;
+  };
+  const GUARDS = ["leakguard", "runguard", "harnessguard", "writeguard"];
+
+  it("each of the four PreToolUse guards carries timeout 30 and no onFailure", () => {
+    const pre = manifest.hooks.PreToolUse.flatMap((e) => e.hooks);
+    expect(pre.length).toBe(GUARDS.length);
+    for (const g of GUARDS) {
+      const hits = pre.filter((h) => h.command.includes(`pretooluse-${g}.mjs`));
+      expect(hits.length, g).toBe(1);
+      expect(hits[0].timeout, g).toBe(30);
+      expect(hits[0].onFailure, g).toBeUndefined();
+    }
+  });
+
+  it("the other hooks keep their values: the decision was the guards' alone", () => {
+    const rest = Object.entries(manifest.hooks).filter(([event]) => event !== "PreToolUse")
+      .flatMap(([event, entries]) => entries.flatMap((e) => e.hooks.map((h) => `${event} ${h.command.split("/").pop()} ${h.timeout}`)));
+    expect(rest).toEqual([
+      'PostToolUse posttooluse-breadcrumb.mjs" 3000',
+      'PostToolUse posttooluse-observe.mjs" 3000',
+      'PostToolUse posttooluse-loopcheck.mjs" 3000',
+      'PostToolUseFailure posttooluse-observe.mjs" 3000',
+      'Stop stop-costtracker.mjs" 5000',
+      'SessionStart sessionstart-continuity.mjs" 3000',
+      'StopFailure notification-pause.mjs" 10000',
+      'Notification notification-pause.mjs" 10000',
+    ]);
+  });
+});
