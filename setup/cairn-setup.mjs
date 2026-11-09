@@ -67,6 +67,7 @@ import { fileURLToPath } from "node:url";
 import {
   BEGIN, READERS, insideDir, reachFrom, realOrNull, sameFile, spliceFragment, spliceImport,
 } from "./spine-reach.mjs";
+import { SANDBOX_FLAG, checkSandbox, installSandbox } from "./sandbox.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESSES = ["grok", "copilot", "codex", "gemini", "cursor", "opencode", "zed", "claude"];
@@ -793,6 +794,7 @@ if (checkMode) {
     console.log(`  git hooks (pre-push): ${layer.detail}`);
     if (layer.lagging) lagging++;
   }
+  if (harness === "claude") lagging += checkSandbox(projectDir); // the sandbox recipe (#567): absent is opt-in
 
   const latest = await npmLatestVersion();
   if (latest !== "unknown" && latest !== sourceVersion) {
@@ -810,6 +812,7 @@ if (checkMode) {
 
 const fragment = readFileSync(join(repoRoot, "harness", "AGENTS-cairn.md"), "utf8");
 console.log(`wiring cairn into ${harness} for ${projectDir}...`);
+if (args.includes(SANDBOX_FLAG)) installSandbox({ harness, projectDir, write: writeChecked, mkdir: mkdirChecked }); // opt-in (#567)
 
 // Universal layer — every harness benefits from these three.
 mergeMcpJson(join(projectDir, ".mcp.json"));
