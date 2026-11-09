@@ -110,6 +110,31 @@ phase's own stated criteria (PLAN.md, SPEC docs — whatever that phase
 committed to), check delivered state against it, don't substitute a
 generic checklist for the phase's actual bar.
 
+**Agent scope (`security`, `security --surface`, and their `sweep`
+legs).** Every agent this mode dispatches to find or to verify gets a
+scope block at the top of its brief, phrased as intent rather than as a
+claim about the environment, so it still holds when the sandbox around
+the run is misconfigured (Anthropic's best practices for Cyber
+Verification Program participants, read 2026-11-09; #570). Fill in the
+target and the scratch folder; keep the rest as written:
+
+```
+Scope (intent):
+- In scope: <the target> in this checkout, run locally with input you
+  craft; the project's own test suite.
+- Permitted: read the repo; write probes and findings under <scratch>.
+- Out of scope: any network access; any path outside the checkout and
+  <scratch>; the home folder's credential and harness folders (SSH,
+  keychains, the harness's own config); process listings or
+  environments; git push; tracker or MCP writes; edits to hooks,
+  settings or MCP configs.
+- Stop and report if a probe leaves <scratch> or you find you can
+  reach the network.
+```
+
+Findings come back to this session as text, and only `audit_record`
+files them, after the refutation panel below.
+
 These four modes are viewpoint-shaped, so the seat roster can sharpen
 them: when `seat_roster` holds a valid seat matching the mode (a project
 security seat for `audit security`, and so on), that seat's lens MAY
