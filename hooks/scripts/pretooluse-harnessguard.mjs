@@ -595,9 +595,15 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * at a word start comments out the rest of its line (#283), as the shell
  * reads it, so `echo x # > hooks/hooks.json` writes nothing and `echo x >
  * hooks/hooks.json # note` is the write; a quoted `#`, or one inside a
- * word, is text.
+ * word, is text. A backslash-newline joins the lines it splits, as bash
+ * joins them (#529): `cp evil.sh \` over `.git/hooks/pre-commit` is one cp,
+ * and a double-quoted backslash escapes only what bash lets it. Asserted by
+ * hooks.test.ts and shell-words.test.ts (#529), the second against real bash.
  */
-const READ = { redirects: true, subshells: true, substitutions: true, comments: true, budget: readBudget() };
+const READ = {
+  redirects: true, subshells: true, substitutions: true, comments: true, continuation: true, posixEscapes: true,
+  budget: readBudget(),
+};
 
 // The same, for a runner's guess at its later words (#522), on the same budget.
 const GUESS = { ...READ, guess: true };

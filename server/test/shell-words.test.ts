@@ -8,7 +8,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -1059,6 +1059,16 @@ describe("`>&` is a descriptor only for a number or `-`; anything else is a redi
 });
 
 /**
+ * Each guard's read options, as its READ holds them (no budget): the tables
+ * below hold the reader against real bash under every one of them.
+ */
+const GUARD_READS: Record<string, Record<string, boolean>> = {
+  run: { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+  harness: { redirects: true, subshells: true, substitutions: true, comments: true, continuation: true, posixEscapes: true },
+  write: { redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true, continuation: true, posixEscapes: true, anyWhitespace: true },
+};
+
+/**
  * #527: the reader walks a `${...}` the way bash does, or whatever follows it on
  * the line reads as text and runs unjudged. Every spelling below goes through
  * every context below, and real bash decides: a tail bash ran is a tail the reader
@@ -1067,11 +1077,7 @@ describe("`>&` is a descriptor only for a number or `-`; anything else is a redi
  * reader to nothing. Empty is a failure: the table has to reach bash and find tails.
  */
 describe("a quote or brace in a ${...} is read as real bash reads it (#527)", () => {
-  const READS: Record<string, Record<string, boolean>> = {
-    run: { subshells: true, comments: true, substitutions: true, heredocs: true, continuation: true, posixEscapes: true, anyWhitespace: true },
-    harness: { redirects: true, subshells: true, substitutions: true, comments: true },
-    write: { redirects: true, subshells: true, substitutions: true, heredocs: true, comments: true, continuation: true, posixEscapes: true, anyWhitespace: true },
-  };
+  const READS = GUARD_READS;
   const SPELLINGS = [
     // the issue's, and the plain controls
     "${X:-'}'}", "${X:-'{}'}", '${X:-"}"}', "${X:-\\}}", "${X}", "${X:-}", "${X:-x}", "${#X}",
@@ -1187,4 +1193,78 @@ describe("a quote or brace in a ${...} is read as real bash reads it (#527)", ()
     expect(wrong).toEqual([]);
     if (OTHERS.length) expect(ran).toBeGreaterThan(SPELLINGS.length);
   }, 240_000);
+});
+
+/**
+ * #529: a line wrapped with a trailing backslash is one line to bash, so the reader
+ * joins it the way bash does, under every guard's read options, or the target after
+ * the wrap is never judged. A probe program `p` prints the words bash really handed
+ * it, and the reader's words for each `p` must be those. Empty is a failure: the
+ * table has to reach bash and find calls.
+ */
+describe("a line continued with a backslash is read as real bash reads it (#529)", () => {
+  const LINES = [
+    // the issue's: a wrapped operand, a wrapped word, a wrapped config line
+    "p cp evil.sh \\\n  .git/hooks/pre-commit", "p rm -rf \\\n  hooks", "p git config \\\n core.hooksPath /tmp/h",
+    "p cairn-setup claude \\\n --git-hooks", "p hoo\\\nks/hooks.json", "p a\\\n\\\nb", "p \\\n",
+    // inside quotes: double quotes join, single quotes keep it, an escaped backslash is no wrap
+    'p "hoo\\\nks"', "p 'hoo\\\nks'", 'p "a\\\\\\\nb"', 'p "a\\\n"b', "p a\\\\\nb", "p $'a\\\nb'",
+    // a comment ends at its newline, wrapped or not
+    "p a #c \\\np after", "p a \\\n#c\np b",
+    // an operator wrapped in two
+    "p b &\\\n& p c", "false |\\\n| p c", "p b ;\\\n p c", "p b \\\n; p c",
+    // a heredoc: an unquoted body's wrapped line can be its end, a quoted body's never is
+    "cat <<EOF\nbody\nE\\\nOF\np ESCAPED\nEOF", "cat <<'EOF'\nE\\\nOF\np HIDDEN\nEOF\np AFTER",
+    "cat <<EOF\nE\\\nO\\\nF\np ESCAPED\nEOF", "cat <<EOF\nE\\\\\nOF\np KEPT\nEOF\np AFTER",
+    // a here-string, a heredoc and its delimiter wrapped in two
+    "cat <\\\n<< hs\np AFTER", "cat <<\\\n< hs\np AFTER", "cat <\\\n<EOF\np HIDDEN\nEOF\np AFTER", "cat <<\\\nEOF\np HIDDEN\nEOF\np AFTER",
+  ];
+  const cwd = mkdtempSync(join(tmpdir(), "cairn-529-"));
+  const bin = mkdtempSync(join(tmpdir(), "cairn-529-bin-"));
+  writeFileSync(join(bin, "p"), "#!/bin/sh\nprintf 'P'\nfor a in \"$@\"; do printf '\\037%s' \"$a\"; done\nprintf '\\036'\n");
+  chmodSync(join(bin, "p"), 0o755);
+  // each `p` bash ran, as the words it was handed
+  const ran = (line: string, at = cwd): string[][] => {
+    const r = spawnSync("bash", ["-c", line], { cwd: at, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    return [...(r.stdout ?? "").matchAll(/P((?:\x1f[^\x1e\x1f]*)*)\x1e/g)].map((m) => m[1].split("\x1f").slice(1));
+  };
+  const read = (line: string, opts: Record<string, boolean>): string[][] =>
+    (shellSegments(line, opts) as Seg[]).filter((s) => s.words[0] === "p").map((s) => s.words.slice(1));
+
+  it("every line: the reader's words for each p are the words bash handed it", () => {
+    const wrong: string[] = [];
+    let calls = 0;
+    for (const line of LINES) {
+      const b = ran(line);
+      calls += b.length;
+      for (const [name, opts] of Object.entries(GUARD_READS)) {
+        const r = read(line, opts);
+        if (JSON.stringify(r) !== JSON.stringify(b)) wrong.push(`${name}: ${JSON.stringify(line)} bash ${JSON.stringify(b)} reader ${JSON.stringify(r)}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    // a table that stopped reaching bash would pass above forever
+    expect(calls).toBeGreaterThan(LINES.length);
+  }, 60_000);
+
+  const TARGETS = ["p x > hoo\\\nks.json", "p x >\\\n out1", "p x >\\\n> out2", "p x &\\\n> out3", 'p x > "o\\\nut4"', "p x >\\\n| out5",
+    "p x > out\\\n6 \\\n> out7"];
+
+  it("every wrapped redirect: the reader's targets are the files bash wrote", () => {
+    const wrong: string[] = [];
+    let files = 0;
+    for (const line of TARGETS) {
+      const at = mkdtempSync(join(tmpdir(), "cairn-529-to-"));
+      ran(line, at);
+      const wrote = readdirSync(at).sort();
+      files += wrote.length;
+      for (const name of ["harness", "write"]) {
+        const segs = shellSegments(line, GUARD_READS[name]) as Seg[];
+        const targets = [...new Set(segs.flatMap((s) => s.redirects))].sort();
+        if (JSON.stringify(targets) !== JSON.stringify(wrote)) wrong.push(`${name}: ${JSON.stringify(line)} bash wrote ${wrote} reader ${targets}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(files).toBeGreaterThanOrEqual(TARGETS.length);
+  });
 });

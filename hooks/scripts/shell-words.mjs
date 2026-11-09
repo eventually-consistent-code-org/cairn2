@@ -46,6 +46,13 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
 // What follows `>&` when it is no file (#523): `>&2`, a close `>&-`, a move `>&3-`.
 const DESCRIPTOR = /^(?:\d+-?|-)$/;
 
+// The characters that open an operator or an expansion one more character can
+// change: `<` to `<<` or `<<<`, `&` to `&&`, `$` to `$(` (#529).
+const OPERATOR_START = "<>&|;$";
+
+// A line that ends in an odd run of backslashes: its newline is escaped (#529).
+const WRAPPED = /(?:^|[^\\])(?:\\\\)*\\$/;
+
 // Reserved words that open, continue or close a compound command; the
 // command word comes after them (#285).
 const RESERVED = new Set(["!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until",
@@ -281,7 +288,8 @@ function ansiQuoted(body) {
       text += point <= 0x10ffff ? String.fromCodePoint(point) : "";
       i += m[0].length;
     } else if (rest[0] !== undefined) {
-      text += CODES[rest[0]] ?? rest[0];
+      // a wrapped line stays wrapped in here: bash keeps the backslash and the newline (#529)
+      text += rest[0] === "\n" ? "\\\n" : CODES[rest[0]] ?? rest[0];
       i++;
     }
   }
@@ -343,7 +351,13 @@ function ansiQuoted(body) {
  * never three commands -- and the literal target after it is never lost.
  * Nesting and quotes inside are honoured, and `foo$(x)bar` stays one word.
  *   continuation   backslash-newline joins lines, and a lone trailing
- *                  backslash is dropped. Off: the backslash is word text.
+ *                  backslash is dropped -- between words, inside double
+ *                  quotes, inside an operator (`<\` over `<< x` is `<<<`), and
+ *                  where an unquoted heredoc body ends (`E\` over `OF` ends
+ *                  `<<EOF`), as bash joins them (#529); single quotes, `$'...'`
+ *                  and a quoted heredoc body keep it. Asserted against real
+ *                  bash by shell-words.test.ts (#529). Off: the backslash is
+ *                  word text.
  *   posixEscapes   inside double quotes a backslash escapes only " \ $ and
  *                  a backtick, and is text before anything else. Off: it
  *                  escapes any character.
@@ -437,6 +451,12 @@ export function shellSegments(command, read = {}, depth = 0) {
   // Where a `${` closes, noting a line whose shells part over a `'` in it: the
   // line is then read their way too, so what either runs reaches the guard (#527).
   let parted = false;
+  // #529 -- with continuation read, every backslash-newline at `at` goes, as bash
+  // drops it before it reads the characters on either side of it
+  const joinWrapped = (at) => {
+    if (!read.continuation) return;
+    while (command.startsWith("\\\n", at)) command = command.slice(0, at) + command.slice(at + 2);
+  };
   const braceEnd = (at, dq) => {
     const end = closeBrace(command, at, dq, 0, read.plainQuote);
     if (!read.plainQuote && closeBrace(command, at, dq, 0, true) !== end) parted = true;
@@ -452,6 +472,13 @@ export function shellSegments(command, read = {}, depth = 0) {
       return segs;
     }
     const c = command[i];
+    // #529 -- bash joins a wrapped line before it reads an operator, so `<\` and
+    // `<< x` on the next line are one `<<<`, never a `<` and a heredoc
+    if (OPERATOR_START.includes(c)) {
+      joinWrapped(i + 1);
+      // and inside a longer one: `<<` and `<`, `>>` and `|`, `&>` and `>`
+      for (let j = i + 2; j <= i + 3 && "<>&|-!".includes(command[j - 1]) && c !== "$"; j++) joinWrapped(j);
+    }
     const n = command[i + 1];
 
     // a quote or backslash anywhere in a heredoc's delimiter word keeps
@@ -486,6 +513,10 @@ export function shellSegments(command, read = {}, depth = 0) {
       i++;
       while (i < command.length && command[i] !== '"') {
         const d = command[i];
+        // #529 -- a wrapped line joins inside double quotes too: `"hoo\` and `ks"` is
+        // "hooks", and `"$\` and `(cmd)"` is a substitution
+        if (read.continuation && d === "\\" && command[i + 1] === "\n") { i += 2; continue; }
+        if (d === "$") joinWrapped(i + 1);
         const e = command[i + 1];
         if (d === "\\" && i + 1 < command.length && (!read.posixEscapes || '"\\$`'.includes(e))) {
           escaped.push(s.length);
@@ -586,8 +617,15 @@ export function shellSegments(command, read = {}, depth = 0) {
         const start = i + 1;
         let k = start;
         for (;;) {
-          const nl = command.indexOf("\n", k);
-          const line = command.slice(k, nl < 0 ? command.length : nl);
+          let nl = command.indexOf("\n", k);
+          let line = command.slice(k, nl < 0 ? command.length : nl);
+          // #529 -- bash joins an unquoted body's wrapped lines before it looks for
+          // the end, so `E\` over `OF` ends `<<EOF`; a quoted body is kept as typed
+          while (!doc.quoted && read.continuation && nl >= 0 && WRAPPED.test(line)) {
+            const more = command.indexOf("\n", nl + 1);
+            line = line.slice(0, -1) + command.slice(nl + 1, more < 0 ? command.length : more);
+            nl = more;
+          }
           const done = (tabs ? line.replace(/^\t+/, "") : line) === doc.delim;
           if (done || nl < 0) {
             doc.body = command.slice(start, done ? k : command.length);

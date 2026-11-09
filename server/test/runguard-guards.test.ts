@@ -4543,3 +4543,53 @@ describe("run guard: a soft or mixed reset with a word it can't spell passes, a 
     expect(readFileSync(join(proj, "seed.txt"), "utf8")).not.toBe("changed\n");
   });
 });
+
+/**
+ * #529: the run guard joined a wrapped line between words, but not inside double
+ * quotes, not inside an operator, and not where an unquoted heredoc ends, so the
+ * reset after a wrapped `E\`-over-`OF` end read as heredoc text. The reader joins
+ * them all now (shell-words.test.ts (#529), against real bash); this holds the guard.
+ */
+describe("run guard: a line wrapped with a backslash is judged whole (#529)", () => {
+  function nested() {
+    const f = fixture(undefined, false);
+    const sub = join(f.proj, "pkg", "lib");
+    mkdirSync(sub, { recursive: true });
+    return { ...f, sub };
+  }
+
+  it("a wrapped reset, in every place a wrap can sit, is refused from the root and a nested folder", () => {
+    const { proj, home, sub } = nested();
+    for (const c of [
+      "git reset \\\n --hard", "git reset --ha\\\nrd", 'git reset "--ha\\\nrd"', "cat <<EOF\nx\nE\\\nOF\ngit reset --hard\nEOF",
+      "cat <\\\n<< x\ngit reset --hard", 'echo "$\\\n(git reset --hard)"', "true &\\\n& git reset --hard",
+      "sh -c 'git reset \\\n --hard'",
+    ]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)}\n${r.stderr}`).toBe(2);
+        expect(r.stderr, c).toContain("git reset --hard");
+      }
+    }
+  });
+
+  it("twins: a wrapped everyday git line passes, and so does a reset only quoted text holds", () => {
+    const { proj, home, sub } = nested();
+    for (const c of ["git status \\\n --short", "git log \\\n -1", "git commit -m 'a \\\n git reset --hard'",
+      "cat <<'EOF'\nE\\\nOF\ngit reset --hard\nEOF", "cat <<EOF\nE\\\\\nOF\ngit reset --hard\nEOF"]) {
+      for (const cwd of [proj, sub]) {
+        const r = guard(proj, home, c, {}, cwd);
+        expect(r.status, `${JSON.stringify(c)}\n${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it("hostile: a wrapped push and a wrapped force, one shell down", () => {
+    const { proj, home } = nested();
+    for (const [c, names] of [["bash -c 'git push \\\n --force origin x'", "git push --force"], ['eval "git push --for\\\nce origin x"', "git push --force"]]) {
+      const r = guard(proj, home, c);
+      expect(r.status, `${JSON.stringify(c)}\n${r.stderr}`).toBe(2);
+      expect(r.stderr, c).toContain(names);
+    }
+  });
+});
