@@ -57,6 +57,10 @@
 //     there: that layout is the owner's, so a checkout can still change the
 //     hook file in it, though not the script it runs, which stays under the
 //     git common directory (#558, pinned in gitlayer.test.ts).
+//   - the hook drops PATH folders inside the worktree it runs in before it
+//     runs node (#558); a PATH folder inside another linked worktree of the
+//     repository, or a program file elsewhere that links into a worktree, is
+//     kept (pinned in gitlayer.test.ts).
 //   - a hard link has no direction: one to a file outside the project is that
 //     file, by this name too, so it is written through (#498).
 //   - a link staying inside the project writes as today, wherever inside it
@@ -530,6 +534,8 @@ function sharedFolderWhy(setting, dir) {
  *  script is named by one absolute path under the git common directory, and
  *  looked for nowhere else (#558): the worktree git runs the hook in is what a
  *  checkout writes, and every linked worktree shares the common directory.
+ *  node, and the git the script runs, come from PATH with this worktree's
+ *  folders taken out, and the owner's lines after the markers get PATH back.
  *  Exit 2 from the script is the refusal; anything else fails open. */
 function hookBlock(gate) {
   return [
@@ -542,6 +548,17 @@ function hookBlock(gate) {
     "# git hands this hook are kept on stdin for whatever follows the markers.",
     "# The script lives under the git common directory, which no checkout writes.",
     `cairn_prepush=${shQuote(join(gate.scripts, PREPUSH))}`,
+    "# Every program the block runs, node and the git the script calls, comes from",
+    "# a PATH folder outside this worktree: a branch can carry node_modules/.bin/node,",
+    "# and npm puts that folder first. The owner's lines below get their PATH back.",
+    'cairn_top=$(pwd -P); cairn_oldpath=$PATH; cairn_safe=; cairn_ifs=$IFS; IFS=:',
+    "for cairn_d in $PATH; do",
+    '  case "$cairn_d" in /*) ;; *) continue ;; esac',
+    '  cairn_real=$(cd "$cairn_d" 2>/dev/null && pwd -P) || continue',
+    '  case "$cairn_real/" in "$cairn_top"/*) continue ;; esac',
+    "  cairn_safe=${cairn_safe:+$cairn_safe:}$cairn_d",
+    "done",
+    "IFS=$cairn_ifs; PATH=$cairn_safe",
     'if command -v node >/dev/null 2>&1 && [ -f "$cairn_prepush" ]; then',
     "  if cairn_refs=$(mktemp 2>/dev/null); then",
     '    cat > "$cairn_refs"',
@@ -555,6 +572,7 @@ function hookBlock(gate) {
     "else",
     '  echo "cairn pre-push: node or $cairn_prepush not found -- this push was not judged" >&2',
     "fi",
+    "PATH=$cairn_oldpath",
     HOOK_END,
   ].join("\n") + "\n";
 }

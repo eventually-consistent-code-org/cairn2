@@ -170,26 +170,24 @@ describe("the gate lives under the git common directory, out of every checkout's
   it("the issue's scenario: a contributor's branch carrying its own gate script, checked out and pushed, runs the common directory's gate; the payload never runs", () => {
     const { proj, home, bare } = repo();
     expect(setup(home, { project: proj }, "--git-hooks").status).toBe(0);
-    const gate = gateOf(proj, home);
-    const before = readFileSync(join(gate, "scripts", "pre-push.mjs"), "utf8");
     const mark = join(fresh("cairn-gl-mark-"), "pwned");
     contributor(bare, home, { [OLD_SCRIPT]: payloadScript(mark) });
 
     git(proj, home, "fetch", "-q", "origin");
     git(proj, home, "checkout", "-q", "pr");
-    // git overwrote nothing of the gate: the branch's file is just a file in the tree
+    // the branch's file is just a file in the tree now
     expect(readFileSync(join(proj, OLD_SCRIPT), "utf8")).toContain("payload ran");
     const p = tryGit(proj, home, ["push", "origin", "HEAD:main"]);
+    expect(existsSync(mark)).toBe(false);
     expect(p.status, p.out).not.toBe(0);
     expect(p.stderr).toContain(REFUSED);
-    expect(existsSync(mark)).toBe(false);
-    expect(readFileSync(join(gate, "scripts", "pre-push.mjs"), "utf8")).toBe(before);
+    // git overwrote nothing of the gate
+    expect(readFileSync(join(gateOf(proj, home), "scripts", "pre-push.mjs"), "utf8")).toBe(readFileSync(PREPUSH_SRC, "utf8"));
   });
 
   it("checked out and back: the branch's script leaves the tree, the gate does not, and the next unstamped push is still refused, never unjudged", () => {
     const { proj, home, bare } = repo();
     expect(setup(home, { project: proj }, "--git-hooks").status).toBe(0);
-    const gate = gateOf(proj, home);
     const mark = join(fresh("cairn-gl-mark-"), "pwned");
     contributor(bare, home, { [OLD_SCRIPT]: payloadScript(mark) });
     git(proj, home, "fetch", "-q", "origin");
@@ -197,13 +195,13 @@ describe("the gate lives under the git common directory, out of every checkout's
     git(proj, home, "checkout", "-q", "main");
     // the round trip deleted the branch's file, as it deleted the gate's in the old layout
     expect(existsSync(join(proj, OLD_SCRIPT))).toBe(false);
-    expect(existsSync(join(gate, "scripts", "pre-push.mjs"))).toBe(true);
 
     commit(proj, home, "b.txt");
     const p = tryGit(proj, home, ["push", "origin", "main"]);
+    expect(p.stderr).not.toContain(UNJUDGED);
     expect(p.status, p.out).not.toBe(0);
     expect(p.stderr).toContain(REFUSED);
-    expect(p.stderr).not.toContain(UNJUDGED);
+    expect(existsSync(join(gateOf(proj, home), "scripts", "pre-push.mjs"))).toBe(true);
     expect(git(proj, home, "ls-remote", "origin", "main")).not.toContain(git(proj, home, "rev-parse", "HEAD"));
 
     // the harmless twin: a clean stamp at that commit lets it through, the gate ran and judged it
@@ -315,6 +313,38 @@ describe("the gate lives under the git common directory, out of every checkout's
     expect(p.stderr, p.out).toContain(REFUSED);
     expect(p.stderr).not.toContain(UNJUDGED);
     expect(existsSync(mark)).toBe(false);
+  });
+
+  // The sibling the issue never named: the script is out of reach, but the
+  // programs the hook runs come from PATH, and `npm run` puts the project's own
+  // node_modules/.bin first. A branch force-adding a node (or a git, which the
+  // script runs in turn) there ran it as the owner at the next push.
+  it("hostile: a branch carrying node_modules/.bin/node and git, pushed with that folder first on PATH (as npm run does), runs neither; from a nested folder too", () => {
+    const { proj, home, bare } = repo();
+    expect(setup(home, { project: proj }, "--git-hooks").status).toBe(0);
+    const mark = join(fresh("cairn-gl-mark-"), "pwned");
+    const fake = `#!/bin/sh\necho "ran as $(id -un)" >> '${mark}'\nexit 0\n`;
+    contributor(bare, home, { "node_modules/.bin/node": fake, "node_modules/.bin/git-shim/git": fake });
+    git(proj, home, "fetch", "-q", "origin");
+    git(proj, home, "checkout", "-q", "pr");
+    const bin = join(realpathSync(proj), "node_modules", ".bin");
+    const PATH = `${bin}:${join(bin, "git-shim")}:${process.env.PATH ?? ""}`;
+    for (const at of [proj, join(proj, "src")]) {
+      // git itself is the real one here: the shell running `git push` is the owner's
+      const p = spawnSync(execFileSync("which", ["git"], { encoding: "utf8" }).trim(), ["push", "origin", "HEAD:main"], {
+        cwd: at, encoding: "utf8", timeout: 20000, env: plainEnv(home, { PATH }),
+      });
+      expect(existsSync(mark), `${at}: ${p.stderr}`).toBe(false);
+      expect(p.status, p.stderr).not.toBe(0);
+      expect(p.stderr).toContain(REFUSED);
+    }
+    // the harmless twin: the same folder on PATH holding nothing the hook runs changes nothing
+    git(proj, home, "checkout", "-q", "main");
+    commit(proj, home, "f.txt");
+    const twin = spawnSync("git", ["push", "origin", "main"], { cwd: proj, encoding: "utf8", timeout: 20000, env: plainEnv(home, { PATH }) });
+    expect(twin.stderr).toContain(REFUSED);
+    // the owner's own lines after the markers keep the PATH they were given
+    expect(readFileSync(join(gateOf(proj, home), "hooks", "pre-push"), "utf8")).toContain("PATH=$cairn_oldpath");
   });
 
   it("hostile: the gate's folder under .git swapped for a link into the working tree is refused, nothing written through it; --check names a link swapped in later", () => {
@@ -474,7 +504,7 @@ describe("Not seen: an owner's own core.hooksPath inside the working tree is res
     expect(readFileSync(join(gate, "scripts", "pre-push.mjs"), "utf8")).toBe(readFileSync(PREPUSH_SRC, "utf8"));
 
     expect(readFileSync(SETUP, "utf8")).toContain("a local core.hooksPath the owner points inside the working tree");
-    expect(readFileSync(PREPUSH_SRC, "utf8")).toContain("own local core.hooksPath naming a folder inside the working tree");
+    expect(readFileSync(SETUP, "utf8")).toContain("a PATH folder inside another linked worktree of the");
   });
 });
 
