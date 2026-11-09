@@ -8832,4 +8832,16 @@ describe("no guard says the platform fails closed: the sentence the hooks refere
       expect(source, file).toContain("onFailure");
     }
   });
+
+  it("nor do the docs that told the same story: ADR 0016, the runbook and ARCHITECTURE", () => {
+    const docs = ["adr/0016-harness-guards-refuse-visibly-rather-than-sandbox.md", "01-runbook.md", "ARCHITECTURE.md"]
+      .map((f) => join(SCRIPTS, "..", "..", "docs", f));
+    expect(docs.length).toBe(3);
+    for (const file of docs) {
+      const text = readFileSync(file, "utf8").replace(/\s+/g, " ");
+      expect(text, file).not.toMatch(/fails closed when it cannot reach|it fails closed when it cannot/);
+      expect(text, file).toContain("read 2026-11-06");
+      expect(text, file).toContain("(#371)");
+    }
+  });
 });

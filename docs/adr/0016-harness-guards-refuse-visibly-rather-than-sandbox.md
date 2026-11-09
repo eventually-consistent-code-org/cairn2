@@ -65,22 +65,26 @@ the instruction came from. Asserted in `server/test/hooks.test.ts`
 ("harness guard protects git hooks (#353)"); `audit security --surface`
 reads the same folder.
 
-Fail-open is half cairn's and half the platform's, and the two halves
-now point different ways. A guard's own error exits 0 — a broken guard
-never blocks work (asserted: `server/test/runguard-effects.test.ts`
-"fails open", `server/test/runguard-guards.test.ts` "garbage stdin
-fails open"). Claude Code's command hooks have offered `onFailure:
-"block"` since 2.1.295 — a hook that cannot start, times out or exits
-with an unexpected code then blocks the action — and `hooks/hooks.json`
-leaves it unset by design: setting it would invert this decision, so
-the absence is the decision, not a gap. Since 2.1.299 the platform
-fails closed on the delivery half regardless: when it cannot hand a
-guard its payload or read its answer back, an action the guard could
-have blocked is refused, and on Windows a PreToolUse hook with no shell
-blocks the call. The sentence to carry is "fails open on its own error;
-the platform fails closed when it cannot reach the guard or read its
-answer." The platform half is a claim about the harness, dated
-2026-10-14 from the 2.1.299 changelog (#371).
+Fail-open is half cairn's and half the platform's, and both halves point
+the same way. A guard's own error exits 0 — a broken guard never blocks
+work (asserted: `server/test/runguard-effects.test.ts` "fails open",
+`server/test/runguard-guards.test.ts` "garbage stdin fails open").
+Claude Code's command hooks have offered `onFailure: "block"` since
+2.1.295 — a hook that cannot start, times out or exits with an
+unexpected code then blocks the action — and `hooks/hooks.json` leaves
+it unset by design: setting it would invert this decision, so the
+absence is the decision, not a gap. Without it, the hooks reference says
+a hook that "exits with any other code, or fails in some other way, such
+as not starting or printing invalid JSON. The action goes ahead", and "a
+timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
+call"; the one exception it names is a shell-form hook on Windows without
+Git Bash, which "can instead block the tool call". The sentence to carry
+is "a guard fails open, on its own error and when the platform can't run
+it." A claim about the harness, read 2026-11-06 (#528). It corrects this
+paragraph's earlier "since 2.1.299 the platform fails closed on the
+delivery half", dated 2026-10-14 from the 2.1.299 changelog (#371), which
+the reference does not say. The four guards cancel at 30 seconds, still
+failing open (the owner's decision, 2026-11-09, #568).
 
 ## Amendment 2026-10-21 — the run guard is described by effect (#359)
 

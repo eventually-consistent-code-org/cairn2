@@ -45,5 +45,15 @@ harness guard's zones, so an agent edit there runs under the owner at
 their next push; the install is a command an agent may run; a shared
 hooks folder receives the hook for every repository on the machine; and
 a force push onto a stamped commit passes, since the hook applies the
-stamp rule and not the force rule (#492, #497, #503, #508). All four are
-filed; the first is the next phase's critical.
+stamp rule and not the force rule (#492, #497, #503, #508). All four
+were closed in phase 31.5 (the third hardening).
+
+## Amendment 2026-11-09 — the gate lives in the git common directory (#558)
+
+The decision stands; this moves where the hook and its script live. A
+gate in the working tree could be swapped by a checkout, a merge or a
+contributor's branch, and the hook preferred the checked-out copy. Both
+now live under the git common directory, which git never writes from a
+commit and every linked worktree shares, and the hook names its script
+by one absolute path (asserted: `server/test/gitlayer.test.ts`). A re-run
+moves an older install off `.cairn/githooks` and deletes nothing.

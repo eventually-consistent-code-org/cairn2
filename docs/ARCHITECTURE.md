@@ -125,9 +125,9 @@ reason.
   question an adapter may answer — which category (open, in progress,
   closed) a requested state name resolves to — so a caller that must
   refuse a transition by its meaning rather than its spelling can ask;
-  today the local adapter answers it and the four adapters that accept
-  custom display names do not, which is the open half of that check and
-  is filed (#471).
+  the local adapter answers it, and the four adapters that accept custom
+  display names answer from their state maps and the statuses the wire
+  has shown them, falling closed on a name they cannot place (#471).
 - `planning/` — plan artifacts, tracker mirroring, drift detection,
   per-phase distill manifests, milestone lifecycle — plus the headless-batch
   primitives: per-phase token estimation calibrated from recorded spend,
@@ -189,7 +189,8 @@ reason.
   pauses log under the cairn home — is subtracted from the span and
   reported beside it as paused minutes, so a run that sat at a limit for
   two hours is not read as two hours of work (ADR 0020, amendment); the
-  log is read without a writer check today, which is filed (#470). The
+  log is a guarded zone, and the close counts only the claiming
+  session's rows (#470). The
   ledger append consumes the receipt into one key=value segment on the
   line, and falls back to git dates across the commit range when the
   close measured nothing, since it is the only tool holding that range.
@@ -233,7 +234,7 @@ reason.
   configured state maps and the statuses the wire has already shown
   them, and a name an adapter cannot place falls closed at the gate
   (#471; the Azure spelling the closing audit found learning an unplaced
-  state as open is filed, #496). The manifest also records, at staging,
+  state as open was closed in phase 31.5, #496). The manifest also records, at staging,
   which session the run is — the id the staging shell carried — and the
   breaker limit the project configuration held at that moment, so the
   hooks judge the run by what was staged and never by a file the run can
@@ -632,10 +633,10 @@ distinction matters more than the count.
   fails open on its own error: an error inside a guard exits zero rather
   than blocking work, and `hooks/hooks.json` leaves the platform's
   `onFailure: "block"` unset so the harness does not invert that. The
-  delivery half is the platform's: since Claude Code 2.1.299 it fails
-  closed when it cannot reach the guard or read its answer — an action
-  the guard could have blocked is refused, not let through (a dated
-  claim about the harness, 2026-10-14; ADR 0016, #371). Their refusals
+  platform's half points the same way: a hook that times out, fails to
+  start or exits with an unexpected code lets the action go ahead (the
+  hooks reference, read 2026-11-06, #528; ADR 0016). That corrects the
+  2.1.299 "fails closed" reading dated 2026-10-14 (#371). Their refusals
   also add up: each appends an audit row (a digest of the input, never
   the command) through one wrapped call that keeps refusing even when
   the breaker library is missing or throws, and a headless batch run is
@@ -655,7 +656,7 @@ distinction matters more than the count.
   found open are closed: setting git's hooks-path key in any scope and
   by any route, and the include keys that could carry it, is refused by
   the harness guard (#465; the inline-alias and init-template spellings
-  the next audit found are filed, #506, #507), and a second manifest
+  the next audit found were closed in phase 31.5, #506, #507), and a second manifest
   staged beside a live run neither moves the count nor is created —
   `RUN_LIVE` (#466).
 - **Advisers** say something and block nothing. The loop check notices
@@ -682,8 +683,8 @@ forced recursive remove of the whole tree is a discards-work row refused
 in every session, while the cached, dry-run and single-path forms stay
 allowed (the lone colon, the empty-path magic forms and the absolute
 repository root are the whole tree too, #464; the one-character globs
-and relative-root spellings the closing audit found still passing are
-filed, #493). The owner-checkout effect carries its definition in the
+and relative-root spellings the closing audit found passing were closed
+in phase 31.5, #493). The owner-checkout effect carries its definition in the
 header — a command touches the checkout when it rewrites the working
 files or replaces the checked-out commit — and rows for checkout,
 switch, merge, pull, rebase, cherry-pick, revert, am, mv, the stash
@@ -737,11 +738,11 @@ live hooks would go silent, and is measured by `plan_drift` as
 Opt-in, because the hooks-path key is the owner's ground. ADR 0041 —
 removeWhen: the harness runs its hooks for every process that pushes
 from the checkout, or the service's ruleset can name the agent (ADR
-0037). What the closing audit found of this layer is filed: the script
-folder the hook runs from sits outside the harness guard's zones, the
-install is a command an agent may run, a shared hooks folder receives
-the hook for every repository on the machine, and a stamped force push
-passes (#492, #497, #503, #508).
+0037). What the closing audit found of this layer was closed in phase
+31.5: the script folder is zoned, an agent-run install needs the owner,
+a shared hooks folder refuses the install, and the hook applies the
+force rule (#492, #497, #503, #508). The gate and its script then moved
+under the git common directory, out of a checkout's reach (#558).
 
 The breaker is the other shared library: the one call every refuser
 makes to append its row and, while a batch run is live, count toward the
@@ -776,7 +777,7 @@ guard — git's top level from the payload's working directory, else the
 nearest folder holding the harness settings folder, else the working
 directory itself — through one helper, so a nested working directory
 with the variable stripped refuses what it refuses with the variable set
-(#459; the nested-repository spelling is filed, #510). An `eval` is read
+(#459; the nested-repository spelling was closed in phase 31.5, #510). An `eval` is read
 the way the shell runs it, words joined and read as one line, through
 one reader function the run and harness guards both call (#283). ADR
 0039 — removeWhen: never; a fix that lands in one guard's own matching
@@ -792,7 +793,7 @@ environment variable as typed, written into its header's dated block
 ones (#304), counts the read-only plugin words so a trailing help flag
 reads as a read (#350), refuses the plan-metadata tool's approve flag
 unless the session carries the owner's escape (#460; the plain-file
-route to the stamp is filed, #500), and zones the pauses folder under
+route to the stamp was closed in phase 31.5, #500), and zones the pauses folder under
 every cairn home (#470). The leak guard's secret shapes are the list in
 the server readme, held equal to the peer screen's copy by a parity test
 (#280). Every shape a guard cannot see is written into that guard's

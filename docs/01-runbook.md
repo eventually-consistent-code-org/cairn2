@@ -2434,15 +2434,18 @@ fails open"). Claude Code's command hooks have carried an `onFailure:
 times out or exits with an unexpected code blocks the action instead.
 `hooks/hooks.json` leaves it unset on purpose: it would invert the
 rule above, and the next sweep should read the absence as the decision
-it is, not an oversight. The other half is the platform's. Since
-2.1.299, when Claude Code cannot hand a hook its payload or cannot read
-its answer back, an action the hook could have blocked is refused rather
-than let through, and on Windows a PreToolUse hook with no shell blocks
-the call instead of failing open — regardless of `onFailure`. So the
-honest sentence is: a guard fails open on its own error; the platform
-fails closed when it cannot reach the guard or read its answer. Both
-halves of that platform behaviour are claims about the harness, dated
-2026-10-14 from the 2.1.299 changelog, and can expire (#371).
+it is, not an oversight. The other half is the platform's, and it
+points the same way. With `onFailure` unset, the hooks reference says a
+hook that "exits with any other code, or fails in some other way, such
+as not starting or printing invalid JSON. The action goes ahead", and "a
+timed-out `command`, `http`, or `mcp_tool` hook doesn't block the tool
+call". The one exception it names is a shell-form hook on Windows
+without Git Bash, which "can instead block the tool call". So the honest
+sentence is: a guard fails open, on its own error and when the platform
+can't run it. That is a claim about the harness, read 2026-11-06 (#528).
+It corrects this section's earlier "the platform fails closed", dated
+2026-10-14 from the 2.1.299 changelog (#371). The four guards cancel at
+30 seconds, still failing open (#568).
 
 One more hook worth knowing, on the advisory side rather than the
 refusing side: the **loop check** notices when the same tool is called
