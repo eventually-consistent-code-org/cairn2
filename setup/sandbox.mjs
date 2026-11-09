@@ -62,7 +62,9 @@
  * Not seen, dated 2026-11-05 (each pinned in server/test/sandbox.test.ts):
  *   - a worktree or submodule made after the install has no rows of its own
  *     on Linux, where a denyWrite wildcard works only as a trailing `/**`;
- *     --check reports it as lagging until the owner re-runs.
+ *     --check reports it as lagging until the owner re-runs. Nor, there, does
+ *     a package folder or a worktree inside the checkout holding its own
+ *     .cairn folders: darwin gets `<root>/**` rows for those, Linux none.
  *   - a relative row anchors at the session's working directory, not the
  *     repository root ("anchors at the session's primary working directory"),
  *     so the absolute rows are the ones the main checkout relies on.
@@ -188,7 +190,12 @@ export function denyPaths(where, { rows = CAIRN_DENY, platform = process.platfor
   const projects = [...new Set([where.root, where.top])];
   for (const row of rows) {
     if (row.at === "project") {
-      for (const base of projects) out.add(join(base, row.rel));
+      for (const base of projects) {
+        out.add(join(base, row.rel));
+        // a package folder or a worktree made inside the checkout holds the
+        // same folders (setup installs where it stands): wildcards on darwin only
+        if (platform === "darwin" && row.rel.startsWith(".cairn/")) out.add(join(base, "**", row.rel));
+      }
       out.add(`./${row.rel}`);
     } else if (row.at === "common") {
       if (where.common === null) continue; // no repository: no git rows to write

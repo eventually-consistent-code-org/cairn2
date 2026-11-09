@@ -240,13 +240,18 @@ describe("the deny rows are one list a later change extends (#567, #558)", () =>
 
   it("darwin adds the wildcard rows; Linux, where a mid-path wildcard covers nothing, does not (the Not seen line)", async () => {
     const { denyPaths, locate } = await lib();
-    const where = locate(repo());
+    const p = repo();
+    const where = locate(p);
     const mac = denyPaths(where, { platform: "darwin" });
     const linux = denyPaths(where, { platform: "linux" });
     expect(mac.some((x) => x.endsWith(join("worktrees", "*", "commondir")))).toBe(true);
+    // a package folder or a worktree inside the checkout (#559's same-line worktree)
+    expect(mac).toContain(join(p, "**", ".cairn", "harness"));
+    expect(mac).not.toContain(join(p, "**", "cairn.json"));
     expect(linux.some((x) => x.includes("*"))).toBe(false);
     const header = readFileSync(SANDBOX, "utf8");
     expect(header).toContain("a worktree or submodule made after the install has no rows of its own");
     expect(header).toContain("a relative row anchors at the session's working directory");
+    expect(header).toContain("a package folder or a worktree inside the checkout holding its own");
   });
 });
