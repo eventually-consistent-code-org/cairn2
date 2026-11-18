@@ -1,6 +1,12 @@
 node_modules/
 .env
-.cairn/
+# cairn's working state stays local; memory cards are the one part that
+# ships with the repo (#388). Four lines because git cannot re-include a
+# path whose parent directory is excluded.
+.cairn/*
+!.cairn/memory/
+.cairn/memory/*
+!.cairn/memory/cards/
 /cairn.json
 
 # superpowers SDD scratch (ledgers, briefs, review packages)
